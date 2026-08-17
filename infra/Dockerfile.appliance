@@ -1,0 +1,18 @@
+# Arkive — offline appliance agent image
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libssl-dev curl && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY shared /app/shared
+COPY appliance /app/appliance
+
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -e /app/shared \
+ && pip install --no-cache-dir -r /app/appliance/requirements.txt \
+ && (pip install --no-cache-dir oqs || echo "liboqs unavailable — flagged PQC fallback")
+
+WORKDIR /app/appliance
+EXPOSE 8090
+CMD ["uvicorn", "agent.main:app", "--host", "0.0.0.0", "--port", "8090"]

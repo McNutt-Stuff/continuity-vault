@@ -1,0 +1,27 @@
+# Arkive reverse proxy.
+# Caddy automatically provisions and renews a Let's Encrypt certificate for the
+# domain below. The SPA is served statically; /api is proxied to the control
+# plane running on localhost:8000.
+
+{{DOMAIN}} {
+	encode zstd gzip
+
+	# API -> control plane
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# Static single-page app
+	handle {
+		root * {{WEBROOT}}
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}

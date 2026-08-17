@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll Arkive for cloud updates every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=cv-cloud-update.service
+
+[Install]
+WantedBy=timers.target

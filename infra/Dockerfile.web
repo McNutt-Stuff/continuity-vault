@@ -1,0 +1,9 @@
+# Arkive — web portal (dev server)
+FROM node:20-slim
+WORKDIR /app/web
+COPY web/package.json ./
+RUN npm install
+COPY web /app/web
+EXPOSE 5173
+ENV CV_API_TARGET=http://cloud:8000
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

@@ -1,0 +1,90 @@
+# Arkive — local prototype topology
+# 1 all-in-one cloud server + 2 offline appliances + 1 S3 (MinIO) storage service.
+#
+#   docker compose up --build
+#   Portal:  http://localhost:5173   (sign in as owner@northwind.example)
+#   API:     http://localhost:8000/api/health
+#   MinIO:   http://localhost:9001    (minioadmin / minioadmin)
+#
+# Activate the two appliances from the portal (Appliances -> generate linking
+# code) then POST it to the appliance:
+#   curl -XPOST localhost:8091/activate -H 'content-type: application/json' \
+#        -d '{"linking_code":"CV-XXXX-YYYY"}'
+#   curl -XPOST localhost:8092/activate -H 'content-type: application/json' \
+#        -d '{"linking_code":"CV-XXXX-YYYY"}'
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cvault
+      POSTGRES_PASSWORD: cvault
+      POSTGRES_DB: continuity
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["miniodata:/data"]
+
+  cloud:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.cloud
+    depends_on: [postgres, minio]
+    environment:
+      CV_ENVIRONMENT: development
+      CV_DATABASE_URL: postgresql+psycopg://cvault:cvault@postgres/continuity
+      CV_SESSION_SECRET: dev-secret-change-me
+      CV_KEK_SECRET: dev-kek-change-me
+      CV_S3_ENDPOINT_URL: http://minio:9000
+      CV_AWS_ACCESS_KEY_ID: minioadmin
+      CV_AWS_SECRET_ACCESS_KEY: minioadmin
+      CV_S3_BUCKET: continuity-vault-recovery
+      CV_KEY_STORE: /data/keystore
+      CV_FLEET_SIGNER: /data/fleet_signer.json
+    ports: ["8000:8000"]
+    volumes: ["clouddata:/data"]
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.web
+    depends_on: [cloud]
+    ports: ["5173:5173"]
+
+  appliance-1:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.appliance
+    depends_on: [cloud]
+    environment:
+      CVA_CLOUD_BASE_URL: http://cloud:8000/api
+      CVA_DATA_DIR: /data
+      CVA_MODEL: CV Edge 8
+    ports: ["8091:8090"]
+    volumes: ["appliance1:/data"]
+
+  appliance-2:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.appliance
+    depends_on: [cloud]
+    environment:
+      CVA_CLOUD_BASE_URL: http://cloud:8000/api
+      CVA_DATA_DIR: /data
+      CVA_MODEL: CV Vault 64
+    ports: ["8092:8090"]
+    volumes: ["appliance2:/data"]
+
+volumes:
+  pgdata:
+  miniodata:
+  clouddata:
+  appliance1:
+  appliance2:

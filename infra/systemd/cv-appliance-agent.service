@@ -1,0 +1,21 @@
+[Unit]
+Description=Arkive Appliance Agent
+After=network.target
+
+[Service]
+Type=simple
+User=cvagent
+Group=cvagent
+EnvironmentFile=/etc/continuity-vault/appliance.env
+WorkingDirectory=/opt/continuity-vault/appliance
+ExecStart=/opt/continuity-vault/.venv/bin/uvicorn agent.main:app --host 127.0.0.1 --port 8090
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/continuity-vault-appliance
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

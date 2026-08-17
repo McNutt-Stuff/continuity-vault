@@ -1,0 +1,7 @@
+[Unit]
+Description=Arkive cloud self-update check
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/continuity-vault.env
+ExecStart=/opt/continuity-vault/updater/cloud-update.sh

@@ -1,0 +1,29 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Local prototype state (regenerated on run)
+*.db
+cv_keystore/
+cv_object_store/
+cv_appliance_data/
+cv_fleet_signer.json
+cv_sim_authenticators.json
+cv_demo_authenticators.json
+e2e_demo.db
+
+# Node / web
+node_modules/
+web/dist/
+
+# Env / secrets
+.env
+*.env
+!*.env.example
+
+# OS
+.DS_Store

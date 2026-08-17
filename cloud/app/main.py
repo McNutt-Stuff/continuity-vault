@@ -1,0 +1,72 @@
+"""Arkive cloud control-plane API (spec 14)."""
+
+from __future__ import annotations
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from .config import get_settings
+from .db import init_db
+from .api import (
+    admin,
+    appliances,
+    auth,
+    collections,
+    connectors,
+    restore,
+    search,
+    snapshots,
+    tenant,
+    updates,
+)
+
+settings = get_settings()
+
+app = FastAPI(
+    title="Arkive Control Plane",
+    version="0.1.0",
+    description="Cloud-managed digital continuity and cyber-recovery platform.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"] if settings.environment == "development" else [settings.rp_origin],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+API = "/api"
+app.include_router(auth.router, prefix=API)
+app.include_router(tenant.router, prefix=API)
+app.include_router(connectors.router, prefix=API)
+app.include_router(collections.router, prefix=API)
+app.include_router(search.router, prefix=API)
+app.include_router(snapshots.router, prefix=API)
+app.include_router(restore.router, prefix=API)
+app.include_router(appliances.fleet_router, prefix=API)
+app.include_router(appliances.agent_router, prefix=API)
+app.include_router(admin.router, prefix=API)
+app.include_router(updates.router, prefix=API)
+app.include_router(updates.public_router, prefix=API)
+
+
+@app.on_event("startup")
+def startup() -> None:
+    init_db()
+    if settings.seed_demo_data:
+        from .seed import seed
+
+        seed()
+
+
+@app.get("/api/health")
+def health():
+    from cv_crypto.provider import get_provider
+
+    return {
+        "status": "ok",
+        "domain": settings.domain,
+        "environment": settings.environment,
+        "pq_available": get_provider().pq_available,
+    }

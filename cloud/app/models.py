@@ -1,0 +1,312 @@
+"""
+Cloud control-plane data model (spec 14).
+
+Multi-tenant isolation is enforced at the application, identity, storage-prefix,
+policy, and encryption layers. Every tenant-scoped row carries ``tenant_id`` and
+all queries in the API layer filter by the authenticated tenant.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import relationship
+
+from .db import Base
+
+
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class Tenant(Base):
+    __tablename__ = "tenants"
+    id = Column(String, primary_key=True, default=_uuid)
+    name = Column(String, nullable=False)
+    plan = Column(String, default="business")  # consumer | family | business | enterprise
+    key_ownership_model = Column(String, default="customer-managed")  # spec 10.x
+    storage_prefix = Column(String, nullable=False)  # tenant isolation in S3
+    status = Column(String, default="active")
+    created_at = Column(DateTime, default=_now)
+
+    users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
+    vaults = relationship("Vault", back_populates="tenant", cascade="all, delete-orphan")
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("tenant_id", "email", name="uq_tenant_email"),)
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    email = Column(String, nullable=False)
+    display_name = Column(String, nullable=False)
+    role = Column(String, default="member")  # owner | security-admin | member | support-admin
+    is_platform_admin = Column(Boolean, default=False)  # backend admin console
+    status = Column(String, default="active")
+    created_at = Column(DateTime, default=_now)
+
+    tenant = relationship("Tenant", back_populates="users")
+    passkeys = relationship("Passkey", back_populates="user", cascade="all, delete-orphan")
+
+
+class Passkey(Base):
+    """WebAuthn/passkey or hardware-token credential used to unlock portal
+    interfaces and authorize sensitive operations (spec: user-owned keys /
+    passkeys / hardware tokens unlock data-access interfaces)."""
+
+    __tablename__ = "passkeys"
+    id = Column(String, primary_key=True, default=_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    credential_id = Column(String, nullable=False, unique=True)
+    public_key = Column(Text, nullable=False)
+    sign_count = Column(Integer, default=0)
+    transport = Column(String, default="internal")  # internal | usb | nfc | hybrid
+    label = Column(String, default="Passkey")
+    aaguid = Column(String, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+    user = relationship("User", back_populates="passkeys")
+
+
+class Vault(Base):
+    __tablename__ = "vaults"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    key_ownership_model = Column(String, default="customer-managed")
+    crypto_profile_id = Column(String, default="cvp-hybrid-2026a")
+    # Wrapped vault key material for each recovery recipient (spec 9.4).
+    wrapped_keys = Column(JSON, default=list)
+    created_at = Column(DateTime, default=_now)
+
+    tenant = relationship("Tenant", back_populates="vaults")
+    collections = relationship("Collection", back_populates="vault", cascade="all, delete-orphan")
+
+
+class Collection(Base):
+    """A logical grouping of protected data from one source (e.g. a Gmail
+    mailbox, a 1Password account) with its own key and protection policy."""
+
+    __tablename__ = "collections"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    vault_id = Column(String, ForeignKey("vaults.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    source_type = Column(String, nullable=False)  # connector type
+    connector_account_id = Column(String, ForeignKey("connector_accounts.id"), nullable=True)
+    policy_id = Column(String, ForeignKey("protection_policies.id"), nullable=True)
+    sensitivity = Column(String, default="standard")  # standard | sensitive | restricted
+    created_at = Column(DateTime, default=_now)
+
+    vault = relationship("Vault", back_populates="collections")
+
+
+class ConnectorAccount(Base):
+    """A linked source account (OAuth/API) for a sync worker (spec: connectors
+    for 1Password, Gmail, Outlook.com, OneDrive, Dropbox, iCloud)."""
+
+    __tablename__ = "connector_accounts"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    connector_type = Column(String, nullable=False)
+    account_label = Column(String, nullable=False)
+    auth_status = Column(String, default="linked")  # linked | needs-reauth | revoked
+    # Encrypted credential blob (never plaintext at rest).
+    encrypted_credentials = Column(Text, nullable=True)
+    scopes = Column(JSON, default=list)
+    last_sync_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+
+class ProtectionPolicy(Base):
+    """Destination + retention policy at the collection level (spec 8)."""
+
+    __tablename__ = "protection_policies"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    destinations = Column(JSON, default=list)  # ["cv-cloud","appliance","customer-s3"]
+    backup_frequency_minutes = Column(Integer, default=60)
+    cloud_staging_hours = Column(Integer, default=24)
+    cloud_retention_days = Column(Integer, default=365)
+    appliance_retention_days = Column(Integer, default=3650)
+    rpo_minutes = Column(Integer, default=60)
+    rto_minutes = Column(Integer, default=240)
+    immutability_days = Column(Integer, default=365)
+    required_approvals = Column(Integer, default=1)
+    verification_frequency_days = Column(Integer, default=7)
+    created_at = Column(DateTime, default=_now)
+
+
+class Appliance(Base):
+    """Offline appliance fleet record (spec 4, 5, 14)."""
+
+    __tablename__ = "appliances"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    serial = Column(String, nullable=False, unique=True)
+    model = Column(String, default="CV Edge 8")
+    name = Column(String, default="Appliance")
+    location_label = Column(String, default="")
+    state = Column(String, default="PROVISIONING")  # spec 4.2 state machine
+    isolation_state = Column(String, default="sealed")
+    software_version = Column(String, default="0.0.0")
+    last_heartbeat_at = Column(DateTime, nullable=True)
+    last_attestation_at = Column(DateTime, nullable=True)
+    attestation_ok = Column(Boolean, default=False)
+    tamper_state = Column(String, default="normal")
+    # Appliance-provided public signature bundle used to verify its receipts.
+    identity_bundle = Column(JSON, nullable=True)
+    # Cloud's signer public bundle the appliance uses to verify commands.
+    telemetry = Column(JSON, default=dict)  # capacity, drives, power, temp
+    command_sequence = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_now)
+
+
+class LinkingCode(Base):
+    """Short-lived turnkey linking code entered during appliance activation."""
+
+    __tablename__ = "linking_codes"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    code = Column(String, nullable=False, unique=True, index=True)
+    appliance_id = Column(String, ForeignKey("appliances.id"), nullable=True)
+    model = Column(String, default="CV Edge 8")
+    name = Column(String, default="Appliance")
+    consumed = Column(Boolean, default=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=_now)
+
+
+class ApplianceCommand(Base):
+    __tablename__ = "appliance_commands"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    appliance_id = Column(String, ForeignKey("appliances.id"), nullable=False, index=True)
+    command_type = Column(String, nullable=False)
+    sequence = Column(Integer, nullable=False)
+    envelope = Column(JSON, nullable=False)  # signed command {payload, signature}
+    status = Column(String, default="pending")  # pending | delivered | acked | rejected | expired
+    requested_by = Column(String, nullable=False)
+    result = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+
+class SnapshotReceipt(Base):
+    """Signed seal receipt returned by an appliance (spec 6.1 step 11)."""
+
+    __tablename__ = "snapshot_receipts"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    appliance_id = Column(String, ForeignKey("appliances.id"), nullable=True, index=True)
+    vault_id = Column(String, ForeignKey("vaults.id"), nullable=False, index=True)
+    collection_id = Column(String, ForeignKey("collections.id"), nullable=False, index=True)
+    snapshot_id = Column(String, nullable=False, index=True)
+    destination = Column(String, nullable=False)  # cv-cloud | appliance | customer-s3
+    object_count = Column(Integer, default=0)
+    total_bytes = Column(Integer, default=0)
+    manifest_hash = Column(String, nullable=False)
+    recoverable = Column(Boolean, default=False)  # spec 6.1 step 12 / build-instr 18
+    receipt = Column(JSON, nullable=True)  # signed seal receipt
+    created_at = Column(DateTime, default=_now)
+
+
+class SearchDocument(Base):
+    """Denormalised, tenant-scoped index entry powering unified search across
+    all data types, accounts, and objects within a user account."""
+
+    __tablename__ = "search_documents"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    vault_id = Column(String, index=True)
+    collection_id = Column(String, index=True)
+    snapshot_id = Column(String, index=True)
+    object_id = Column(String, index=True)
+    source_type = Column(String, index=True)  # gmail | onepassword | dropbox | ...
+    doc_type = Column(String, index=True)  # email | file | secret | contact | note
+    title = Column(String, nullable=False)
+    # Searchable metadata only. Content stays encrypted; this is derived,
+    # policy-permitted preview text (empty for zero-knowledge vaults).
+    preview = Column(Text, default="")
+    meta = Column(JSON, default=dict)
+    labels = Column(JSON, default=list)  # tags / folders for faceting
+    # Denormalised searchable text (title + preview + connector-declared
+    # searchable metadata fields). Empty for zero-knowledge vaults.
+    search_blob = Column(Text, default="")
+    size_bytes = Column(Integer, default=0)
+    modified_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+
+class RestoreRequest(Base):
+    __tablename__ = "restore_requests"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    requested_by = Column(String, ForeignKey("users.id"), nullable=False)
+    snapshot_id = Column(String, nullable=False)
+    object_ids = Column(JSON, default=list)
+    destination = Column(String, nullable=False)
+    purpose = Column(String, default="")
+    status = Column(String, default="pending-approval")
+    approvals = Column(JSON, default=list)
+    required_approvals = Column(Integer, default=1)
+    plan = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+
+class SoftwareRelease(Base):
+    """Signed software release for cloud-triggered updates (spec 11)."""
+
+    __tablename__ = "software_releases"
+    id = Column(String, primary_key=True, default=_uuid)
+    component = Column(String, nullable=False)  # cloud | appliance
+    version = Column(String, nullable=False)
+    channel = Column(String, default="stable")
+    package_url = Column(String, nullable=False)
+    package_hash = Column(String, nullable=False)
+    security_floor = Column(String, default="0.0.0")
+    manifest = Column(JSON, nullable=False)  # signed update manifest
+    created_at = Column(DateTime, default=_now)
+
+
+class UpdateJob(Base):
+    __tablename__ = "update_jobs"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, nullable=True, index=True)
+    target_type = Column(String, nullable=False)  # cloud | appliance
+    target_id = Column(String, nullable=True)  # appliance id
+    release_id = Column(String, ForeignKey("software_releases.id"), nullable=False)
+    status = Column(String, default="scheduled")  # scheduled | staged | applying | applied | rolled-back | failed
+    approval_mode = Column(String, default="maintenance-window")
+    created_at = Column(DateTime, default=_now)
+
+
+class AuditEvent(Base):
+    """Tamper-evident audit ledger (append-only, hash-chained)."""
+
+    __tablename__ = "audit_events"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, index=True, nullable=True)
+    actor = Column(String, nullable=False)
+    action = Column(String, nullable=False)
+    resource = Column(String, default="")
+    detail = Column(JSON, default=dict)
+    prev_hash = Column(String, default="")
+    entry_hash = Column(String, default="")
+    created_at = Column(DateTime, default=_now)
