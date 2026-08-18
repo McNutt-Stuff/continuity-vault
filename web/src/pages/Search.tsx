@@ -9,6 +9,8 @@ interface Result {
   snapshot_id: string;
   source_type: string;
   doc_type: string;
+  category: string;
+  sensitivity: string;
   title: string;
   preview: string;
   meta: Record<string, unknown>;
@@ -20,8 +22,26 @@ interface SearchResp {
   count: number;
   total_indexed: number;
   results: Result[];
-  facets: { source: Record<string, number>; type: Record<string, number>; label: Record<string, number> };
+  facets: {
+    source: Record<string, number>;
+    type: Record<string, number>;
+    category: Record<string, number>;
+    label: Record<string, number>;
+  };
 }
+
+const CATEGORY_META: Record<string, { icon: IconName; label: string; color: string }> = {
+  credential: { icon: "key", label: "Credentials", color: "#f5a623" },
+  message: { icon: "mail", label: "Messages", color: "#ea4335" },
+  contact: { icon: "user", label: "Contacts", color: "#35d0a5" },
+  document: { icon: "file", label: "Documents", color: "#4f7cff" },
+  media: { icon: "image", label: "Media", color: "#7a5cff" },
+  file: { icon: "database", label: "Files", color: "#9aa7bf" },
+  calendar: { icon: "calendar", label: "Calendar", color: "#0078d4" },
+  note: { icon: "note", label: "Notes", color: "#35d0a5" },
+  identity: { icon: "shield", label: "Identity & Legal", color: "#f2545b" },
+  record: { icon: "database", label: "Records", color: "#7a5cff" },
+};
 
 const SOURCE_META: Record<string, { color: string; icon: IconName; label: string }> = {
   gmail: { color: "#ea4335", icon: "mail", label: "Gmail" },
@@ -37,6 +57,7 @@ export default function Search() {
   const { me, stepUp } = useAuth();
   const [q, setQ] = useState("");
   const [source, setSource] = useState<string | null>(null);
+  const [category, setCategory] = useState<string | null>(null);
   const [label, setLabel] = useState<string | null>(null);
   const [data, setData] = useState<SearchResp | null>(null);
   const [locked, setLocked] = useState(false);
@@ -46,6 +67,7 @@ export default function Search() {
       const params = new URLSearchParams();
       if (q) params.set("q", q);
       if (source) params.set("source_type", source);
+      if (category) params.set("category", category);
       if (label) params.set("label", label);
       setData(await api.get<SearchResp>(`/search?${params.toString()}`));
       setLocked(false);
@@ -57,7 +79,7 @@ export default function Search() {
   useEffect(() => {
     if (me?.passkey_verified) void run();
     else setLocked(true);
-  }, [me?.passkey_verified, source, label]);
+  }, [me?.passkey_verified, source, category, label]);
 
   if (locked) {
     return (
@@ -91,6 +113,27 @@ export default function Search() {
         />
         <button className="btn primary sm" onClick={run}>Search</button>
       </div>
+
+      {data && Object.keys(data.facets.category).length > 0 && (
+        <div className="chips" style={{ marginBottom: 10 }}>
+          <span className={`chip ${!category ? "active" : ""}`} onClick={() => setCategory(null)}>
+            All types
+          </span>
+          {Object.entries(data.facets.category)
+            .sort((a, b) => b[1] - a[1])
+            .map(([cat, n]) => {
+              const cm = CATEGORY_META[cat] ?? { icon: "database" as IconName, label: cat, color: "#9aa7bf" };
+              return (
+                <span key={cat} className={`chip ${category === cat ? "active" : ""}`}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+                  onClick={() => setCategory(category === cat ? null : cat)}>
+                  <span style={{ color: cm.color, display: "inline-flex" }}><Icon name={cm.icon} size={13} /></span>
+                  {cm.label} · {n}
+                </span>
+              );
+            })}
+        </div>
+      )}
 
       <div className="chips" style={{ marginBottom: 10 }}>
         <span className={`chip ${!source ? "active" : ""}`} onClick={() => setSource(null)}>
@@ -153,7 +196,11 @@ export default function Search() {
               )}
             </div>
             <div className="stack" style={{ alignItems: "flex-end", gap: 6 }}>
-              <Pill tone="info">{r.doc_type}</Pill>
+              <div className="row" style={{ gap: 6 }}>
+                {r.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
+                <Pill tone="info">{CATEGORY_META[r.category]?.label ?? r.category}</Pill>
+                <span className="faint" style={{ fontSize: 11 }}>{r.doc_type}</span>
+              </div>
               <div className="faint" style={{ fontSize: 11 }}>
                 {bytes(r.size_bytes)} · {timeAgo(r.modified_at)}
               </div>

@@ -187,11 +187,34 @@ class LinkingCode(Base):
     id = Column(String, primary_key=True, default=_uuid)
     tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
     code = Column(String, nullable=False, unique=True, index=True)
+    kind = Column(String, default="appliance")  # appliance | agent
     appliance_id = Column(String, ForeignKey("appliances.id"), nullable=True)
     model = Column(String, default="CV Edge 8")
     name = Column(String, default="Appliance")
     consumed = Column(Boolean, default=False)
     expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=_now)
+
+
+class DesktopAgent(Base):
+    """A managed endpoint agent (e.g. macOS) that collects locally via native
+    tools (1Password CLI, etc.) and pushes encrypted data to the platform."""
+
+    __tablename__ = "desktop_agents"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    name = Column(String, default="Desktop Agent")
+    platform = Column(String, default="macos")
+    hostname = Column(String, default="")
+    version = Column(String, default="1.0.0")
+    state = Column(String, default="active")  # active | offline | quarantined
+    collectors = Column(JSON, default=list)  # e.g. ["onepassword"]
+    config = Column(JSON, default=dict)  # destinations, schedule, collector opts
+    pending_command = Column(JSON, nullable=True)  # {type, params}
+    telemetry = Column(JSON, default=dict)
+    identity_bundle = Column(JSON, nullable=True)
+    last_heartbeat_at = Column(DateTime, nullable=True)
+    last_collection_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 
 
@@ -240,7 +263,8 @@ class SearchDocument(Base):
     snapshot_id = Column(String, index=True)
     object_id = Column(String, index=True)
     source_type = Column(String, index=True)  # gmail | onepassword | dropbox | ...
-    doc_type = Column(String, index=True)  # email | file | secret | contact | note
+    doc_type = Column(String, index=True)  # canonical kind (email | pdf | login | ...)
+    category = Column(String, index=True)  # canonical category (message | document | ...)
     title = Column(String, nullable=False)
     # Searchable metadata only. Content stays encrypted; this is derived,
     # policy-permitted preview text (empty for zero-knowledge vaults).

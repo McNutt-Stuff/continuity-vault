@@ -41,6 +41,8 @@ def _apply_additive_migrations() -> None:
 
     statements = [
         "ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT false",
+        "ALTER TABLE search_documents ADD COLUMN category VARCHAR",
+        "ALTER TABLE linking_codes ADD COLUMN kind VARCHAR DEFAULT 'appliance'",
     ]
     for statement in statements:
         try:

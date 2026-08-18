@@ -16,7 +16,11 @@ type IconName =
   | "check"
   | "logout"
   | "user"
-  | "database";
+  | "database"
+  | "file"
+  | "image"
+  | "note"
+  | "calendar";
 
 const paths: Record<IconName, ReactNode> = {
   shield: <path d="M12 2l7 3v6c0 4.5-3 8-7 11-4-3-7-6.5-7-11V5l7-3z" />,
@@ -92,6 +96,31 @@ const paths: Record<IconName, ReactNode> = {
       <ellipse cx="12" cy="5" rx="8" ry="3" />
       <path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5" />
       <path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" />
+    </>
+  ),
+  file: (
+    <>
+      <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z" />
+      <path d="M14 3v5h5" />
+    </>
+  ),
+  image: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <circle cx="9" cy="10" r="2" />
+      <path d="M21 16l-5-5-6 6" />
+    </>
+  ),
+  note: (
+    <>
+      <path d="M5 3h11l3 3v15a1 1 0 01-1 1H5a1 1 0 01-1-1V4a1 1 0 011-1z" />
+      <path d="M8 8h7M8 12h7M8 16h4" />
+    </>
+  ),
+  calendar: (
+    <>
+      <rect x="3" y="5" width="18" height="16" rx="2" />
+      <path d="M3 9h18M8 3v4M16 3v4" />
     </>
   ),
 };

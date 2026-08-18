@@ -1,0 +1,3 @@
+httpx>=0.27.0
+# Client-side encryption uses the shared cv_crypto package (installed with
+# `pip install -e ../shared` by the installer), which pulls in `cryptography`.

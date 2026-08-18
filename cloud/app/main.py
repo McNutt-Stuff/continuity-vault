@@ -9,6 +9,7 @@ from .config import get_settings
 from .db import init_db
 from .api import (
     admin,
+    agents,
     appliances,
     auth,
     collections,
@@ -46,6 +47,8 @@ app.include_router(snapshots.router, prefix=API)
 app.include_router(restore.router, prefix=API)
 app.include_router(appliances.fleet_router, prefix=API)
 app.include_router(appliances.agent_router, prefix=API)
+app.include_router(agents.fleet_router, prefix=API)
+app.include_router(agents.agent_router, prefix=API)
 app.include_router(admin.router, prefix=API)
 app.include_router(updates.router, prefix=API)
 app.include_router(updates.public_router, prefix=API)

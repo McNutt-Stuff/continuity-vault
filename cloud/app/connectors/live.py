@@ -14,6 +14,7 @@ from typing import Iterable, List
 import httpx
 
 from .base import SourceObject
+from ..taxonomy import classify_file, map_1password
 
 
 def _now() -> datetime:
@@ -81,9 +82,11 @@ def fetch_graph_files(access_token: str, limit: int = 60) -> Iterable[SourceObje
                 continue
             mime = (it.get("file") or {}).get("mimeType", "application/octet-stream")
             path = (it.get("parentReference") or {}).get("path", "/drive/root:")
+            _cat, _kind = classify_file(it.get("name", ""), mime)
             yield SourceObject(
                 object_id=f"onedrive:{it['id']}",
-                doc_type="file",
+                doc_type=_kind,
+                category=_cat,
                 title=it.get("name", "file"),
                 content=json.dumps(it).encode(),
                 preview=f"{mime} · {int(it.get('size', 0)) // 1000} KB",
@@ -103,9 +106,11 @@ def fetch_dropbox(access_token: str, limit: int = 100) -> Iterable[SourceObject]
         for it in r.json().get("entries", []):
             if it.get(".tag") != "file":
                 continue
+            _cat, _kind = classify_file(it.get("name", ""))
             yield SourceObject(
                 object_id=f"dropbox:{it.get('id', it['path_lower'])}",
-                doc_type="file",
+                doc_type=_kind,
+                category=_cat,
                 title=it.get("name", "file"),
                 content=json.dumps(it).encode(),
                 preview=f"{int(it.get('size', 0)) // 1000} KB · {it.get('path_display', '')}",
@@ -150,14 +155,16 @@ def fetch_1password(creds: dict) -> Iterable[SourceObject]:
                     if f.get("purpose") == "USERNAME":
                         username = f.get("value", "")
                 urls = [u.get("href") for u in it.get("urls", []) if u.get("href")]
+                _cat, _kind = map_1password(it.get("category"))
                 yield SourceObject(
                     object_id=f"onepassword:{it['id']}",
-                    doc_type="secret",
+                    doc_type=_kind,
+                    category=_cat,
                     title=it.get("title", "(untitled)"),
                     content=json.dumps(detail).encode(),  # encrypted at rest downstream
                     preview=f"{it.get('category', '')} · {v.get('name', '')}",
                     meta={"vault": v.get("name"), "category": it.get("category"),
-                          "kind": it.get("category"), "tags": it.get("tags", []),
+                          "kind": _kind, "tags": it.get("tags", []),
                           "url": urls[0] if urls else None, "username": username},
                     labels=[v.get("name"), *it.get("tags", [])],
                 )
@@ -210,8 +217,9 @@ def fetch_icloud(creds: dict) -> Iterable[SourceObject]:
         drive = api.drive
         for name in drive.dir():
             node = drive[name]
+            _cat, _kind = classify_file(name)
             yield SourceObject(
-                object_id=f"icloud:drive:{name}", doc_type="file", title=name,
+                object_id=f"icloud:drive:{name}", doc_type=_kind, category=_cat, title=name,
                 content=json.dumps({"name": name, "type": getattr(node, "type", None)}).encode(),
                 preview=f"iCloud Drive · {getattr(node, 'type', 'item')}",
                 meta={"path": f"/{name}"}, labels=["iCloud Drive"])

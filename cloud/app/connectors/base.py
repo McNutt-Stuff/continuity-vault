@@ -26,13 +26,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Type
 
+from ..taxonomy import category_for_kind
+
 
 @dataclass
 class SourceObject:
     """One normalized item pulled from a source service."""
 
     object_id: str
-    doc_type: str  # email | file | secret | contact | note | photo | record
+    doc_type: str  # canonical kind (email, pdf, login, person, event, ...)
     title: str
     content: bytes
     preview: str  # policy-permitted derived preview text
@@ -40,12 +42,19 @@ class SourceObject:
     size_bytes: int = 0
     modified_at: Optional[datetime] = None
     labels: List[str] = field(default_factory=list)  # tags / folders for faceting
+    category: str = ""  # canonical top-level category; derived from kind if unset
 
     def __post_init__(self) -> None:
         if not self.size_bytes:
             self.size_bytes = len(self.content)
         if self.modified_at is None:
             self.modified_at = datetime.now(timezone.utc)
+        if not self.category:
+            self.category = category_for_kind(self.doc_type)
+
+    @property
+    def kind(self) -> str:
+        return self.doc_type
 
     def searchable_text(self, fields: List[str]) -> str:
         """Flatten title, preview, labels, and the connector's declared

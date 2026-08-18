@@ -70,3 +70,43 @@ def release_vault_root_key(vault_id: str) -> bytes:
     return provider.aes_decrypt(
         master, base64.b64decode(w["nonce"]), base64.b64decode(w["ct"]), b"vault-root"
     )
+
+
+def _recovery_path(vault_id: str) -> Path:
+    return _KEY_STORE / f"{vault_id}.recovery.json"
+
+
+def provision_recovery_keypair(vault_id: str) -> Dict[str, str]:
+    """Provision a KEM recovery keypair for endpoint (client-side) encryption.
+
+    Agents wrap their local data key to this public key so escrowed content can
+    be recovered by an authorized party. The private key is broker-wrapped (in a
+    zero-knowledge deployment it would be customer-held instead)."""
+    path = _recovery_path(vault_id)
+    if path.exists():
+        d = json.loads(path.read_text())
+        return {"public_key": d["publicKey"], "kem_alg": d["kemAlg"]}
+    provider = get_provider()
+    kp = provider.kem_keypair("ML-KEM-768")
+    master = provider.hkdf(
+        (os.environ.get("CV_KEK_SECRET", "dev-kek") + vault_id).encode(),
+        b"cv-recovery-master", 32)
+    nonce, ct = provider.aes_encrypt(master, kp.private_key, b"recovery-priv")
+    path.write_text(json.dumps({
+        "vaultId": vault_id, "publicKey": base64.b64encode(kp.public_key).decode(),
+        "kemAlg": kp.algorithm,
+        "wrappedPriv": {"nonce": base64.b64encode(nonce).decode(),
+                        "ct": base64.b64encode(ct).decode()},
+    }))
+    return {"public_key": base64.b64encode(kp.public_key).decode(), "kem_alg": kp.algorithm}
+
+
+def release_recovery_private(vault_id: str) -> bytes:
+    record = json.loads(_recovery_path(vault_id).read_text())
+    provider = get_provider()
+    master = provider.hkdf(
+        (os.environ.get("CV_KEK_SECRET", "dev-kek") + vault_id).encode(),
+        b"cv-recovery-master", 32)
+    w = record["wrappedPriv"]
+    return provider.aes_decrypt(
+        master, base64.b64decode(w["nonce"]), base64.b64decode(w["ct"]), b"recovery-priv")

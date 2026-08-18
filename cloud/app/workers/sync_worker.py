@@ -28,7 +28,7 @@ from cv_crypto.envelope import EnvelopeKeyHierarchy, encrypt_object
 from cv_crypto.provider import hexdigest
 from cv_crypto.signing import HybridSigner
 
-from .. import audit, credstore, keybroker
+from .. import audit, credstore, keybroker, taxonomy
 from ..connectors import get_connector
 from ..connectors import oauth
 from ..models import (
@@ -46,7 +46,7 @@ from ..fleet import fleet_signer
 
 def run_backup(db: Session, collection: Collection, destinations: Optional[List[str]] = None
                ) -> SnapshotReceipt:
-    vault = db.get(Vault, collection.vault_id)
+    """Pull from the source connector and ingest into protected storage."""
     account = (
         db.get(ConnectorAccount, collection.connector_account_id)
         if collection.connector_account_id
@@ -57,13 +57,31 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
         raise ValueError(f"no connector for {collection.source_type}")
 
     label = account.account_label if account else collection.name
-    zero_knowledge = vault.key_ownership_model == "zero-knowledge"
-
-    # Decrypt the linked account's credentials and refresh the OAuth token if it
-    # has expired, so the connector pulls live data.
     config = _account_config(db, collection, account)
+    caps = connector.capabilities()
+    objects = list(connector.fetch(label, config=config).objects)
 
-    # Release the vault root key for encryption (or derive on endpoint in ZK).
+    receipt = ingest_objects(db, collection, objects, destinations,
+                             searchable_fields=caps.searchable_fields, actor="sync-worker")
+    if account:
+        account.last_sync_at = datetime.now(timezone.utc)
+        db.commit()
+    return receipt
+
+
+def ingest_objects(db: Session, collection: Collection, source_objects,
+                   destinations: Optional[List[str]] = None,
+                   searchable_fields: Optional[List[str]] = None,
+                   actor: str = "ingest") -> SnapshotReceipt:
+    """Encrypt, snapshot, index, and store a set of normalized source objects.
+
+    Shared by the cloud sync worker (connector pulls) and pushed ingest from the
+    desktop agent.
+    """
+    vault = db.get(Vault, collection.vault_id)
+    zero_knowledge = vault.key_ownership_model == "zero-knowledge"
+    searchable_fields = searchable_fields or ["*"]
+
     root_key = keybroker.release_vault_root_key(vault.id)
     hierarchy = EnvelopeKeyHierarchy(root_key)
     snapshot_id = str(uuid.uuid4())
@@ -73,15 +91,16 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
     index_rows: List[SearchDocument] = []
     total_bytes = 0
 
-    caps = connector.capabilities()
-    for src in connector.fetch(label, config=config).objects:
+    for src in source_objects:
         enc = encrypt_object(snapshot_key, src.content, src.object_id)
         enc["plaintextBytes"] = src.size_bytes
         encrypted_objects.append(enc)
         total_bytes += src.size_bytes
-        # Build the searchable blob from title + preview + connector-declared
-        # searchable metadata fields; suppressed entirely for zero-knowledge.
-        search_blob = "" if zero_knowledge else src.searchable_text(caps.searchable_fields)
+        # Restricted categories (credentials, identity) never index derived
+        # content — only the title and non-secret metadata.
+        allow_preview = not zero_knowledge and taxonomy.index_preview(src.category)
+        search_blob = src.searchable_text(searchable_fields) if allow_preview \
+            else ("" if zero_knowledge else src.title)
         index_rows.append(
             SearchDocument(
                 tenant_id=collection.tenant_id,
@@ -91,8 +110,9 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
                 object_id=src.object_id,
                 source_type=collection.source_type,
                 doc_type=src.doc_type,
+                category=src.category,
                 title=src.title,
-                preview="" if zero_knowledge else src.preview,
+                preview="" if not allow_preview else src.preview,
                 meta={} if zero_knowledge else src.meta,
                 labels=[] if zero_knowledge else src.labels,
                 search_blob=search_blob,
@@ -117,9 +137,6 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
     last_receipt: Optional[SnapshotReceipt] = None
 
     for kind in dest_kinds:
-        # Appliance destinations are handled by the appliance agent via signed
-        # commands; here we record the pending receipt and the fleet manager
-        # opens an ingest window. Cloud/customer-s3 write immediately.
         recoverable = False
         if kind in ("cv-cloud", "customer-s3"):
             dest = build_destination(kind)
@@ -127,7 +144,7 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
                 dest.put_object(tenant_prefix, f"{snapshot_id}/{obj['objectId']}",
                                 obj["ciphertext"].encode())
             dest.put_manifest(tenant_prefix, snapshot_id, manifest)
-            recoverable = True  # destination confirmed commit
+            recoverable = True
 
         receipt = SnapshotReceipt(
             tenant_id=collection.tenant_id,
@@ -146,12 +163,10 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
 
     for row in index_rows:
         db.add(row)
-
-    account and setattr(account, "last_sync_at", datetime.now(timezone.utc))
     db.commit()
 
     audit.record(
-        db, actor="sync-worker", action="backup.completed",
+        db, actor=actor, action="backup.completed",
         tenant_id=collection.tenant_id, resource=collection.id,
         detail={"snapshotId": snapshot_id, "objects": len(encrypted_objects),
                 "bytes": total_bytes, "destinations": dest_kinds},

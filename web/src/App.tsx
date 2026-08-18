@@ -11,6 +11,7 @@ import Snapshots from "./pages/Snapshots";
 import Restore from "./pages/Restore";
 import Onboarding from "./pages/Onboarding";
 import Admin from "./pages/Admin";
+import Agents from "./pages/Agents";
 import Settings from "./pages/Settings";
 
 const NAV: { to: string; label: string; icon: IconName }[] = [
@@ -19,6 +20,7 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/connectors", label: "Sources", icon: "link" },
   { to: "/snapshots", label: "Recovery Points", icon: "clock" },
   { to: "/appliances", label: "Appliances", icon: "server" },
+  { to: "/agents", label: "Desktop Agents", icon: "user" },
   { to: "/restore", label: "Restore", icon: "restore" },
   { to: "/settings", label: "Settings", icon: "gear" },
 ];
@@ -48,6 +50,7 @@ export default function App() {
             <Route path="/connectors" element={<Connectors />} />
             <Route path="/snapshots" element={<Snapshots />} />
             <Route path="/appliances" element={<Appliances />} />
+            <Route path="/agents" element={<Agents />} />
             <Route path="/restore" element={<Restore />} />
             <Route path="/settings" element={<Settings />} />
             {me.is_platform_admin && <Route path="/admin" element={<Admin />} />}

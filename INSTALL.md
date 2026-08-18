@@ -245,6 +245,38 @@ data, which is encrypted before it enters any destination.
 
 ---
 
+## Desktop agents (macOS)
+
+Some sources (1Password) require a local agent because data is extracted with a
+native CLI (`op`). The desktop agent registers with a linking code like an
+appliance, **encrypts on the endpoint** (the cloud never sees plaintext),
+collects locally, pushes to the cloud (or an appliance), reports telemetry, and
+self-updates on command. It runs in the background as a menu-bar app and bundles
+the 1Password CLI.
+
+**Install on a Mac (one-click):**
+
+1. In the portal: **Desktop Agents → Download Mac installer** (the linking code
+   and cloud URL are baked into the downloaded `arkive-agent-installer.command`).
+2. On the Mac, run it (right-click → Open, or `bash ~/Downloads/arkive-agent-installer.command`).
+   It clones the agent, builds its Python env, bundles the `op` CLI, installs a
+   **launchd** menu-bar app, escrows its client-side key, and registers.
+3. For unattended collection, provide a **1Password service-account token** when
+   prompted; otherwise it uses the interactive 1Password app + CLI integration.
+
+Client-side encryption: the agent holds a data key in the macOS Keychain, wraps
+each item under it, and escrows a copy wrapped to the vault recovery key — so
+secrets are unreadable by the cloud yet recoverable by an authorized party.
+
+Manage from **Desktop Agents**: **Collect now**, **Update**, **Reconfigure**.
+Status/logs on the Mac:
+
+```bash
+tail -f ~/.arkive-agent/agent.log
+```
+
+---
+
 ## Updating from GitHub
 
 Updates pull the latest code from your GitHub repo into a source checkout at
