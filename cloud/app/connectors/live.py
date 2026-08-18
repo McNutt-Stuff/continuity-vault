@@ -113,3 +113,108 @@ def fetch_dropbox(access_token: str, limit: int = 100) -> Iterable[SourceObject]
                 labels=["/".join(it.get("path_display", "/").split("/")[:-1]) or "/"],
                 size_bytes=int(it.get("size", 0)) or None,  # type: ignore
             )
+
+
+def _status(object_id: str, title: str, preview: str, label: str) -> SourceObject:
+    return SourceObject(object_id=object_id, doc_type="note", title=title,
+                        content=b"linked", preview=preview, meta={"status": "linked"},
+                        labels=[label])
+
+
+def fetch_1password(creds: dict) -> Iterable[SourceObject]:
+    """Pull item metadata + encrypted item detail via a 1Password Connect server.
+
+    Secret field values are stored only inside the (envelope-encrypted) object
+    content; the search index carries only non-secret metadata.
+    """
+    token = creds.get("token")
+    host = (creds.get("host") or "").rstrip("/")
+    if not token or not host:
+        yield _status("onepassword:status", "1Password connected",
+                      "Add a 1Password Connect host to enable automatic item sync.",
+                      "1Password")
+        return
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    with httpx.Client(timeout=30) as c:
+        vaults = c.get(f"{host}/v1/vaults", headers=headers)
+        vaults.raise_for_status()
+        for v in vaults.json():
+            listing = c.get(f"{host}/v1/vaults/{v['id']}/items", headers=headers)
+            if listing.status_code != 200:
+                continue
+            for it in listing.json():
+                detail = c.get(f"{host}/v1/vaults/{v['id']}/items/{it['id']}",
+                               headers=headers).json()
+                username = ""
+                for f in detail.get("fields", []):
+                    if f.get("purpose") == "USERNAME":
+                        username = f.get("value", "")
+                urls = [u.get("href") for u in it.get("urls", []) if u.get("href")]
+                yield SourceObject(
+                    object_id=f"onepassword:{it['id']}",
+                    doc_type="secret",
+                    title=it.get("title", "(untitled)"),
+                    content=json.dumps(detail).encode(),  # encrypted at rest downstream
+                    preview=f"{it.get('category', '')} · {v.get('name', '')}",
+                    meta={"vault": v.get("name"), "category": it.get("category"),
+                          "kind": it.get("category"), "tags": it.get("tags", []),
+                          "url": urls[0] if urls else None, "username": username},
+                    labels=[v.get("name"), *it.get("tags", [])],
+                )
+
+
+def fetch_icloud(creds: dict) -> Iterable[SourceObject]:
+    """Best-effort iCloud pull (Contacts + Drive listing) via the pyicloud
+    library and an app-specific password. iCloud has no official API and may
+    require interactive 2FA, in which case a status note is returned."""
+    apple_id = creds.get("username")
+    password = creds.get("token")
+    if not apple_id or not password:
+        yield _status("icloud:status", "iCloud connected",
+                      "Provide your Apple ID and app-specific password.", "iCloud")
+        return
+    try:
+        from pyicloud import PyiCloudService  # optional dependency
+    except Exception:
+        yield _status("icloud:status", "iCloud connected",
+                      "Install 'pyicloud' on the server to enable iCloud sync.", "iCloud")
+        return
+    try:
+        api = PyiCloudService(apple_id, password)
+    except Exception as exc:
+        yield _status("icloud:status", "iCloud connected",
+                      f"iCloud sign-in failed: {exc}", "iCloud")
+        return
+    if getattr(api, "requires_2fa", False) or getattr(api, "requires_2sa", False):
+        yield _status("icloud:status", "iCloud connected",
+                      "iCloud requires interactive two-factor auth; automated sync unavailable.",
+                      "iCloud")
+        return
+
+    try:
+        for ct in (api.contacts.all() or []):
+            name = " ".join(filter(None, [ct.get("firstName"), ct.get("lastName")])) \
+                or ct.get("companyName") or "Contact"
+            emails = [e.get("field") for e in ct.get("emailAddresses", []) if e.get("field")]
+            phones = [p.get("field") for p in ct.get("phones", []) if p.get("field")]
+            yield SourceObject(
+                object_id=f"icloud:contact:{ct.get('contactId')}",
+                doc_type="contact", title=name,
+                content=json.dumps(ct).encode(),
+                preview=", ".join(emails + phones)[:140],
+                meta={"emails": emails, "phones": phones}, labels=["Contacts"])
+    except Exception:
+        pass
+
+    try:
+        drive = api.drive
+        for name in drive.dir():
+            node = drive[name]
+            yield SourceObject(
+                object_id=f"icloud:drive:{name}", doc_type="file", title=name,
+                content=json.dumps({"name": name, "type": getattr(node, "type", None)}).encode(),
+                preview=f"iCloud Drive · {getattr(node, 'type', 'item')}",
+                meta={"path": f"/{name}"}, labels=["iCloud Drive"])
+    except Exception:
+        pass
+

@@ -231,8 +231,13 @@ https://vault.arkive.life/api/connectors/oauth/callback
 | Gmail | Google Cloud Console → OAuth client (Web); enable Gmail API | `CV_GOOGLE_CLIENT_ID`, `CV_GOOGLE_CLIENT_SECRET` |
 | Outlook / OneDrive | Microsoft Entra ID → App registration; delegated `Mail.Read` / `Files.Read.All` + `offline_access` | `CV_MICROSOFT_CLIENT_ID`, `CV_MICROSOFT_CLIENT_SECRET` |
 | Dropbox | dropbox.com/developers → scoped app | `CV_DROPBOX_CLIENT_ID`, `CV_DROPBOX_CLIENT_SECRET` |
-| 1Password | Service Account token (pasted at connect time) | — |
-| iCloud | App-specific password (pasted at connect time) | — |
+| 1Password | 1Password Connect server + Connect token (enter host + token when connecting) | — |
+| iCloud | App-specific password + `pip install pyicloud` on the server | — |
+
+**What each connector pulls:** Gmail/Outlook = messages; OneDrive/Dropbox =
+files; 1Password = vault items (secret values encrypted, only metadata indexed);
+iCloud = Contacts + Drive listing (best-effort; interactive-2FA accounts can't be
+synced automatically).
 
 In the portal: **Sources → click a service → authorize** on the provider's
 consent screen → you're redirected back linked. Then **Back up now** pulls live

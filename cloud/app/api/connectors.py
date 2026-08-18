@@ -46,13 +46,16 @@ def _setup_instructions(connector_type: str) -> list[str]:
         ]
     if connector_type == "onepassword":
         return [
-            "In 1Password, create a Service Account with read access.",
-            "Paste the service-account token when connecting — it is encrypted at rest.",
+            "Deploy 1Password Connect (or use your hosted Connect) with a Connect token.",
+            "Grant the token read access to the vaults you want to protect.",
+            "Connect with the Connect server URL (host) and the Connect token.",
         ]
     if connector_type == "icloud":
         return [
             "At appleid.apple.com, generate an app-specific password.",
+            "Install 'pyicloud' on the server (pip install pyicloud).",
             "Connect with your Apple ID and that app-specific password.",
+            "Note: accounts requiring interactive 2FA can't be synced automatically.",
         ]
     return []
 
@@ -150,6 +153,7 @@ class TokenLinkRequest(BaseModel):
     account_label: str
     token: str
     username: str | None = None  # e.g. Apple ID for iCloud
+    host: str | None = None       # e.g. 1Password Connect server URL
 
 
 @router.post("/{connector_type}/token")
@@ -159,7 +163,7 @@ def link_with_token(connector_type: str, body: TokenLinkRequest,
                     db: Session = Depends(get_db)):
     if connector_type not in oauth.TOKEN_TYPES:
         raise HTTPException(400, "this provider uses OAuth; use /connect")
-    creds = {"token": body.token, "username": body.username}
+    creds = {"token": body.token, "username": body.username, "host": body.host}
     account = ConnectorAccount(
         tenant_id=tenant.id,
         connector_type=connector_type,

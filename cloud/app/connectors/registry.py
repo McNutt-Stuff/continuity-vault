@@ -59,13 +59,7 @@ class OnePasswordConnector(Connector):
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}
         if config.get("token"):
-            # Real service account linked. Automatic item enumeration requires the
-            # 1Password Connect server / SDK; surface status rather than fake items.
-            yield SourceObject(
-                object_id="onepassword:status", doc_type="note",
-                title="1Password connected", content=b"linked",
-                preview="Service account linked and encrypted. Item sync requires a 1Password Connect host.",
-                meta={"status": "linked"}, labels=["1Password"])
+            yield from live.fetch_1password(config)
             return
         items = [
             ("Chase Bank Login", "login", "chase.com", "rob@arkive.life", "Personal", ["finance"]),
@@ -316,11 +310,7 @@ class ICloudConnector(Connector):
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}
         if config.get("token"):
-            yield SourceObject(
-                object_id="icloud:status", doc_type="note",
-                title="iCloud connected", content=b"linked",
-                preview="Apple ID app-password linked. iCloud has no public API; use manual export for content.",
-                meta={"status": "linked"}, labels=["iCloud"])
+            yield from live.fetch_icloud(config)
             return
         items = [
             ("IMG_4821.HEIC", "photo", 3_800_000, "Recents"),

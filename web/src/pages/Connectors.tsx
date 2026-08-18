@@ -66,12 +66,22 @@ export default function Connectors() {
       return;
     }
     if (c.mode === "token") {
-      const token = prompt(`Paste your ${c.displayName} token / app password`);
+      let token = "";
+      let username: string | undefined;
+      let host: string | undefined;
+      if (c.type === "onepassword") {
+        host = prompt("1Password Connect server URL (host)") ?? undefined;
+        token = prompt("1Password Connect token") ?? "";
+      } else if (c.type === "icloud") {
+        username = prompt("Apple ID (email)") ?? undefined;
+        token = prompt("App-specific password") ?? "";
+      } else {
+        token = prompt(`Paste your ${c.displayName} token`) ?? "";
+      }
       if (!token) return;
-      const username = c.type === "icloud" ? prompt("Apple ID (email)") ?? "" : undefined;
-      const label = prompt("Account label", `My ${c.displayName}`) ?? c.displayName;
+      const label = prompt("Account label", username || `My ${c.displayName}`) ?? c.displayName;
       try {
-        await api.post(`/connectors/${c.type}/token`, { account_label: label, token, username });
+        await api.post(`/connectors/${c.type}/token`, { account_label: label, token, username, host });
         flash(`${c.displayName} connected`);
         await load();
       } catch (e) { alert((e as ApiError).message); }
