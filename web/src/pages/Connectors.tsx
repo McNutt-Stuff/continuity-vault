@@ -8,10 +8,12 @@ interface CatalogItem {
   type: string;
   displayName: string;
   authType: string;
-  scopes: string[];
   icon: string;
   color: string;
   docTypes: string[];
+  mode: "oauth" | "token";
+  configured: boolean;
+  setup: string[];
 }
 interface Account {
   id: string;
@@ -27,6 +29,7 @@ export default function Connectors() {
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
+  const [setup, setSetup] = useState<CatalogItem | null>(null);
   const [toast, setToast] = useState("");
 
   async function load() {
@@ -35,28 +38,59 @@ export default function Connectors() {
     const t = await api.get<{ vaults: Vault[] }>("/tenant");
     setVaults(t.vaults);
   }
-  useEffect(() => { void load(); }, []);
 
-  async function link(c: CatalogItem) {
+  useEffect(() => {
+    void load();
+    // Handle the return from an OAuth consent redirect.
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("connected")) {
+      flash(`${p.get("connected")} connected`);
+      window.history.replaceState({}, "", "/connectors");
+    } else if (p.get("error")) {
+      flash(`Connection failed: ${p.get("error")}`);
+      window.history.replaceState({}, "", "/connectors");
+    }
+  }, []);
+
+  function flash(msg: string) {
+    setToast(msg);
+    setTimeout(() => setToast(""), 3500);
+  }
+
+  async function connect(c: CatalogItem) {
     if (!me?.passkey_verified) {
-      await stepUp().catch((e) => alert(e.message));
+      try { await stepUp(); } catch (e) { return alert((e as Error).message); }
     }
-    const label = prompt(`Account label for ${c.displayName}`, `My ${c.displayName}`);
-    if (!label) return;
+    if (c.mode === "oauth" && !c.configured) {
+      setSetup(c);
+      return;
+    }
+    if (c.mode === "token") {
+      const token = prompt(`Paste your ${c.displayName} token / app password`);
+      if (!token) return;
+      const username = c.type === "icloud" ? prompt("Apple ID (email)") ?? "" : undefined;
+      const label = prompt("Account label", `My ${c.displayName}`) ?? c.displayName;
+      try {
+        await api.post(`/connectors/${c.type}/token`, { account_label: label, token, username });
+        flash(`${c.displayName} connected`);
+        await load();
+      } catch (e) { alert((e as ApiError).message); }
+      return;
+    }
+    // OAuth: get the provider consent URL and redirect the browser to it.
     try {
-      await api.post("/connectors/link", { connector_type: c.type, account_label: label });
-      setToast(`${c.displayName} linked`);
-      await load();
+      const res = await api.post<{ authorize_url: string }>(`/connectors/${c.type}/connect`, {});
+      window.location.href = res.authorize_url;
     } catch (e) {
-      alert((e as ApiError).message);
+      const err = e as ApiError;
+      if (err.status === 400) setSetup(c);
+      else alert(err.message);
     }
-    setTimeout(() => setToast(""), 2500);
   }
 
   async function backup(a: Account) {
     const vault = vaults[0];
     if (!vault) return alert("No vault available");
-    // Create a collection for this source then run a backup to cloud+appliance.
     const coll = await api.post<{ id: string }>("/collections", {
       vault_id: vault.id,
       name: a.account_label,
@@ -64,13 +98,23 @@ export default function Connectors() {
       connector_account_id: a.id,
       destinations: ["cv-cloud"],
     });
-    const res = await api.post<{ object_count: number; total_bytes: number }>(
-      `/collections/${coll.id}/backup`,
-      { destinations: ["cv-cloud"] }
-    );
-    setToast(`Backed up ${res.object_count} objects from ${a.account_label}`);
+    try {
+      const res = await api.post<{ object_count: number }>(
+        `/collections/${coll.id}/backup`, { destinations: ["cv-cloud"] });
+      flash(`Backed up ${res.object_count} objects from ${a.account_label}`);
+    } catch (e) {
+      alert(`Backup failed: ${(e as ApiError).message}`);
+    }
     await load();
-    setTimeout(() => setToast(""), 3000);
+  }
+
+  async function unlink(a: Account) {
+    if (!confirm(`Unlink ${a.account_label}?`)) return;
+    try {
+      await api.del(`/connectors/accounts/${a.id}`);
+      flash("Unlinked");
+      await load();
+    } catch (e) { alert((e as ApiError).message); }
   }
 
   return (
@@ -78,20 +122,25 @@ export default function Connectors() {
       <Card style={{ marginBottom: 16 }}>
         <h2 style={{ marginBottom: 4 }}>Connect a source</h2>
         <div className="muted" style={{ marginBottom: 16, fontSize: 13 }}>
-          Sync workers continuously capture and encrypt data from your services. Content is
-          encrypted before it leaves the connector environment.
+          You authorize each service through its own consent screen. Data is encrypted before
+          it leaves the connector environment. Tokens are stored encrypted at rest.
         </div>
         <div className="grid grid-3">
           {catalog.map((c) => (
-            <div key={c.type} className="dest-card" onClick={() => link(c)}>
-              <div className="row" style={{ marginBottom: 10 }}>
-                <div className="result-icon" style={{ background: c.color, width: 34, height: 34 }}>
-                  <Icon name={c.icon as IconName} size={17} />
+            <div key={c.type} className="dest-card" onClick={() => connect(c)}>
+              <div className="spread" style={{ marginBottom: 10 }}>
+                <div className="row">
+                  <div className="result-icon" style={{ background: c.color, width: 34, height: 34 }}>
+                    <Icon name={c.icon as IconName} size={17} />
+                  </div>
+                  <div>
+                    <div style={{ fontWeight: 650 }}>{c.displayName}</div>
+                    <div className="faint" style={{ fontSize: 11.5 }}>{c.mode === "oauth" ? "OAuth" : "Token"}</div>
+                  </div>
                 </div>
-                <div>
-                  <div style={{ fontWeight: 650 }}>{c.displayName}</div>
-                  <div className="faint" style={{ fontSize: 11.5 }}>{c.authType}</div>
-                </div>
+                {c.mode === "oauth" && !c.configured
+                  ? <Pill tone="warn">Needs setup</Pill>
+                  : <Pill tone="ok">Ready</Pill>}
               </div>
               <div className="faint" style={{ fontSize: 12 }}>{c.docTypes.join(" · ")}</div>
             </div>
@@ -99,24 +148,43 @@ export default function Connectors() {
         </div>
       </Card>
 
+      {setup && (
+        <Card style={{ marginBottom: 16, borderColor: "var(--warn)" }}>
+          <div className="spread" style={{ marginBottom: 8 }}>
+            <h3>Set up {setup.displayName}</h3>
+            <button className="btn ghost sm" onClick={() => setSetup(null)}>Close</button>
+          </div>
+          <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+            This provider needs an OAuth app configured on the server before it can be connected.
+          </div>
+          <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.7 }}>
+            {setup.setup.map((s, i) => <li key={i}>{s}</li>)}
+          </ol>
+        </Card>
+      )}
+
       <Card>
         <h2 style={{ marginBottom: 12 }}>Linked accounts</h2>
         {accounts.length === 0 && <div className="muted">No sources linked yet.</div>}
-        {accounts.map((a) => (
-          <div key={a.id} className="result-row">
-            <div className="result-icon" style={{ background: catalog.find(c => c.type === a.connector_type)?.color ?? "#1a2234" }}>
-              <Icon name={(catalog.find(c => c.type === a.connector_type)?.icon as IconName) ?? "database"} size={17} />
-            </div>
-            <div className="flex1">
-              <div style={{ fontWeight: 600 }}>{a.account_label}</div>
-              <div className="faint" style={{ fontSize: 12 }}>
-                {a.connector_type} · last sync {timeAgo(a.last_sync_at)}
+        {accounts.map((a) => {
+          const c = catalog.find((x) => x.type === a.connector_type);
+          return (
+            <div key={a.id} className="result-row">
+              <div className="result-icon" style={{ background: c?.color ?? "#1a2234" }}>
+                <Icon name={(c?.icon as IconName) ?? "database"} size={17} />
               </div>
+              <div className="flex1">
+                <div style={{ fontWeight: 600 }}>{a.account_label}</div>
+                <div className="faint" style={{ fontSize: 12 }}>
+                  {c?.displayName ?? a.connector_type} · last sync {timeAgo(a.last_sync_at)}
+                </div>
+              </div>
+              <Pill tone={a.auth_status === "linked" ? "ok" : "warn"}>{a.auth_status}</Pill>
+              <button className="btn sm primary" onClick={() => backup(a)}>Back up now</button>
+              <button className="btn sm ghost" onClick={() => unlink(a)}>Unlink</button>
             </div>
-            <Pill tone={a.auth_status === "linked" ? "ok" : "warn"}>{a.auth_status}</Pill>
-            <button className="btn sm primary" onClick={() => backup(a)}>Back up now</button>
-          </div>
-        ))}
+          );
+        })}
       </Card>
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}

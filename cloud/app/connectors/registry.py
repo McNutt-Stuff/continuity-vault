@@ -20,6 +20,7 @@ from .base import (
     get_connector,
     register_connector,
 )
+from . import live
 
 
 def _dt(days_ago: int) -> datetime:
@@ -56,6 +57,16 @@ class OnePasswordConnector(Connector):
         )
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("token"):
+            # Real service account linked. Automatic item enumeration requires the
+            # 1Password Connect server / SDK; surface status rather than fake items.
+            yield SourceObject(
+                object_id="onepassword:status", doc_type="note",
+                title="1Password connected", content=b"linked",
+                preview="Service account linked and encrypted. Item sync requires a 1Password Connect host.",
+                meta={"status": "linked"}, labels=["1Password"])
+            return
         items = [
             ("Chase Bank Login", "login", "chase.com", "rob@arkive.life", "Personal", ["finance"]),
             ("Gmail Recovery Codes", "note", "google.com", "", "Personal", ["recovery"]),
@@ -105,6 +116,10 @@ class GmailConnector(Connector):
         )
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_gmail(config["access_token"])
+            return
         emails = [
             ("Q3 Board Deck — final", "board@company.com", "Please find attached the final deck for Thursday.", "Inbox"),
             ("Your receipt from Apple", "no_reply@apple.com", "Thank you for your purchase of iCloud+ 2TB.", "Receipts"),
@@ -153,6 +168,10 @@ class OutlookConnector(Connector):
         )
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_graph_mail(config["access_token"])
+            return
         emails = [
             ("Contract renewal", "legal@partner.com", "The renewal terms are attached for signature.", "Legal"),
             ("Payroll confirmation", "hr@company.com", "Your payroll has been processed.", "Focused"),
@@ -198,6 +217,10 @@ class OneDriveConnector(Connector):
         )
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_graph_files(config["access_token"])
+            return
         files = [
             ("2025 Tax Return.pdf", 842_000, "application/pdf", "/Documents/Finance"),
             ("Family Trust.docx", 96_000, "application/vnd.openxmlformats", "/Documents/Legal"),
@@ -243,6 +266,10 @@ class DropboxConnector(Connector):
         )
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_dropbox(config["access_token"])
+            return
         files = [
             ("Wedding Photos.zip", 2_400_000_000, "application/zip", "/Media"),
             ("Business Plan.pdf", 540_000, "application/pdf", "/Work"),
@@ -287,6 +314,14 @@ class ICloudConnector(Connector):
         )
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("token"):
+            yield SourceObject(
+                object_id="icloud:status", doc_type="note",
+                title="iCloud connected", content=b"linked",
+                preview="Apple ID app-password linked. iCloud has no public API; use manual export for content.",
+                meta={"status": "linked"}, labels=["iCloud"])
+            return
         items = [
             ("IMG_4821.HEIC", "photo", 3_800_000, "Recents"),
             ("Contacts Export.vcf", "contact", 42_000, "Contacts"),

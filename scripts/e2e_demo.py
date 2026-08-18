@@ -81,14 +81,13 @@ def main():
     tok = r.json()["token"]
     print("passkey verified =", r.json()["passkey_verified"])
 
-    hr("3. Link Gmail + back it up")
-    acct = client.post("/api/connectors/link",
-                       json={"connector_type": "gmail", "account_label": "owner@gmail.com"},
-                       headers=auth()).json()
+    hr("3. Protect a Gmail source (simulated data in dev) + back it up")
     vault_id = client.get("/api/tenant", headers=auth()).json()["vaults"][0]["id"]
+    # Without configured OAuth creds the connector yields its simulated dataset;
+    # a collection with no linked account exercises that path.
     coll = client.post("/api/collections", json={
         "vault_id": vault_id, "name": "owner@gmail.com", "source_type": "gmail",
-        "connector_account_id": acct["id"], "destinations": ["cv-cloud"],
+        "destinations": ["cv-cloud"],
     }, headers=auth()).json()
     bk = client.post(f"/api/collections/{coll['id']}/backup",
                      json={"destinations": ["cv-cloud"]}, headers=auth()).json()

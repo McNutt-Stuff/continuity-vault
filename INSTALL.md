@@ -210,6 +210,36 @@ journalctl -u cv-appliance-agent -f  # appliance
 
 ---
 
+## Connecting data sources
+
+Sources use real provider authorization. OAuth providers (Gmail, Outlook,
+OneDrive, Dropbox) need an OAuth app configured on the server; token providers
+(1Password, iCloud) accept a pasted token / app-password. Until a provider is
+configured, the portal shows it as **"Needs setup"** with the exact steps.
+
+**OAuth redirect URI** to register with every provider:
+
+```
+https://vault.arkive.life/api/connectors/oauth/callback
+```
+
+**Per provider**, create an OAuth app and set the credentials in
+`/etc/continuity-vault.env`, then `sudo systemctl restart cv-cloud`:
+
+| Provider | Where to create the app | Env vars |
+|---|---|---|
+| Gmail | Google Cloud Console → OAuth client (Web); enable Gmail API | `CV_GOOGLE_CLIENT_ID`, `CV_GOOGLE_CLIENT_SECRET` |
+| Outlook / OneDrive | Microsoft Entra ID → App registration; delegated `Mail.Read` / `Files.Read.All` + `offline_access` | `CV_MICROSOFT_CLIENT_ID`, `CV_MICROSOFT_CLIENT_SECRET` |
+| Dropbox | dropbox.com/developers → scoped app | `CV_DROPBOX_CLIENT_ID`, `CV_DROPBOX_CLIENT_SECRET` |
+| 1Password | Service Account token (pasted at connect time) | — |
+| iCloud | App-specific password (pasted at connect time) | — |
+
+In the portal: **Sources → click a service → authorize** on the provider's
+consent screen → you're redirected back linked. Then **Back up now** pulls live
+data, which is encrypted before it enters any destination.
+
+---
+
 ## Updating from GitHub
 
 Updates pull the latest code from your GitHub repo into a source checkout at

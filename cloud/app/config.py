@@ -44,15 +44,23 @@ class Settings(BaseSettings):
     # Authentication.
     allow_signup: bool = True
     email_code_ttl_seconds: int = 600
-    # SMTP for verification/sign-in codes. If unset, codes are logged (dev also
-    # returns them in the API response) so the platform can bootstrap without an
-    # email provider.
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_user: str | None = None
     smtp_password: str | None = None
     smtp_from: str = "no-reply@arkive.life"
     smtp_starttls: bool = True
+
+    # Connector OAuth apps. Set the client id/secret for each provider to enable
+    # real linking; a provider is shown as "needs setup" until configured.
+    oauth_redirect_base: str | None = None  # default: https://{domain}/api
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    microsoft_client_id: str | None = None
+    microsoft_client_secret: str | None = None
+    microsoft_tenant: str = "common"
+    dropbox_client_id: str | None = None
+    dropbox_client_secret: str | None = None
 
     seed_demo_data: bool = True
 

@@ -28,8 +28,9 @@ from cv_crypto.envelope import EnvelopeKeyHierarchy, encrypt_object
 from cv_crypto.provider import hexdigest
 from cv_crypto.signing import HybridSigner
 
-from .. import audit, keybroker
+from .. import audit, credstore, keybroker
 from ..connectors import get_connector
+from ..connectors import oauth
 from ..models import (
     Collection,
     ConnectorAccount,
@@ -58,6 +59,10 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
     label = account.account_label if account else collection.name
     zero_knowledge = vault.key_ownership_model == "zero-knowledge"
 
+    # Decrypt the linked account's credentials and refresh the OAuth token if it
+    # has expired, so the connector pulls live data.
+    config = _account_config(db, collection, account)
+
     # Release the vault root key for encryption (or derive on endpoint in ZK).
     root_key = keybroker.release_vault_root_key(vault.id)
     hierarchy = EnvelopeKeyHierarchy(root_key)
@@ -69,7 +74,7 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
     total_bytes = 0
 
     caps = connector.capabilities()
-    for src in connector.fetch(label).objects:
+    for src in connector.fetch(label, config=config).objects:
         enc = encrypt_object(snapshot_key, src.content, src.object_id)
         enc["plaintextBytes"] = src.size_bytes
         encrypted_objects.append(enc)
@@ -161,3 +166,30 @@ def _tenant_prefix(db: Session, tenant_id: str) -> str:
 
     tenant = db.get(Tenant, tenant_id)
     return tenant.storage_prefix if tenant else tenant_id
+
+
+def _account_config(db: Session, collection: Collection,
+                    account: Optional[ConnectorAccount]) -> dict:
+    """Decrypt an account's credentials and refresh an expired OAuth token."""
+    import time
+
+    if not account or not account.encrypted_credentials:
+        return {}
+    try:
+        creds = credstore.decrypt(collection.tenant_id, account.encrypted_credentials)
+    except Exception:
+        return {}
+    # Refresh the OAuth access token if it is expired and we have a refresh token.
+    if creds.get("access_token") and creds.get("expires_at", 0) < time.time():
+        if creds.get("refresh_token"):
+            try:
+                creds.update(oauth.refresh_tokens(collection.source_type,
+                                                  creds["refresh_token"]))
+                account.encrypted_credentials = credstore.encrypt(
+                    collection.tenant_id, creds)
+                account.auth_status = "linked"
+                db.commit()
+            except Exception:
+                account.auth_status = "needs-reauth"
+                db.commit()
+    return creds
