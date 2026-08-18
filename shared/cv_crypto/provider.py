@@ -214,19 +214,45 @@ class CryptoProvider:
         return hmac.compare_digest(expected, signature)
 
 
+# Candidate liboqs identifiers per canonical algorithm, newest name first.
+# liboqs renamed algorithms across versions (e.g. Kyber768 -> ML-KEM-768,
+# SPHINCS+-SHA2-128s-simple -> SLH-DSA-SHA2-128s), so we resolve against the
+# mechanisms the installed liboqs actually enables.
+_KEM_CANDIDATES = {
+    "ML-KEM-768": ["ML-KEM-768", "Kyber768"],
+    "ML-KEM-1024": ["ML-KEM-1024", "Kyber1024"],
+}
+_SIG_CANDIDATES = {
+    "ML-DSA-65": ["ML-DSA-65", "Dilithium3"],
+    "ML-DSA-87": ["ML-DSA-87", "Dilithium5"],
+    "SLH-DSA-SHA2-128s": ["SLH-DSA-SHA2-128s", "SPHINCS+-SHA2-128s-simple",
+                          "SPHINCS+-SHA2-128s"],
+}
+
+
+def _resolve(alg: str, candidates: list, enabled_fn) -> str:
+    try:
+        enabled = set(enabled_fn())
+    except Exception:
+        enabled = set()
+    for name in candidates:
+        if name in enabled:
+            return name
+    return candidates[0]
+
+
 def _oqs_kem_name(alg: str) -> str:
-    return {
-        "ML-KEM-768": "ML-KEM-768",
-        "ML-KEM-1024": "ML-KEM-1024",
-    }.get(alg, alg)
+    cands = _KEM_CANDIDATES.get(alg, [alg])
+    if not _OQS_AVAILABLE:
+        return cands[0]
+    return _resolve(alg, cands, oqs.get_enabled_kem_mechanisms)
 
 
 def _oqs_sig_name(alg: str) -> str:
-    return {
-        "ML-DSA-65": "ML-DSA-65",
-        "ML-DSA-87": "ML-DSA-87",
-        "SLH-DSA-SHA2-128s": "SPHINCS+-SHA2-128s-simple",
-    }.get(alg, alg)
+    cands = _SIG_CANDIDATES.get(alg, [alg])
+    if not _OQS_AVAILABLE:
+        return cands[0]
+    return _resolve(alg, cands, oqs.get_enabled_sig_mechanisms)
 
 
 @lru_cache(maxsize=1)
