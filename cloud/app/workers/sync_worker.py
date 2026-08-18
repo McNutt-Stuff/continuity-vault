@@ -34,6 +34,7 @@ from ..connectors import get_connector
 from ..connectors import oauth
 from ..models import (
     Appliance,
+    ApplianceStorage,
     Collection,
     ConnectorAccount,
     SearchDocument,
@@ -101,7 +102,15 @@ def _compose_preview(meta: dict, max_fields: int = 4) -> str:
 
 
 def _resolve_appliance(db: Session, tenant_id: str, kind: str) -> Optional[Appliance]:
-    """Resolve an 'appliance' or 'appliance:<id>' destination to a live appliance."""
+    """Resolve a destination to a live appliance. Accepts the canonical
+    ``store:<storageId>`` form, the legacy ``appliance:<id>`` form, and the bare
+    ``appliance`` (most-recent sealed unit)."""
+    if kind.startswith("store:"):
+        store = db.get(ApplianceStorage, kind.split(":", 1)[1])
+        if not store or store.tenant_id != tenant_id:
+            return None
+        a = db.get(Appliance, store.appliance_id)
+        return a if a and a.tenant_id == tenant_id else None
     if ":" in kind:
         aid = kind.split(":", 1)[1]
         a = db.get(Appliance, aid)
@@ -111,6 +120,10 @@ def _resolve_appliance(db: Session, tenant_id: str, kind: str) -> Optional[Appli
                     Appliance.state.in_(["SEALED", "ONLINE_STAGING", "READY_TO_SEAL"]))
             .order_by(Appliance.last_heartbeat_at.desc())
             .first())
+
+
+def _storage_id(kind: str) -> Optional[str]:
+    return kind.split(":", 1)[1] if kind.startswith("store:") else None
 
 
 def run_backup(db: Session, collection: Collection, destinations: Optional[List[str]] = None
@@ -228,6 +241,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
 
     for kind in dest_kinds:
         recoverable = False
+        receipt_appliance_id: Optional[str] = None
         # Each destination is attempted independently: one failing target (e.g. an
         # offline appliance) must not prevent the others (e.g. the cloud copy) from
         # landing. We only raise if *every* destination fails.
@@ -239,7 +253,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                                     obj["ciphertext"].encode())
                 dest.put_manifest(tenant_prefix, snapshot_id, manifest)
                 recoverable = True
-            elif kind == "appliance" or kind.startswith("appliance:"):
+            elif kind == "appliance" or kind.startswith("appliance:") or kind.startswith("store:"):
                 # Hand the (already-encrypted) objects to the appliance via a
                 # signed, sequenced OPEN_INGEST_WINDOW command. The appliance
                 # commits them and returns a seal receipt (marking the snapshot
@@ -249,12 +263,14 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                     raise ValueError(
                         f"no linked appliance available for destination '{kind}' "
                         "(appliance offline, quarantined, or not sealed)")
+                receipt_appliance_id = appliance.id
                 fleet.issue_command(
                     db, appliance, "OPEN_INGEST_WINDOW", actor,
                     {
                         "snapshotId": snapshot_id,
                         "vaultId": vault.id,
                         "collectionId": collection.id,
+                        "storageId": _storage_id(kind),
                         "objects": [
                             {"objectId": o["objectId"], "ciphertext": o["ciphertext"],
                              "plaintextBytes": int(o.get("plaintextBytes", 0))}
@@ -276,6 +292,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
             collection_id=collection.id,
             snapshot_id=snapshot_id,
             destination=kind,
+            appliance_id=receipt_appliance_id,
             object_count=len(encrypted_objects),
             total_bytes=total_bytes,
             manifest_hash=manifest_hash,

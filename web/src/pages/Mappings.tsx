@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import { Card, Pill } from "../components/ui";
+import { Card, Pill, bytes } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, notify } from "../components/dialog";
@@ -48,6 +48,8 @@ export default function Mappings() {
   const [activity, setActivity] = useState<Activity | null>(null);
   // collection_id -> epoch ms when a sync was triggered (live indicator).
   const [syncing, setSyncing] = useState<Record<string, number>>({});
+  // collection_id -> whether the activity window is expanded.
+  const [openActivity, setOpenActivity] = useState<Record<string, boolean>>({});
 
   async function load() {
     const [acc, tenant, coll, tgts] = await Promise.all([
@@ -97,9 +99,12 @@ export default function Mappings() {
     if (t) return t.label;
     if (id === "cv-cloud") return "Arkive Cloud";
     if (id === "customer-s3") return "Customer S3";
+    if (id.startsWith("store:")) return "Appliance storage (removed)";
     if (id.startsWith("appliance:")) return "Appliance (removed)";
     return id;
   }
+
+  const isApplianceDest = (d: string) => d.startsWith("appliance") || d.startsWith("store:");
 
   function toggleDest(id: string) {
     setDests((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]);
@@ -166,6 +171,7 @@ export default function Mappings() {
 
   async function syncNow(m: Mapping) {
     setSyncing((cur) => ({ ...cur, [m.id]: Date.now() }));
+    setOpenActivity((cur) => ({ ...cur, [m.id]: true }));
     try {
       const res = await api.post<{ kind: string; queued_agents?: number; object_count?: number }>(`/collections/${m.id}/sync`, {});
       if (res.kind === "agent") flash(`Queued sync on ${res.queued_agents} agent(s)`);
@@ -262,7 +268,7 @@ export default function Mappings() {
                 {!editing && (
                   <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
                     {(m.destinations || []).map((d) => (
-                      <Pill key={d} tone={d.startsWith("appliance") ? "ok" : "info"}>{destLabel(d)}</Pill>
+                      <Pill key={d} tone={isApplianceDest(d) ? "ok" : "info"}>{destLabel(d)}</Pill>
                     ))}
                     {(m.index_fields && m.index_fields.length ? m.index_fields : m.available_fields)
                       .slice(0, 6).map((f) => (
@@ -271,29 +277,59 @@ export default function Mappings() {
                     {m.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
                   </div>
                 )}
-                {!editing && (syncing[m.id] || eventsFor(m.id).length > 0) && (
-                  <div className="map-activity">
-                    {syncing[m.id] && (
-                      <div className="row" style={{ gap: 8, fontSize: 12.5, alignItems: "center" }}>
-                        <span className="spinner-dot" />
-                        <span className="faint">
-                          {m.is_agent ? "Collecting on desktop agent, then ingesting…" : "Syncing & ingesting…"}
+                {!editing && (syncing[m.id] || eventsFor(m.id).length > 0) && (() => {
+                  const evs = eventsFor(m.id);
+                  const isSyncing = !!syncing[m.id];
+                  const expanded = openActivity[m.id] || isSyncing;
+                  const latest = evs[0];
+                  return (
+                    <div style={{ marginTop: 8 }}>
+                      <button
+                        className="map-activity-toggle"
+                        onClick={() => setOpenActivity((cur) => ({ ...cur, [m.id]: !expanded }))}
+                      >
+                        <span className="row" style={{ gap: 6, alignItems: "center" }}>
+                          {isSyncing ? <span className="spinner-dot" /> : <Icon name="activity" size={13} />}
+                          <span style={{ fontWeight: 600, fontSize: 12 }}>
+                            {isSyncing ? "Syncing…" : "Activity"}
+                          </span>
+                          {evs.length > 0 && (
+                            <span className="faint" style={{ fontSize: 11.5 }}>
+                              · {latest.object_count ?? 0} objects → {destLabel(latest.destination || "cv-cloud")} · {fmtTime(latest.at)}
+                            </span>
+                          )}
                         </span>
-                      </div>
-                    )}
-                    {eventsFor(m.id).map((e, i) => (
-                      <div key={i} className="row" style={{ gap: 6, fontSize: 12, flexWrap: "wrap", alignItems: "center" }}>
-                        <Icon name={e.destination?.startsWith("appliance") ? "server" : "cloud"} size={12} />
-                        <span className="faint">{destLabel(e.destination || "cv-cloud")}</span>
-                        <span className="faint">· {e.object_count ?? 0} objects</span>
-                        <Pill tone={e.status === "recoverable" ? "ok" : "warn"}>
-                          {e.status === "recoverable" ? "recoverable" : "sealing"}
-                        </Pill>
-                        <span className="faint" style={{ marginLeft: "auto" }}>{fmtTime(e.at)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                        <span className="faint" style={{ fontSize: 11 }}>{expanded ? "▲" : "▼"}</span>
+                      </button>
+                      {expanded && (
+                        <div className="map-activity">
+                          {isSyncing && (
+                            <div className="row" style={{ gap: 8, fontSize: 12.5, alignItems: "center" }}>
+                              <span className="spinner-dot" />
+                              <span className="faint">
+                                {m.is_agent ? "Collecting on desktop agent, then ingesting…" : "Syncing & ingesting…"}
+                              </span>
+                            </div>
+                          )}
+                          {evs.length === 0 && !isSyncing && (
+                            <span className="faint" style={{ fontSize: 12 }}>No activity yet.</span>
+                          )}
+                          {evs.map((e, i) => (
+                            <div key={i} className="row" style={{ gap: 6, fontSize: 12, flexWrap: "wrap", alignItems: "center" }}>
+                              <Icon name={isApplianceDest(e.destination || "") ? "server" : "cloud"} size={12} />
+                              <span className="faint">{destLabel(e.destination || "cv-cloud")}</span>
+                              <span className="faint">· {e.object_count ?? 0} objects · {bytes(e.total_bytes ?? 0)}</span>
+                              <Pill tone={e.status === "recoverable" ? "ok" : "warn"}>
+                                {e.status === "recoverable" ? "recoverable" : "sealing"}
+                              </Pill>
+                              <span className="faint" style={{ marginLeft: "auto" }}>{fmtTime(e.at)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 {editing && (
                   <div className="stack" style={{ gap: 10, marginTop: 8 }}>
                     <div className="stack" style={{ gap: 6 }}>

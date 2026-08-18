@@ -1,15 +1,17 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { confirmDialog, notify, promptDialog } from "../components/dialog";
 import { ApplianceStatePill } from "./Dashboard";
 
+interface Store { id: string; name: string; kind: string; capacity_bytes: number; }
 interface Appliance {
   id: string; serial: string; model: string; name: string; location_label: string;
   state: string; isolation_state: string; software_version: string;
   attestation_ok: boolean; tamper_state: string;
   last_heartbeat_at: string | null; last_attestation_at: string | null;
-  telemetry: any;
+  telemetry: any; stores?: Store[];
 }
 
 export default function Appliances() {
@@ -52,6 +54,24 @@ export default function Appliances() {
     setToast(`${command_type} issued (signed & sequenced)`);
     setTimeout(() => setToast(""), 2500);
     await load();
+  }
+
+  async function remove(a: Appliance) {
+    const ok = await confirmDialog({
+      title: "Remove appliance",
+      message: `Remove "${a.name}" (${a.serial}) from the fleet? This deletes the fleet record and its pending commands. Existing recovery points are kept. If the unit is still running it will re-appear on its next activation.`,
+      confirmLabel: "Remove appliance",
+    });
+    if (!ok) return;
+    try {
+      await api.del(`/appliances/${a.id}`);
+      if (selected?.id === a.id) setSelected(null);
+      setToast("Appliance removed");
+      setTimeout(() => setToast(""), 2500);
+      await load();
+    } catch (e) {
+      await notify({ title: "Couldn't remove appliance", message: (e as ApiError).message, tone: "danger" });
+    }
   }
 
   return (
@@ -128,7 +148,7 @@ export default function Appliances() {
 
       <div>
         {selected ? (
-          <ApplianceDetail a={selected} onCommand={command} />
+          <ApplianceDetail a={selected} onCommand={command} onRemove={remove} reload={load} />
         ) : (
           <Card><div className="muted">Select an appliance to view its dashboard.</div></Card>
         )}
@@ -139,15 +159,46 @@ export default function Appliances() {
   );
 }
 
-function ApplianceDetail({ a, onCommand }: { a: Appliance; onCommand: (a: Appliance, t: string, p?: any) => void }) {
+function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onCommand: (a: Appliance, t: string, p?: any) => void; onRemove: (a: Appliance) => void; reload: () => Promise<void> }) {
   const t = a.telemetry ?? {};
   const usedPct = t.capacity_total_bytes ? (t.capacity_used_bytes / t.capacity_total_bytes) * 100 : 0;
+
+  async function renameAppliance() {
+    const name = await promptDialog({ title: "Rename appliance", label: "Appliance name", defaultValue: a.name, confirmLabel: "Save" });
+    if (name == null || !name.trim()) return;
+    try { await api.put(`/appliances/${a.id}`, { name: name.trim() }); await reload(); }
+    catch (e) { await notify({ title: "Couldn't rename", message: (e as ApiError).message, tone: "danger" }); }
+  }
+  async function addStorage() {
+    const name = await promptDialog({ title: "Add storage", label: "Storage name", placeholder: "External Storage 1", confirmLabel: "Add" });
+    if (name == null || !name.trim()) return;
+    try { await api.post(`/appliances/${a.id}/storage`, { name: name.trim(), kind: "external" }); await reload(); }
+    catch (e) { await notify({ title: "Couldn't add storage", message: (e as ApiError).message, tone: "danger" }); }
+  }
+  async function renameStorage(s: Store) {
+    const name = await promptDialog({ title: "Rename storage", label: "Storage name", defaultValue: s.name, confirmLabel: "Save" });
+    if (name == null || !name.trim()) return;
+    try { await api.put(`/appliances/${a.id}/storage/${s.id}`, { name: name.trim() }); await reload(); }
+    catch (e) { await notify({ title: "Couldn't rename storage", message: (e as ApiError).message, tone: "danger" }); }
+  }
+  async function deleteStorage(s: Store) {
+    const ok = await confirmDialog({ title: "Remove storage", message: `Remove "${s.name}"? Mappings pointing at it will need re-routing.`, confirmLabel: "Remove" });
+    if (!ok) return;
+    try { await api.del(`/appliances/${a.id}/storage/${s.id}`); await reload(); }
+    catch (e) { await notify({ title: "Couldn't remove storage", message: (e as ApiError).message, tone: "danger" }); }
+  }
+
   return (
     <>
       <Card style={{ marginBottom: 16 }}>
         <div className="spread" style={{ marginBottom: 14 }}>
           <div>
-            <h2>{a.name}</h2>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <h2 style={{ margin: 0 }}>{a.name}</h2>
+              <button className="btn ghost sm" title="Rename appliance" onClick={renameAppliance}>
+                <Icon name="gear" size={13} />
+              </button>
+            </div>
             <div className="faint" style={{ fontSize: 12 }}>{a.model} · v{a.software_version}</div>
           </div>
           <div className="row" style={{ gap: 8 }}>
@@ -165,6 +216,32 @@ function ApplianceDetail({ a, onCommand }: { a: Appliance; onCommand: (a: Applia
           <Info label="Tamper" value={a.tamper_state} tone={a.tamper_state === "normal" ? "ok" : "danger"} />
           <Info label="Heartbeat" value={timeAgo(a.last_heartbeat_at)} />
         </div>
+      </Card>
+
+      <Card style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ marginBottom: 12 }}>
+          <h3 style={{ margin: 0 }}>Storage</h3>
+          <button className="btn sm" onClick={addStorage}><Icon name="database" size={13} /> Add storage</button>
+        </div>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+          Mappings in the Data Map target a storage here (e.g. "{a.name} · Built-In Storage"), the same
+          way they can target the Arkive cloud or your own S3 bucket.
+        </div>
+        {(a.stores ?? []).map((s) => (
+          <div key={s.id} className="result-row">
+            <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 32, height: 32 }}>
+              <Icon name="database" size={15} />
+            </div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>{s.name}</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>{a.name} · store:{s.id.slice(0, 8)}</div>
+            </div>
+            <Pill tone={s.kind === "builtin" ? "info" : "ok"}>{s.kind === "builtin" ? "Built-in" : "External"}</Pill>
+            <button className="btn sm ghost" onClick={() => renameStorage(s)}>Rename</button>
+            {s.kind !== "builtin" && <button className="btn sm ghost" onClick={() => deleteStorage(s)}>Remove</button>}
+          </div>
+        ))}
+        {(a.stores ?? []).length === 0 && <div className="muted">No storage objects yet.</div>}
       </Card>
 
       <Card style={{ marginBottom: 16 }}>
@@ -235,6 +312,12 @@ function ApplianceDetail({ a, onCommand }: { a: Appliance; onCommand: (a: Applia
           </button>
           <button className="btn sm danger" onClick={() => onCommand(a, "QUARANTINE")}>
             Quarantine
+          </button>
+        </div>
+        <div className="spread" style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
+          <span className="faint" style={{ fontSize: 12 }}>Decommission or remove a stale / test unit from the fleet.</span>
+          <button className="btn sm danger" onClick={() => onRemove(a)}>
+            <Icon name="logout" size={13} /> Remove appliance
           </button>
         </div>
       </Card>

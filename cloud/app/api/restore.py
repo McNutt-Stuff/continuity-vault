@@ -16,6 +16,7 @@ from .. import audit, fleet, keybroker, security
 from ..db import get_db
 from ..models import (
     Appliance,
+    ApplianceStorage,
     RestoreRequest,
     SnapshotReceipt,
     Tenant,
@@ -104,9 +105,18 @@ def execute(request_id: str,
     receipt = (db.query(SnapshotReceipt)
                .filter(SnapshotReceipt.snapshot_id == req.snapshot_id).first())
 
-    # For appliance-sourced restores, issue a signed recovery-window command.
-    if receipt and receipt.destination == "appliance" and receipt.appliance_id:
-        appliance = db.get(Appliance, receipt.appliance_id)
+    # For appliance-sourced restores, issue a signed recovery-window command. The
+    # destination is a storage object (store:<id>) or a legacy appliance id.
+    is_appliance = bool(receipt and (receipt.destination.startswith("appliance")
+                                     or receipt.destination.startswith("store:")))
+    if is_appliance:
+        appliance = db.get(Appliance, receipt.appliance_id) if receipt.appliance_id else None
+        if not appliance and receipt.destination.startswith("store:"):
+            store = db.get(ApplianceStorage, receipt.destination.split(":", 1)[1])
+            if store and store.tenant_id == tenant.id:
+                appliance = db.get(Appliance, store.appliance_id)
+        if not appliance:
+            raise HTTPException(404, "appliance for this recovery point is not available")
         cmd = fleet.issue_command(
             db, appliance, "OPEN_RECOVERY_WINDOW", principal.user_id,
             {"snapshotId": req.snapshot_id, "objectIds": req.object_ids,

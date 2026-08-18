@@ -30,6 +30,7 @@ from ..db import get_db
 from ..models import (
     Appliance,
     ApplianceCommand,
+    ApplianceStorage,
     LinkingCode,
     SnapshotReceipt,
     Tenant,
@@ -120,6 +121,33 @@ def list_appliances(tenant: Tenant = Depends(security.get_tenant),
     return [_appliance_view(a) for a in rows]
 
 
+@fleet_router.delete("/{appliance_id}")
+def delete_appliance(appliance_id: str,
+                     principal: security.Principal = Depends(security.require_security_admin),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    """Remove an appliance from the fleet (e.g. a decommissioned or stale test
+    unit). Dependent command rows are deleted and snapshot receipts are detached
+    so recovery-point history is preserved."""
+    a = db.get(Appliance, appliance_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "appliance not found")
+    db.query(ApplianceCommand).filter(ApplianceCommand.appliance_id == appliance_id).delete()
+    db.query(ApplianceStorage).filter(ApplianceStorage.appliance_id == appliance_id).delete()
+    (db.query(SnapshotReceipt)
+     .filter(SnapshotReceipt.appliance_id == appliance_id)
+     .update({SnapshotReceipt.appliance_id: None}))
+    (db.query(LinkingCode)
+     .filter(LinkingCode.appliance_id == appliance_id)
+     .update({LinkingCode.appliance_id: None}))
+    db.delete(a)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="appliance.removed",
+                 tenant_id=tenant.id, resource=appliance_id,
+                 detail={"serial": a.serial, "name": a.name})
+    return {"ok": True}
+
+
 @fleet_router.get("/{appliance_id}")
 def get_appliance(appliance_id: str,
                   tenant: Tenant = Depends(security.get_tenant),
@@ -160,6 +188,17 @@ def send_command(appliance_id: str, body: CommandRequest,
 
 def _appliance_view(a: Appliance) -> dict:
     tel = a.telemetry or {}
+    from ..db import SessionLocal  # local import to avoid a cycle at module load
+    stores = []
+    db = SessionLocal()
+    try:
+        for s in (db.query(ApplianceStorage)
+                  .filter(ApplianceStorage.appliance_id == a.id)
+                  .order_by(ApplianceStorage.kind.desc(), ApplianceStorage.created_at.asc()).all()):
+            stores.append({"id": s.id, "name": s.name, "kind": s.kind,
+                           "capacity_bytes": s.capacity_bytes})
+    finally:
+        db.close()
     return {
         "id": a.id,
         "serial": a.serial,
@@ -174,7 +213,100 @@ def _appliance_view(a: Appliance) -> dict:
         "last_heartbeat_at": a.last_heartbeat_at.isoformat() if a.last_heartbeat_at else None,
         "last_attestation_at": a.last_attestation_at.isoformat() if a.last_attestation_at else None,
         "telemetry": tel,
+        "stores": stores,
     }
+
+
+def _ensure_builtin_store(db: Session, a: Appliance) -> ApplianceStorage:
+    store = (db.query(ApplianceStorage)
+             .filter(ApplianceStorage.appliance_id == a.id,
+                     ApplianceStorage.kind == "builtin").first())
+    if not store:
+        store = ApplianceStorage(tenant_id=a.tenant_id, appliance_id=a.id,
+                                 name="Built-In Storage", kind="builtin")
+        db.add(store)
+        db.commit()
+        db.refresh(store)
+    return store
+
+
+class RenameApplianceRequest(BaseModel):
+    name: str | None = None
+    location_label: str | None = None
+
+
+@fleet_router.put("/{appliance_id}")
+def rename_appliance(appliance_id: str, body: RenameApplianceRequest,
+                     principal: security.Principal = Depends(security.require_security_admin),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    a = db.get(Appliance, appliance_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "appliance not found")
+    if body.name is not None:
+        a.name = body.name.strip() or a.name
+    if body.location_label is not None:
+        a.location_label = body.location_label
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="appliance.renamed",
+                 tenant_id=tenant.id, resource=a.id, detail={"name": a.name})
+    return _appliance_view(a)
+
+
+class StorageRequest(BaseModel):
+    name: str
+    kind: str = "external"  # external | builtin
+
+
+@fleet_router.post("/{appliance_id}/storage")
+def add_storage(appliance_id: str, body: StorageRequest,
+                principal: security.Principal = Depends(security.require_security_admin),
+                tenant: Tenant = Depends(security.get_tenant),
+                db: Session = Depends(get_db)):
+    a = db.get(Appliance, appliance_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "appliance not found")
+    s = ApplianceStorage(tenant_id=tenant.id, appliance_id=a.id,
+                         name=body.name.strip() or "Storage",
+                         kind="builtin" if body.kind == "builtin" else "external")
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+    audit.record(db, actor=principal.user_id, action="appliance.storage_added",
+                 tenant_id=tenant.id, resource=a.id, detail={"storage": s.name})
+    return {"id": s.id, "name": s.name, "kind": s.kind}
+
+
+@fleet_router.put("/{appliance_id}/storage/{storage_id}")
+def rename_storage(appliance_id: str, storage_id: str, body: StorageRequest,
+                   principal: security.Principal = Depends(security.require_security_admin),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    s = db.get(ApplianceStorage, storage_id)
+    if not s or s.tenant_id != tenant.id or s.appliance_id != appliance_id:
+        raise HTTPException(404, "storage not found")
+    s.name = body.name.strip() or s.name
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="appliance.storage_renamed",
+                 tenant_id=tenant.id, resource=appliance_id, detail={"storage": s.name})
+    return {"id": s.id, "name": s.name, "kind": s.kind}
+
+
+@fleet_router.delete("/{appliance_id}/storage/{storage_id}")
+def delete_storage(appliance_id: str, storage_id: str,
+                   principal: security.Principal = Depends(security.require_security_admin),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    s = db.get(ApplianceStorage, storage_id)
+    if not s or s.tenant_id != tenant.id or s.appliance_id != appliance_id:
+        raise HTTPException(404, "storage not found")
+    if s.kind == "builtin":
+        raise HTTPException(400, "the built-in storage cannot be removed")
+    db.delete(s)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="appliance.storage_removed",
+                 tenant_id=tenant.id, resource=appliance_id, detail={"storage": s.name})
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------
@@ -301,23 +433,43 @@ def activate(body: ActivateRequest, db: Session = Depends(get_db)):
     if not lc or lc.consumed or lc.expires_at < _now():
         raise HTTPException(400, "invalid or expired linking code")
 
-    appliance = Appliance(
-        tenant_id=lc.tenant_id,
-        serial=body.serial,
-        model=body.model or lc.model,
-        name=lc.name,
-        state="ONLINE_STAGING",
-        isolation_state="sealed",
-        identity_bundle=body.identity_bundle,
-        attestation_ok=True,
-        last_attestation_at=_now(),
-        software_version="1.0.0",
-    )
-    db.add(appliance)
+    # Re-activating the same physical unit (same serial) updates the existing
+    # record instead of creating a duplicate, so re-installs don't leave stale
+    # appliances lingering in the fleet.
+    appliance = (db.query(Appliance)
+                 .filter(Appliance.tenant_id == lc.tenant_id,
+                         Appliance.serial == body.serial).first())
+    if appliance:
+        appliance.model = body.model or lc.model
+        appliance.name = lc.name
+        appliance.state = "ONLINE_STAGING"
+        appliance.isolation_state = "sealed"
+        appliance.identity_bundle = body.identity_bundle
+        appliance.attestation_ok = True
+        appliance.last_attestation_at = _now()
+        appliance.software_version = "1.0.0"
+    else:
+        appliance = Appliance(
+            tenant_id=lc.tenant_id,
+            serial=body.serial,
+            model=body.model or lc.model,
+            name=lc.name,
+            state="ONLINE_STAGING",
+            isolation_state="sealed",
+            identity_bundle=body.identity_bundle,
+            attestation_ok=True,
+            last_attestation_at=_now(),
+            software_version="1.0.0",
+        )
+        db.add(appliance)
     lc.consumed = True
+    db.flush()
     lc.appliance_id = appliance.id
     db.commit()
     db.refresh(appliance)
+
+    # Every appliance has at least a built-in storage object that mappings target.
+    _ensure_builtin_store(db, appliance)
 
     token = secrets.token_urlsafe(32)
     appliance.agent_token_hash = _hash_token(token)
@@ -417,6 +569,7 @@ class SealReceiptRequest(BaseModel):
     total_bytes: int
     manifest_hash: str
     receipt: dict  # signed seal receipt {payload, signature}
+    storage_id: str | None = None  # the appliance storage the objects landed in
 
 
 @agent_router.post("/seal-receipt")
@@ -429,20 +582,34 @@ def seal_receipt(body: SealReceiptRequest,
         appliance, body.receipt["payload"], body.receipt["signature"],
         SigPolicy.REQUIRE_BOTH,
     )
-    receipt = SnapshotReceipt(
-        tenant_id=appliance.tenant_id,
-        appliance_id=appliance.id,
-        vault_id=body.vault_id,
-        collection_id=body.collection_id,
-        snapshot_id=body.snapshot_id,
-        destination="appliance",
-        object_count=body.object_count,
-        total_bytes=body.total_bytes,
-        manifest_hash=body.manifest_hash,
-        recoverable=ok,
-        receipt=body.receipt,
-    )
-    db.add(receipt)
+    # The sync worker already recorded a not-yet-recoverable receipt for this
+    # appliance+snapshot (destination store:<id>). Mark that one recoverable
+    # rather than inserting a second, differently-labelled record.
+    existing = (db.query(SnapshotReceipt)
+                .filter(SnapshotReceipt.snapshot_id == body.snapshot_id,
+                        SnapshotReceipt.appliance_id == appliance.id)
+                .order_by(SnapshotReceipt.created_at.desc()).first())
+    if existing:
+        existing.recoverable = ok
+        existing.manifest_hash = body.manifest_hash
+        existing.receipt = body.receipt
+        existing.object_count = body.object_count or existing.object_count
+        existing.total_bytes = body.total_bytes or existing.total_bytes
+    else:
+        destination = f"store:{body.storage_id}" if body.storage_id else "appliance"
+        db.add(SnapshotReceipt(
+            tenant_id=appliance.tenant_id,
+            appliance_id=appliance.id,
+            vault_id=body.vault_id,
+            collection_id=body.collection_id,
+            snapshot_id=body.snapshot_id,
+            destination=destination,
+            object_count=body.object_count,
+            total_bytes=body.total_bytes,
+            manifest_hash=body.manifest_hash,
+            recoverable=ok,
+            receipt=body.receipt,
+        ))
     db.commit()
     audit.record(db, actor=f"appliance:{appliance.serial}",
                  action="appliance.snapshot_sealed", tenant_id=appliance.tenant_id,

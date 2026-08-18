@@ -29,6 +29,45 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _apply_additive_migrations()
+    _backfill_appliance_storage()
+
+
+def _backfill_appliance_storage() -> None:
+    """Ensure every appliance has a built-in storage object and migrate legacy
+    ``appliance:<id>`` / ``appliance`` mapping destinations to ``store:<id>`` so
+    mappings reference the storage object (with its own id/name), not the device."""
+    from .models import Appliance, ApplianceStorage, Collection
+
+    try:
+        with SessionLocal() as db:
+            builtin: dict[str, str] = {}
+            for a in db.query(Appliance).all():
+                store = (db.query(ApplianceStorage)
+                         .filter(ApplianceStorage.appliance_id == a.id,
+                                 ApplianceStorage.kind == "builtin").first())
+                if not store:
+                    store = ApplianceStorage(tenant_id=a.tenant_id, appliance_id=a.id,
+                                             name="Built-In Storage", kind="builtin")
+                    db.add(store)
+                    db.flush()
+                builtin[a.id] = store.id
+            any_store = next(iter(builtin.values()), None)
+            for c in db.query(Collection).all():
+                dests = c.destinations or []
+                new, dirty = [], False
+                for d in dests:
+                    if isinstance(d, str) and d.startswith("appliance:"):
+                        sid = builtin.get(d.split(":", 1)[1])
+                        if sid:
+                            new.append(f"store:{sid}"); dirty = True; continue
+                    elif d == "appliance" and any_store:
+                        new.append(f"store:{any_store}"); dirty = True; continue
+                    new.append(d)
+                if dirty:
+                    c.destinations = new
+            db.commit()
+    except Exception:
+        pass  # best-effort backfill; never block startup
 
 
 def _apply_additive_migrations() -> None:

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .. import audit, keybroker, security
 from ..config import get_settings
 from ..db import get_db
-from ..models import Appliance, Collection, Tenant, Vault
+from ..models import Appliance, ApplianceStorage, Collection, Tenant, Vault
 
 router = APIRouter(prefix="/tenant", tags=["tenant"])
 
@@ -70,28 +70,33 @@ def destination_options():
 @router.get("/storage-targets")
 def storage_targets(tenant: Tenant = Depends(security.get_tenant),
                     db: Session = Depends(get_db)):
-    """Concrete, selectable storage destinations for source→vault mappings.
+    """Concrete, selectable storage objects for source→vault mappings.
 
-    Unlike ``/destinations`` (which describes destination *kinds*), this returns
-    the specific targets a mapping can route to: the Arkive cloud, each linked
-    appliance by name, and the customer's own cloud bucket when configured. The
-    ``id`` is what a mapping stores in ``destinations`` (e.g. ``appliance:<id>``).
+    A mapping targets a *storage* (identified by its own id): the Arkive cloud,
+    a customer's own S3 bucket, or a named storage volume on an appliance
+    (``store:<id>``, e.g. "My Home Appliance · Built-In Storage").
     """
     settings = get_settings()
     targets: list[dict] = [
         {"id": "cv-cloud", "label": "Arkive Cloud", "kind": "cloud",
          "detail": "Managed vendor cloud, multi-region"},
     ]
-    appliances = (db.query(Appliance)
-                  .filter(Appliance.tenant_id == tenant.id)
-                  .order_by(Appliance.name.asc()).all())
-    for a in appliances:
-        online = bool(a.last_heartbeat_at)
+    appliances = {a.id: a for a in db.query(Appliance)
+                  .filter(Appliance.tenant_id == tenant.id).all()}
+    stores = (db.query(ApplianceStorage)
+              .filter(ApplianceStorage.tenant_id == tenant.id).all())
+    for s in sorted(stores, key=lambda s: (appliances.get(s.appliance_id).name
+                                           if appliances.get(s.appliance_id) else "", s.name)):
+        a = appliances.get(s.appliance_id)
+        if not a:
+            continue
         targets.append({
-            "id": f"appliance:{a.id}", "kind": "appliance",
-            "label": a.name or "Appliance",
+            "id": f"store:{s.id}", "kind": "appliance",
+            "label": f"{a.name} · {s.name}",
             "detail": f"{a.model} · {a.serial}",
-            "state": a.state, "online": online,
+            "appliance_id": a.id, "appliance_name": a.name,
+            "store_name": s.name, "store_kind": s.kind,
+            "state": a.state, "online": bool(a.last_heartbeat_at),
         })
     if settings.aws_access_key_id and settings.s3_bucket:
         targets.append({

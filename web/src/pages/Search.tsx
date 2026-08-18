@@ -277,7 +277,7 @@ export default function Search() {
                       title={`Retrieve from ${loc.label}`}
                       onClick={() => retrieve(r, loc)}
                     >
-                      <Icon name={loc.destination.startsWith("appliance") ? "server" : "cloud"} size={12} />
+                      <Icon name={/^(appliance|store:)/.test(loc.destination) ? "server" : "cloud"} size={12} />
                       {loc.label}
                     </button>
                   ))}

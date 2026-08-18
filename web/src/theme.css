@@ -234,6 +234,10 @@ h3 { font-size: 15px; }
 .map-activity { margin-top: 8px; padding: 8px 10px; border-radius: 8px;
   border: 1px solid var(--border-soft); background: var(--bg-elev-2);
   display: flex; flex-direction: column; gap: 4px; }
+.map-activity-toggle { display: flex; align-items: center; justify-content: space-between;
+  width: 100%; gap: 8px; padding: 6px 10px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border-soft); background: transparent; color: var(--text); }
+.map-activity-toggle:hover { background: var(--bg-elev-2); border-color: var(--border); }
 
 /* Abnormal-event alert bell */
 .alert-bell { position: relative; }

@@ -183,6 +183,22 @@ class Appliance(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class ApplianceStorage(Base):
+    """A named storage volume that belongs to an appliance (built-in disk,
+    external volume, NAS…). Mappings target a *storage* object — not the
+    appliance itself — the same way they target the Arkive cloud or a customer
+    S3 bucket. The destination id used in mappings/receipts is ``store:<id>``."""
+
+    __tablename__ = "appliance_storages"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    appliance_id = Column(String, ForeignKey("appliances.id"), nullable=False, index=True)
+    name = Column(String, default="Built-In Storage")
+    kind = Column(String, default="builtin")  # builtin | external
+    capacity_bytes = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_now)
+
+
 class LinkingCode(Base):
     """Short-lived turnkey linking code entered during appliance activation."""
 

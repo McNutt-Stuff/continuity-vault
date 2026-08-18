@@ -11,21 +11,36 @@ from sqlalchemy.orm import Session
 from .. import audit, fleet, security
 from ..db import get_db
 from ..connectors import get_connector
-from ..models import Appliance, Collection, ConnectorAccount, SearchDocument, SnapshotReceipt, Tenant
+from ..models import Appliance, ApplianceStorage, Collection, ConnectorAccount, SearchDocument, SnapshotReceipt, Tenant
 from ..storage import build_destination
 from ..taxonomy import describe, sensitivity_for
 
 router = APIRouter(prefix="/search", tags=["search"])
 
 
-def _location_label(destination: str) -> str:
+def _location_label(destination: str, store_labels: dict[str, str] | None = None) -> str:
+    if destination.startswith("store:") and store_labels:
+        return store_labels.get(destination, "Appliance storage")
     base = destination.split(":", 1)[0]
     return {
         "cv-cloud": "Arkive Cloud",
         "customer-s3": "Customer S3",
         "local-fs": "Local store",
         "appliance": "Appliance",
+        "store": "Appliance storage",
     }.get(base, destination)
+
+
+def _store_label_map(db: Session, tenant_id: str) -> dict[str, str]:
+    """Map ``store:<id>`` → "<appliance> · <storage>" for the tenant."""
+    out: dict[str, str] = {}
+    appliances = {a.id: a for a in db.query(Appliance)
+                  .filter(Appliance.tenant_id == tenant_id).all()}
+    for s in (db.query(ApplianceStorage)
+              .filter(ApplianceStorage.tenant_id == tenant_id).all()):
+        a = appliances.get(s.appliance_id)
+        out[f"store:{s.id}"] = f"{a.name} · {s.name}" if a else s.name
+    return out
 
 
 @router.get("/taxonomy")
@@ -164,6 +179,8 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
                            SnapshotReceipt.snapshot_id.in_(all_snap_ids)).all()):
             receipts_by_snap.setdefault(rc.snapshot_id, []).append(rc)
 
+    store_labels = _store_label_map(db, tenant.id)
+
     def _locations_for(r: SearchDocument) -> list:
         out: dict[str, dict] = {}
         for snap in object_snapshots.get((r.source_type, r.object_id), set()):
@@ -174,7 +191,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
                     continue
                 out[rc.destination] = {
                     "destination": rc.destination,
-                    "label": _location_label(rc.destination),
+                    "label": _location_label(rc.destination, store_labels),
                     "recoverable": bool(rc.recoverable),
                 }
         return list(out.values())
@@ -224,11 +241,16 @@ def retrieve(body: RetrieveRequest,
     read directly (returned client-encrypted); appliance-stored objects are pulled
     via a signed recovery-window command to the offline appliance."""
     base = body.destination.split(":", 1)[0]
-    label = _location_label(body.destination)
+    store_labels = _store_label_map(db, tenant.id)
+    label = _location_label(body.destination, store_labels)
 
-    if base == "appliance":
+    if base in ("appliance", "store"):
         appliance = None
-        if ":" in body.destination:
+        if base == "store":
+            store = db.get(ApplianceStorage, body.destination.split(":", 1)[1])
+            if store and store.tenant_id == tenant.id:
+                appliance = db.get(Appliance, store.appliance_id)
+        elif ":" in body.destination:
             aid = body.destination.split(":", 1)[1]
             appliance = db.get(Appliance, aid)
         if not appliance or appliance.tenant_id != tenant.id:

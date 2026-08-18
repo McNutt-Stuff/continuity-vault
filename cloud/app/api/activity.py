@@ -15,6 +15,8 @@ from .. import audit, security
 from ..db import get_db
 from ..models import (
     AuditEvent,
+    Appliance,
+    ApplianceStorage,
     Collection,
     ConnectorAccount,
     DesktopAgent,
@@ -23,6 +25,29 @@ from ..models import (
 )
 
 router = APIRouter(tags=["activity"])
+
+
+def _dest_labeler(db: Session, tenant_id: str):
+    """Return a fn mapping a destination id to a friendly label (resolving
+    store:<id> to "<appliance> · <storage>")."""
+    appliances = {a.id: a for a in db.query(Appliance)
+                  .filter(Appliance.tenant_id == tenant_id).all()}
+    stores = {f"store:{s.id}": s for s in db.query(ApplianceStorage)
+              .filter(ApplianceStorage.tenant_id == tenant_id).all()}
+
+    def label(dest: str) -> str:
+        if dest == "cv-cloud":
+            return "Arkive Cloud"
+        if dest == "customer-s3":
+            return "Customer S3"
+        if dest in stores:
+            s = stores[dest]
+            a = appliances.get(s.appliance_id)
+            return f"{a.name} · {s.name}" if a else s.name
+        if dest.startswith("appliance"):
+            return "Appliance"
+        return dest
+    return label
 
 
 @router.get("/activity")
@@ -53,12 +78,14 @@ def activity(limit: int = 40,
                 .filter(SnapshotReceipt.tenant_id == tenant.id)
                 .order_by(SnapshotReceipt.created_at.desc())
                 .limit(limit).all())
+    dest_label = _dest_labeler(db, tenant.id)
     events = [{
         "kind": "backup",
         "collection_id": rc.collection_id,
         "source": _source_label(rc.collection_id),
         "source_type": _source_type(rc.collection_id),
         "destination": rc.destination,
+        "destination_label": dest_label(rc.destination),
         "object_count": rc.object_count,
         "total_bytes": rc.total_bytes,
         "status": "recoverable" if rc.recoverable else "pending",

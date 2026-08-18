@@ -6,7 +6,7 @@ import { BrandIcon, brandForSource } from "../components/BrandIcon";
 
 interface Event {
   kind: string; source: string; source_type?: string; destination?: string;
-  object_count?: number; total_bytes?: number; status: string;
+  destination_label?: string; object_count?: number; total_bytes?: number; status: string;
   snapshot_id?: string; at?: string; command?: string;
 }
 interface Activity {
@@ -23,11 +23,14 @@ function ago(iso?: string | null): string {
   return `${Math.floor(d / 86400)}d ago`;
 }
 
-function destLabel(d?: string): string {
-  if (!d) return "Arkive Cloud";
-  if (d === "cv-cloud") return "Arkive Cloud";
+const isAppliance = (d?: string) => !!d && (/^appliance/.test(d) || d.startsWith("store:"));
+
+function destLabel(e: Event): string {
+  if (e.destination_label) return e.destination_label;
+  const d = e.destination;
+  if (!d || d === "cv-cloud") return "Arkive Cloud";
   if (d === "customer-s3") return "Customer S3";
-  if (d.startsWith("appliance")) return "Appliance";
+  if (isAppliance(d)) return "Appliance";
   return d;
 }
 
@@ -98,7 +101,7 @@ export default function ActivityPage() {
             <div className="flex1">
               <div style={{ fontWeight: 600 }}>{e.source}</div>
               <div className="faint" style={{ fontSize: 12.5 }}>
-                <Icon name={e.destination?.startsWith("appliance") ? "server" : "cloud"} size={12} /> {destLabel(e.destination)}
+                <Icon name={isAppliance(e.destination) ? "server" : "cloud"} size={12} /> {destLabel(e)}
                 {" · "}{e.object_count ?? 0} objects · {bytes(e.total_bytes ?? 0)}
               </div>
             </div>

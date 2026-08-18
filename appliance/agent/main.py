@@ -267,6 +267,7 @@ class Agent:
                 "vault_id": params.get("vaultId", "local"),
                 "collection_id": params.get("collectionId", "local"),
                 "snapshot_id": snapshot_id,
+                "storage_id": params.get("storageId"),
                 "object_count": count,
                 "total_bytes": sum(int(o.get("plaintextBytes", 0)) for o in params.get("objects", [])),
                 "manifest_hash": manifest_hash,
