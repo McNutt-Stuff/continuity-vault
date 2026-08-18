@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import { Card, Pill } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, notify } from "../components/dialog";
 
 interface Account { id: string; connector_type: string; account_label: string; }
@@ -27,6 +28,10 @@ export default function Mappings() {
   const [accountId, setAccountId] = useState("");
   const [vaultId, setVaultId] = useState("");
   const [dests, setDests] = useState<string[]>(["cv-cloud"]);
+
+  // Inline routing editor for an existing mapping.
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editDests, setEditDests] = useState<string[]>([]);
 
   async function load() {
     const [acc, tenant, coll, tgts] = await Promise.all([
@@ -91,6 +96,27 @@ export default function Mappings() {
     }
   }
 
+  function startEdit(m: Mapping) {
+    setEditId(m.id);
+    setEditDests(m.destinations && m.destinations.length ? [...m.destinations] : ["cv-cloud"]);
+  }
+
+  function toggleEditDest(id: string) {
+    setEditDests((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]);
+  }
+
+  async function saveRouting(m: Mapping) {
+    if (editDests.length === 0) return flash("Pick at least one destination");
+    try {
+      await api.put(`/collections/${m.id}`, { destinations: editDests });
+      setEditId(null);
+      flash("Routing updated");
+      await load();
+    } catch (e) {
+      await notify({ title: "Couldn't update routing", message: (e as ApiError).message, tone: "danger" });
+    }
+  }
+
   return (
     <>
       <Card style={{ marginBottom: 16 }}>
@@ -145,26 +171,62 @@ export default function Mappings() {
       <Card>
         <h3 style={{ marginBottom: 12 }}>Mappings</h3>
         {mappings.length === 0 && <div className="muted">No mappings yet. Add one above.</div>}
-        {mappings.map((m) => (
-          <div key={m.id} className="result-row">
-            <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
-              <Icon name="database" size={17} />
-            </div>
-            <div className="flex1">
-              <div style={{ fontWeight: 600 }}>
-                {m.account_label ?? m.source_type} <span className="faint">→</span> {m.vault_name ?? m.vault_id}
+        {mappings.map((m) => {
+          const brand = brandForSource(m.source_type);
+          const editing = editId === m.id;
+          return (
+            <div key={m.id} className="result-row" style={{ alignItems: "flex-start" }}>
+              <div className="result-icon" style={{ background: brand ? "#0e1524" : "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
+                {brand ? <BrandIcon name={brand} size={18} /> : <Icon name="database" size={17} />}
               </div>
-              <div className="row" style={{ gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-                <Pill tone="info">{m.source_type}</Pill>
-                {(m.destinations || []).map((d) => (
-                  <Pill key={d} tone={d.startsWith("appliance") ? "ok" : "info"}>{destLabel(d)}</Pill>
-                ))}
-                {m.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
+              <div className="flex1">
+                <div style={{ fontWeight: 600 }}>
+                  {m.account_label ?? m.source_type} <span className="faint">→</span> {m.vault_name ?? m.vault_id}
+                </div>
+                {!editing && (
+                  <div className="row" style={{ gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+                    <Pill tone="info">{m.source_type}</Pill>
+                    {(m.destinations || []).map((d) => (
+                      <Pill key={d} tone={d.startsWith("appliance") ? "ok" : "info"}>{destLabel(d)}</Pill>
+                    ))}
+                    {m.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
+                  </div>
+                )}
+                {editing && (
+                  <div className="stack" style={{ gap: 8, marginTop: 8 }}>
+                    <span className="faint" style={{ fontSize: 11.5 }}>Route this source to</span>
+                    <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                      {targets.map((t) => (
+                        <span
+                          key={t.id}
+                          className={`chip ${editDests.includes(t.id) ? "active" : ""}`}
+                          onClick={() => toggleEditDest(t.id)}
+                          title={t.detail}
+                        >
+                          <Icon name={t.kind === "appliance" ? "server" : "cloud"} size={13} />
+                          {t.label}
+                          {t.kind === "appliance" && t.online === false && (
+                            <span className="faint" style={{ marginLeft: 4 }}>· offline</span>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="row" style={{ gap: 8 }}>
+                      <button className="btn sm primary" onClick={() => saveRouting(m)}>Save routing</button>
+                      <button className="btn sm ghost" onClick={() => setEditId(null)}>Cancel</button>
+                    </div>
+                  </div>
+                )}
               </div>
+              {!editing && (
+                <>
+                  <button className="btn sm" onClick={() => startEdit(m)}>Edit routing</button>
+                  <button className="btn sm ghost" onClick={() => remove(m)}>Remove</button>
+                </>
+              )}
             </div>
-            <button className="btn sm ghost" onClick={() => remove(m)}>Remove</button>
-          </div>
-        ))}
+          );
+        })}
       </Card>
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}

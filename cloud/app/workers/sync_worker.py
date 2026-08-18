@@ -17,6 +17,7 @@ handles metadata previews permitted by the vault's key-ownership mode
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -43,6 +44,8 @@ from ..storage import build_destination
 
 # The cloud manifest signer (distinct from the fleet command signer).
 from ..fleet import fleet_signer
+
+logger = logging.getLogger("cv.sync")
 
 
 # Nice, human labels for common discrete metadata keys shown in search.
@@ -217,39 +220,52 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     dest_kinds = destinations or ["cv-cloud"]
     tenant_prefix = _tenant_prefix(db, collection.tenant_id)
     last_receipt: Optional[SnapshotReceipt] = None
+    succeeded: List[str] = []
+    errors: dict = {}
 
     for kind in dest_kinds:
         recoverable = False
-        if kind in ("cv-cloud", "customer-s3"):
-            dest = build_destination(kind)
-            for obj in encrypted_objects:
-                dest.put_object(tenant_prefix, f"{snapshot_id}/{obj['objectId']}",
-                                obj["ciphertext"].encode())
-            dest.put_manifest(tenant_prefix, snapshot_id, manifest)
-            recoverable = True
-        elif kind == "appliance" or kind.startswith("appliance:"):
-            # Hand the (already-encrypted) objects to the appliance via a signed,
-            # sequenced OPEN_INGEST_WINDOW command. The appliance commits them to
-            # its local vault and returns a seal receipt (which marks the snapshot
-            # recoverable). Until then the receipt is recorded as not-yet-recoverable.
-            appliance = _resolve_appliance(db, collection.tenant_id, kind)
-            if appliance is None:
-                raise ValueError(
-                    f"no linked appliance available for destination '{kind}' "
-                    "(appliance offline, quarantined, or not sealed)")
-            fleet.issue_command(
-                db, appliance, "OPEN_INGEST_WINDOW", actor,
-                {
-                    "snapshotId": snapshot_id,
-                    "vaultId": vault.id,
-                    "collectionId": collection.id,
-                    "objects": [
-                        {"objectId": o["objectId"], "ciphertext": o["ciphertext"],
-                         "plaintextBytes": int(o.get("plaintextBytes", 0))}
-                        for o in encrypted_objects
-                    ],
-                },
-            )
+        # Each destination is attempted independently: one failing target (e.g. an
+        # offline appliance) must not prevent the others (e.g. the cloud copy) from
+        # landing. We only raise if *every* destination fails.
+        try:
+            if kind in ("cv-cloud", "customer-s3"):
+                dest = build_destination(kind)
+                for obj in encrypted_objects:
+                    dest.put_object(tenant_prefix, f"{snapshot_id}/{obj['objectId']}",
+                                    obj["ciphertext"].encode())
+                dest.put_manifest(tenant_prefix, snapshot_id, manifest)
+                recoverable = True
+            elif kind == "appliance" or kind.startswith("appliance:"):
+                # Hand the (already-encrypted) objects to the appliance via a
+                # signed, sequenced OPEN_INGEST_WINDOW command. The appliance
+                # commits them and returns a seal receipt (marking the snapshot
+                # recoverable). Until then the receipt is not-yet-recoverable.
+                appliance = _resolve_appliance(db, collection.tenant_id, kind)
+                if appliance is None:
+                    raise ValueError(
+                        f"no linked appliance available for destination '{kind}' "
+                        "(appliance offline, quarantined, or not sealed)")
+                fleet.issue_command(
+                    db, appliance, "OPEN_INGEST_WINDOW", actor,
+                    {
+                        "snapshotId": snapshot_id,
+                        "vaultId": vault.id,
+                        "collectionId": collection.id,
+                        "objects": [
+                            {"objectId": o["objectId"], "ciphertext": o["ciphertext"],
+                             "plaintextBytes": int(o.get("plaintextBytes", 0))}
+                            for o in encrypted_objects
+                        ],
+                    },
+                )
+            else:
+                raise ValueError(f"unknown destination '{kind}'")
+        except Exception as exc:  # noqa: BLE001 - recorded per-destination
+            logger.warning("destination %s failed for snapshot %s: %s",
+                           kind, snapshot_id, exc)
+            errors[kind] = str(exc)
+            continue
 
         receipt = SnapshotReceipt(
             tenant_id=collection.tenant_id,
@@ -265,6 +281,13 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         )
         db.add(receipt)
         last_receipt = receipt
+        succeeded.append(kind)
+
+    if not succeeded:
+        # Nothing landed anywhere — surface the failure to the caller.
+        db.rollback()
+        raise RuntimeError("backup failed for all destinations: "
+                           + "; ".join(f"{k}: {v}" for k, v in errors.items()))
 
     for row in index_rows:
         db.add(row)
@@ -274,7 +297,8 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         db, actor=actor, action="backup.completed",
         tenant_id=collection.tenant_id, resource=collection.id,
         detail={"snapshotId": snapshot_id, "objects": len(encrypted_objects),
-                "bytes": total_bytes, "destinations": dest_kinds},
+                "bytes": total_bytes, "destinations": succeeded,
+                "failed": errors or None},
     )
     if last_receipt:
         db.refresh(last_receipt)

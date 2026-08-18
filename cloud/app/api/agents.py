@@ -436,9 +436,13 @@ def ingest(body: AgentIngest, agent: DesktopAgent = Depends(_auth_agent),
                           Collection.source_type == body.source_type,
                           Collection.name == name).first())
     if not collection:
+        # Seed the mapping's destinations from the agent's config on first sight;
+        # thereafter the Data Map (collection.destinations) is authoritative.
         collection = Collection(tenant_id=agent.tenant_id, vault_id=vault.id,
                                 name=name, source_type=body.source_type,
-                                sensitivity="restricted")
+                                sensitivity="restricted",
+                                destinations=body.destinations
+                                or agent.config.get("destinations") or ["cv-cloud"])
         db.add(collection)
         db.commit()
         db.refresh(collection)
@@ -450,8 +454,10 @@ def ingest(body: AgentIngest, agent: DesktopAgent = Depends(_auth_agent),
                      labels=o.labels, size_bytes=o.size_bytes)
         for o in body.objects
     ]
-    dests = (body.destinations or collection.destinations
-             or agent.config.get("destinations") or ["cv-cloud"])
+    # The source→vault mapping in the Data Map drives routing. The agent's
+    # locally-configured destinations only seed a new mapping (above), so changing
+    # the mapping in the portal reroutes subsequent syncs without touching the Mac.
+    dests = collection.destinations or ["cv-cloud"]
     searchable = None
     facets = None
     conn = get_connector(body.source_type)

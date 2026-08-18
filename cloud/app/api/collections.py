@@ -51,6 +51,40 @@ def create_collection(body: CreateCollectionRequest,
     return _collection_view(db, coll)
 
 
+class UpdateCollectionRequest(BaseModel):
+    name: str | None = None
+    vault_id: str | None = None
+    sensitivity: str | None = None
+    destinations: list[str] | None = None
+
+
+@router.put("/{collection_id}")
+def update_collection(collection_id: str, body: UpdateCollectionRequest,
+                      principal: security.Principal = Depends(security.get_principal),
+                      tenant: Tenant = Depends(security.get_tenant),
+                      db: Session = Depends(get_db)):
+    coll = db.get(Collection, collection_id)
+    if not coll or coll.tenant_id != tenant.id:
+        raise HTTPException(404, "collection not found")
+    if body.vault_id is not None:
+        vault = db.get(Vault, body.vault_id)
+        if not vault or vault.tenant_id != tenant.id:
+            raise HTTPException(404, "vault not found")
+        coll.vault_id = body.vault_id
+    if body.name is not None:
+        coll.name = body.name
+    if body.sensitivity is not None:
+        coll.sensitivity = body.sensitivity
+    if body.destinations is not None:
+        coll.destinations = body.destinations or ["cv-cloud"]
+    db.commit()
+    db.refresh(coll)
+    audit.record(db, actor=principal.user_id, action="collection.updated",
+                 tenant_id=tenant.id, resource=coll.id,
+                 detail={"destinations": coll.destinations})
+    return _collection_view(db, coll)
+
+
 def _collection_view(db: Session, c: Collection) -> dict:
     vault = db.get(Vault, c.vault_id)
     account = db.get(ConnectorAccount, c.connector_account_id) if c.connector_account_id else None
