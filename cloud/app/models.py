@@ -111,6 +111,7 @@ class Collection(Base):
     name = Column(String, nullable=False)
     source_type = Column(String, nullable=False)  # connector type
     connector_account_id = Column(String, ForeignKey("connector_accounts.id"), nullable=True)
+    agent_id = Column(String, ForeignKey("desktop_agents.id"), nullable=True)  # agent-collected sources
     policy_id = Column(String, ForeignKey("protection_policies.id"), nullable=True)
     sensitivity = Column(String, default="standard")  # standard | sensitive | restricted
     destinations = Column(JSON, default=list)  # where this mapping stores data

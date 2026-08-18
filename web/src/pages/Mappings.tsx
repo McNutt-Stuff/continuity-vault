@@ -6,6 +6,7 @@ import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, notify } from "../components/dialog";
 
 interface Account { id: string; connector_type: string; account_label: string; }
+interface Agent { id: string; name: string; hostname: string; collectors: string[]; }
 interface Vault { id: string; name: string; }
 interface StorageTarget {
   id: string; kind: string; label: string; detail?: string;
@@ -31,13 +32,16 @@ interface Activity {
 
 export default function Mappings() {
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [targets, setTargets] = useState<StorageTarget[]>([]);
   const [mappings, setMappings] = useState<Mapping[]>([]);
   const [toast, setToast] = useState("");
 
-  // New-mapping form
-  const [accountId, setAccountId] = useState("");
+  // New-mapping form. sourceSel encodes the chosen source:
+  //   "acct:<accountId>"  (cloud connector account)
+  //   "agent:<agentId>:<collector>"  (agent-discovered collector)
+  const [sourceSel, setSourceSel] = useState("");
   const [vaultId, setVaultId] = useState("");
   const [dests, setDests] = useState<string[]>(["cv-cloud"]);
 
@@ -52,18 +56,19 @@ export default function Mappings() {
   const [openActivity, setOpenActivity] = useState<Record<string, boolean>>({});
 
   async function load() {
-    const [acc, tenant, coll, tgts] = await Promise.all([
+    const [acc, ags, tenant, coll, tgts] = await Promise.all([
       api.get<Account[]>("/connectors/accounts"),
+      api.get<Agent[]>("/agents").catch(() => [] as Agent[]),
       api.get<{ vaults: Vault[] }>("/tenant"),
       api.get<Mapping[]>("/collections"),
       api.get<StorageTarget[]>("/tenant/storage-targets"),
     ]);
     setAccounts(acc);
+    setAgents(ags);
     setVaults(tenant.vaults);
     setMappings(coll);
     setTargets(tgts);
     if (!vaultId && tenant.vaults[0]) setVaultId(tenant.vaults[0].id);
-    if (!accountId && acc[0]) setAccountId(acc[0].id);
     try { setActivity(await api.get<Activity>("/activity")); } catch { /* ignore */ }
   }
   useEffect(() => {
@@ -111,20 +116,34 @@ export default function Mappings() {
   }
 
   async function addMapping() {
-    const acct = accounts.find((a) => a.id === accountId);
-    if (!acct || !vaultId || dests.length === 0) {
+    if (!sourceSel || !vaultId || dests.length === 0) {
       return flash("Pick a source, a vault, and at least one destination");
     }
     const vault = vaults.find((v) => v.id === vaultId);
     try {
-      await api.post("/collections", {
-        vault_id: vaultId,
-        name: `${acct.account_label} → ${vault?.name ?? "vault"}`,
-        source_type: acct.connector_type,
-        connector_account_id: acct.id,
-        destinations: dests,
-      });
-      flash("Mapping created");
+      if (sourceSel.startsWith("agent:")) {
+        const [, agentId, collector] = sourceSel.split(":");
+        const agent = agents.find((a) => a.id === agentId);
+        await api.post("/collections", {
+          vault_id: vaultId,
+          name: `${collector} (${agent?.hostname || agent?.name || "agent"})`,
+          source_type: collector,
+          agent_id: agentId,
+          sensitivity: "restricted",
+          destinations: dests,
+        });
+      } else {
+        const acct = accounts.find((a) => a.id === sourceSel.replace(/^acct:/, ""));
+        if (!acct) return flash("Pick a source");
+        await api.post("/collections", {
+          vault_id: vaultId,
+          name: `${acct.account_label} → ${vault?.name ?? "vault"}`,
+          source_type: acct.connector_type,
+          connector_account_id: acct.id,
+          destinations: dests,
+        });
+      }
+      flash("Source added");
       await load();
     } catch (e) { flash((e as ApiError).message); }
   }
@@ -188,19 +207,32 @@ export default function Mappings() {
       <Card style={{ marginBottom: 16 }}>
         <h2 style={{ marginBottom: 4 }}>Map sources to vaults</h2>
         <div className="muted" style={{ fontSize: 13, marginBottom: 14 }}>
-          Route each source into a vault and choose exactly where that mapping stores its data —
-          the Arkive cloud, a specific appliance, or your own cloud bucket. A source can feed many
-          vaults and a vault can hold many sources. Backups run automatically when the source syncs
-          (connector poll or desktop-agent push); this page only defines the routing.
+          Add a source and route it into a vault, choosing where it stores its data — the Arkive
+          cloud, an appliance storage, or your own cloud bucket. Cloud connectors and desktop-agent
+          collectors (e.g. 1Password, discovered from a linked agent) are both added here in the
+          portal; agents never create sources on their own. Backups run on sync.
         </div>
         <div className="grid grid-3" style={{ gap: 12, alignItems: "end" }}>
           <label className="stack">
             <span className="faint" style={{ fontSize: 11.5 }}>Source</span>
-            <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
-              {accounts.length === 0 && <option value="">No sources linked</option>}
-              {accounts.map((a) => (
-                <option key={a.id} value={a.id}>{a.account_label} ({a.connector_type})</option>
-              ))}
+            <select className="input" value={sourceSel} onChange={(e) => setSourceSel(e.target.value)}>
+              <option value="">Choose a source…</option>
+              {accounts.length > 0 && (
+                <optgroup label="Cloud connectors">
+                  {accounts.map((a) => (
+                    <option key={a.id} value={`acct:${a.id}`}>{a.account_label} ({a.connector_type})</option>
+                  ))}
+                </optgroup>
+              )}
+              {agents.some((a) => (a.collectors || []).length) && (
+                <optgroup label="Desktop agents">
+                  {agents.flatMap((a) => (a.collectors || []).map((c) => (
+                    <option key={`${a.id}:${c}`} value={`agent:${a.id}:${c}`}>
+                      {c} — {a.hostname || a.name}
+                    </option>
+                  )))}
+                </optgroup>
+              )}
             </select>
           </label>
           <label className="stack">
@@ -210,7 +242,7 @@ export default function Mappings() {
             </select>
           </label>
           <button className="btn primary" onClick={addMapping}>
-            <Icon name="link" size={15} /> Add mapping
+            <Icon name="link" size={15} /> Add source
           </button>
         </div>
         <div className="stack" style={{ gap: 6, marginTop: 14 }}>

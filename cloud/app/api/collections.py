@@ -31,6 +31,7 @@ class CreateCollectionRequest(BaseModel):
     name: str
     source_type: str
     connector_account_id: str | None = None
+    agent_id: str | None = None  # bind an agent-collected source to a device
     sensitivity: str = "standard"
     destinations: list[str] = ["cv-cloud"]
 
@@ -43,12 +44,23 @@ def create_collection(body: CreateCollectionRequest,
     vault = db.get(Vault, body.vault_id)
     if not vault or vault.tenant_id != tenant.id:
         raise HTTPException(404, "vault not found")
+    # Agent-collected sources are unique per (agent, source_type): if one already
+    # exists, return it instead of creating a duplicate. This is what stops the
+    # agent's push from ever spawning a second entry.
+    if body.agent_id:
+        existing = (db.query(Collection)
+                    .filter(Collection.tenant_id == tenant.id,
+                            Collection.agent_id == body.agent_id,
+                            Collection.source_type == body.source_type).first())
+        if existing:
+            return _collection_view(db, existing)
     coll = Collection(
         tenant_id=tenant.id,
         vault_id=vault.id,
         name=body.name,
         source_type=body.source_type,
         connector_account_id=body.connector_account_id,
+        agent_id=body.agent_id,
         sensitivity=body.sensitivity,
         destinations=body.destinations or ["cv-cloud"],
     )
@@ -113,6 +125,7 @@ def _available_fields(source_type: str) -> list[str]:
 def _collection_view(db: Session, c: Collection) -> dict:
     vault = db.get(Vault, c.vault_id)
     account = db.get(ConnectorAccount, c.connector_account_id) if c.connector_account_id else None
+    agent = db.get(DesktopAgent, c.agent_id) if c.agent_id else None
     conn = get_connector(c.source_type)
     available = _available_fields(c.source_type)
     # Last backup status across this mapping's snapshots.
@@ -120,11 +133,14 @@ def _collection_view(db: Session, c: Collection) -> dict:
             .filter(SnapshotReceipt.collection_id == c.id)
             .order_by(SnapshotReceipt.created_at.desc()).first())
     is_agent = bool(conn and conn.capabilities().requires_agent)
+    agent_label = (agent.hostname or agent.name) if agent else None
     return {
         "id": c.id, "name": c.name, "source_type": c.source_type,
         "source_display": conn.display_name if conn else c.source_type,
-        "source_label": account.account_label if account else c.name,
+        "source_label": account.account_label if account else (agent_label or c.name),
         "is_agent": is_agent,
+        "agent_id": c.agent_id,
+        "agent_label": agent_label,
         "vault_id": c.vault_id, "vault_name": vault.name if vault else None,
         "connector_account_id": c.connector_account_id,
         "account_label": account.account_label if account else None,
@@ -213,9 +229,14 @@ def sync(collection_id: str,
     is_agent = bool(conn and conn.capabilities().requires_agent)
 
     if is_agent:
-        agents = (db.query(DesktopAgent)
-                  .filter(DesktopAgent.tenant_id == tenant.id).all())
-        targeted = [a for a in agents if coll.source_type in (a.collectors or [])] or agents
+        agents_q = db.query(DesktopAgent).filter(DesktopAgent.tenant_id == tenant.id)
+        # Prefer the agent this source is bound to; otherwise any agent that can
+        # collect this source type.
+        if coll.agent_id:
+            targeted = [a for a in agents_q.filter(DesktopAgent.id == coll.agent_id).all()]
+        else:
+            targeted = [a for a in agents_q.all()
+                        if coll.source_type in (a.collectors or [])]
         queued = 0
         for a in targeted:
             a.pending_command = {"type": "collect", "params": {}}
@@ -225,7 +246,7 @@ def sync(collection_id: str,
                      tenant_id=tenant.id, resource=coll.id,
                      detail={"kind": "agent", "agents": queued})
         if queued == 0:
-            raise HTTPException(409, "no desktop agent is linked to collect this source")
+            raise HTTPException(409, "the desktop agent for this source is not available")
         return {"kind": "agent", "queued_agents": queued,
                 "message": f"Queued collection on {queued} agent(s); data will arrive shortly."}
 

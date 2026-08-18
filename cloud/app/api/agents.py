@@ -190,6 +190,16 @@ def _agent_view(a: DesktopAgent) -> dict:
     }
 
 
+def _record_discovered_collector(db: Session, agent: DesktopAgent, source_type: str) -> None:
+    """Remember a collector the agent can provide so the operator can add it as a
+    source in the portal (discovery-then-approve, no silent auto-create)."""
+    cols = list(agent.collectors or [])
+    if source_type and source_type not in cols:
+        cols.append(source_type)
+        agent.collectors = cols
+        db.commit()
+
+
 # --------------------------------------------------------------------------
 # Agent-facing (outbound-only)
 # --------------------------------------------------------------------------
@@ -429,23 +439,32 @@ def ingest(body: AgentIngest, agent: DesktopAgent = Depends(_auth_agent),
     if not vault:
         raise HTTPException(400, "no vault provisioned for tenant")
 
-    name = body.collection_name or f"{body.source_type} ({agent.hostname})"
+    # Sources are created by the operator in the cloud and bound to this agent.
+    # The agent NEVER auto-creates a source — that caused duplicate entries. If no
+    # source is configured yet, the discovered collector is recorded on the agent
+    # and the push is skipped until the operator adds it in the portal.
     collection = (db.query(Collection)
                   .filter(Collection.tenant_id == agent.tenant_id,
-                          Collection.vault_id == vault.id,
-                          Collection.source_type == body.source_type,
-                          Collection.name == name).first())
+                          Collection.agent_id == agent.id,
+                          Collection.source_type == body.source_type).first())
     if not collection:
-        # Seed the mapping's destinations from the agent's config on first sight;
-        # thereafter the Data Map (collection.destinations) is authoritative.
-        collection = Collection(tenant_id=agent.tenant_id, vault_id=vault.id,
-                                name=name, source_type=body.source_type,
-                                sensitivity="restricted",
-                                destinations=body.destinations
-                                or agent.config.get("destinations") or ["cv-cloud"])
-        db.add(collection)
-        db.commit()
-        db.refresh(collection)
+        # Fall back to a legacy agent-collected source (bound before agent_id
+        # existed) matched by source type + no connector account, then adopt it.
+        legacy = (db.query(Collection)
+                  .filter(Collection.tenant_id == agent.tenant_id,
+                          Collection.source_type == body.source_type,
+                          Collection.agent_id.is_(None),
+                          Collection.connector_account_id.is_(None)).first())
+        if legacy:
+            legacy.agent_id = agent.id
+            db.commit()
+            collection = legacy
+
+    if not collection:
+        _record_discovered_collector(db, agent, body.source_type)
+        return {"status": "unconfigured", "object_count": 0,
+                "message": f"'{body.source_type}' is not configured for this agent yet. "
+                           "Add it from the portal (Data Map → add source)."}
 
     source_objects = [
         SourceObject(object_id=o.object_id, doc_type=o.kind, title=o.title,
@@ -454,9 +473,8 @@ def ingest(body: AgentIngest, agent: DesktopAgent = Depends(_auth_agent),
                      labels=o.labels, size_bytes=o.size_bytes)
         for o in body.objects
     ]
-    # The source→vault mapping in the Data Map drives routing. The agent's
-    # locally-configured destinations only seed a new mapping (above), so changing
-    # the mapping in the portal reroutes subsequent syncs without touching the Mac.
+    # The operator-created source→vault mapping drives routing; changing it in the
+    # portal reroutes subsequent syncs without touching the Mac.
     dests = collection.destinations or ["cv-cloud"]
     searchable = None
     facets = None
