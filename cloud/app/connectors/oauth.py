@@ -149,7 +149,9 @@ def exchange_code(connector_type: str, code: str) -> dict:
     with httpx.Client(timeout=30) as client:
         r = client.post(spec.token_url, data=data,
                         headers={"Accept": "application/json"})
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"{connector_type} token exchange failed ({r.status_code}): {r.text}")
         tok = r.json()
     return _normalize(tok, spec)
 

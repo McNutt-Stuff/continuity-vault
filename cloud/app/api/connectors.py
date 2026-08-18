@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -18,6 +19,7 @@ from ..models import ConnectorAccount, Tenant
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 settings = get_settings()
+logger = logging.getLogger("cv.connectors")
 
 
 def _setup_instructions(connector_type: str) -> list[str]:
@@ -129,6 +131,7 @@ def oauth_callback(code: str | None = Query(default=None),
     try:
         tokens = oauth.exchange_code(connector_type, code)
     except Exception as exc:
+        logger.error("OAuth token exchange failed for %s: %s", connector_type, exc)
         return RedirectResponse(f"{portal}/connectors?error=token_exchange")
 
     label = data.get("label") or _fetch_account_label(connector_type, tokens) \

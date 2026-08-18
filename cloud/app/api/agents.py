@@ -10,11 +10,14 @@ normalized objects into the protection pipeline).
 from __future__ import annotations
 
 import base64
+import io
 import secrets
+import tarfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -91,23 +94,19 @@ def download_installer(body: CreateAgentCode,
     db.add(lc)
     db.commit()
 
-    template_path = Path(__file__).resolve().parents[3] / "installers" / "desktop-agent-install-macos.sh"
-    try:
-        template = template_path.read_text()
-    except Exception:
-        template = "#!/usr/bin/env bash\necho 'installer template unavailable'\nexit 1\n"
-    body_script = template.split("\n", 1)[1] if template.startswith("#!") else template
-    header = (
-        "#!/usr/bin/env bash\n"
-        "# Arkive Desktop Agent — one-click installer (linking code baked in).\n"
-        f'export ARKIVE_CLOUD_URL="{settings.api_base_url}"\n'
-        f'export ARKIVE_LINKING_CODE="{code}"\n'
-        'export ARKIVE_REPO_URL="https://github.com/mcnutter1/continuity-vault.git"\n\n'
-    )
     audit.record(db, actor=principal.user_id, action="agent.installer_downloaded",
                  tenant_id=tenant.id, detail={"code": code})
-    return {"code": code, "filename": "arkive-agent-installer.command",
-            "script": header + body_script}
+    # Tiny, self-contained .command: no git/Xcode — curls the cloud bootstrap.
+    api = settings.api_base_url.rstrip("/")
+    script = (
+        "#!/bin/bash\n"
+        "# Arkive Desktop Agent — one-click installer (downloads from the cloud).\n"
+        f'export ARKIVE_CLOUD_URL="{api}"\n'
+        f'export ARKIVE_LINKING_CODE="{code}"\n'
+        'curl -fsSL "$ARKIVE_CLOUD_URL/agent/bootstrap" -o /tmp/arkive-bootstrap.sh '
+        '&& bash /tmp/arkive-bootstrap.sh\n'
+    )
+    return {"code": code, "filename": "arkive-agent-installer.command", "script": script}
 
 
 @fleet_router.get("")
@@ -184,6 +183,41 @@ def _agent_view(a: DesktopAgent) -> dict:
 # --------------------------------------------------------------------------
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+@agent_router.get("/bootstrap")
+def bootstrap():
+    """Serve the macOS bootstrap installer (no auth — it's the open agent code)."""
+    path = _repo_root() / "installers" / "agent-bootstrap-macos.sh"
+    try:
+        return PlainTextResponse(path.read_text())
+    except Exception:
+        raise HTTPException(404, "bootstrap unavailable")
+
+
+_EXCLUDE = (".venv", "__pycache__", "node_modules", ".git", ".pyc")
+
+
+@agent_router.get("/bundle")
+def bundle():
+    """Serve the agent code (desktop-agent + shared) as a tar.gz."""
+    root = _repo_root()
+    buf = io.BytesIO()
+
+    def _filter(ti: tarfile.TarInfo):
+        return None if any(x in ti.name for x in _EXCLUDE) else ti
+
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for d in ("desktop-agent", "shared"):
+            p = root / d
+            if p.exists():
+                tar.add(str(p), arcname=d, filter=_filter)
+    return Response(content=buf.getvalue(), media_type="application/gzip",
+                    headers={"Content-Disposition": "attachment; filename=arkive-agent.tar.gz"})
 
 
 def _auth_agent(authorization: str = Header(default=""),

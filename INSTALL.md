@@ -259,8 +259,10 @@ the 1Password CLI.
 1. In the portal: **Desktop Agents → Download Mac installer** (the linking code
    and cloud URL are baked into the downloaded `arkive-agent-installer.command`).
 2. On the Mac, run it (right-click → Open, or `bash ~/Downloads/arkive-agent-installer.command`).
-   It clones the agent, builds its Python env, bundles the `op` CLI, installs a
-   **launchd** menu-bar app, escrows its client-side key, and registers.
+   It downloads everything from the cloud with `curl` — a self-contained Python
+   runtime, the agent, and the `op` CLI — with **no git, Xcode, Homebrew, or
+   system Python required**, installs a **launchd** menu-bar app, escrows its
+   client-side key, and registers.
 3. For unattended collection, provide a **1Password service-account token** when
    prompted; otherwise it uses the interactive 1Password app + CLI integration.
 
