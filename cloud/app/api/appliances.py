@@ -145,7 +145,8 @@ def _appliance_view(a: Appliance) -> dict:
 agent_router = APIRouter(prefix="/appliance", tags=["appliance-agent"])
 
 
-def _agent_appliance(db: Session, authorization: str = Header(default="")) -> Appliance:
+def _agent_appliance(authorization: str = Header(default=""),
+                     db: Session = Depends(get_db)) -> Appliance:
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing appliance token")
     token = authorization.split(" ", 1)[1]
