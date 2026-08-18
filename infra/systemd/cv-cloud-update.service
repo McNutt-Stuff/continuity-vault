@@ -1,7 +1,12 @@
 [Unit]
-Description=Arkive cloud self-update check
+Description=Arkive cloud git update check
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
+# CV_DOMAIN comes from the app env; CV_REPO_URL / CV_REPO_BRANCH from the update
+# config (optional — git-update.sh exits cleanly if no repo is configured).
 EnvironmentFile=/etc/continuity-vault.env
-ExecStart=/opt/continuity-vault/updater/cloud-update.sh
+EnvironmentFile=-/etc/arkive-update.env
+ExecStart=/opt/arkive-src/updater/git-update.sh cloud

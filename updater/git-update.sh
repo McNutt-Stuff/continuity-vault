@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+#
+# Arkive — Git-based updater.
+#
+# Pulls the latest code from a GitHub repository into a source checkout, then
+# redeploys via the idempotent, resumable installer. If the installer fails
+# (e.g. the health check), it rolls back to the previous commit and redeploys.
+#
+# Usage (as root):
+#   CV_REPO_URL=https://github.com/you/arkive.git CV_DOMAIN=vault.arkive.life \
+#     ./git-update.sh cloud
+#   CV_REPO_URL=https://github.com/you/arkive.git \
+#     CV_CLOUD_URL=https://vault.arkive.life/api ./git-update.sh appliance
+#
+# If the source checkout already exists, CV_REPO_URL is optional (its origin is
+# used). Config can also live in /etc/arkive-update.env. CV_FORCE=1 redeploys
+# even when already up to date. For private repos, use an https token URL or an
+# SSH deploy key on the host.
+#
+set -Eeuo pipefail
+
+COMPONENT="${1:-cloud}"
+CV_SRC_DIR="${CV_SRC_DIR:-/opt/arkive-src}"
+CV_REPO_BRANCH="${CV_REPO_BRANCH:-}"   # empty => auto-detect the default branch
+DEFAULT_REPO="https://github.com/mcnutter1/continuity-vault.git"
+
+# Optional config file.
+if [[ -f /etc/arkive-update.env ]]; then
+  # shellcheck disable=SC1091
+  set -a; source /etc/arkive-update.env; set +a
+fi
+
+if [[ $EUID -ne 0 ]]; then echo "Run as root."; exit 1; fi
+command -v git >/dev/null || { echo "git is required (apt-get install -y git)."; exit 1; }
+
+# Resolve the repo URL: explicit env wins, else reuse an existing checkout's
+# origin, else the project default.
+if [[ -z "${CV_REPO_URL:-}" && -d "$CV_SRC_DIR/.git" ]]; then
+  CV_REPO_URL="$(git -C "$CV_SRC_DIR" remote get-url origin)"
+fi
+CV_REPO_URL="${CV_REPO_URL:-$DEFAULT_REPO}"
+
+echo "==> Arkive updater [$COMPONENT] from ${CV_REPO_URL}"
+
+git config --global --add safe.directory "$CV_SRC_DIR" 2>/dev/null || true
+
+if [[ ! -d "$CV_SRC_DIR/.git" ]]; then
+  echo "==> Cloning into $CV_SRC_DIR"
+  clone_args=()
+  [[ -n "$CV_REPO_BRANCH" ]] && clone_args+=(--branch "$CV_REPO_BRANCH")
+  git clone "${clone_args[@]}" "$CV_REPO_URL" "$CV_SRC_DIR"
+fi
+
+cd "$CV_SRC_DIR"
+git remote set-url origin "$CV_REPO_URL"
+
+# Auto-detect the remote's default branch when one wasn't specified.
+if [[ -z "$CV_REPO_BRANCH" ]]; then
+  CV_REPO_BRANCH="$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')"
+  CV_REPO_BRANCH="${CV_REPO_BRANCH:-main}"
+fi
+echo "==> Branch: ${CV_REPO_BRANCH}"
+
+git fetch --quiet origin "$CV_REPO_BRANCH"
+PREV="$(git rev-parse HEAD)"
+TARGET="$(git rev-parse "origin/${CV_REPO_BRANCH}")"
+
+if [[ "$PREV" == "$TARGET" && "${CV_FORCE:-0}" != "1" ]]; then
+  echo "==> Already up to date (${PREV:0:12})."
+  exit 0
+fi
+
+echo "==> Updating ${PREV:0:12} -> ${TARGET:0:12}"
+git checkout --quiet "$CV_REPO_BRANCH"
+git reset --hard --quiet "origin/${CV_REPO_BRANCH}"
+
+run_installer() {
+  if [[ "$COMPONENT" == "cloud" ]]; then
+    REPO_SRC="$CV_SRC_DIR" CV_DOMAIN="${CV_DOMAIN:-vault.arkive.life}" \
+      bash "$CV_SRC_DIR/installers/cloud-install.sh"
+  else
+    REPO_SRC="$CV_SRC_DIR" CV_CLOUD_URL="${CV_CLOUD_URL:-https://vault.arkive.life/api}" \
+      bash "$CV_SRC_DIR/installers/appliance-install.sh"
+  fi
+}
+
+if run_installer; then
+  echo "==> Update to ${TARGET:0:12} complete."
+else
+  echo "!! Update failed — rolling back to ${PREV:0:12}"
+  git reset --hard --quiet "$PREV"
+  if run_installer; then
+    echo "==> Rolled back to ${PREV:0:12}."
+    exit 1
+  fi
+  echo "!! Rollback redeploy also failed; manual intervention required."
+  exit 2
+fi

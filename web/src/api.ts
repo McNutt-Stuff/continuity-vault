@@ -55,6 +55,7 @@ export interface Me {
   role: string;
   tenant_id: string;
   is_platform_admin: boolean;
+  email_verified: boolean;
   passkey_verified: boolean;
   passkeys: { id: string; label: string; transport: string }[];
 }

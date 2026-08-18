@@ -34,7 +34,7 @@ const SOURCE_META: Record<string, { color: string; icon: IconName; label: string
 };
 
 export default function Search() {
-  const { me, unlock } = useAuth();
+  const { me, stepUp } = useAuth();
   const [q, setQ] = useState("");
   const [source, setSource] = useState<string | null>(null);
   const [label, setLabel] = useState<string | null>(null);
@@ -71,7 +71,7 @@ export default function Search() {
             </div>
           </div>
         </div>
-        <button className="btn accent" onClick={() => unlock().then(run).catch((e) => alert(e.message))}>
+        <button className="btn accent" onClick={() => stepUp().then(run).catch((e) => alert(e.message))}>
           <Icon name="key" size={15} /> Unlock to search
         </button>
       </Card>

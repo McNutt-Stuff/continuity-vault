@@ -41,6 +41,19 @@ class Settings(BaseSettings):
     # Software update publishing.
     release_channel: str = "stable"
 
+    # Authentication.
+    allow_signup: bool = True
+    email_code_ttl_seconds: int = 600
+    # SMTP for verification/sign-in codes. If unset, codes are logged (dev also
+    # returns them in the API response) so the platform can bootstrap without an
+    # email provider.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_from: str = "no-reply@arkive.life"
+    smtp_starttls: bool = True
+
     seed_demo_data: bool = True
 
 

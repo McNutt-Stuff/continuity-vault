@@ -99,7 +99,7 @@ function Sidebar() {
 }
 
 function TopBar() {
-  const { me, unlock, logout } = useAuth();
+  const { me, stepUp, logout } = useAuth();
   const loc = useLocation();
   const title =
     NAV.find((n) => n.to === loc.pathname)?.label ??
@@ -113,8 +113,8 @@ function TopBar() {
             <Icon name="lock" size={13} /> Unlocked
           </Pill>
         ) : (
-          <button className="btn sm" onClick={() => unlock().catch((e) => alert(e.message))}>
-            <Icon name="key" size={14} /> Unlock with passkey
+          <button className="btn sm" onClick={() => stepUp().catch((e) => alert(e.message))}>
+            <Icon name="key" size={14} /> {me?.passkeys?.length ? "Unlock with passkey" : "Set up a passkey"}
           </button>
         )}
         <div className="row">

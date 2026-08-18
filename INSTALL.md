@@ -72,14 +72,7 @@ systemctl status cv-cloud caddy --no-pager
 Open `https://vault.arkive.life` and sign in as `owner@northwind.example`
 (demo seed data).
 
-**Optional — enable cloud auto-updates** (polls the admin *Updates* console every
-5 minutes and applies releases with automatic rollback):
-
-```bash
-sudo cp ~/arkive/infra/systemd/cv-cloud-update.* /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now cv-cloud-update.timer
-```
+**Optional — updates from GitHub:** see [Updating from GitHub](#updating-from-github).
 
 ---
 
@@ -214,3 +207,49 @@ journalctl -u cv-appliance-agent -f  # appliance
 | Portal 502 | `systemctl status cv-cloud`; `curl -s http://127.0.0.1:8000/api/health` |
 | Appliance not appearing | Correct `CV_CLOUD_URL`; valid/unexpired linking code; `journalctl -u cv-appliance-agent` |
 | Appliance shows attestation failed | Restart agent; confirm system time is correct (signature expiry) |
+
+---
+
+## Updating from GitHub
+
+Updates pull the latest code from your GitHub repo into a source checkout at
+`/opt/arkive-src`, then redeploy via the idempotent installer with **automatic
+rollback** — if the new revision fails to start / health-check, it resets to the
+previous commit and redeploys.
+
+**One-time setup** (cloud server and/or each appliance):
+
+```bash
+sudo cp ~/arkive/updater/arkive-update.env.example /etc/arkive-update.env
+sudo nano /etc/arkive-update.env      # set CV_REPO_URL and CV_REPO_BRANCH
+```
+
+**Manual update:**
+
+```bash
+# cloud (first run clones the repo to /opt/arkive-src)
+sudo CV_REPO_URL=https://github.com/mcnutter1/continuity-vault.git \
+     CV_DOMAIN=vault.arkive.life ~/arkive/updater/git-update.sh cloud
+
+# after the first run, config comes from /etc/arkive-update.env:
+sudo /opt/arkive-src/updater/git-update.sh cloud
+# appliance:
+sudo /opt/arkive-src/updater/git-update.sh appliance
+```
+
+Nothing to do if already up to date; `CV_FORCE=1` redeploys anyway.
+
+**Automatic updates on a timer** (checks GitHub every 10 min cloud / 30 min appliance):
+
+```bash
+sudo cp /opt/arkive-src/infra/systemd/cv-cloud-update.* /etc/systemd/system/   # cloud
+sudo cp /opt/arkive-src/infra/systemd/cv-appliance-update.* /etc/systemd/system/ # appliance
+sudo systemctl daemon-reload
+sudo systemctl enable --now cv-cloud-update.timer        # or cv-appliance-update.timer
+```
+
+**Private repos:** use a token URL in `CV_REPO_URL`
+(`https://<user>:<token>@github.com/...`) or install an SSH deploy key on the host.
+
+The appliance can also be updated cloud-side via signed `STAGE_UPDATE` commands
+(admin *Updates* console) for environments that shouldn't reach GitHub directly.

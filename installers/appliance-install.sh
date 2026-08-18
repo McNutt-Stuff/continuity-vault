@@ -30,7 +30,7 @@ export DEBIAN_FRONTEND=noninteractive
 install_os_deps() {
   apt-get update -y
   apt-get install -y python3 python3-venv python3-pip curl ca-certificates \
-    build-essential libssl-dev openssl tpm2-tools
+    build-essential libssl-dev openssl tpm2-tools git rsync
 }
 
 create_user_dirs() {
@@ -41,7 +41,7 @@ create_user_dirs() {
 
 sync_code() {
   if command -v rsync >/dev/null; then
-    rsync -a --delete --exclude '.venv' --exclude 'node_modules' \
+    rsync -a --delete --exclude '.git' --exclude '.venv' --exclude 'node_modules' \
       "$REPO_SRC/" "$INSTALL_DIR/"
   else
     cp -r "$REPO_SRC/." "$INSTALL_DIR/"

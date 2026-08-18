@@ -55,13 +55,19 @@ def auth():
 
 def main():
     global tok
-    hr("1. Login")
-    r = client.post("/api/auth/login", json={"email": "owner@northwind.example"})
+    hr("1. Passwordless login (email code bootstrap)")
+    req = client.post("/api/auth/email/request",
+                      json={"email": "owner@northwind.example", "purpose": "login"})
+    req.raise_for_status()
+    dev_code = req.json().get("dev_code")
+    assert dev_code, "development should return the code"
+    r = client.post("/api/auth/email/verify", json={
+        "email": "owner@northwind.example", "code": dev_code, "purpose": "login"})
     r.raise_for_status()
     tok = r.json()["token"]
-    print("logged in as owner@northwind.example; has_passkey =", r.json()["has_passkey"])
+    print("email-verified session; passkey_verified =", r.json()["passkey_verified"])
 
-    hr("2. Enroll passkey + unlock (step-up)")
+    hr("2. Enroll passkey + step-up (simulated authenticator)")
     r = client.post("/api/auth/passkey/register-simulated",
                     json={"label": "Demo", "transport": "internal"}, headers=auth())
     r.raise_for_status()
@@ -154,8 +160,11 @@ def main():
     print(f"restore status: requested -> {ap['status']} -> {ex['status']}")
 
     hr("8. Admin overview")
-    # Switch to platform admin.
-    at = client.post("/api/auth/login", json={"email": "admin@arkive.life"}).json()["token"]
+    # Switch to platform admin via email-code login.
+    ac = client.post("/api/auth/email/request",
+                     json={"email": "admin@arkive.life", "purpose": "login"}).json()["dev_code"]
+    at = client.post("/api/auth/email/verify",
+                     json={"email": "admin@arkive.life", "code": ac, "purpose": "login"}).json()["token"]
     ov = client.get("/api/admin/overview", headers={"Authorization": f"Bearer {at}"}).json()
     print("admin overview:", ov)
 

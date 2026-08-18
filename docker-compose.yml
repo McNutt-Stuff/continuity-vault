@@ -42,6 +42,8 @@ services:
       CV_DATABASE_URL: postgresql+psycopg://cvault:cvault@postgres/continuity
       CV_SESSION_SECRET: dev-secret-change-me
       CV_KEK_SECRET: dev-kek-change-me
+      CV_RP_ID: localhost
+      CV_RP_ORIGIN: http://localhost:5173
       CV_S3_ENDPOINT_URL: http://minio:9000
       CV_AWS_ACCESS_KEY_ID: minioadmin
       CV_AWS_SECRET_ACCESS_KEY: minioadmin

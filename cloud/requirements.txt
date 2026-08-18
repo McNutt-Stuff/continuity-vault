@@ -10,6 +10,7 @@ argon2-cffi>=23.1.0
 boto3>=1.34.0
 httpx>=0.27.0
 psycopg[binary]>=3.1.0
+webauthn>=2.1.0,<3
 # Post-quantum primitives (ML-KEM / ML-DSA / SLH-DSA) via liboqs.
 # Optional: the prototype runs without it using a clearly-flagged fallback.
 # oqs>=0.10.0

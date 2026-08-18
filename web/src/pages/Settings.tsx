@@ -14,7 +14,7 @@ export default function Settings() {
   useEffect(() => { api.get<Tenant>("/tenant").then(setTenant).catch(() => {}); }, []);
 
   async function addPasskey(transport: string) {
-    await enrollPasskey(transport === "internal" ? "This device" : "Security key", transport);
+    await enrollPasskey(transport === "internal" ? "This device" : "Security key");
     await refresh();
     setToast("Passkey enrolled");
     setTimeout(() => setToast(""), 2500);

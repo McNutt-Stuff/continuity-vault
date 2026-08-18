@@ -28,3 +28,23 @@ def init_db() -> None:
     from . import models  # noqa: F401  ensure models are registered
 
     Base.metadata.create_all(bind=engine)
+    _apply_additive_migrations()
+
+
+def _apply_additive_migrations() -> None:
+    """Add new columns to pre-existing tables (prototype-grade, additive only).
+
+    ``create_all`` never alters existing tables, so newly-introduced columns are
+    applied here. Each statement runs in its own transaction and is ignored if it
+    has already been applied."""
+    from sqlalchemy import text
+
+    statements = [
+        "ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT false",
+    ]
+    for statement in statements:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(statement))
+        except Exception:
+            pass  # column already exists or dialect variance — safe to skip

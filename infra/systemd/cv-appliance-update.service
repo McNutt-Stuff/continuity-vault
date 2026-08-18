@@ -1,0 +1,10 @@
+[Unit]
+Description=Arkive appliance git update check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/continuity-vault/appliance.env
+EnvironmentFile=-/etc/arkive-update.env
+ExecStart=/opt/arkive-src/updater/git-update.sh appliance

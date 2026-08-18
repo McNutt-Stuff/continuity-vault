@@ -23,7 +23,7 @@ interface Account {
 interface Vault { id: string; name: string; }
 
 export default function Connectors() {
-  const { me, unlock } = useAuth();
+  const { me, stepUp } = useAuth();
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
@@ -39,7 +39,7 @@ export default function Connectors() {
 
   async function link(c: CatalogItem) {
     if (!me?.passkey_verified) {
-      await unlock().catch((e) => alert(e.message));
+      await stepUp().catch((e) => alert(e.message));
     }
     const label = prompt(`Account label for ${c.displayName}`, `My ${c.displayName}`);
     if (!label) return;

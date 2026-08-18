@@ -1,9 +1,9 @@
 [Unit]
-Description=Poll Arkive for cloud updates every 5 minutes
+Description=Check Arkive GitHub for cloud updates every 10 minutes
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
+OnBootSec=3min
+OnUnitActiveSec=10min
 Unit=cv-cloud-update.service
 
 [Install]

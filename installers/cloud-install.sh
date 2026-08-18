@@ -42,7 +42,7 @@ install_os_deps() {
   apt-get update -y
   apt-get install -y python3 python3-venv python3-pip git curl ca-certificates \
     build-essential libssl-dev postgresql postgresql-contrib debian-keyring \
-    debian-archive-keyring apt-transport-https openssl gnupg
+    debian-archive-keyring apt-transport-https openssl gnupg rsync
 }
 
 install_node() {
@@ -69,7 +69,7 @@ create_user_dirs() {
 
 sync_code() {
   if command -v rsync >/dev/null; then
-    rsync -a --delete --exclude '.venv' --exclude 'node_modules' \
+    rsync -a --delete --exclude '.git' --exclude '.venv' --exclude 'node_modules' \
       --exclude 'web/dist' "$REPO_SRC/" "$INSTALL_DIR/"
   else
     cp -r "$REPO_SRC/." "$INSTALL_DIR/"
@@ -137,6 +137,14 @@ CV_KEY_STORE=${DATA_DIR}/keystore
 CV_OBJECT_STORE=${DATA_DIR}/object_store
 CV_FLEET_SIGNER=${DATA_DIR}/fleet_signer.json
 CV_SEED_DEMO_DATA=true
+CV_ALLOW_SIGNUP=true
+# Email delivery for sign-in / verification codes. Without SMTP, codes are
+# written to the service log (journalctl -u cv-cloud). Uncomment to enable:
+# CV_SMTP_HOST=smtp.example.com
+# CV_SMTP_PORT=587
+# CV_SMTP_USER=apikey
+# CV_SMTP_PASSWORD=your-smtp-password
+# CV_SMTP_FROM=no-reply@arkive.life
 EOF
   else
     sed -i "s#^CV_DATABASE_URL=.*#CV_DATABASE_URL=postgresql+psycopg://cvault:${DB_PASSWORD}@localhost/continuity#" \
@@ -188,7 +196,7 @@ step "Installing Caddy (Let's Encrypt)"    install_caddy
 step "Creating service user & directories" create_user_dirs
 step_always "Copying application files"    sync_code
 step_always "Configuring PostgreSQL database" setup_database
-step "Installing Python control plane"     install_python
+step_always "Installing Python control plane" install_python
 step_always "Building web portal"          build_web
 step_always "Validating application"       validate_app
 step_always "Writing configuration"        write_env

@@ -11,7 +11,7 @@ interface Restore {
 }
 
 export default function RestorePage() {
-  const { me, unlock } = useAuth();
+  const { me, stepUp } = useAuth();
   const [snaps, setSnaps] = useState<Snapshot[]>([]);
   const [restores, setRestores] = useState<Restore[]>([]);
   const [toast, setToast] = useState("");
@@ -23,7 +23,7 @@ export default function RestorePage() {
   useEffect(() => { void load(); }, []);
 
   async function request(s: Snapshot) {
-    if (!me?.passkey_verified) await unlock().catch((e) => alert(e.message));
+    if (!me?.passkey_verified) await stepUp().catch((e) => alert(e.message));
     try {
       await api.post("/restore", {
         snapshot_id: s.snapshot_id,

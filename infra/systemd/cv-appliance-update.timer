@@ -1,0 +1,10 @@
+[Unit]
+Description=Check Arkive GitHub for appliance updates every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Unit=cv-appliance-update.service
+
+[Install]
+WantedBy=timers.target

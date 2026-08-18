@@ -58,6 +58,7 @@ class User(Base):
     display_name = Column(String, nullable=False)
     role = Column(String, default="member")  # owner | security-admin | member | support-admin
     is_platform_admin = Column(Boolean, default=False)  # backend admin console
+    email_verified = Column(Boolean, default=False)
     status = Column(String, default="active")
     created_at = Column(DateTime, default=_now)
 
