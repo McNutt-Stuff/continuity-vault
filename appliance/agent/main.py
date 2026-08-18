@@ -126,10 +126,48 @@ class Agent:
                 self._last_update_note = latest
                 self.log.info("update available: %s -> %s (headless self-update will apply it)",
                               settings.software_version, latest)
+            # Detect control-plane signing-key drift: if the cloud is now signing
+            # commands with a different key than the one pinned at linking, every
+            # command will fail signature verification. Re-pin over this same
+            # authenticated TLS channel so a legitimate key rotation self-heals.
+            cp_key = data.get("control_plane_key_id")
+            local_key = (self.cloud_bundle or {}).get("keyId")
+            if cp_key and local_key and cp_key != local_key:
+                self.log.warning("control-plane key drift: cloud=%s pinned=%s — re-pinning",
+                                 cp_key, local_key)
+                await self._retrust_control_plane(client, cp_key)
             for command in data.get("commands", []):
                 await self._handle_command(client, command)
         self.log.debug("heartbeat ok (state=%s, isolation=%s)",
                        self.sm.state.value, self.sm.isolation_state)
+
+    async def _retrust_control_plane(self, client: httpx.AsyncClient, expected_key: str) -> None:
+        """Re-pin the cloud's current command-signing bundle after a key rotation,
+        over the appliance's authenticated token channel, and persist it."""
+        try:
+            r = await client.get(f"{settings.cloud_base_url}/appliance/control-plane-bundle",
+                                 headers=self._headers())
+            if r.status_code != 200:
+                self.log.warning("re-trust failed: %s", r.status_code)
+                return
+            bundle = r.json().get("bundle")
+            if not bundle or bundle.get("keyId") != expected_key:
+                self.log.warning("re-trust bundle mismatch (got %s want %s)",
+                                 (bundle or {}).get("keyId"), expected_key)
+                return
+            self.cloud_bundle = bundle
+            self._persist_cloud_bundle()
+            self.log.info("re-pinned control-plane key %s", expected_key)
+        except Exception as exc:
+            self.log.warning("re-trust error: %s", exc)
+
+    def _persist_cloud_bundle(self) -> None:
+        try:
+            d = json.loads(_REG.read_text()) if _REG.exists() else {}
+            d["cloud_public_bundle"] = self.cloud_bundle
+            _REG.write_text(json.dumps(d))
+        except Exception as exc:
+            self.log.warning("could not persist re-pinned bundle: %s", exc)
 
     def _telemetry(self) -> dict:
         cap = self.vault.capacity()
@@ -190,16 +228,21 @@ class Agent:
         payload = command["payload"]
         signature = command["signature"]
         if payload["applianceId"] != self.appliance_id:
+            self.log.warning("command rejected: applianceId mismatch (cmd=%s self=%s)",
+                             payload.get("applianceId"), self.appliance_id)
             return False
         if payload["commandType"] == "QUARANTINE":
             pass  # allowed even when quarantined
         elif self.sm.state == State.QUARANTINED:
+            self.log.warning("command rejected: appliance is QUARANTINED")
             return False  # reject all other commands while quarantined
         # Hybrid signature (require both classical + PQ) — no fail-open.
         try:
             HybridVerifier.from_bundle(self.cloud_bundle).verify(
                 payload, signature, SigPolicy.REQUIRE_BOTH)
-        except Exception:
+        except Exception as exc:
+            self.log.warning("command rejected: signature verify failed (%s) — cloud "
+                             "control-plane key may have changed; re-link the appliance", exc)
             return False
         # Local policy hash must match the appliance's own policy view.
         expected = hexdigest(json.dumps({
@@ -208,7 +251,11 @@ class Agent:
             "immutability": True,
             "allowIngest": self.sm.state in (State.SEALED, State.ONLINE_STAGING, State.READY_TO_SEAL),
         }, sort_keys=True).encode())
-        return payload["policyHash"] == expected
+        if payload["policyHash"] != expected:
+            self.log.warning("command rejected: policyHash mismatch (state=%s) — cmd=%s expected=%s",
+                             self.sm.state.value, payload.get("policyHash"), expected)
+            return False
+        return True
 
     async def _handle_command(self, client: httpx.AsyncClient, command: dict) -> None:
         payload = command["payload"]

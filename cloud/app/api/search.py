@@ -464,12 +464,16 @@ def retrieve(body: RetrieveRequest,
 
 @router.get("/retrieve-status/{command_id}")
 def retrieve_status(command_id: str,
-                    principal: security.Principal = Depends(security.require_passkey),
+                    principal: security.Principal = Depends(security.get_principal),
                     tenant: Tenant = Depends(security.get_tenant),
                     db: Session = Depends(get_db)):
     """Poll an appliance recovery command. While the appliance unseals/retrieves
     the command is ``pending``/``delivered``; once it re-seals and returns the
-    content the cloud decrypts and stages it, exposing the recovered item(s)."""
+    content the cloud decrypts and stages it, exposing the recovered item(s).
+
+    Only status metadata is returned here (no protected content), so this does not
+    require passkey step-up — otherwise the 2s poll would hit step-up expiry and
+    the recovery modal would hang instead of showing the outcome."""
     cmd = db.get(ApplianceCommand, command_id)
     if not cmd or cmd.tenant_id != tenant.id:
         raise HTTPException(404, "command not found")
@@ -489,6 +493,10 @@ def retrieve_status(command_id: str,
     message = result.get("message")
     if cmd.status == "expired":
         message = "The appliance did not respond before the recovery command expired."
+    elif cmd.status == "rejected":
+        message = ("The appliance rejected the recovery command. This usually means its "
+                   "pinned control-plane key is stale — it will re-pin on its next heartbeat; "
+                   "try again in a moment.")
     return {
         "status": stage,
         "command_status": cmd.status,

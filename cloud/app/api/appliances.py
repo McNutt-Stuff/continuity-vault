@@ -651,6 +651,7 @@ def heartbeat(body: HeartbeatRequest,
                     len(delivered), appliance.id, delivered_types)
     return {"commands": delivered,
             "latest_version": _appliance_bundle_version(),
+            "control_plane_key_id": fleet.cloud_public_bundle().get("keyId"),
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
 
 
@@ -659,6 +660,23 @@ class CommandResultRequest(BaseModel):
     accepted: bool
     result: dict = {}
     receipt: dict | None = None  # signed seal/attestation receipt
+
+
+@agent_router.get("/control-plane-bundle")
+def control_plane_bundle(appliance: Appliance = Depends(_agent_appliance),
+                         db: Session = Depends(get_db)):
+    """Return the cloud's current command-signing public bundle so an already-
+    linked appliance can re-pin it after a legitimate control-plane key rotation.
+
+    This is the only distribution path for a rotated signing key: commands are
+    signed with the new key and would otherwise fail the appliance's pinned-key
+    check forever. The request is authenticated by the appliance's own bearer
+    token over TLS (same trust channel as activation), and the re-pin is audited."""
+    bundle = fleet.cloud_public_bundle()
+    audit.record(db, actor=f"appliance:{appliance.serial}",
+                 action="appliance.control_plane_retrust", tenant_id=appliance.tenant_id,
+                 resource=appliance.id, detail={"key_id": bundle.get("keyId")})
+    return {"bundle": bundle}
 
 
 @agent_router.post("/command-result")
