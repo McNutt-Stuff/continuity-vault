@@ -10,10 +10,15 @@ attestation, signed commands, and signed receipts (spec 2.1, build-instr 3).
 
 from __future__ import annotations
 
+import hashlib
+import io
 import secrets
+import tarfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -33,8 +38,17 @@ from ..models import (
 settings = get_settings()
 router = APIRouter(tags=["appliances"])
 
-# Prototype appliance-agent bearer tokens issued at activation.
+# In-memory fast path; the durable source of truth is the sha256 hash persisted
+# on the Appliance row, so tokens survive cloud restarts.
 _agent_tokens: dict[str, str] = {}  # token -> appliance_id
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
 
 
 def _now():
@@ -73,6 +87,30 @@ def create_linking_code(body: CreateLinkingCodeRequest,
                  tenant_id=tenant.id, detail={"model": body.model})
     return {"code": code, "expires_at": lc.expires_at.isoformat(),
             "model": body.model, "name": body.name}
+
+
+@fleet_router.post("/installer")
+def appliance_installer(body: CreateLinkingCodeRequest,
+                        principal: security.Principal = Depends(security.require_security_admin),
+                        tenant: Tenant = Depends(security.get_tenant),
+                        db: Session = Depends(get_db)):
+    """Generate a linking code and return a single-line install command that a
+    clean Ubuntu host can run to download, install, and register from the cloud."""
+    code = f"CV-{secrets.token_hex(3).upper()}-{secrets.token_hex(3).upper()}"
+    lc = LinkingCode(
+        tenant_id=tenant.id, code=code, model=body.model, name=body.name,
+        expires_at=_now() + timedelta(seconds=settings.linking_code_ttl_seconds),
+    )
+    db.add(lc)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="appliance.installer_created",
+                 tenant_id=tenant.id, detail={"model": body.model})
+    api = settings.api_base_url.rstrip("/")
+    command = (
+        f'curl -fsSL "{api}/appliance/bootstrap" -o /tmp/arkive-appliance.sh && '
+        f'sudo CV_CLOUD_URL="{api}" CV_LINKING_CODE="{code}" bash /tmp/arkive-appliance.sh'
+    )
+    return {"code": code, "expires_at": lc.expires_at.isoformat(), "command": command}
 
 
 @fleet_router.get("")
@@ -146,17 +184,60 @@ def _appliance_view(a: Appliance) -> dict:
 agent_router = APIRouter(prefix="/appliance", tags=["appliance-agent"])
 
 
+_BUNDLE_DIRS = ("appliance", "shared", "installers", "infra", "updater")
+_BUNDLE_EXCLUDE = (".venv", "__pycache__", "node_modules", ".git", ".pyc", "web/dist")
+
+
+@agent_router.get("/bootstrap")
+def appliance_bootstrap():
+    """Serve the appliance cloud bootstrap installer (no auth — open code)."""
+    path = _repo_root() / "installers" / "appliance-bootstrap.sh"
+    try:
+        return PlainTextResponse(path.read_text())
+    except Exception:
+        raise HTTPException(404, "bootstrap unavailable")
+
+
+@agent_router.get("/bundle")
+def appliance_bundle():
+    """Serve the appliance install bundle (appliance + shared + installers + infra)."""
+    root = _repo_root()
+    buf = io.BytesIO()
+
+    def _filter(ti: tarfile.TarInfo):
+        return None if any(x in ti.name for x in _BUNDLE_EXCLUDE) else ti
+
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for d in _BUNDLE_DIRS:
+            p = root / d
+            if p.exists():
+                tar.add(str(p), arcname=d, filter=_filter)
+        # Stamp a build version so the appliance can detect when to self-update.
+        version = f"{datetime.now(timezone.utc):%Y%m%d.%H%M%S}".encode()
+        vi = tarfile.TarInfo("appliance/VERSION")
+        vi.size = len(version)
+        tar.addfile(vi, io.BytesIO(version))
+    return Response(content=buf.getvalue(), media_type="application/gzip",
+                    headers={"Content-Disposition": "attachment; filename=arkive-appliance.tar.gz"})
+
+
 def _agent_appliance(authorization: str = Header(default=""),
                      db: Session = Depends(get_db)) -> Appliance:
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing appliance token")
     token = authorization.split(" ", 1)[1]
+    a = None
     appliance_id = _agent_tokens.get(token)
-    if not appliance_id:
-        raise HTTPException(401, "invalid appliance token")
-    a = db.get(Appliance, appliance_id)
+    if appliance_id:
+        a = db.get(Appliance, appliance_id)
+    if a is None:
+        # Fall back to the durable hash so tokens survive cloud restarts.
+        a = db.query(Appliance).filter(
+            Appliance.agent_token_hash == _hash_token(token)).first()
+        if a:
+            _agent_tokens[token] = a.id
     if not a:
-        raise HTTPException(404, "appliance not found")
+        raise HTTPException(401, "invalid appliance token")
     return a
 
 
@@ -196,6 +277,8 @@ def activate(body: ActivateRequest, db: Session = Depends(get_db)):
     db.refresh(appliance)
 
     token = secrets.token_urlsafe(32)
+    appliance.agent_token_hash = _hash_token(token)
+    db.commit()
     _agent_tokens[token] = appliance.id
     audit.record(db, actor=f"appliance:{body.serial}", action="appliance.activated",
                  tenant_id=lc.tenant_id, resource=appliance.id)

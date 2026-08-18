@@ -16,6 +16,7 @@ export default function Appliances() {
   const [apps, setApps] = useState<Appliance[]>([]);
   const [selected, setSelected] = useState<Appliance | null>(null);
   const [code, setCode] = useState<string | null>(null);
+  const [installCmd, setInstallCmd] = useState<string | null>(null);
   const [toast, setToast] = useState("");
 
   async function load() {
@@ -37,6 +38,15 @@ export default function Appliances() {
     setCode(res.code);
   }
 
+  async function newInstaller() {
+    const res = await api.post<{ code: string; command: string }>("/appliances/installer", {
+      model: "CV Edge 8",
+      name: "Home Appliance",
+    });
+    setCode(res.code);
+    setInstallCmd(res.command);
+  }
+
   async function command(a: Appliance, command_type: string, parameters: any = {}) {
     await api.post(`/appliances/${a.id}/command`, { command_type, parameters });
     setToast(`${command_type} issued (signed & sequenced)`);
@@ -50,18 +60,44 @@ export default function Appliances() {
         <Card style={{ marginBottom: 16 }}>
           <div className="spread" style={{ marginBottom: 8 }}>
             <h2>Turnkey activation</h2>
-            <button className="btn primary sm" onClick={newCode}>
-              <Icon name="link" size={14} /> Generate linking code
-            </button>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn sm" onClick={newCode}>
+                <Icon name="link" size={14} /> Linking code
+              </button>
+              <button className="btn primary sm" onClick={newInstaller}>
+                <Icon name="server" size={14} /> Install command
+              </button>
+            </div>
           </div>
           <div className="muted" style={{ fontSize: 13 }}>
-            Install the appliance, then enter this one-time linking code on the console. It
-            pulls all configuration and the control-plane trust bundle from the cloud.
+            On a clean Ubuntu host, paste the one-line install command below — it downloads,
+            installs, registers, and enables headless self-updates from the cloud. Or generate
+            just a linking code to enter on a pre-installed appliance console.
           </div>
           {code && (
             <div className="card" style={{ marginTop: 14, textAlign: "center", background: "#0e1421" }}>
               <div className="faint" style={{ fontSize: 12 }}>Linking code (valid 15 min)</div>
               <div className="mono" style={{ fontSize: 26, letterSpacing: 2, margin: "8px 0" }}>{code}</div>
+            </div>
+          )}
+          {installCmd && (
+            <div className="card" style={{ marginTop: 14, background: "#0e1421" }}>
+              <div className="spread" style={{ marginBottom: 6 }}>
+                <div className="faint" style={{ fontSize: 12 }}>One-line install (run as sudo on Ubuntu)</div>
+                <button
+                  className="btn sm"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(installCmd);
+                    setToast("Install command copied");
+                    setTimeout(() => setToast(""), 2500);
+                  }}
+                >
+                  <Icon name="link" size={13} /> Copy
+                </button>
+              </div>
+              <pre className="mono" style={{ fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0 }}>
+                {installCmd}
+              </pre>
             </div>
           )}
         </Card>

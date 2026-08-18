@@ -23,6 +23,9 @@ DATA_DIR="/var/lib/continuity-vault-appliance"
 REPO_SRC="${REPO_SRC:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 CV_USER="cvagent"
 CV_MODEL="${CV_MODEL:-CV Edge 8}"
+# Native liboqs version for real post-quantum crypto (matches the binding ABI).
+LIBOQS_VERSION="${LIBOQS_VERSION:-0.16.0}"
+OQS_PREFIX="/usr/local"
 export DEBIAN_FRONTEND=noninteractive
 
 # --- step implementations ---------------------------------------------------
@@ -54,27 +57,43 @@ install_python() {
   "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip wheel
   "$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR/shared"
   "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/appliance/requirements.txt"
-  "$INSTALL_DIR/.venv/bin/pip" install oqs || true
+}
+
+build_pqcrypto() {
+  ensure_liboqs "$INSTALL_DIR/.venv" "$LIBOQS_VERSION" "$OQS_PREFIX"
 }
 
 validate_app() {
   # Import the agent in a throwaway data dir to surface import errors early.
   cd "$INSTALL_DIR/appliance"
   CVA_DATA_DIR=/tmp/cv_probe_agent \
+  OQS_INSTALL_PATH="$OQS_PREFIX" \
     "$INSTALL_DIR/.venv/bin/python" -c "import agent.main; print('agent import OK')"
   rm -rf /tmp/cv_probe_agent
 }
 
 write_config() {
   mkdir -p /etc/continuity-vault
-  cat > /etc/continuity-vault/appliance.env <<EOF
+  local ver; ver="$(cat "$INSTALL_DIR/appliance/VERSION" 2>/dev/null || echo 1.0.0)"
+  if [[ ! -f /etc/continuity-vault/appliance.env ]]; then
+    cat > /etc/continuity-vault/appliance.env <<EOF
 CVA_CLOUD_BASE_URL=${CV_CLOUD_URL}
 CVA_DATA_DIR=${DATA_DIR}/data
 CVA_LINKING_CODE=${LINKING_CODE}
 CVA_MODEL=${CV_MODEL}
-CVA_SOFTWARE_VERSION=1.0.0
+CVA_SOFTWARE_VERSION=${ver}
 CVA_REQUIRE_LOCAL_RECOVERY_APPROVAL=true
 EOF
+  else
+    # Preserve the existing config (e.g. the consumed linking code); only refresh
+    # the cloud URL and the deployed version on re-runs / self-updates.
+    sed -i "s#^CVA_CLOUD_BASE_URL=.*#CVA_CLOUD_BASE_URL=${CV_CLOUD_URL}#" /etc/continuity-vault/appliance.env
+    if grep -q '^CVA_SOFTWARE_VERSION=' /etc/continuity-vault/appliance.env; then
+      sed -i "s#^CVA_SOFTWARE_VERSION=.*#CVA_SOFTWARE_VERSION=${ver}#" /etc/continuity-vault/appliance.env
+    else
+      echo "CVA_SOFTWARE_VERSION=${ver}" >> /etc/continuity-vault/appliance.env
+    fi
+  fi
   chmod 600 /etc/continuity-vault/appliance.env
   chown -R "$CV_USER":"$CV_USER" "$INSTALL_DIR" "$DATA_DIR" /etc/continuity-vault
 }
@@ -84,6 +103,15 @@ install_service() {
   systemctl daemon-reload
   systemctl enable cv-appliance-agent.service
   systemctl restart cv-appliance-agent.service
+}
+
+install_selfupdate() {
+  # Headless self-update: a timer periodically pulls the cloud bundle and
+  # re-installs when the version changed (no git required).
+  cp "$INSTALL_DIR/infra/systemd/cv-appliance-selfupdate.service" /etc/systemd/system/
+  cp "$INSTALL_DIR/infra/systemd/cv-appliance-selfupdate.timer" /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable --now cv-appliance-selfupdate.timer
 }
 
 verify_agent() {
@@ -111,10 +139,16 @@ fi
 step "Installing system packages"          install_os_deps
 step "Creating service user & directories" create_user_dirs
 step_always "Copying application files"    sync_code
-step "Installing appliance agent"          install_python
+step_if_changed "Installing appliance agent" \
+  "$INSTALL_DIR/appliance/requirements.txt $INSTALL_DIR/shared $INSTALL_DIR/.venv/pyvenv.cfg" \
+  install_python
+step_if_changed "Building quantum-safe crypto (liboqs)" \
+  "$INSTALL_DIR/shared $INSTALL_DIR/.venv/.pq-ok" \
+  build_pqcrypto
 step_always "Validating agent"             validate_app
 step_always "Writing appliance configuration" write_config
 step_always "Starting appliance agent"     install_service
+step_always "Enabling headless self-update" install_selfupdate
 step_always "Verifying activation with cloud" verify_agent
 
 finish

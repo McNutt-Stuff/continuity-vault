@@ -1,0 +1,8 @@
+[Unit]
+Description=Arkive Appliance headless self-update (cloud pull)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/continuity-vault/installers/appliance-update.sh

@@ -95,6 +95,27 @@ sudo CV_CLOUD_URL=https://vault.arkive.life/api \
      CV_LINKING_CODE=CV-XXXX-YYYY ./installers/appliance-install.sh
 ```
 
+### Cloud one-line install (clean Ubuntu, no repo copy, no git)
+
+In the portal: **Appliances → Install command**. Copy the generated one-liner and
+run it on a clean Ubuntu host — it downloads the appliance bundle from the cloud,
+installs, registers, and enables headless self-update:
+
+```bash
+curl -fsSL "https://vault.arkive.life/api/appliance/bootstrap" -o /tmp/arkive-appliance.sh && \
+  sudo CV_CLOUD_URL="https://vault.arkive.life/api" CV_LINKING_CODE="CV-XXXX-YYYY" \
+  bash /tmp/arkive-appliance.sh
+```
+
+**Headless self-update:** the installer enables a `cv-appliance-selfupdate.timer`
+that periodically pulls the cloud bundle and re-installs **only when the version
+changed** (no git, no operator action). Check it with:
+
+```bash
+systemctl status cv-appliance-selfupdate.timer --no-pager
+journalctl -u cv-appliance-selfupdate.service -n 30 --no-pager
+```
+
 **Verify (on the appliance):**
 
 ```bash
@@ -184,7 +205,8 @@ server:
 The installer builds the native **liboqs** library and installs the real
 `liboqs-python` binding, then verifies that ML-KEM-768 and ML-DSA-65 are
 available. Hybrid envelopes and command signatures then use genuine
-post-quantum primitives (X25519+ML-KEM, Ed25519+ML-DSA).
+post-quantum primitives (X25519+ML-KEM, Ed25519+ML-DSA). The appliance installer
+does the same so signing/verification is quantum-safe end to end.
 
 - If the liboqs build cannot complete on the host, the install **aborts** rather
   than silently downgrading. To proceed with the clearly-flagged classical

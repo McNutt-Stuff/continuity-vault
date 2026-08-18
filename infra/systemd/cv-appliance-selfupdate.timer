@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Arkive appliance self-update periodically
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

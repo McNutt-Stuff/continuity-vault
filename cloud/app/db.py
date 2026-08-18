@@ -44,6 +44,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE search_documents ADD COLUMN category VARCHAR",
         "ALTER TABLE linking_codes ADD COLUMN kind VARCHAR DEFAULT 'appliance'",
         "ALTER TABLE desktop_agents ADD COLUMN agent_token_hash VARCHAR",
+        "ALTER TABLE appliances ADD COLUMN agent_token_hash VARCHAR",
     ]
     for statement in statements:
         try:

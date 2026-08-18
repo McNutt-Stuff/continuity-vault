@@ -176,6 +176,7 @@ class Appliance(Base):
     identity_bundle = Column(JSON, nullable=True)
     # Cloud's signer public bundle the appliance uses to verify commands.
     telemetry = Column(JSON, default=dict)  # capacity, drives, power, temp
+    agent_token_hash = Column(String, nullable=True, index=True)  # sha256 of bearer token
     command_sequence = Column(Integer, default=0)
     created_at = Column(DateTime, default=_now)
 

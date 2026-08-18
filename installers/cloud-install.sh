@@ -105,66 +105,8 @@ install_python() {
 
 # True when the real liboqs binding is importable and the required algorithms
 # are available (i.e. genuine post-quantum crypto, not the classical fallback).
-pq_selftest() {
-  OQS_INSTALL_PATH="$OQS_PREFIX" "$INSTALL_DIR/.venv/bin/python" - <<'PY'
-import sys
-try:
-    import oqs
-    oqs.KeyEncapsulation("ML-KEM-768")
-    oqs.Signature("ML-DSA-65")
-except BaseException as e:  # SystemExit on load failure, too
-    print("pq_selftest error:", repr(e), file=sys.stderr)
-    sys.exit(1)
-print("pq_selftest OK")
-PY
-}
-
 build_pqcrypto() {
-  if pq_selftest; then
-    echo "liboqs-python already functional (real post-quantum crypto active)"
-    return 0
-  fi
-
-  # The unrelated PyPI package literally named 'oqs' shadows the real binding.
-  "$INSTALL_DIR/.venv/bin/pip" uninstall -y oqs 2>/dev/null || true
-
-  apt-get install -y cmake ninja-build gcc g++ libssl-dev git
-
-  # (Re)build & install the native liboqs at the pinned version. We only get
-  # here when the self-test failed, so always install to guarantee the native
-  # library matches the liboqs-python binding ABI (a stale mismatched lib is the
-  # usual cause of failure). cmake --install overwrites in place.
-  local src="/opt/liboqs-src"
-  rm -rf "$src"
-  git clone --depth 1 --branch "$LIBOQS_VERSION" \
-    https://github.com/open-quantum-safe/liboqs.git "$src"
-  cmake -S "$src" -B "$src/build" -GNinja \
-    -DBUILD_SHARED_LIBS=ON -DOQS_BUILD_ONLY_LIB=ON \
-    -DCMAKE_INSTALL_PREFIX="$OQS_PREFIX"
-  cmake --build "$src/build" --parallel
-  cmake --install "$src/build"
-  ldconfig
-
-  # Install the real Open Quantum Safe Python binding (imports as 'oqs') at the
-  # SAME version as the native library so it loads our /usr/local liboqs.
-  "$INSTALL_DIR/.venv/bin/pip" install --force-reinstall --no-deps \
-    "liboqs-python==${LIBOQS_VERSION}" \
-    || "$INSTALL_DIR/.venv/bin/pip" install \
-         "git+https://github.com/open-quantum-safe/liboqs-python.git@${LIBOQS_VERSION}"
-
-  if pq_selftest; then
-    echo "liboqs OK — ML-KEM-768 / ML-DSA-65 available (quantum-safe active)"
-    return 0
-  fi
-
-  echo "!! liboqs verification FAILED — real post-quantum crypto is NOT active."
-  if [[ "${CV_ALLOW_CLASSICAL_FALLBACK:-0}" == "1" ]]; then
-    echo "CV_ALLOW_CLASSICAL_FALLBACK=1 set; continuing with the flagged classical fallback."
-    return 0
-  fi
-  echo "Refusing to continue without quantum-safe crypto."
-  echo "Set CV_ALLOW_CLASSICAL_FALLBACK=1 to install anyway (NOT quantum-safe)."
-  return 1
+  ensure_liboqs "$INSTALL_DIR/.venv" "$LIBOQS_VERSION" "$OQS_PREFIX"
 }
 
 build_web() {
@@ -276,9 +218,15 @@ step "Installing Caddy (Let's Encrypt)"    install_caddy
 step "Creating service user & directories" create_user_dirs
 step_always "Copying application files"    sync_code
 step_always "Configuring PostgreSQL database" setup_database
-step_always "Installing Python control plane" install_python
-step_always "Building quantum-safe crypto (liboqs)" build_pqcrypto
-step_always "Building web portal"          build_web
+step_if_changed "Installing Python control plane" \
+  "$INSTALL_DIR/cloud/requirements.txt $INSTALL_DIR/shared $INSTALL_DIR/.venv/pyvenv.cfg" \
+  install_python
+step_if_changed "Building quantum-safe crypto (liboqs)" \
+  "$INSTALL_DIR/shared $INSTALL_DIR/.venv/.pq-ok" \
+  build_pqcrypto
+step_if_changed "Building web portal" \
+  "$INSTALL_DIR/web/src $INSTALL_DIR/web/package.json $INSTALL_DIR/web/index.html $INSTALL_DIR/web/vite.config.ts $INSTALL_DIR/web/tsconfig.json $INSTALL_DIR/web/tsconfig.node.json $INSTALL_DIR/web/dist/index.html" \
+  build_web
 step_always "Validating application"       validate_app
 step_always "Writing configuration"        write_env
 step_always "Starting control-plane service" install_service

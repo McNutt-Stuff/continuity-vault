@@ -129,7 +129,112 @@ step_always() {
   return $rc
 }
 
+# A content fingerprint of the given files/dirs (build inputs). Excludes derived
+# and vendored trees so only real source changes matter.
+_fingerprint() {
+  {
+    local p
+    for p in "$@"; do
+      if [[ -d "$p" ]]; then
+        find "$p" -type f \
+          -not -path '*/node_modules/*' -not -path '*/.venv/*' \
+          -not -path '*/dist/*' -not -path '*/__pycache__/*' \
+          -not -name '*.pyc' 2>/dev/null
+      elif [[ -e "$p" ]]; then
+        echo "$p"
+      fi
+    done | LC_ALL=C sort | while IFS= read -r f; do
+      sha256sum "$f" 2>/dev/null
+    done
+  } | sha256sum | awk '{print $1}'
+}
+
+# step_if_changed "Description" "path1 path2 ..." command [args...]
+# Runs the command only when the fingerprint of the given input paths changed
+# since the last successful run (or when CV_FORCE=1). Use for expensive,
+# input-driven steps (web build, dependency install) so unchanged redeploys skip
+# them. Keep cheap steps as step_always.
+step_if_changed() {
+  local desc="$1" paths="$2"; shift 2
+  local slug hashfile newhash
+  slug="$(_slug "$desc")"
+  hashfile="$STATE_DIR/$slug.inputhash"
+  # shellcheck disable=SC2086
+  newhash="$(_fingerprint $paths)"
+  if [[ "${CV_FORCE:-0}" != "1" && -f "$hashfile" && "$(cat "$hashfile" 2>/dev/null)" == "$newhash" ]]; then
+    _STEP_NO=$((_STEP_NO + 1))
+    printf "  %s✓%s %s %s(unchanged)%s\n" "$GREEN" "$RESET" "$desc" "$DIM" "$RESET"
+    return 0
+  fi
+  step_always "$desc" "$@"
+  local rc=$?
+  [[ $rc -eq 0 ]] && printf '%s' "$newhash" > "$hashfile"
+  return $rc
+}
+
 note() { printf "  %s%s%s\n" "$DIM" "$1" "$RESET"; }
+
+# Verify genuine post-quantum crypto in a venv. Args: python_bin oqs_prefix.
+pq_selftest() {
+  OQS_INSTALL_PATH="$2" "$1" - <<'PY' 2>&1
+import sys
+try:
+    import oqs
+    oqs.KeyEncapsulation("ML-KEM-768")
+    oqs.Signature("ML-DSA-65")
+except BaseException as e:
+    print("pq_selftest error:", repr(e))
+    sys.exit(1)
+print("pq_selftest OK")
+PY
+}
+
+# Ensure real liboqs + liboqs-python (same version) in a venv, verifying ML-KEM
+# and ML-DSA. Writes a .pq-ok marker on success. Honors CV_ALLOW_CLASSICAL_FALLBACK.
+# Args: venv_dir liboqs_version [install_prefix]
+ensure_liboqs() {
+  local venv="$1" version="$2" prefix="${3:-/usr/local}"
+  local pip="$venv/bin/pip" py="$venv/bin/python" mark="$venv/.pq-ok"
+
+  if pq_selftest "$py" "$prefix"; then
+    printf '%s' "$version" > "$mark"
+    echo "liboqs already functional (real post-quantum crypto active)"
+    return 0
+  fi
+
+  # The unrelated PyPI package named 'oqs' shadows the real binding.
+  "$pip" uninstall -y oqs 2>/dev/null || true
+  apt-get install -y cmake ninja-build gcc g++ libssl-dev git
+
+  # (Re)build native liboqs at the pinned version so its ABI matches the binding.
+  local src="/opt/liboqs-src"
+  rm -rf "$src"
+  git clone --depth 1 --branch "$version" \
+    https://github.com/open-quantum-safe/liboqs.git "$src"
+  cmake -S "$src" -B "$src/build" -GNinja \
+    -DBUILD_SHARED_LIBS=ON -DOQS_BUILD_ONLY_LIB=ON -DCMAKE_INSTALL_PREFIX="$prefix"
+  cmake --build "$src/build" --parallel
+  cmake --install "$src/build"
+  ldconfig
+
+  "$pip" install --force-reinstall --no-deps "liboqs-python==${version}" \
+    || "$pip" install "git+https://github.com/open-quantum-safe/liboqs-python.git@${version}"
+
+  if pq_selftest "$py" "$prefix"; then
+    printf '%s' "$version" > "$mark"
+    echo "liboqs OK — ML-KEM-768 / ML-DSA-65 available (quantum-safe active)"
+    return 0
+  fi
+
+  echo "!! liboqs verification FAILED — real post-quantum crypto is NOT active."
+  if [[ "${CV_ALLOW_CLASSICAL_FALLBACK:-0}" == "1" ]]; then
+    echo "CV_ALLOW_CLASSICAL_FALLBACK=1 set; continuing with the flagged classical fallback."
+    return 0
+  fi
+  echo "Refusing to continue without quantum-safe crypto."
+  echo "Set CV_ALLOW_CLASSICAL_FALLBACK=1 to install anyway (NOT quantum-safe)."
+  return 1
+}
 
 finish() {
   local url="${1:-}"
