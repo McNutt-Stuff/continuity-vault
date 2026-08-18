@@ -37,7 +37,9 @@ from .errors import CryptoError
 try:  # pragma: no cover - depends on host
     import oqs  # type: ignore
 
-    _OQS_AVAILABLE = True
+    # A bare `import oqs` can resolve to the unrelated PyPI `oqs` package, which
+    # lacks the liboqs API. Only treat PQ as available if the real API is present.
+    _OQS_AVAILABLE = hasattr(oqs, "KeyEncapsulation") and hasattr(oqs, "Signature")
 except Exception:  # pragma: no cover
     oqs = None  # type: ignore
     _OQS_AVAILABLE = False

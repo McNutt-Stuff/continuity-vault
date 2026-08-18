@@ -6,4 +6,4 @@ httpx>=0.27.0
 cryptography>=42.0.0
 argon2-cffi>=23.1.0
 # Post-quantum primitives via liboqs (optional, see cloud/requirements.txt).
-# oqs>=0.10.0
+# liboqs-python>=0.10.0  (NOT the unrelated PyPI package named `oqs`)

@@ -15,4 +15,6 @@ webauthn>=2.1.0,<3
 # pyicloud>=1.0.0
 # Post-quantum primitives (ML-KEM / ML-DSA / SLH-DSA) via liboqs.
 # Optional: the prototype runs without it using a clearly-flagged fallback.
-# oqs>=0.10.0
+# The Open Quantum Safe Python binding is `liboqs-python` (imports as `oqs`) and
+# requires the native liboqs library. The PyPI package named `oqs` is UNRELATED.
+# liboqs-python>=0.10.0

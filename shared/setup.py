@@ -12,7 +12,10 @@ setup(
     ],
     extras_require={
         # Post-quantum primitives via liboqs. Optional so the prototype runs
-        # without native deps; install for real quantum-safe operation.
-        "pq": ["oqs>=0.10.0"],
+        # without native deps; install for real quantum-safe operation. NOTE: the
+        # PyPI package literally named `oqs` is a DIFFERENT, unrelated project —
+        # the Open Quantum Safe binding is `liboqs-python` (also imports as `oqs`)
+        # and needs the native liboqs library.
+        "pq": ["liboqs-python>=0.10.0"],
     },
 )
