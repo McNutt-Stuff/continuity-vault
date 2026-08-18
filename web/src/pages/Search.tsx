@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, bytes, timeAgo } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
+import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { notify } from "../components/dialog";
 
 interface Result {
@@ -156,11 +157,20 @@ export default function Search() {
           All sources {data && `· ${data.total_indexed}`}
         </span>
         {data &&
-          Object.entries(data.facets.source).map(([s, n]) => (
-            <span key={s} className={`chip ${source === s ? "active" : ""}`} onClick={() => setSource(s)}>
-              {SOURCE_META[s]?.label ?? s} · {n}
-            </span>
-          ))}
+          Object.entries(data.facets.source).map(([s, n]) => {
+            const sm = SOURCE_META[s] ?? { color: "#9aa7bf", icon: "database" as IconName, label: s };
+            const brand = brandForSource(s);
+            return (
+              <span key={s} className={`chip ${source === s ? "active" : ""}`}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+                onClick={() => setSource(source === s ? null : s)}>
+                {brand
+                  ? <BrandIcon name={brand} size={14} />
+                  : <span style={{ color: sm.color, display: "inline-flex" }}><Icon name={sm.icon} size={13} /></span>}
+                {sm.label} · {n}
+              </span>
+            );
+          })}
       </div>
 
       {data && Object.keys(data.facets.label).length > 0 && (
@@ -186,15 +196,22 @@ export default function Search() {
 
       {data?.results.map((r) => {
         const sm = SOURCE_META[r.source_type] ?? { color: "#1a2234", icon: "database" as IconName, label: r.source_type };
+        const brand = brandForSource(r.source_type);
         return (
-          <div key={r.object_id} className="result-row">
-            <div className="result-icon" style={{ background: sm.color }}>
-              <Icon name={sm.icon} size={18} />
+          <div key={`${r.source_type}:${r.object_id}`} className="result-row">
+            <div className="result-icon" style={{ background: brand ? "#0e1524" : sm.color }}>
+              {brand ? <BrandIcon name={brand} size={20} /> : <Icon name={sm.icon} size={18} />}
             </div>
             <div className="flex1">
-              <div style={{ fontWeight: 600 }}>{r.title}</div>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <span style={{ fontWeight: 600 }}>{r.title}</span>
+                <span className="src-tag" style={{ borderColor: sm.color, color: sm.color }}>
+                  {brand ? <BrandIcon name={brand} size={11} /> : <Icon name={sm.icon} size={11} />}
+                  {sm.label}
+                </span>
+              </div>
               <div className="faint" style={{ fontSize: 12.5 }}>
-                {r.preview || <span className="faint">metadata hidden (zero-knowledge vault)</span>}
+                {r.preview || <span className="faint">no indexed metadata for this object</span>}
               </div>
               {r.labels && r.labels.length > 0 && (
                 <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>

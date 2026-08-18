@@ -28,7 +28,7 @@ from cv_crypto.envelope import EnvelopeKeyHierarchy, encrypt_object
 from cv_crypto.provider import hexdigest
 from cv_crypto.signing import HybridSigner
 
-from .. import audit, credstore, fleet, keybroker, taxonomy
+from .. import audit, credstore, fleet, keybroker
 from ..connectors import get_connector
 from ..connectors import oauth
 from ..models import (
@@ -43,6 +43,58 @@ from ..storage import build_destination
 
 # The cloud manifest signer (distinct from the fleet command signer).
 from ..fleet import fleet_signer
+
+
+# Nice, human labels for common discrete metadata keys shown in search.
+_META_LABELS = {
+    "from": "From", "to": "To", "folder": "Folder", "labels": "Labels",
+    "tags": "Tags", "vault": "Vault", "kind": "Type", "url": "URL",
+    "username": "Username", "path": "Path", "mime": "Type", "party": "Party",
+    "sender": "From", "recipient": "To", "account": "Account",
+}
+
+
+def _pretty_key(key: str) -> str:
+    return _META_LABELS.get(key, key.replace("_", " ").capitalize())
+
+
+def _fmt_value(value) -> str:
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(str(v) for v in value if v not in (None, ""))
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
+
+
+def _discrete_metadata(meta: dict, display_keys: List[str]) -> dict:
+    """Keep only the connector-declared discrete keys that have a value. When a
+    connector declares no fields, index nothing derived (title-only search)."""
+    out: dict = {}
+    for k in display_keys:
+        v = (meta or {}).get(k)
+        if v in (None, "", [], {}):
+            continue
+        out[k] = v
+    return out
+
+
+def _flatten_values(meta: dict) -> List[str]:
+    parts: List[str] = []
+    for v in (meta or {}).values():
+        if isinstance(v, (list, tuple, set)):
+            parts.extend(str(x) for x in v if x not in (None, ""))
+        elif isinstance(v, dict):
+            parts.extend(f"{k} {val}" for k, val in v.items())
+        elif v not in (None, ""):
+            parts.append(str(v))
+    return parts
+
+
+def _compose_preview(meta: dict, max_fields: int = 4) -> str:
+    """A compact, non-content summary like 'From: a@b.com · Folder: Inbox'."""
+    bits = [f"{_pretty_key(k)}: {_fmt_value(v)}"
+            for k, v in list(meta.items())[:max_fields]]
+    return " · ".join(bits)
 
 
 def _resolve_appliance(db: Session, tenant_id: str, kind: str) -> Optional[Appliance]:
@@ -76,7 +128,8 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
     objects = list(connector.fetch(label, config=config).objects)
 
     receipt = ingest_objects(db, collection, objects, destinations,
-                             searchable_fields=caps.searchable_fields, actor="sync-worker")
+                             searchable_fields=caps.searchable_fields,
+                             facet_fields=caps.facet_fields, actor="sync-worker")
     if account:
         account.last_sync_at = datetime.now(timezone.utc)
         db.commit()
@@ -86,6 +139,7 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
 def ingest_objects(db: Session, collection: Collection, source_objects,
                    destinations: Optional[List[str]] = None,
                    searchable_fields: Optional[List[str]] = None,
+                   facet_fields: Optional[List[str]] = None,
                    actor: str = "ingest") -> SnapshotReceipt:
     """Encrypt, snapshot, index, and store a set of normalized source objects.
 
@@ -94,7 +148,13 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     """
     vault = db.get(Vault, collection.vault_id)
     zero_knowledge = vault.key_ownership_model == "zero-knowledge"
-    searchable_fields = searchable_fields or ["*"]
+    # Only the discrete metadata fields the connector declares are indexed or
+    # shown in search — never the object's body/content. facet_fields come first
+    # (they are the most identifying), then any extra searchable metadata keys.
+    display_keys: List[str] = []
+    for k in [*(facet_fields or []), *(searchable_fields or [])]:
+        if k and k != "*" and k not in display_keys:
+            display_keys.append(k)
 
     root_key = keybroker.release_vault_root_key(vault.id)
     hierarchy = EnvelopeKeyHierarchy(root_key)
@@ -110,11 +170,19 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         enc["plaintextBytes"] = src.size_bytes
         encrypted_objects.append(enc)
         total_bytes += src.size_bytes
-        # Restricted categories (credentials, identity) never index derived
-        # content — only the title and non-secret metadata.
-        allow_preview = not zero_knowledge and taxonomy.index_preview(src.category)
-        search_blob = src.searchable_text(searchable_fields) if allow_preview \
-            else ("" if zero_knowledge else src.title)
+        # Index only discrete, connector-declared metadata — no body/content. The
+        # preview is a composed "Field: value" summary of that metadata (empty for
+        # zero-knowledge vaults, which index the title only).
+        if zero_knowledge:
+            discrete_meta: dict = {}
+            preview = ""
+            search_blob = ""
+        else:
+            discrete_meta = _discrete_metadata(src.meta, display_keys)
+            preview = _compose_preview(discrete_meta)
+            search_blob = " ".join(
+                [src.title, *(src.labels or []), *_flatten_values(discrete_meta)]
+            ).strip()
         index_rows.append(
             SearchDocument(
                 tenant_id=collection.tenant_id,
@@ -126,9 +194,9 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                 doc_type=src.doc_type,
                 category=src.category,
                 title=src.title,
-                preview="" if not allow_preview else src.preview,
-                meta={} if zero_knowledge else src.meta,
-                labels=[] if zero_knowledge else src.labels,
+                preview=preview,
+                meta=discrete_meta,
+                labels=[] if zero_knowledge else (src.labels or []),
                 search_blob=search_blob,
                 size_bytes=src.size_bytes,
                 modified_at=src.modified_at,

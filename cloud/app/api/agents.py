@@ -453,12 +453,16 @@ def ingest(body: AgentIngest, agent: DesktopAgent = Depends(_auth_agent),
     dests = (body.destinations or collection.destinations
              or agent.config.get("destinations") or ["cv-cloud"])
     searchable = None
+    facets = None
     conn = get_connector(body.source_type)
     if conn:
-        searchable = conn.capabilities().searchable_fields
+        caps = conn.capabilities()
+        searchable = caps.searchable_fields
+        facets = caps.facet_fields
 
     receipt = ingest_objects(db, collection, source_objects, dests,
-                             searchable_fields=searchable, actor=f"agent:{agent.hostname}")
+                             searchable_fields=searchable, facet_fields=facets,
+                             actor=f"agent:{agent.hostname}")
     agent.last_collection_at = _now()
     db.commit()
     audit.record(db, actor=f"agent:{agent.hostname}", action="agent.ingest",

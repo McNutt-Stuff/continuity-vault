@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, timeAgo } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
+import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, formDialog, notify } from "../components/dialog";
 
 interface CatalogItem {
@@ -203,8 +204,10 @@ export default function Connectors() {
             <div key={c.type} className="dest-card" onClick={() => connect(c)}>
               <div className="spread" style={{ marginBottom: 10 }}>
                 <div className="row">
-                  <div className="result-icon" style={{ background: c.color, width: 34, height: 34 }}>
-                    <Icon name={c.icon as IconName} size={17} />
+                  <div className="result-icon" style={{ background: brandForSource(c.type) ? "#0e1524" : c.color, width: 34, height: 34 }}>
+                    {brandForSource(c.type)
+                      ? <BrandIcon name={brandForSource(c.type)!} size={19} />
+                      : <Icon name={c.icon as IconName} size={17} />}
                   </div>
                   <div>
                     <div style={{ fontWeight: 650 }}>{c.displayName}</div>
@@ -263,8 +266,10 @@ export default function Connectors() {
           const c = catalog.find((x) => x.type === a.connector_type);
           return (
             <div key={a.id} className="result-row">
-              <div className="result-icon" style={{ background: c?.color ?? "#1a2234" }}>
-                <Icon name={(c?.icon as IconName) ?? "database"} size={17} />
+              <div className="result-icon" style={{ background: brandForSource(a.connector_type) ? "#0e1524" : (c?.color ?? "#1a2234") }}>
+                {brandForSource(a.connector_type)
+                  ? <BrandIcon name={brandForSource(a.connector_type)!} size={18} />
+                  : <Icon name={(c?.icon as IconName) ?? "database"} size={17} />}
               </div>
               <div className="flex1">
                 <div style={{ fontWeight: 600 }}>{a.account_label}</div>
