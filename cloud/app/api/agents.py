@@ -186,7 +186,8 @@ def _agent_view(a: DesktopAgent) -> dict:
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
 
 
-def _auth_agent(db: Session, authorization: str = Header(default="")) -> DesktopAgent:
+def _auth_agent(authorization: str = Header(default=""),
+                db: Session = Depends(get_db)) -> DesktopAgent:
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing agent token")
     agent_id = _agent_tokens.get(authorization.split(" ", 1)[1])
