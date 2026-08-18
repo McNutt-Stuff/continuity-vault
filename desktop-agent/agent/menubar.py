@@ -14,6 +14,7 @@ import time
 
 from .config import Config
 from .main import Agent
+from . import status_ui
 
 
 def _agent_loop(agent: Agent, on_status) -> None:
@@ -54,6 +55,7 @@ def run() -> None:
             super().__init__("Arkive", quit_button=None)
             self.status_item = rumps.MenuItem("Starting…")
             self.menu = [self.status_item, None,
+                         rumps.MenuItem("Agent Status…", callback=self.show_status),
                          rumps.MenuItem("Sync now", callback=self.sync),
                          rumps.MenuItem("Open logs", callback=self.logs), None,
                          rumps.MenuItem("Quit", callback=self.quit)]
@@ -62,6 +64,14 @@ def run() -> None:
 
         def _set_status(self, text: str):
             self.status_item.title = text
+
+        def show_status(self, _):
+            try:
+                path = cfg.data_dir / "status.html"
+                path.write_text(status_ui.render(agent.status_snapshot()))
+                subprocess.Popen(["open", str(path)])
+            except Exception as exc:
+                rumps.notification("Arkive", "Could not open status", str(exc))
 
         def sync(self, _):
             try:

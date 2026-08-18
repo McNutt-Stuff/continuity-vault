@@ -111,8 +111,6 @@ export default function Agents() {
               </div>
               {a.telemetry?.op_available === false
                 ? <Pill tone="warn">op CLI missing</Pill>
-                : a.telemetry?.op_auth === "unauthenticated"
-                ? <Pill tone="warn">1Password not signed in</Pill>
                 : <Pill tone="ok">healthy</Pill>}
             </div>
             <div className="grid grid-3" style={{ marginTop: 12 }}>
@@ -193,8 +191,10 @@ function AgentStatusModal({
   const t = agent.telemetry || {};
   const crypto = t.crypto || {};
   const online = heartbeatTone(agent.last_heartbeat_at);
-  const opTone: "ok" | "warn" | "danger" =
-    t.op_available === false ? "danger" : t.op_auth === "unauthenticated" ? "warn" : "ok";
+  const opState: "missing" | "interactive" | "ready" =
+    t.op_available === false ? "missing" : t.op_auth === "unauthenticated" ? "interactive" : "ready";
+  const opTone: "ok" | "info" | "danger" =
+    opState === "missing" ? "danger" : opState === "interactive" ? "info" : "ok";
   const logs: string[] = Array.isArray(t.recent_logs) ? t.recent_logs : [];
 
   return (
@@ -238,24 +238,23 @@ function AgentStatusModal({
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 13 }}>1Password (op CLI)</div>
                   <div className="faint" style={{ fontSize: 11.5 }}>
-                    {t.op_available === false
+                    {opState === "missing"
                       ? "CLI not installed"
-                      : t.op_auth === "unauthenticated"
-                      ? "installed · not authenticated"
+                      : opState === "interactive"
+                      ? "installed · collects interactively"
                       : `installed · ${t.op_auth || "ready"}`}
                   </div>
                 </div>
               </div>
               <Pill tone={opTone}>
-                {opTone === "ok" ? "ready" : opTone === "warn" ? "needs sign-in" : "missing"}
+                {opState === "missing" ? "missing" : opState === "interactive" ? "interactive only" : "ready"}
               </Pill>
             </div>
-            {t.op_auth === "unauthenticated" && (
+            {opState === "interactive" && (
               <div className="hint-box">
-                Background collection needs a <b>1Password service-account token</b>
-                (the app CLI integration can't be approved unattended). Add a token and
-                re-run the installer, or run <span className="mono">Collect now</span> while
-                the 1Password app is unlocked.
+                1Password collects <b>interactively</b>: open and unlock the 1Password app,
+                then use the agent’s <span className="mono">Sync now</span>. Unattended
+                background collection requires a 1Password service account (Business plan).
               </div>
             )}
             <div className="grid grid-3" style={{ marginTop: 10 }}>

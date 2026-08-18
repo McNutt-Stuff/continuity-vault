@@ -63,7 +63,9 @@ class Agent:
         self.log = agent_log.setup_logging(cfg.log_file)
         self.reg = self._load_registration()
         self._last_collect = 0.0
+        self._last_heartbeat = 0.0
         self._last_update_attempt = 0.0
+        self._last_telemetry: dict = {}
         self._agent_key: Optional[bytes] = None
 
     @property
@@ -154,14 +156,29 @@ class Agent:
                   **extra}
         self.cfg.status_file.write_text(json.dumps(status, indent=2))
 
+    def status_snapshot(self) -> dict:
+        """Structured status for the menu-bar UI."""
+        return {
+            "name": (self.reg or {}).get("name") or socket.gethostname(),
+            "agent_id": (self.reg or {}).get("agent_id"),
+            "registered": self.registered,
+            "cloud_url": self.cfg.cloud_base_url,
+            "version": self.cfg.version,
+            "last_heartbeat_epoch": self._last_heartbeat,
+            "last_collect_epoch": self._last_collect,
+            "telemetry": self._last_telemetry or self.telemetry(),
+        }
+
     # -- heartbeat + commands -----------------------------------------
 
     def heartbeat(self) -> dict:
-        body = {"state": "active", "version": self.cfg.version,
-                "telemetry": self.telemetry()}
+        tel = self.telemetry()
+        self._last_telemetry = tel
+        body = {"state": "active", "version": self.cfg.version, "telemetry": tel}
         r = httpx.post(f"{self.cfg.cloud_base_url}/agent/heartbeat",
                        json=body, headers=self._headers(), timeout=30)
         r.raise_for_status()
+        self._last_heartbeat = time.time()
         data = r.json()
         self.reg["config"] = data.get("config", self.reg.get("config", {}))
         self.cfg.registration_file.write_text(json.dumps(self.reg))
@@ -220,6 +237,14 @@ class Agent:
             if not onepassword.available():
                 self.log.warning("collector %s: op CLI not installed", name)
                 results.append({"collector": name, "error": "op CLI not installed"})
+                continue
+            # 1Password app integration can't be approved unattended and service
+            # accounts need a Business plan — if not authenticated, skip quietly
+            # (only collect when a token is present or the app authorizes it).
+            if onepassword.auth_state(self.cfg.op_service_account_token) == "unauthenticated":
+                self.log.info("collector %s skipped: 1Password not authenticated "
+                              "(interactive sign-in or service-account token required)", name)
+                results.append({"collector": name, "skipped": "not authenticated"})
                 continue
             try:
                 objects = onepassword.collect(self.cfg.op_service_account_token)
