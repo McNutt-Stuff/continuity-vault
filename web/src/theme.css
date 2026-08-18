@@ -197,3 +197,17 @@ h3 { font-size: 15px; }
   padding: 12px; background: rgba(0,0,0,.28); border: 1px solid var(--border-soft); border-radius: 10px; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
+
+/* Promise-based confirm/prompt/notify dialogs */
+.dialog-panel { width: min(460px, 100%); }
+.dialog-head { display: flex; align-items: center; gap: 12px; padding: 18px 20px 4px; }
+.dialog-icon { display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 10px; flex: none; }
+.dialog-icon.info { color: var(--brand); background: rgba(79,124,255,.12); }
+.dialog-icon.ok { color: #2fbf88; background: rgba(47,191,136,.12); }
+.dialog-icon.warn { color: #f5a623; background: rgba(245,166,35,.12); }
+.dialog-icon.danger { color: var(--danger-c); background: rgba(242,84,91,.12); }
+.dialog-title { font-size: 15px; font-weight: 700; }
+.dialog-body { padding-top: 10px; }
+.dialog-message { font-size: 13.5px; line-height: 1.55; color: var(--text-dim); white-space: pre-wrap; }
+.dialog-foot { justify-content: flex-end; }

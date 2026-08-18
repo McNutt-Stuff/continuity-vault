@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from .. import audit, security
 from ..db import get_db
-from ..models import Collection, ConnectorAccount, Tenant, Vault
+from ..models import Collection, ConnectorAccount, SearchDocument, SnapshotReceipt, Tenant, Vault
 from ..workers.sync_worker import run_backup
 
 router = APIRouter(prefix="/collections", tags=["collections"])
@@ -79,6 +79,11 @@ def delete_collection(collection_id: str,
     c = db.get(Collection, collection_id)
     if not c or c.tenant_id != tenant.id:
         raise HTTPException(404, "collection not found")
+    # Remove dependent rows first — snapshot receipts and search-index entries
+    # reference this collection (no DB cascade), so deleting the mapping while it
+    # still has backup history would otherwise fail with a foreign-key error.
+    db.query(SearchDocument).filter(SearchDocument.collection_id == collection_id).delete()
+    db.query(SnapshotReceipt).filter(SnapshotReceipt.collection_id == collection_id).delete()
     db.delete(c)
     db.commit()
     audit.record(db, actor=principal.user_id, action="collection.deleted",

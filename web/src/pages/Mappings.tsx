@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import { Card, Pill } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { confirmDialog, notify } from "../components/dialog";
 
 interface Account { id: string; connector_type: string; account_label: string; }
 interface Vault { id: string; name: string; }
@@ -78,9 +79,16 @@ export default function Mappings() {
   }
 
   async function remove(m: Mapping) {
-    if (!confirm(`Remove mapping "${m.name}"?`)) return;
+    const ok = await confirmDialog({
+      title: "Remove mapping",
+      message: `Remove "${m.name}"? This deletes the routing and its backup history index. Stored recovery points are not deleted.`,
+      confirmLabel: "Remove mapping",
+    });
+    if (!ok) return;
     try { await api.del(`/collections/${m.id}`); flash("Mapping removed"); await load(); }
-    catch (e) { flash((e as ApiError).message); }
+    catch (e) {
+      await notify({ title: "Couldn't remove mapping", message: (e as ApiError).message, tone: "danger" });
+    }
   }
 
   return (

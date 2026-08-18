@@ -20,6 +20,8 @@ type IconName =
   | "file"
   | "image"
   | "note"
+  | "info"
+  | "alert"
   | "calendar";
 
 const paths: Record<IconName, ReactNode> = {
@@ -121,6 +123,18 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <rect x="3" y="5" width="18" height="16" rx="2" />
       <path d="M3 9h18M8 3v4M16 3v4" />
+    </>
+  ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5M12 8h.01" />
+    </>
+  ),
+  alert: (
+    <>
+      <path d="M12 3l9 16H3l9-16z" />
+      <path d="M12 10v4M12 17h.01" />
     </>
   ),
 };

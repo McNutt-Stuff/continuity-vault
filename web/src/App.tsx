@@ -2,6 +2,7 @@ import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom"
 import { useAuth } from "./auth";
 import { Icon, IconName } from "./components/Icon";
 import { Pill } from "./components/ui";
+import { DialogHost, notify } from "./components/dialog";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Search from "./pages/Search";
@@ -37,10 +38,11 @@ export default function App() {
       </div>
     );
 
-  if (!me) return <Login />;
+  if (!me) return (<><Login /><DialogHost /></>);
 
   return (
     <div className="app-shell">
+      <DialogHost />
       <Sidebar />
       <div className="main">
         <TopBar />
@@ -119,7 +121,7 @@ function TopBar() {
             <Icon name="lock" size={13} /> Unlocked
           </Pill>
         ) : (
-          <button className="btn sm" onClick={() => stepUp().catch((e) => alert(e.message))}>
+          <button className="btn sm" onClick={() => stepUp().catch((e) => notify({ message: e.message, tone: "danger" }))}>
             <Icon name="key" size={14} /> {me?.passkeys?.length ? "Unlock with passkey" : "Set up a passkey"}
           </button>
         )}

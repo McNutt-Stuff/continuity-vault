@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, bytes, timeAgo } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
+import { notify } from "../components/dialog";
 
 interface Result {
   object_id: string;
@@ -108,7 +109,7 @@ export default function Search() {
             </div>
           </div>
         </div>
-        <button className="btn accent" onClick={() => stepUp().then(run).catch((e) => alert(e.message))}>
+        <button className="btn accent" onClick={() => stepUp().then(run).catch((e) => notify({ message: e.message, tone: "danger" }))}>
           <Icon name="key" size={15} /> Unlock to search
         </button>
       </Card>

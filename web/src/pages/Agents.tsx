@@ -3,6 +3,7 @@ import { api } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, timeAgo } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { notify } from "../components/dialog";
 
 interface Agent {
   id: string; name: string; hostname: string; platform: string; version: string;
@@ -43,7 +44,7 @@ export default function Agents() {
 
   async function downloadInstaller() {
     if (!me?.passkey_verified) {
-      try { await stepUp(); } catch (e) { return alert((e as Error).message); }
+      try { await stepUp(); } catch (e) { return notify({ message: (e as Error).message, tone: "danger" }); }
     }
     const res = await api.post<{ filename: string; script: string }>("/agents/installer", {
       name: "Mac Agent", collectors: ["onepassword"], destinations: ["cv-cloud"],

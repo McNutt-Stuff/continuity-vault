@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, timeAgo } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
+import { confirmDialog, formDialog, notify } from "../components/dialog";
 
 interface CatalogItem {
   type: string;
@@ -76,32 +77,55 @@ export default function Connectors() {
       return;
     }
     if (!me?.passkey_verified) {
-      try { await stepUp(); } catch (e) { return alert((e as Error).message); }
+      try { await stepUp(); } catch (e) { return notify({ message: (e as Error).message, tone: "danger" }); }
     }
     if (c.mode === "oauth" && !c.configured) {
       setSetup(c);
       return;
     }
     if (c.mode === "token") {
-      let token = "";
-      let username: string | undefined;
-      let host: string | undefined;
+      let result: Record<string, string> | null;
       if (c.type === "onepassword") {
-        host = prompt("1Password Connect server URL (host)") ?? undefined;
-        token = prompt("1Password Connect token") ?? "";
+        result = await formDialog({
+          title: `Connect ${c.displayName}`,
+          message: "Enter your 1Password Connect server details.",
+          fields: [
+            { name: "host", label: "Connect server URL (host)", placeholder: "https://connect.example.com", required: true },
+            { name: "token", label: "Connect token", password: true, required: true },
+            { name: "label", label: "Account label", defaultValue: `My ${c.displayName}` },
+          ],
+        });
       } else if (c.type === "icloud") {
-        username = prompt("Apple ID (email)") ?? undefined;
-        token = prompt("App-specific password") ?? "";
+        result = await formDialog({
+          title: `Connect ${c.displayName}`,
+          message: "Use an app-specific password from appleid.apple.com.",
+          fields: [
+            { name: "username", label: "Apple ID (email)", required: true },
+            { name: "token", label: "App-specific password", password: true, required: true },
+            { name: "label", label: "Account label" },
+          ],
+        });
       } else {
-        token = prompt(`Paste your ${c.displayName} token`) ?? "";
+        result = await formDialog({
+          title: `Connect ${c.displayName}`,
+          fields: [
+            { name: "token", label: `${c.displayName} token`, password: true, required: true },
+            { name: "label", label: "Account label", defaultValue: `My ${c.displayName}` },
+          ],
+        });
       }
-      if (!token) return;
-      const label = prompt("Account label", username || `My ${c.displayName}`) ?? c.displayName;
+      if (!result || !result.token) return;
+      const label = result.label?.trim() || result.username || `My ${c.displayName}`;
       try {
-        await api.post(`/connectors/${c.type}/token`, { account_label: label, token, username, host });
+        await api.post(`/connectors/${c.type}/token`, {
+          account_label: label, token: result.token,
+          username: result.username, host: result.host,
+        });
         flash(`${c.displayName} connected`);
         await load();
-      } catch (e) { alert((e as ApiError).message); }
+      } catch (e) {
+        await notify({ title: "Couldn't connect", message: (e as ApiError).message, tone: "danger" });
+      }
       return;
     }
     // OAuth: get the provider consent URL and redirect the browser to it.
@@ -111,13 +135,13 @@ export default function Connectors() {
     } catch (e) {
       const err = e as ApiError;
       if (err.status === 400) setSetup(c);
-      else alert(err.message);
+      else await notify({ title: "Couldn't start authorization", message: err.message, tone: "danger" });
     }
   }
 
   async function backup(a: Account) {
     const vault = vaults[0];
-    if (!vault) return alert("No vault available");
+    if (!vault) return notify({ message: "No vault is available to store this backup.", tone: "warn" });
     // Prefer an existing Data Map mapping for this source so the sync routes to
     // the destinations configured there; only fall back to a page-level choice
     // when the source has not been mapped yet.
@@ -145,18 +169,25 @@ export default function Connectors() {
         `/collections/${collId}/backup`, {});
       flash(`Backed up ${res.object_count} objects from ${a.account_label} → ${(routedDests || ["cv-cloud"]).join(", ")}`);
     } catch (e) {
-      alert(`Backup failed: ${(e as ApiError).message}`);
+      await notify({ title: "Backup failed", message: (e as ApiError).message, tone: "danger" });
     }
     await load();
   }
 
   async function unlink(a: Account) {
-    if (!confirm(`Unlink ${a.account_label}?`)) return;
+    const ok = await confirmDialog({
+      title: "Unlink source",
+      message: `Unlink ${a.account_label}? New backups will stop for this source. Existing recovery points are kept.`,
+      confirmLabel: "Unlink",
+    });
+    if (!ok) return;
     try {
       await api.del(`/connectors/accounts/${a.id}`);
       flash("Unlinked");
       await load();
-    } catch (e) { alert((e as ApiError).message); }
+    } catch (e) {
+      await notify({ title: "Couldn't unlink", message: (e as ApiError).message, tone: "danger" });
+    }
   }
 
   return (

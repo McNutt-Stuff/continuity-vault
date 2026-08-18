@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { Card, Pill, Stat, timeAgo } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { promptDialog } from "../components/dialog";
 
 type Tab = "overview" | "tenants" | "fleet" | "crypto" | "audit" | "updates";
 
@@ -172,7 +173,13 @@ function Updates() {
   useEffect(() => { void load(); }, []);
 
   async function publish(component: string) {
-    const version = prompt(`New ${component} version`, "1.0.1");
+    const version = await promptDialog({
+      title: `Publish ${component} release`,
+      label: "New version",
+      defaultValue: "1.0.1",
+      placeholder: "1.0.1",
+      confirmLabel: "Publish",
+    });
     if (!version) return;
     await api.post("/updates/releases", {
       component, version,

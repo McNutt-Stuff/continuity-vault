@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, timeAgo } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { notify } from "../components/dialog";
 
 interface Snapshot { id: string; snapshot_id: string; destination: string; object_count: number; recoverable: boolean; }
 interface Restore {
@@ -23,7 +24,7 @@ export default function RestorePage() {
   useEffect(() => { void load(); }, []);
 
   async function request(s: Snapshot) {
-    if (!me?.passkey_verified) await stepUp().catch((e) => alert(e.message));
+    if (!me?.passkey_verified) await stepUp().catch((e) => notify({ message: e.message, tone: "danger" }));
     try {
       await api.post("/restore", {
         snapshot_id: s.snapshot_id,
@@ -33,7 +34,7 @@ export default function RestorePage() {
       });
       setToast("Restore requested — awaiting approval");
       await load();
-    } catch (e) { alert((e as ApiError).message); }
+    } catch (e) { await notify({ title: "Couldn't request restore", message: (e as ApiError).message, tone: "danger" }); }
     setTimeout(() => setToast(""), 2500);
   }
 
@@ -42,7 +43,7 @@ export default function RestorePage() {
       const res = await api.post<{ status: string; note?: string }>(`/restore/${r.id}/${action}`);
       setToast(res.note ?? `Restore ${res.status}`);
       await load();
-    } catch (e) { alert((e as ApiError).message); }
+    } catch (e) { await notify({ title: "Restore action failed", message: (e as ApiError).message, tone: "danger" }); }
     setTimeout(() => setToast(""), 3500);
   }
 
