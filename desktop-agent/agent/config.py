@@ -14,10 +14,21 @@ class Config:
             "ARKIVE_AGENT_DIR", str(Path.home() / ".arkive-agent")))
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.linking_code = os.environ.get("ARKIVE_LINKING_CODE", "")
-        # Optional 1Password service account token for unattended collection.
-        self.op_service_account_token = os.environ.get("OP_SERVICE_ACCOUNT_TOKEN", "")
+        # 1Password service-account token for unattended collection. Read from the
+        # environment, else from a local 0600 file so it can be supplied without a
+        # reinstall: echo 'ops_...' > ~/.arkive-agent/op_token
+        self.op_service_account_token = self._read_op_token()
         self.version = self._read_version()
         self.home = os.environ.get("ARKIVE_AGENT_HOME", str(Path(__file__).resolve().parents[1]))
+
+    def _read_op_token(self) -> str:
+        tok = os.environ.get("OP_SERVICE_ACCOUNT_TOKEN", "").strip()
+        if tok:
+            return tok
+        try:
+            return (self.data_dir / "op_token").read_text().strip()
+        except Exception:
+            return ""
 
     @staticmethod
     def _read_version() -> str:
