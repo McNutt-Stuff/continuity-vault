@@ -19,6 +19,7 @@ interface Mapping {
   account_label: string | null; sensitivity: string; destinations: string[];
   index_fields: string[]; available_fields: string[];
   last_backup_at: string | null; last_object_count: number; last_recoverable: boolean;
+  offpolicy_points: number;
 }
 interface ActivityEvent {
   kind: string; collection_id?: string; source: string; source_type?: string;
@@ -196,6 +197,24 @@ export default function Mappings() {
       await load();
     } catch (e) {
       await notify({ title: "Couldn't update mapping", message: (e as ApiError).message, tone: "danger" });
+    }
+  }
+
+  async function prune(m: Mapping) {
+    const ok = await confirmDialog({
+      title: "Prune off-policy recovery points",
+      message: `Delete ${m.offpolicy_points} recovery point(s) stored where "${m.name}" no longer routes? They'll stop appearing as recovery locations. Immutable stored data ages out under retention.`,
+      confirmLabel: "Prune copies",
+    });
+    if (!ok) return;
+    try {
+      const res = await api.post<{ pruned: number; destinations: string[] }>(`/collections/${m.id}/prune`, {});
+      flash(res.pruned > 0
+        ? `Pruned ${res.pruned} off-policy recovery point(s)${res.destinations.length ? ` from ${res.destinations.join(", ")}` : ""}`
+        : "No off-policy recovery points to prune");
+      await load();
+    } catch (e) {
+      await notify({ title: "Couldn't prune", message: (e as ApiError).message, tone: "danger" });
     }
   }
 
@@ -438,6 +457,12 @@ export default function Mappings() {
                 <>
                   <button className="btn sm primary" onClick={() => syncNow(m)}>Sync now</button>
                   <button className="btn sm" onClick={() => startEdit(m)}>Edit</button>
+                  {m.offpolicy_points > 0 && (
+                    <button className="btn sm warn" onClick={() => prune(m)}
+                            title="Delete recovery points stored where this source no longer routes">
+                      Prune {m.offpolicy_points} off-policy
+                    </button>
+                  )}
                   <button className="btn sm ghost" onClick={() => remove(m)}>Remove</button>
                 </>
               )}

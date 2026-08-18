@@ -651,12 +651,65 @@ def command_result(body: CommandResultRequest,
     if not cmd or cmd.appliance_id != appliance.id:
         raise HTTPException(404, "command not found")
     cmd.status = "acked" if body.accepted else "rejected"
-    cmd.result = body.result
+    result = dict(body.result or {})
+    # Recovery windows: the appliance returns the encrypted object units it read
+    # out of sealed storage. Decrypt them here (inside the key boundary) and stage
+    # them into the same time-limited recovery window used by cloud retrieval, so
+    # the requesting operator can view/download the item.
+    if body.accepted and cmd.command_type == "OPEN_RECOVERY_WINDOW":
+        try:
+            result["recovered"] = _stage_recovered_from_appliance(db, appliance, cmd, result)
+        except Exception as exc:  # noqa: BLE001 - never fail the ack on staging error
+            logger.warning("recovery staging failed for %s: %s", cmd.id, exc)
+            result.setdefault("error", f"staging failed: {exc}")
+    cmd.result = result
     db.commit()
     audit.record(db, actor=f"appliance:{appliance.serial}",
                  action="appliance.command_result", tenant_id=appliance.tenant_id,
                  resource=cmd.id, detail={"accepted": body.accepted})
     return {"ok": True}
+
+
+def _stage_recovered_from_appliance(db: Session, appliance: Appliance,
+                                    cmd: ApplianceCommand, result: dict) -> list[dict]:
+    """Decrypt the envelope units an appliance returned and stage recovery-window
+    items. Returns a compact list describing each staged item for status polling."""
+    from ..models import SearchDocument
+    from . import recovery
+    from .search import decrypt_recovered_units
+
+    units = result.get("units") or {}
+    params = (cmd.envelope or {}).get("payload", {}).get("parameters", {})
+    snapshot_id = params.get("snapshotId")
+    object_ids = params.get("objectIds", [])
+    if not units or not snapshot_id:
+        return []
+    receipt = (db.query(SnapshotReceipt)
+               .filter(SnapshotReceipt.tenant_id == appliance.tenant_id,
+                       SnapshotReceipt.snapshot_id == snapshot_id).first())
+    if receipt is None:
+        return []
+    staged: list[dict] = []
+    for oid in object_ids:
+        plaintext, client_encrypted = decrypt_recovered_units(db, receipt, oid, units)
+        if plaintext is None or client_encrypted:
+            continue
+        doc = (db.query(SearchDocument)
+               .filter(SearchDocument.tenant_id == appliance.tenant_id,
+                       SearchDocument.object_id == oid).first())
+        title = (doc.title if doc else oid) or oid
+        item = recovery.create_recovered(
+            db, appliance.tenant_id, cmd.requested_by, object_id=oid,
+            snapshot_id=snapshot_id, title=title,
+            doc_type=doc.doc_type if doc else "",
+            source_type=doc.source_type if doc else "",
+            location=appliance.name, content=plaintext)
+        staged.append({
+            "object_id": oid, "recovered_id": item.id, "title": item.title,
+            "mime": item.mime, "size_bytes": item.size_bytes,
+            "doc_type": item.doc_type, "source_type": item.source_type,
+        })
+    return staged
 
 
 class SealReceiptRequest(BaseModel):

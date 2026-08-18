@@ -20,6 +20,7 @@ from ..db import get_db
 from ..connectors import get_connector
 from ..models import (
     Appliance,
+    ApplianceCommand,
     ApplianceStorage,
     Collection,
     ConnectorAccount,
@@ -63,6 +64,48 @@ def _unwrap_agent_content(db: Session, receipt: SnapshotReceipt, inner: dict) ->
     dek = p.aes_decrypt(agent_key, _unb64(wd["nonce"]), _unb64(wd["ct"]), b"agent-dek")
     return p.aes_decrypt(dek, _unb64(inner["nonce"]), _unb64(inner["ct"]),
                          str(inner["objectId"]).encode())
+
+
+def decrypt_recovered_units(db: Session, receipt: SnapshotReceipt, object_id: str,
+                            units: dict) -> tuple[bytes | None, bool]:
+    """Decrypt an object (and its chunks) from the in-memory envelope units an
+    appliance returns for an OPEN_RECOVERY_WINDOW command. Mirrors the cloud
+    retrieve path but reads envelopes from ``units`` rather than object storage.
+
+    Returns ``(plaintext, client_encrypted)``. ``plaintext`` is None when the
+    unit is missing/undecryptable; ``client_encrypted`` is True when the content
+    is an agent envelope with no escrowed recovery key to open it."""
+    obj = units.get(object_id)
+    if not isinstance(obj, dict):
+        return None, False
+    try:
+        root_key = keybroker.release_vault_root_key(receipt.vault_id)
+        snapshot_key = EnvelopeKeyHierarchy(root_key).snapshot_key(
+            receipt.vault_id, receipt.collection_id, receipt.snapshot_id)
+        if obj.get("chunked"):
+            buf = bytearray()
+            for part in obj.get("parts", []):
+                pdata = units.get(part["objectId"])
+                if not isinstance(pdata, dict):
+                    return None, False
+                buf += decrypt_object(snapshot_key, pdata)
+            plaintext = bytes(buf)
+        else:
+            plaintext = decrypt_object(snapshot_key, obj)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("recover: could not decrypt %s (%s)", object_id, exc)
+        return None, False
+    # Agent-collected items are themselves client-encrypted envelopes.
+    try:
+        candidate = json.loads(plaintext.decode())
+        if isinstance(candidate, dict) and candidate.get("wrappedDek") and candidate.get("v"):
+            recovered = _unwrap_agent_content(db, receipt, candidate)
+            if recovered is not None:
+                return recovered, False
+            return plaintext, True
+    except Exception:
+        pass
+    return plaintext, False
 
 
 def _location_label(destination: str, store_labels: dict[str, str] | None = None) -> str:
@@ -314,6 +357,7 @@ def retrieve(body: RetrieveRequest,
                      tenant_id=tenant.id, resource=body.object_id,
                      detail={"location": label, "appliance": appliance.id})
         return {"status": "requested", "location": label, "async": True,
+                "appliance_name": appliance.name,
                 "message": f"Recovery requested from {appliance.name}. "
                            "The appliance unseals, retrieves, and re-seals; "
                            "local approval may be required.",
@@ -414,4 +458,37 @@ def retrieve(body: RetrieveRequest,
         "size_bytes": item.size_bytes, "doc_type": item.doc_type,
         "expires_in_seconds": recovery.get_settings().recovered_ttl_seconds,
         "message": f"Recovered {size_bytes} bytes from {label} — viewable until it expires.",
+    }
+
+
+@router.get("/retrieve-status/{command_id}")
+def retrieve_status(command_id: str,
+                    principal: security.Principal = Depends(security.require_passkey),
+                    tenant: Tenant = Depends(security.get_tenant),
+                    db: Session = Depends(get_db)):
+    """Poll an appliance recovery command. While the appliance unseals/retrieves
+    the command is ``pending``/``delivered``; once it re-seals and returns the
+    content the cloud decrypts and stages it, exposing the recovered item(s)."""
+    cmd = db.get(ApplianceCommand, command_id)
+    if not cmd or cmd.tenant_id != tenant.id:
+        raise HTTPException(404, "command not found")
+    result = cmd.result or {}
+    # pending -> requested to the appliance; delivered -> appliance is working;
+    # acked -> content returned; rejected -> refused/failed.
+    stage = {
+        "pending": "requested", "delivered": "retrieving",
+        "acked": "ready", "rejected": "failed",
+    }.get(cmd.status, cmd.status)
+    recovered = result.get("recovered") or []
+    if result.get("awaiting_local_approval"):
+        stage = "awaiting_approval"
+    if cmd.status == "acked" and not recovered and not result.get("awaiting_local_approval"):
+        # Acked but nothing decryptable came back.
+        stage = "unavailable"
+    return {
+        "status": stage,
+        "command_status": cmd.status,
+        "recovered": recovered,
+        "error": result.get("error"),
+        "message": result.get("message"),
     }

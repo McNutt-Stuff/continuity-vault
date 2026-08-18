@@ -140,6 +140,13 @@ def _collection_view(db: Session, c: Collection) -> dict:
     indexed = (db.query(SearchDocument.object_id)
                .filter(SearchDocument.collection_id == c.id)
                .distinct().count())
+    # Recovery points stored at destinations no longer in this mapping's routing
+    # (e.g. old cloud copies after the mapping was switched to an appliance).
+    keep = set(c.destinations or ["cv-cloud"])
+    offpolicy_points = (db.query(SnapshotReceipt)
+                        .filter(SnapshotReceipt.collection_id == c.id,
+                                SnapshotReceipt.destination.notin_(list(keep)))
+                        .count())
     return {
         "id": c.id, "name": c.name, "source_type": c.source_type,
         "source_display": conn.display_name if conn else c.source_type,
@@ -157,6 +164,7 @@ def _collection_view(db: Session, c: Collection) -> dict:
         "last_backup_at": last.created_at.isoformat() if last else None,
         "last_object_count": indexed,
         "last_recoverable": bool(last.recoverable) if last else False,
+        "offpolicy_points": offpolicy_points,
     }
 
 
@@ -185,6 +193,38 @@ def delete_collection(collection_id: str,
     audit.record(db, actor=principal.user_id, action="collection.deleted",
                  tenant_id=tenant.id, resource=collection_id)
     return {"ok": True}
+
+
+@router.post("/{collection_id}/prune")
+def prune_collection(collection_id: str,
+                     principal: security.Principal = Depends(security.get_principal),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    """Prune off-policy recovery points: delete snapshot receipts stored at
+    destinations that are no longer part of this mapping's routing. Removes them
+    from search locations so recovery only draws from the current destinations.
+    Immutable object-store bytes age out under retention; this drops the pointers.
+    """
+    c = db.get(Collection, collection_id)
+    if not c or c.tenant_id != tenant.id:
+        raise HTTPException(404, "collection not found")
+    keep = set(c.destinations or ["cv-cloud"])
+    stale = (db.query(SnapshotReceipt)
+             .filter(SnapshotReceipt.collection_id == c.id,
+                     SnapshotReceipt.tenant_id == tenant.id,
+                     SnapshotReceipt.destination.notin_(list(keep)))
+             .all())
+    from .search import _location_label, _store_label_map
+    store_labels = _store_label_map(db, tenant.id)
+    dests = sorted({r.destination for r in stale})
+    for r in stale:
+        db.delete(r)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="collection.pruned",
+                 tenant_id=tenant.id, resource=collection_id,
+                 detail={"pruned": len(stale), "destinations": dests})
+    return {"pruned": len(stale),
+            "destinations": [_location_label(d, store_labels) for d in dests]}
 
 
 class BackupRequest(BaseModel):

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, ApiError, getToken } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, bytes, timeAgo } from "../components/ui";
@@ -15,6 +15,18 @@ interface RetrieveResp {
   status: string; message: string; recovered_id?: string; title?: string;
   mime?: string; doc_type?: string; size_bytes?: number;
   content_b64?: string | null; filename?: string;
+  async?: boolean; command_id?: string; appliance_name?: string;
+}
+interface RecoveredUnit {
+  object_id: string; recovered_id: string; title: string; mime: string;
+  size_bytes: number; doc_type: string; source_type: string;
+}
+interface RetrieveStatus {
+  status: string; command_status: string; recovered: RecoveredUnit[];
+  error?: string | null; message?: string | null;
+}
+interface Retrieving {
+  commandId: string; title: string; location: string; stage: string; error?: string;
 }
 interface Viewing { item: Recovered; kind: "text" | "image" | "binary"; text?: string; url?: string; }
 
@@ -114,6 +126,8 @@ export default function Search() {
   const [msg, setMsg] = useState("");
   const [recovered, setRecovered] = useState<Recovered[]>([]);
   const [viewing, setViewing] = useState<Viewing | null>(null);
+  const [retrieving, setRetrieving] = useState<Retrieving | null>(null);
+  const pollRef = useRef(0);
 
   async function loadRecovered() {
     try { setRecovered((await api.get<{ items: Recovered[] }>("/recovered")).items); }
@@ -139,17 +153,68 @@ export default function Search() {
           mime: res.mime || "application/octet-stream", size_bytes: res.size_bytes || 0,
           location: loc.label, expires_in_seconds: 1800, viewed: false,
         });
+      } else if (res.async && res.command_id) {
+        // Appliance-stored: the appliance must unseal, retrieve and re-seal. Show a
+        // live progress modal and poll until the item is decrypted and staged.
+        setRetrieving({ commandId: res.command_id, title: r.title, location: loc.label, stage: "requested" });
+        void pollRetrieveStatus(res.command_id, { title: r.title, location: loc.label, objectId: r.object_id });
       } else if (res.status === "client-encrypted" && res.content_b64) {
         downloadB64(res.content_b64, safeName(res.filename || r.title, r.doc_type));
         setMsg(res.message);
+        setTimeout(() => setMsg(""), 6000);
       } else {
         setMsg(res.message);
+        setTimeout(() => setMsg(""), 6000);
       }
-      setTimeout(() => setMsg(""), 6000);
     } catch (e) {
       setMsg((e as ApiError).message);
       setTimeout(() => setMsg(""), 6000);
     }
+  }
+
+  // Poll an appliance recovery command until it re-seals and the cloud stages the
+  // decrypted item, then open it. Superseded/cancelled when pollRef changes.
+  async function pollRetrieveStatus(commandId: string,
+                                    ctx: { title: string; location: string; objectId: string }) {
+    const token = ++pollRef.current;
+    const deadline = Date.now() + 3 * 60 * 1000;
+    while (pollRef.current === token && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+      if (pollRef.current !== token) return;
+      let s: RetrieveStatus;
+      try { s = await api.get<RetrieveStatus>(`/search/retrieve-status/${commandId}`); }
+      catch { continue; }
+      if (pollRef.current !== token) return;
+      setRetrieving((cur) => (cur && cur.commandId === commandId
+        ? { ...cur, stage: s.status, error: s.error || undefined } : cur));
+      if (s.status === "ready" && s.recovered.length) {
+        const rec = s.recovered.find((x) => x.object_id === ctx.objectId) || s.recovered[0];
+        pollRef.current++;  // stop this loop
+        setRetrieving(null);
+        await loadRecovered();
+        await openViewer({
+          id: rec.recovered_id, object_id: rec.object_id, title: rec.title,
+          doc_type: rec.doc_type, source_type: rec.source_type,
+          mime: rec.mime, size_bytes: rec.size_bytes,
+          location: ctx.location, expires_in_seconds: 1800, viewed: false,
+        });
+        return;
+      }
+      if (s.status === "unavailable" || s.status === "failed") {
+        setRetrieving((cur) => (cur && cur.commandId === commandId
+          ? { ...cur, stage: s.status, error: s.error || s.message || undefined } : cur));
+        return;
+      }
+    }
+    if (pollRef.current === token) {
+      setRetrieving((cur) => (cur && cur.commandId === commandId
+        ? { ...cur, stage: "failed", error: "Timed out waiting for the appliance." } : cur));
+    }
+  }
+
+  function cancelRetrieving() {
+    pollRef.current++;  // invalidate the active poll; item still stages in the tray
+    setRetrieving(null);
   }
 
   // Fetch the staged plaintext (raw) and open it in the viewer.
@@ -470,6 +535,71 @@ export default function Search() {
           </div>
         </div>
       )}
+
+      {retrieving && (() => {
+        const steps = [
+          "Request sent to the appliance",
+          "Appliance unsealing & retrieving from sealed storage",
+          "Decrypting & opening the item",
+        ];
+        const order: Record<string, number> = {
+          requested: 0, awaiting_approval: 1, retrieving: 1,
+          ready: 3, unavailable: 3, failed: 3,
+        };
+        const failed = retrieving.stage === "failed" || retrieving.stage === "unavailable";
+        const active = order[retrieving.stage] ?? 0;
+        return (
+          <div className="modal-backdrop" onClick={cancelRetrieving}>
+            <div className="modal-panel" style={{ maxWidth: 460 }} onClick={(e) => e.stopPropagation()}>
+              <div className="spread">
+                <div>
+                  <h3 style={{ margin: 0 }}><Icon name="restore" size={15} /> Recovering from appliance</h3>
+                  <div className="faint" style={{ fontSize: 12 }}>{retrieving.title} · {retrieving.location}</div>
+                </div>
+                <button className="btn ghost sm" onClick={cancelRetrieving}><Icon name="logout" size={14} /></button>
+              </div>
+              <div className="modal-body">
+                <div style={{ display: "grid", gap: 14, padding: "8px 4px" }}>
+                  {steps.map((label, i) => {
+                    const done = active > i && !failed;
+                    const isActive = active === i && !failed;
+                    return (
+                      <div key={i} className="flex" style={{ gap: 10, alignItems: "center", opacity: done || isActive ? 1 : 0.45 }}>
+                        <span style={{
+                          width: 24, height: 24, borderRadius: 12, flex: "none",
+                          display: "grid", placeItems: "center", color: "#fff", fontSize: 12,
+                          background: done ? "var(--ok, #35d0a5)" : isActive ? "var(--accent, #4f7cff)" : "#1b2436",
+                        }}>
+                          {done ? <Icon name="check" size={12} /> : isActive ? <span className="spinner-dot" /> : i + 1}
+                        </span>
+                        <span style={{ fontSize: 13 }}>{label}</span>
+                      </div>
+                    );
+                  })}
+                  {retrieving.stage === "awaiting_approval" && (
+                    <div className="muted" style={{ fontSize: 12.5 }}>
+                      Waiting for someone to approve the recovery on the appliance's physical panel.
+                    </div>
+                  )}
+                  {failed && (
+                    <div style={{ color: "var(--danger-c, #f2545b)", fontSize: 12.5 }}>
+                      {retrieving.error || (retrieving.stage === "unavailable"
+                        ? "The appliance returned no recoverable content for this item."
+                        : "Recovery failed.")}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="modal-foot">
+                <div style={{ flex: 1 }} />
+                <button className="btn ghost sm" onClick={cancelRetrieving}>
+                  {failed ? "Close" : "Run in background"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {msg && <div className="toast"><Icon name="check" size={15} /> {msg}</div>}
     </>

@@ -297,14 +297,24 @@ class Agent:
         self.sm.state = State.UNSEAL_REQUESTED
         self.sm.transition(State.UNSEALED_FOR_RECOVERY)
         objects = []
+        units: dict = {}
         for oid in params.get("objectIds", []):
             try:
-                objects.append(self.vault.read_object(snapshot_id, oid)["objectId"])
-            except Exception:
-                pass
+                obj = self.vault.read_object(snapshot_id, oid)
+                objects.append(oid)
+                units[oid] = obj
+                # Chunked objects reference their parts by id; return those too so
+                # the cloud can reassemble and decrypt the full content.
+                if isinstance(obj, dict) and obj.get("chunked"):
+                    for part in obj.get("parts", []):
+                        pid = part.get("objectId")
+                        if pid:
+                            units[pid] = self.vault.read_object(snapshot_id, pid)
+            except Exception as exc:
+                self.log.warning("recovery read failed for %s: %s", oid, exc)
         self.sm.transition(State.SEALING)
         self.sm.transition(State.SEALED)
-        return {"recovered_objects": objects, "resealed": True}
+        return {"recovered_objects": objects, "units": units, "resealed": True}
 
     def _stage_update(self, params: dict) -> dict:
         """Verify + stage a signed update; downgrade/floor guarded (spec 11)."""
