@@ -25,7 +25,7 @@ say() { printf "\n\033[1m==> %s\033[0m\n" "$*"; }
 mkdir -p "$HOME_DIR" "$DATA_DIR" "$HOME/Library/LaunchAgents"
 
 ARCH="$(uname -m)"
-case "$ARCH" in arm64) PYARCH=aarch64 ;; x86_64) PYARCH=x86_64 ;; *) PYARCH=aarch64 ;; esac
+case "$ARCH" in arm64) PYARCH=aarch64; OPARCH=arm64 ;; x86_64) PYARCH=x86_64; OPARCH=amd64 ;; *) PYARCH=aarch64; OPARCH=arm64 ;; esac
 
 say "Downloading a self-contained Python runtime"
 PY="$HOME_DIR/python/bin/python3"
@@ -45,7 +45,7 @@ say "Bundling the 1Password CLI (op)"
 OP_DIR="$HOME_DIR/bin"; mkdir -p "$OP_DIR"
 if [ ! -x "$OP_DIR/op" ]; then
   tmp="$(mktemp -d)"
-  if curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VERSION}/op_apple_universal_v${OP_VERSION}.zip" -o "$tmp/op.zip"; then
+  if curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VERSION}/op_darwin_${OPARCH}_v${OP_VERSION}.zip" -o "$tmp/op.zip"; then
     unzip -o -q "$tmp/op.zip" op -d "$OP_DIR" 2>/dev/null || true
     chmod +x "$OP_DIR/op" 2>/dev/null || true
   fi

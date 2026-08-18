@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -12,6 +14,7 @@ from ..models import Collection, ConnectorAccount, Tenant, Vault
 from ..workers.sync_worker import run_backup
 
 router = APIRouter(prefix="/collections", tags=["collections"])
+logger = logging.getLogger("cv.collections")
 
 
 class CreateCollectionRequest(BaseModel):
@@ -68,7 +71,11 @@ def backup(collection_id: str, body: BackupRequest,
     coll = db.get(Collection, collection_id)
     if not coll or coll.tenant_id != tenant.id:
         raise HTTPException(404, "collection not found")
-    receipt = run_backup(db, coll, body.destinations)
+    try:
+        receipt = run_backup(db, coll, body.destinations)
+    except Exception as exc:
+        logger.exception("backup failed for collection %s (%s)", coll.id, coll.source_type)
+        raise HTTPException(502, f"backup failed: {exc}")
     return {
         "snapshot_id": receipt.snapshot_id,
         "object_count": receipt.object_count,

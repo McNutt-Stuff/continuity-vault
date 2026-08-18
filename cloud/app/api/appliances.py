@@ -38,7 +38,8 @@ _agent_tokens: dict[str, str] = {}  # token -> appliance_id
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    # Naive UTC to match SQLAlchemy DateTime columns returned tz-naive by Postgres.
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # --------------------------------------------------------------------------

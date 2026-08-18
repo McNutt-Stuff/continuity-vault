@@ -36,7 +36,9 @@ _agent_tokens: dict[str, str] = {}
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    # Naive UTC to match SQLAlchemy DateTime columns (TIMESTAMP WITHOUT TIME ZONE),
+    # which Postgres returns tz-naive — avoids naive/aware comparison TypeErrors.
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # --------------------------------------------------------------------------
