@@ -188,7 +188,9 @@ class CryptoProvider:
             with oqs.Signature(oqs_name) as sig:  # type: ignore
                 pk = sig.generate_keypair()
                 sk = sig.export_secret_key()
-            return KeyPair(algorithm=alg, public_key=pk, private_key=sk, pq=True)
+            # Store the actual mechanism used (may differ from the requested name
+            # if the build lacks it) so the public bundle and verify stay honest.
+            return KeyPair(algorithm=oqs_name, public_key=pk, private_key=sk, pq=True)
         # Fallback: HMAC keypair (symmetric) flagged as non-PQ.
         seed = os.urandom(32)
         return KeyPair(
@@ -252,7 +254,24 @@ def _oqs_sig_name(alg: str) -> str:
     cands = _SIG_CANDIDATES.get(alg, [alg])
     if not _OQS_AVAILABLE:
         return cands[0]
-    return _resolve(alg, cands, oqs.get_enabled_sig_mechanisms)
+    try:
+        enabled = set(oqs.get_enabled_sig_mechanisms())
+    except Exception:
+        enabled = set()
+    for name in cands:
+        if name in enabled:
+            return name
+    # SLH-DSA / SPHINCS+ family: use any enabled small-SHA2 variant the build has.
+    if alg.startswith("SLH-DSA") or "SPHINCS" in alg.upper():
+        for e in enabled:
+            eu = e.upper().replace("-", "").replace("_", "").replace("+", "")
+            if ("SLHDSA" in eu or "SPHINCS" in eu) and "SHA2128S" in eu:
+                return e
+    # Last resort so signing still works (quantum-safe): an enabled ML-DSA.
+    for pref in ("ML-DSA-65", "ML-DSA-87", "Dilithium3", "Dilithium5"):
+        if pref in enabled:
+            return pref
+    return cands[0]
 
 
 @lru_cache(maxsize=1)
