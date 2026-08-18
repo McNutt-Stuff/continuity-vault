@@ -120,7 +120,9 @@ def download_installer(body: CreateAgentCode,
 @fleet_router.get("")
 def list_agents(tenant: Tenant = Depends(security.get_tenant),
                 db: Session = Depends(get_db)):
-    rows = db.query(DesktopAgent).filter(DesktopAgent.tenant_id == tenant.id).all()
+    rows = db.query(DesktopAgent).filter(
+        DesktopAgent.tenant_id == tenant.id,
+        DesktopAgent.state != "retired").all()
     return [_agent_view(a) for a in rows]
 
 
@@ -239,17 +241,20 @@ def _auth_agent(authorization: str = Header(default=""),
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing agent token")
     token = authorization.split(" ", 1)[1]
+    a = None
     agent_id = _agent_tokens.get(token)
     if agent_id:
         a = db.get(DesktopAgent, agent_id)
+    if a is None:
+        # Fall back to the durable hash so tokens survive cloud restarts.
+        a = db.query(DesktopAgent).filter(
+            DesktopAgent.agent_token_hash == _hash_token(token)).first()
         if a:
-            return a
-    # Fall back to the durable hash so tokens survive cloud restarts.
-    a = db.query(DesktopAgent).filter(
-        DesktopAgent.agent_token_hash == _hash_token(token)).first()
+            _agent_tokens[token] = a.id  # repopulate fast path
     if not a:
         raise HTTPException(401, "invalid agent token")
-    _agent_tokens[token] = a.id  # repopulate fast path
+    if a.state == "retired":
+        raise HTTPException(401, "agent retired")
     return a
 
 
@@ -277,6 +282,18 @@ def activate(body: AgentActivate, db: Session = Depends(get_db)):
         last_heartbeat_at=_now(),
     )
     agent.config["collectors"] = body.collectors
+
+    # Retire any prior agents for this same host so stale installs disappear from
+    # the fleet and can no longer act (their tokens are invalidated).
+    prior = db.query(DesktopAgent).filter(
+        DesktopAgent.tenant_id == lc.tenant_id,
+        DesktopAgent.hostname == body.hostname,
+        DesktopAgent.state != "retired",
+    ).all()
+    for p in prior:
+        p.state = "retired"
+        p.agent_token_hash = None
+        p.pending_command = None
 
     # Provision escrow material BEFORE consuming the code so a transient failure
     # never burns a single-use linking code.
@@ -340,6 +357,19 @@ def heartbeat(body: AgentHeartbeat, agent: DesktopAgent = Depends(_auth_agent),
     db.commit()
     return {"config": agent.config, "command": command,
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
+
+
+@agent_router.post("/deregister")
+def deregister(agent: DesktopAgent = Depends(_auth_agent),
+               db: Session = Depends(get_db)):
+    """Retire this agent (called by the installer before a clean reinstall)."""
+    agent.state = "retired"
+    agent.agent_token_hash = None
+    agent.pending_command = None
+    db.commit()
+    audit.record(db, actor=f"agent:{agent.hostname}", action="agent.deregistered",
+                 tenant_id=agent.tenant_id, resource=agent.id)
+    return {"ok": True, "state": "retired"}
 
 
 class AgentObject(BaseModel):

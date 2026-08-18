@@ -24,6 +24,25 @@ say() { printf "\n\033[1m==> %s\033[0m\n" "$*"; }
 
 mkdir -p "$HOME_DIR" "$DATA_DIR" "$HOME/Library/LaunchAgents"
 
+say "Removing any previous Arkive agent"
+# Stop a running agent from a prior install.
+launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
+launchctl unload "$PLIST" 2>/dev/null || true
+# Best-effort: tell the cloud the old agent is retired before we wipe it locally.
+OLD_REG="$DATA_DIR/registration.json"
+if [ -f "$OLD_REG" ]; then
+  OLD_TOKEN="$(sed -n 's/.*"agent_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$OLD_REG" | head -1)"
+  if [ -n "${OLD_TOKEN:-}" ]; then
+    curl -fsS -X POST "$CLOUD_URL/agent/deregister" \
+      -H "Authorization: Bearer $OLD_TOKEN" >/dev/null 2>&1 \
+      && echo "old agent deregistered in cloud" || echo "old agent could not be reached (will be auto-retired on re-link)"
+  fi
+  rm -f "$OLD_REG" "$DATA_DIR/status.json"
+fi
+# Clear stale code so the fresh bundle is clean (keep the Keychain data key so
+# previously-escrowed content stays recoverable).
+rm -rf "$HOME_DIR/desktop-agent" "$HOME_DIR/shared"
+
 ARCH="$(uname -m)"
 case "$ARCH" in arm64) PYARCH=aarch64; OPARCH=arm64 ;; x86_64) PYARCH=x86_64; OPARCH=amd64 ;; *) PYARCH=aarch64; OPARCH=arm64 ;; esac
 
