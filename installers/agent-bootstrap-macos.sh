@@ -67,6 +67,9 @@ if [ ! -x "$OP_DIR/op" ]; then
   if curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VERSION}/op_darwin_${OPARCH}_v${OP_VERSION}.zip" -o "$tmp/op.zip"; then
     unzip -o -q "$tmp/op.zip" op -d "$OP_DIR" 2>/dev/null || true
     chmod +x "$OP_DIR/op" 2>/dev/null || true
+    # Strip the download quarantine flag so the 1Password app trusts the binary
+    # and shows its CLI authorization prompt.
+    xattr -dr com.apple.quarantine "$OP_DIR/op" 2>/dev/null || true
   fi
   rm -rf "$tmp"
 fi
