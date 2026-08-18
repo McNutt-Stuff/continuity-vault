@@ -11,6 +11,8 @@ EnvironmentFile=/etc/continuity-vault.env
 # Load the system liboqs (built to /usr/local) so the process never tries to
 # auto-build post-quantum libs at runtime under the sandbox.
 Environment=OQS_INSTALL_PATH=/usr/local
+# Writable object store (WorkingDirectory is read-only under ProtectSystem=strict).
+Environment=CV_OBJECT_STORE=/var/lib/continuity-vault/object_store
 WorkingDirectory=/opt/continuity-vault/cloud
 # Single worker: the all-in-one node initializes the schema and seeds on
 # startup, which must not race across workers. Scale out behind a shared,

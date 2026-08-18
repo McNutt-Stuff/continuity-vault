@@ -6,6 +6,7 @@ import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Search from "./pages/Search";
 import Connectors from "./pages/Connectors";
+import Mappings from "./pages/Mappings";
 import Appliances from "./pages/Appliances";
 import Snapshots from "./pages/Snapshots";
 import Restore from "./pages/Restore";
@@ -18,6 +19,7 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/", label: "Overview", icon: "grid" },
   { to: "/search", label: "Unified Search", icon: "search" },
   { to: "/connectors", label: "Sources", icon: "link" },
+  { to: "/mappings", label: "Data Map", icon: "database" },
   { to: "/snapshots", label: "Recovery Points", icon: "clock" },
   { to: "/appliances", label: "Appliances", icon: "server" },
   { to: "/agents", label: "Desktop Agents", icon: "user" },
@@ -48,6 +50,7 @@ export default function App() {
             <Route path="/onboarding" element={<Onboarding />} />
             <Route path="/search" element={<Search />} />
             <Route path="/connectors" element={<Connectors />} />
+            <Route path="/mappings" element={<Mappings />} />
             <Route path="/snapshots" element={<Snapshots />} />
             <Route path="/appliances" element={<Appliances />} />
             <Route path="/agents" element={<Agents />} />

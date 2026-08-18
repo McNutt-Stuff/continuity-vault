@@ -95,6 +95,7 @@ class Agent:
         self.config = d["config"]
         self.sm.state = State.ONLINE_STAGING
         _REG.write_text(json.dumps(d))
+        self.log.info("activated as appliance %s (tenant %s)", self.appliance_id, self.tenant_id)
         return d
 
     # -- heartbeat + command handling ---------------------------------
@@ -127,6 +128,8 @@ class Agent:
                               settings.software_version, latest)
             for command in data.get("commands", []):
                 await self._handle_command(client, command)
+        self.log.debug("heartbeat ok (state=%s, isolation=%s)",
+                       self.sm.state.value, self.sm.isolation_state)
 
     def _telemetry(self) -> dict:
         cap = self.vault.capacity()
@@ -205,6 +208,8 @@ class Agent:
         cmd_id = payload["commandId"]
         ctype = payload["commandType"]
         accepted = self._verify_command(command)
+        self.log.info("command %s (%s): %s", ctype, cmd_id[:8],
+                      "accepted" if accepted else "REJECTED")
         result: dict = {}
         receipt = None
 
@@ -229,6 +234,8 @@ class Agent:
                           json={"command_id": cmd_id, "accepted": accepted,
                                 "result": result, "receipt": receipt},
                           headers=self._headers())
+        self.log.info("command %s result: %s", ctype,
+                      "error" if result.get("error") else "ok")
 
     # -- command implementations --------------------------------------
 
@@ -307,11 +314,13 @@ agent = Agent()
 
 @app.on_event("startup")
 async def startup() -> None:
+    agent.log.info("appliance agent starting (v%s, model=%s)",
+                   settings.software_version, settings.model)
     if not agent.activated and settings.linking_code:
         try:
             await agent.activate(settings.linking_code)
         except Exception as exc:  # keep the agent up to expose status
-            print(f"[agent] activation error: {exc}")
+            agent.log.error("activation error: %s", exc)
     if agent.activated:
         asyncio.create_task(_heartbeat_loop())
 
@@ -322,7 +331,7 @@ async def _heartbeat_loop() -> None:
         try:
             await agent.heartbeat_once()
         except Exception as exc:
-            print(f"[agent] heartbeat error: {exc}")
+            agent.log.error("heartbeat error: %s", exc)
         await asyncio.sleep(interval)
 
 

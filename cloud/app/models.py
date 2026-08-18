@@ -113,6 +113,7 @@ class Collection(Base):
     connector_account_id = Column(String, ForeignKey("connector_accounts.id"), nullable=True)
     policy_id = Column(String, ForeignKey("protection_policies.id"), nullable=True)
     sensitivity = Column(String, default="standard")  # standard | sensitive | restricted
+    destinations = Column(JSON, default=list)  # where this mapping stores data
     created_at = Column(DateTime, default=_now)
 
     vault = relationship("Vault", back_populates="collections")
