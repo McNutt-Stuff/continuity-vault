@@ -14,6 +14,7 @@ import hashlib
 import io
 import secrets
 import tarfile
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from ..models import (
 
 settings = get_settings()
 router = APIRouter(tags=["appliances"])
+logger = logging.getLogger("cv.appliances")
 
 # In-memory fast path; the durable source of truth is the sha256 hash persisted
 # on the Appliance row, so tokens survive cloud restarts.
@@ -612,7 +614,12 @@ def heartbeat(body: HeartbeatRequest,
         appliance.state = "QUARANTINED"
     db.commit()
 
-    _sync_storage_telemetry(db, appliance, body.telemetry or {})
+    # Storage telemetry is best-effort — never let it reject the heartbeat.
+    try:
+        _sync_storage_telemetry(db, appliance, body.telemetry or {})
+    except Exception:
+        db.rollback()
+        logger.exception("storage telemetry sync failed for appliance %s", appliance.id)
 
     # Deliver pending signed commands (management plane only).
     pending = (db.query(ApplianceCommand)

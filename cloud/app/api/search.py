@@ -12,17 +12,57 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from cv_crypto.envelope import EnvelopeKeyHierarchy, decrypt_object
+from cv_crypto.envelope import EnvelopeKeyHierarchy, decrypt_object, unwrap_key
+from cv_crypto.provider import get_provider
 
 from .. import audit, fleet, keybroker, security
 from ..db import get_db
 from ..connectors import get_connector
-from ..models import Appliance, ApplianceStorage, Collection, ConnectorAccount, SearchDocument, SnapshotReceipt, Tenant
+from ..models import (
+    Appliance,
+    ApplianceStorage,
+    Collection,
+    ConnectorAccount,
+    DesktopAgent,
+    SearchDocument,
+    SnapshotReceipt,
+    Tenant,
+    Vault,
+)
 from ..storage import build_destination
 from ..taxonomy import describe, sensitivity_for
 
 router = APIRouter(prefix="/search", tags=["search"])
 logger = logging.getLogger("cv.search")
+
+
+def _unb64(s: str) -> bytes:
+    return base64.b64decode(s)
+
+
+def _unwrap_agent_content(db: Session, receipt: SnapshotReceipt, inner: dict) -> bytes | None:
+    """Decrypt an agent client-side envelope using the escrowed agent key.
+
+    Agents (e.g. 1Password on a Mac) encrypt content locally under a data key and
+    escrow that key wrapped to the vault recovery key. To recover in-portal we
+    unwrap the escrowed key with the vault recovery private key, then decrypt the
+    envelope. Returns None when no escrow is available (unrecoverable in-portal)."""
+    coll = db.get(Collection, receipt.collection_id) if receipt.collection_id else None
+    agent = db.get(DesktopAgent, coll.agent_id) if coll and coll.agent_id else None
+    wrapped = (agent.config or {}).get("escrow_wrapped_key") if agent else None
+    if not wrapped:
+        return None
+    # The agent escrowed to the tenant's first vault's recovery key at activation.
+    rec_vault = (db.query(Vault).filter(Vault.tenant_id == agent.tenant_id).first()
+                 if agent else None)
+    recovery_priv = keybroker.release_recovery_private(
+        rec_vault.id if rec_vault else receipt.vault_id)
+    agent_key = unwrap_key(wrapped, recovery_priv)
+    p = get_provider()
+    wd = inner["wrappedDek"]
+    dek = p.aes_decrypt(agent_key, _unb64(wd["nonce"]), _unb64(wd["ct"]), b"agent-dek")
+    return p.aes_decrypt(dek, _unb64(inner["nonce"]), _unb64(inner["ct"]),
+                         str(inner["objectId"]).encode())
 
 
 def _location_label(destination: str, store_labels: dict[str, str] | None = None) -> str:
@@ -295,13 +335,38 @@ def retrieve(body: RetrieveRequest,
                        SnapshotReceipt.snapshot_id == body.snapshot_id).first())
     content_b64 = None
     size_bytes = len(data)
+    client_encrypted = False
     try:
         obj = json.loads(data.decode())
-        if receipt is not None and isinstance(obj, dict) and "wrappedDek" in obj:
+        decryptable = isinstance(obj, dict) and ("wrappedDek" in obj or obj.get("chunked"))
+        if receipt is not None and decryptable:
             root_key = keybroker.release_vault_root_key(receipt.vault_id)
             snapshot_key = EnvelopeKeyHierarchy(root_key).snapshot_key(
                 receipt.vault_id, receipt.collection_id, body.snapshot_id)
-            plaintext = decrypt_object(snapshot_key, obj)
+            if obj.get("chunked"):
+                # Reassemble large content from its encrypted chunks.
+                buf = bytearray()
+                for part in obj.get("parts", []):
+                    pdata = dest.get_object(prefix, f"{body.snapshot_id}/{part['objectId']}")
+                    buf += decrypt_object(snapshot_key, json.loads(pdata.decode()))
+                plaintext = bytes(buf)
+            else:
+                plaintext = decrypt_object(snapshot_key, obj)
+            # Agent-collected items are client-encrypted; the decrypted layer is
+            # itself an agent envelope — unwrap it with the escrowed agent key.
+            inner = None
+            try:
+                candidate = json.loads(plaintext.decode())
+                if isinstance(candidate, dict) and candidate.get("wrappedDek") and candidate.get("v"):
+                    inner = candidate
+            except Exception:
+                inner = None
+            if inner is not None:
+                recovered = _unwrap_agent_content(db, receipt, inner)
+                if recovered is not None:
+                    plaintext = recovered
+                else:
+                    client_encrypted = True  # no escrow available to open it
             content_b64 = base64.b64encode(plaintext).decode()
             size_bytes = len(plaintext)
     except Exception as exc:  # noqa: BLE001 - legacy metadata-only objects
@@ -318,6 +383,12 @@ def retrieve(body: RetrieveRequest,
                 "size_bytes": size_bytes, "encrypted": True, "content_b64": None,
                 "message": f"Object available at {label} ({size_bytes} bytes). "
                            "This item was captured before full-content backup; re-run a backup to store its content."}
+    if client_encrypted:
+        return {"status": "available", "location": label, "async": False,
+                "size_bytes": size_bytes, "encrypted": True, "content_b64": content_b64,
+                "filename": ((doc.title if doc else body.object_id) or body.object_id) + ".enc",
+                "message": f"Recovered {size_bytes} bytes from {label} (still client-encrypted — "
+                           "the collecting agent has not escrowed a recovery key)."}
     return {"status": "available", "location": label, "async": False,
             "size_bytes": size_bytes, "encrypted": False,
             "content_b64": content_b64,

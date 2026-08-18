@@ -22,7 +22,7 @@ from ..taxonomy import classify_file, map_1password
 logger = logging.getLogger("cv.connectors.live")
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
-_DEFAULT_CAP = 26214400  # 25 MiB
+_DEFAULT_CAP = 268435456  # 256 MiB
 
 
 def _now() -> datetime:

@@ -259,13 +259,15 @@ class Agent:
         self.vault.commit_snapshot(snapshot_id, objects, manifest)
         manifest_hash = manifest["signature"]["payloadHash"]
         self.sm.transition(State.SEALING)
+        # Logical item count (chunked objects arrive as many storage units).
+        logical = int(params.get("objectCount") or len(objects))
+        total_bytes = sum(int(o.get("plaintextBytes", 0)) for o in objects)
         receipt = self.vault.seal(self.identity.signer, self.appliance_id, snapshot_id,
-                                  manifest_hash, len(objects),
-                                  sum(int(o.get("plaintextBytes", 0)) for o in objects))
+                                  manifest_hash, logical, total_bytes)
         self.sm.transition(State.SEALED)
         # Report the seal receipt so the cloud can mark it recoverable.
         asyncio.create_task(self._report_seal(snapshot_id, params, manifest_hash,
-                                              len(objects), receipt))
+                                              logical, receipt))
         return receipt, {"snapshot_id": snapshot_id, "sealed": True}
 
     async def _report_seal(self, snapshot_id, params, manifest_hash, count, receipt):

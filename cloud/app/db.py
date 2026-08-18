@@ -92,6 +92,12 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE connector_accounts ADD COLUMN sync_cursor JSON",
         "ALTER TABLE appliance_storages ADD COLUMN used_bytes INTEGER DEFAULT 0",
         "ALTER TABLE appliance_storages ADD COLUMN health JSON",
+        # Byte counts can exceed 32-bit INTEGER (>2.1GB) — widen to BIGINT so
+        # storing appliance capacity / large content doesn't overflow on Postgres.
+        "ALTER TABLE appliance_storages ALTER COLUMN capacity_bytes TYPE BIGINT",
+        "ALTER TABLE appliance_storages ALTER COLUMN used_bytes TYPE BIGINT",
+        "ALTER TABLE snapshot_receipts ALTER COLUMN total_bytes TYPE BIGINT",
+        "ALTER TABLE search_documents ALTER COLUMN size_bytes TYPE BIGINT",
     ]
     for statement in statements:
         try:

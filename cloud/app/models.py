@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -197,8 +198,8 @@ class ApplianceStorage(Base):
     appliance_id = Column(String, ForeignKey("appliances.id"), nullable=False, index=True)
     name = Column(String, default="Built-In Storage")
     kind = Column(String, default="builtin")  # builtin | external
-    capacity_bytes = Column(Integer, default=0)
-    used_bytes = Column(Integer, default=0)
+    capacity_bytes = Column(BigInteger, default=0)
+    used_bytes = Column(BigInteger, default=0)
     health = Column(JSON, default=dict)  # drive_health, smart, raid, temperature_c
     created_at = Column(DateTime, default=_now)
 
@@ -268,7 +269,7 @@ class SnapshotReceipt(Base):
     snapshot_id = Column(String, nullable=False, index=True)
     destination = Column(String, nullable=False)  # cv-cloud | appliance | customer-s3
     object_count = Column(Integer, default=0)
-    total_bytes = Column(Integer, default=0)
+    total_bytes = Column(BigInteger, default=0)
     manifest_hash = Column(String, nullable=False)
     recoverable = Column(Boolean, default=False)  # spec 6.1 step 12 / build-instr 18
     receipt = Column(JSON, nullable=True)  # signed seal receipt
@@ -298,7 +299,7 @@ class SearchDocument(Base):
     # Denormalised searchable text (title + preview + connector-declared
     # searchable metadata fields). Empty for zero-knowledge vaults.
     search_blob = Column(Text, default="")
-    size_bytes = Column(Integer, default=0)
+    size_bytes = Column(BigInteger, default=0)
     modified_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 

@@ -46,8 +46,33 @@ from ..storage import build_destination
 
 # The cloud manifest signer (distinct from the fleet command signer).
 from ..fleet import fleet_signer
+from ..config import get_settings
 
 logger = logging.getLogger("cv.sync")
+
+
+def _encrypt_content_units(snapshot_key: bytes, content: bytes, object_id: str,
+                           chunk_size: int) -> list:
+    """Encrypt one source object into storage units. Small content becomes a
+    single envelope stored under ``object_id``; large content becomes per-chunk
+    envelopes (``object_id#pN``) plus a small index stored under ``object_id``."""
+    if len(content) <= chunk_size:
+        enc = encrypt_object(snapshot_key, content, object_id)
+        enc["plaintextBytes"] = len(content)
+        return [enc]
+    units: list = []
+    parts: list = []
+    for i in range(0, len(content), chunk_size):
+        part = content[i:i + chunk_size]
+        pid = f"{object_id}#p{i // chunk_size}"
+        penc = encrypt_object(snapshot_key, part, pid)
+        penc["plaintextBytes"] = len(part)
+        units.append(penc)
+        parts.append({"objectId": pid, "bytes": len(part)})
+    # Index object (stored under the logical object id) drives reassembly.
+    units.append({"objectId": object_id, "chunked": True, "parts": parts,
+                  "plaintextBytes": 0})
+    return units
 
 
 # Nice, human labels for common discrete metadata keys shown in search.
@@ -211,22 +236,20 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     hierarchy = EnvelopeKeyHierarchy(root_key)
     snapshot_id = str(uuid.uuid4())
     snapshot_key = hierarchy.snapshot_key(vault.id, collection.id, snapshot_id)
+    chunk_size = get_settings().content_chunk_bytes
 
-    encrypted_objects = []
+    storage_units: list = []  # envelopes to persist (single, or chunks + index)
     index_rows: List[SearchDocument] = []
     total_bytes = 0
 
     src_list = list(source_objects)
     n_total = len(src_list)
     for idx, src in enumerate(src_list):
-        enc = encrypt_object(snapshot_key, src.content, src.object_id)
-        # Account by what is ACTUALLY stored (the encrypted content), not the
-        # source item's logical size — connectors capture metadata/index content,
-        # so src.size_bytes (e.g. a 400MB file) is the item's size, not our footprint.
-        stored_bytes = len(src.content)
-        enc["plaintextBytes"] = stored_bytes
-        encrypted_objects.append(enc)
-        total_bytes += stored_bytes
+        # Large content is split into encrypted chunks at rest; small content is a
+        # single envelope. Either way the item stays one logical object in search.
+        storage_units.extend(
+            _encrypt_content_units(snapshot_key, src.content, src.object_id, chunk_size))
+        total_bytes += len(src.content)
         if progress and (idx % 25 == 0):
             progress(idx, n_total, f"Encrypting {idx}/{n_total}…")
         # Index only discrete, connector-declared metadata — no body/content. The
@@ -268,7 +291,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         snapshot_id=snapshot_id,
         vault_id=vault.id,
         collection_id=collection.id,
-        objects=encrypted_objects,
+        objects=storage_units,
         retention_class="standard",
     )
     manifest_hash = manifest["signature"]["payloadHash"]
@@ -288,7 +311,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         try:
             if kind in ("cv-cloud", "customer-s3"):
                 dest = build_destination(kind)
-                for obj in encrypted_objects:
+                for obj in storage_units:
                     # Store the full envelope (nonce + wrapped DEK + ciphertext) so
                     # the content can be decrypted on retrieval — not just the ct.
                     dest.put_object(tenant_prefix, f"{snapshot_id}/{obj['objectId']}",
@@ -313,11 +336,10 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                         "vaultId": vault.id,
                         "collectionId": collection.id,
                         "storageId": _storage_id(kind),
-                        "objects": [
-                            {"objectId": o["objectId"], "ciphertext": o["ciphertext"],
-                             "plaintextBytes": int(o.get("plaintextBytes", 0))}
-                            for o in encrypted_objects
-                        ],
+                        # Full envelopes (incl. nonce + wrapped DEK, and chunk
+                        # indexes) so the appliance can store & later decrypt.
+                        "objects": storage_units,
+                        "objectCount": n_total,
                     },
                 )
             else:
@@ -335,7 +357,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
             snapshot_id=snapshot_id,
             destination=kind,
             appliance_id=receipt_appliance_id,
-            object_count=len(encrypted_objects),
+            object_count=n_total,
             total_bytes=total_bytes,
             manifest_hash=manifest_hash,
             recoverable=recoverable,
