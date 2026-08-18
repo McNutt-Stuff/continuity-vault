@@ -36,7 +36,8 @@ class Settings(BaseSettings):
     # Appliance fleet management.
     command_ttl_seconds: int = 900
     heartbeat_interval_seconds: int = 30
-    linking_code_ttl_seconds: int = 900
+    # Long enough to survive a first appliance install (native liboqs build).
+    linking_code_ttl_seconds: int = 3600
 
     # Software update publishing.
     release_channel: str = "stable"
