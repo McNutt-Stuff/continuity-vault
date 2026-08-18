@@ -54,7 +54,7 @@ install_caddy() {
 create_user_dirs() {
   id -u "$CV_USER" >/dev/null 2>&1 \
     || useradd --system --home "$DATA_DIR" --shell /usr/sbin/nologin "$CV_USER"
-  mkdir -p "$INSTALL_DIR" "$DATA_DIR/keystore"
+  mkdir -p "$INSTALL_DIR" "$DATA_DIR/keystore" "$DATA_DIR/object_store"
 }
 
 sync_code() {
@@ -111,6 +111,7 @@ CV_RP_ID=${CV_DOMAIN}
 CV_RP_ORIGIN=https://${CV_DOMAIN}
 CV_KEK_SECRET=${kek_secret}
 CV_KEY_STORE=${DATA_DIR}/keystore
+CV_OBJECT_STORE=${DATA_DIR}/object_store
 CV_FLEET_SIGNER=${DATA_DIR}/fleet_signer.json
 CV_SEED_DEMO_DATA=true
 EOF
@@ -138,10 +139,17 @@ configure_caddy() {
 
 health_check() {
   local i
-  for i in $(seq 1 15); do
-    curl -fsS "http://127.0.0.1:8000/api/health" 2>/dev/null | grep -q '"status":"ok"' && return 0
+  for i in $(seq 1 20); do
+    if curl -fsS "http://127.0.0.1:8000/api/health" 2>/dev/null | grep -q '"status":"ok"'; then
+      return 0
+    fi
     sleep 2
   done
+  # Surface why the service is not answering so the log tail is actionable.
+  echo "---- service did not become healthy; diagnostics ----"
+  systemctl --no-pager status cv-cloud.service 2>&1 || true
+  echo "---- recent journal ----"
+  journalctl -u cv-cloud.service --no-pager -n 80 2>&1 || true
   return 1
 }
 

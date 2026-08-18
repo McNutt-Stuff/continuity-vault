@@ -48,9 +48,11 @@ class ProtectionDestination(ABC):
 class LocalFsDestination(ProtectionDestination):
     name = "local-fs"
 
-    def __init__(self, root: str = "./cv_object_store") -> None:
-        self.root = Path(root)
-        self.root.mkdir(exist_ok=True)
+    def __init__(self, root: str | None = None) -> None:
+        # Configurable so it can live on a writable path (the service mounts
+        # the code directory read-only).
+        self.root = Path(root or os.environ.get("CV_OBJECT_STORE", "./cv_object_store"))
+        self.root.mkdir(parents=True, exist_ok=True)
 
     def _p(self, tenant_prefix: str, key: str) -> Path:
         p = self.root / tenant_prefix / key

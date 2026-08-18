@@ -9,7 +9,10 @@ User=cvault
 Group=cvault
 EnvironmentFile=/etc/continuity-vault.env
 WorkingDirectory=/opt/continuity-vault/cloud
-ExecStart=/opt/continuity-vault/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4
+# Single worker: the all-in-one node initializes the schema and seeds on
+# startup, which must not race across workers. Scale out behind a shared,
+# already-migrated database instead.
+ExecStart=/opt/continuity-vault/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 Restart=always
 RestartSec=3
 # Hardening

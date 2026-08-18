@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import keybroker
@@ -56,6 +57,9 @@ def seed(db: Session | None = None) -> None:
                                "hash": result["record"]["rootKeyHash"]}]
 
         db.commit()
+    except IntegrityError:
+        # Another worker/instance seeded concurrently — safe to ignore.
+        db.rollback()
     finally:
         if close:
             db.close()

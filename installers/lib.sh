@@ -90,7 +90,9 @@ step() {
   fi
 
   # TTY: run in background with a spinner, hide output.
-  ( "$@" >>"$LOG" 2>&1 ) &
+  # Clear the ERR trap inside the subshell so an intentional non-zero return
+  # from a step function is reported once (via wait), not twice.
+  ( trap - ERR; "$@" >>"$LOG" 2>&1 ) &
   local pid=$!
   _spinner "$pid" "$desc"
   if wait "$pid"; then

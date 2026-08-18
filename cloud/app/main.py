@@ -53,7 +53,23 @@ app.include_router(updates.public_router, prefix=API)
 
 @app.on_event("startup")
 def startup() -> None:
-    init_db()
+    # The database (Postgres) may still be accepting connections a moment after
+    # the service starts; retry briefly so the worker doesn't crash-loop.
+    import time
+    from sqlalchemy.exc import OperationalError
+
+    last_err: Exception | None = None
+    for attempt in range(30):
+        try:
+            init_db()
+            last_err = None
+            break
+        except OperationalError as exc:
+            last_err = exc
+            time.sleep(2)
+    if last_err is not None:
+        raise last_err
+
     if settings.seed_demo_data:
         from .seed import seed
 
