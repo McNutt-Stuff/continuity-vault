@@ -163,14 +163,14 @@ step "Installing system packages"          install_os_deps
 step "Installing Node.js 20"               install_node
 step "Installing Caddy (Let's Encrypt)"    install_caddy
 step "Creating service user & directories" create_user_dirs
-step "Copying application files"           sync_code
+step_always "Copying application files"    sync_code
 step "Configuring PostgreSQL database"     setup_database
 step "Installing Python control plane"     install_python
-step "Building web portal"                 build_web
-step "Writing configuration"               write_env
-step "Starting control-plane service"      install_service
-step "Configuring TLS reverse proxy"       configure_caddy
-step "Verifying service health"            health_check
+step_always "Building web portal"          build_web
+step_always "Writing configuration"        write_env
+step_always "Starting control-plane service" install_service
+step_always "Configuring TLS reverse proxy" configure_caddy
+step_always "Verifying service health"     health_check
 
 finish
 printf "  Portal:  %shttps://%s%s\n" "$BOLD" "$CV_DOMAIN" "$RESET"

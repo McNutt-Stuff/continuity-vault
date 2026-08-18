@@ -116,6 +116,19 @@ _step_failed() {
   exit 1
 }
 
+# step_always: like step but never cached. Use for deploy/verify steps (code
+# copy, build, service install, health check) so re-running always redeploys
+# the latest code and re-checks — never silently skipped by a stale marker.
+step_always() {
+  local desc="$1"; shift
+  local _saved="${CV_FORCE:-0}"
+  CV_FORCE=1
+  step "$desc" "$@"
+  local rc=$?
+  CV_FORCE="$_saved"
+  return $rc
+}
+
 note() { printf "  %s%s%s\n" "$DIM" "$1" "$RESET"; }
 
 finish() {

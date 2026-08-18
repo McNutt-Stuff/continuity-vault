@@ -101,11 +101,11 @@ fi
 
 step "Installing system packages"          install_os_deps
 step "Creating service user & directories" create_user_dirs
-step "Copying application files"           sync_code
+step_always "Copying application files"    sync_code
 step "Installing appliance agent"          install_python
-step "Writing appliance configuration"     write_config
-step "Starting appliance agent"            install_service
-step "Verifying activation with cloud"     verify_agent
+step_always "Writing appliance configuration" write_config
+step_always "Starting appliance agent"     install_service
+step_always "Verifying activation with cloud" verify_agent
 
 finish
 printf "  Reporting to: %s%s%s\n" "$BOLD" "$CV_CLOUD_URL" "$RESET"
