@@ -67,6 +67,7 @@ export default function Search() {
   const [category, setCategory] = useState<string | null>(null);
   const [label, setLabel] = useState<string | null>(null);
   const [attr, setAttr] = useState<string | null>(null);
+  const [attrKey, setAttrKey] = useState("");
   const [data, setData] = useState<SearchResp | null>(null);
   const [locked, setLocked] = useState(false);
   const [msg, setMsg] = useState("");
@@ -137,90 +138,84 @@ export default function Search() {
         <button className="btn primary sm" onClick={run}>Search</button>
       </div>
 
-      {data && Object.keys(data.facets.category).length > 0 && (
-        <div className="chips" style={{ marginBottom: 10 }}>
-          <span className={`chip ${!category ? "active" : ""}`} onClick={() => setCategory(null)}>
-            All types
-          </span>
-          {Object.entries(data.facets.category)
-            .sort((a, b) => b[1] - a[1])
-            .map(([cat, n]) => {
-              const cm = CATEGORY_META[cat] ?? { icon: "database" as IconName, label: cat, color: "#9aa7bf" };
-              return (
-                <span key={cat} className={`chip ${category === cat ? "active" : ""}`}
-                  style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-                  onClick={() => setCategory(category === cat ? null : cat)}>
-                  <span style={{ color: cm.color, display: "inline-flex" }}><Icon name={cm.icon} size={13} /></span>
-                  {cm.label} · {n}
-                </span>
-              );
-            })}
-        </div>
-      )}
-
-      <div className="chips" style={{ marginBottom: 10 }}>
-        <span className={`chip ${!source ? "active" : ""}`} onClick={() => setSource(null)}>
-          All sources {data && `· ${data.total_indexed}`}
-        </span>
-        {data &&
-          Object.entries(data.facets.source).map(([s, n]) => {
-            const sm = SOURCE_META[s] ?? { color: "#9aa7bf", icon: "database" as IconName, label: s };
-            const brand = brandForSource(s);
-            const label = data.source_display?.[s] ?? sm.label;
-            return (
-              <span key={s} className={`chip ${source === s ? "active" : ""}`}
-                style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-                onClick={() => { setAttr(null); setSource(source === s ? null : s); }}>
-                {brand
-                  ? <BrandIcon name={brand} size={14} />
-                  : <span style={{ color: sm.color, display: "inline-flex" }}><Icon name={sm.icon} size={13} /></span>}
-                {label} · {n}
-              </span>
-            );
-          })}
-      </div>
-
-      {data && Object.keys(data.facets.label).length > 0 && (
-        <div className="chips" style={{ marginBottom: 18 }}>
-          <span className="faint" style={{ fontSize: 11, alignSelf: "center", marginRight: 4 }}>Labels</span>
-          <span className={`chip ${!label ? "active" : ""}`} onClick={() => setLabel(null)}>All</span>
-          {Object.entries(data.facets.label)
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 12)
-            .map(([l, n]) => (
-              <span key={l} className={`chip ${label === l ? "active" : ""}`} onClick={() => setLabel(l)}>
-                {l} · {n}
-              </span>
-            ))}
-        </div>
-      )}
-
-      {data && Object.keys(data.facets.attributes || {}).length > 0 && (
-        <div className="stack" style={{ gap: 8, marginBottom: 18 }}>
-          <div className="row" style={{ gap: 8, alignItems: "center" }}>
-            <span className="faint" style={{ fontSize: 11 }}>Attributes</span>
-            {attr && (
-              <span className="chip active" onClick={() => setAttr(null)}>
-                {attr.replace(":", ": ")} <Icon name="check" size={11} /> clear
-              </span>
-            )}
-          </div>
-          {Object.entries(data.facets.attributes).map(([key, vals]) => (
-            <div key={key} className="chips" style={{ gap: 6 }}>
-              <span className="faint" style={{ fontSize: 11, alignSelf: "center", minWidth: 66, textTransform: "capitalize" }}>{key}</span>
-              {Object.entries(vals).map(([val, n]) => {
-                const id = `${key}:${val}`;
-                return (
-                  <span key={id} className={`chip ${attr === id ? "active" : ""}`}
-                    onClick={() => setAttr(attr === id ? null : id)}>
-                    {val} · {n}
-                  </span>
-                );
-              })}
+      {data && (() => {
+        const cats = Object.entries(data.facets.category).sort((a, b) => b[1] - a[1]);
+        const srcs = Object.entries(data.facets.source).sort((a, b) => b[1] - a[1]);
+        const labels = Object.entries(data.facets.label).sort((a, b) => b[1] - a[1]);
+        const attrKeys = Object.keys(data.facets.attributes || {});
+        const attrVals = attrKey ? data.facets.attributes?.[attrKey] : undefined;
+        const attrValue = attr && attr.startsWith(`${attrKey}:`) ? attr.slice(attrKey.length + 1) : "";
+        const srcLabel = source ? (data.source_display?.[source] ?? SOURCE_META[source]?.label ?? source) : "";
+        const catLabel = category ? (CATEGORY_META[category]?.label ?? category) : "";
+        const hasFilters = !!(source || category || label || attr);
+        function clearAll() { setSource(null); setCategory(null); setLabel(null); setAttr(null); setAttrKey(""); }
+        return (
+          <>
+            <div className="filter-bar">
+              <label className="filter-select">
+                <span>Source</span>
+                <select value={source ?? ""} onChange={(e) => { setAttr(null); setAttrKey(""); setSource(e.target.value || null); }}>
+                  <option value="">All sources ({data.total_indexed})</option>
+                  {srcs.map(([s, n]) => (
+                    <option key={s} value={s}>{data.source_display?.[s] ?? SOURCE_META[s]?.label ?? s} ({n})</option>
+                  ))}
+                </select>
+              </label>
+              {cats.length > 0 && (
+                <label className="filter-select">
+                  <span>Type</span>
+                  <select value={category ?? ""} onChange={(e) => setCategory(e.target.value || null)}>
+                    <option value="">All types</option>
+                    {cats.map(([c, n]) => (
+                      <option key={c} value={c}>{CATEGORY_META[c]?.label ?? c} ({n})</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {labels.length > 0 && (
+                <label className="filter-select">
+                  <span>Label</span>
+                  <select value={label ?? ""} onChange={(e) => setLabel(e.target.value || null)}>
+                    <option value="">All labels</option>
+                    {labels.map(([l, n]) => <option key={l} value={l}>{l} ({n})</option>)}
+                  </select>
+                </label>
+              )}
+              {attrKeys.length > 0 && (
+                <label className="filter-select">
+                  <span>Attribute</span>
+                  <select value={attrKey} onChange={(e) => { setAttrKey(e.target.value); setAttr(null); }}>
+                    <option value="">Choose…</option>
+                    {attrKeys.map((k) => <option key={k} value={k}>{k}</option>)}
+                  </select>
+                </label>
+              )}
+              {attrKey && attrVals && (
+                <label className="filter-select">
+                  <span style={{ textTransform: "capitalize" }}>{attrKey}</span>
+                  <select value={attrValue}
+                    onChange={(e) => setAttr(e.target.value ? `${attrKey}:${e.target.value}` : null)}>
+                    <option value="">Any</option>
+                    {Object.entries(attrVals).map(([v, n]) => <option key={v} value={v}>{v} ({n})</option>)}
+                  </select>
+                </label>
+              )}
+              {hasFilters && (
+                <button className="btn ghost sm" style={{ alignSelf: "flex-end" }} onClick={clearAll}>Clear all</button>
+              )}
             </div>
-          ))}
-        </div>
-      )}
+
+            {hasFilters && (
+              <div className="active-filters">
+                {source && <span className="filter-chip">{srcLabel}<button onClick={() => { setSource(null); setAttr(null); setAttrKey(""); }}>×</button></span>}
+                {category && <span className="filter-chip">{catLabel}<button onClick={() => setCategory(null)}>×</button></span>}
+                {label && <span className="filter-chip">Label: {label}<button onClick={() => setLabel(null)}>×</button></span>}
+                {attr && <span className="filter-chip">{attr.replace(":", ": ")}<button onClick={() => setAttr(null)}>×</button></span>}
+              </div>
+            )}
+          </>
+        );
+      })()}
 
       {data && (
         <div className="muted" style={{ marginBottom: 10, fontSize: 13 }}>

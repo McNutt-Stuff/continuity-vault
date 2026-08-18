@@ -20,7 +20,8 @@ interface Mapping {
   last_backup_at: string | null; last_object_count: number; last_recoverable: boolean;
 }
 interface ActivityEvent {
-  kind: string; source: string; destination?: string; object_count?: number;
+  kind: string; collection_id?: string; source: string; source_type?: string;
+  destination?: string; object_count?: number; total_bytes?: number;
   status: string; at?: string; command?: string;
 }
 interface Activity {
@@ -45,6 +46,8 @@ export default function Mappings() {
   const [editDests, setEditDests] = useState<string[]>([]);
   const [editFields, setEditFields] = useState<string[]>([]);
   const [activity, setActivity] = useState<Activity | null>(null);
+  // collection_id -> epoch ms when a sync was triggered (live indicator).
+  const [syncing, setSyncing] = useState<Record<string, number>>({});
 
   async function load() {
     const [acc, tenant, coll, tgts] = await Promise.all([
@@ -63,9 +66,29 @@ export default function Mappings() {
   }
   useEffect(() => {
     void load();
-    const t = setInterval(() => { api.get<Activity>("/activity").then(setActivity).catch(() => {}); }, 6000);
+    const t = setInterval(() => { api.get<Activity>("/activity").then(setActivity).catch(() => {}); }, 4000);
     return () => clearInterval(t);
   }, []);
+
+  // Clear a mapping's "syncing" indicator once a fresh event lands for it.
+  useEffect(() => {
+    if (!activity) return;
+    setSyncing((cur) => {
+      const next = { ...cur };
+      let changed = false;
+      for (const [cid, ts] of Object.entries(cur)) {
+        const landed = activity.events.some(
+          (e) => e.collection_id === cid && e.at && new Date(e.at).getTime() >= ts - 2000);
+        const stale = Date.now() - ts > 90000; // give up after 90s
+        if (landed || stale) { delete next[cid]; changed = true; }
+      }
+      return changed ? next : cur;
+    });
+  }, [activity]);
+
+  function eventsFor(collectionId: string): ActivityEvent[] {
+    return (activity?.events || []).filter((e) => e.collection_id === collectionId).slice(0, 4);
+  }
 
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
 
@@ -142,12 +165,14 @@ export default function Mappings() {
   }
 
   async function syncNow(m: Mapping) {
+    setSyncing((cur) => ({ ...cur, [m.id]: Date.now() }));
     try {
       const res = await api.post<{ kind: string; queued_agents?: number; object_count?: number }>(`/collections/${m.id}/sync`, {});
       if (res.kind === "agent") flash(`Queued sync on ${res.queued_agents} agent(s)`);
       else flash(`Synced ${res.object_count ?? 0} objects`);
       await load();
     } catch (e) {
+      setSyncing((cur) => { const n = { ...cur }; delete n[m.id]; return n; });
       await notify({ title: "Sync failed", message: (e as ApiError).message, tone: "danger" });
     }
   }
@@ -203,34 +228,14 @@ export default function Mappings() {
         </div>
       </Card>
 
-      {activity && (activity.events.length > 0 || activity.in_flight.length > 0) && (
-        <Card style={{ marginBottom: 16 }}>
-          <div className="spread" style={{ marginBottom: 10 }}>
-            <h3 style={{ margin: 0 }}>Activity</h3>
-            <div className="row" style={{ gap: 8 }}>
-              {activity.summary.queued_agents > 0 && <Pill tone="warn">{activity.summary.queued_agents} syncing</Pill>}
-              {activity.summary.pending > 0 && <Pill tone="info">{activity.summary.pending} sealing</Pill>}
-              <Pill tone="ok">{activity.summary.recent} recent</Pill>
-            </div>
-          </div>
-          {activity.in_flight.map((e, i) => (
-            <div key={`f${i}`} className="row" style={{ gap: 8, padding: "6px 0", fontSize: 13 }}>
-              <span className="spinner-dot" />
-              <span style={{ fontWeight: 600 }}>{e.source}</span>
-              <span className="faint">collecting on desktop agent…</span>
-            </div>
-          ))}
-          {activity.events.slice(0, 8).map((e, i) => (
-            <div key={`e${i}`} className="row" style={{ gap: 8, padding: "6px 0", fontSize: 13, flexWrap: "wrap" }}>
-              <Icon name={e.destination?.startsWith("appliance") ? "server" : "cloud"} size={13} />
-              <span style={{ fontWeight: 600 }}>{e.source}</span>
-              <span className="faint">→ {destLabel(e.destination || "cv-cloud")}</span>
-              <span className="faint">· {e.object_count ?? 0} objects</span>
-              <Pill tone={e.status === "recoverable" ? "ok" : "warn"}>{e.status}</Pill>
-              <span className="faint" style={{ marginLeft: "auto", fontSize: 11 }}>{fmtTime(e.at)}</span>
-            </div>
-          ))}
-        </Card>
+      {activity && (activity.summary.recent > 0 || activity.summary.queued_agents > 0) && (
+        <div className="row" style={{ gap: 8, marginBottom: 12, justifyContent: "flex-end" }}>
+          {activity.summary.queued_agents > 0 && <Pill tone="warn">{activity.summary.queued_agents} syncing</Pill>}
+          {activity.summary.pending > 0 && <Pill tone="info">{activity.summary.pending} sealing</Pill>}
+          <span className="faint" style={{ fontSize: 12, alignSelf: "center" }}>
+            Live · full timeline in <a href="/activity">Activity</a>
+          </span>
+        </div>
       )}
 
       <Card>
@@ -264,6 +269,29 @@ export default function Mappings() {
                         <span key={f} className="chip" style={{ padding: "1px 8px", fontSize: 10.5 }}>{f}</span>
                       ))}
                     {m.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
+                  </div>
+                )}
+                {!editing && (syncing[m.id] || eventsFor(m.id).length > 0) && (
+                  <div className="map-activity">
+                    {syncing[m.id] && (
+                      <div className="row" style={{ gap: 8, fontSize: 12.5, alignItems: "center" }}>
+                        <span className="spinner-dot" />
+                        <span className="faint">
+                          {m.is_agent ? "Collecting on desktop agent, then ingesting…" : "Syncing & ingesting…"}
+                        </span>
+                      </div>
+                    )}
+                    {eventsFor(m.id).map((e, i) => (
+                      <div key={i} className="row" style={{ gap: 6, fontSize: 12, flexWrap: "wrap", alignItems: "center" }}>
+                        <Icon name={e.destination?.startsWith("appliance") ? "server" : "cloud"} size={12} />
+                        <span className="faint">{destLabel(e.destination || "cv-cloud")}</span>
+                        <span className="faint">· {e.object_count ?? 0} objects</span>
+                        <Pill tone={e.status === "recoverable" ? "ok" : "warn"}>
+                          {e.status === "recoverable" ? "recoverable" : "sealing"}
+                        </Pill>
+                        <span className="faint" style={{ marginLeft: "auto" }}>{fmtTime(e.at)}</span>
+                      </div>
+                    ))}
                   </div>
                 )}
                 {editing && (

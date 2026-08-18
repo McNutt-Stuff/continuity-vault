@@ -55,6 +55,7 @@ def activity(limit: int = 40,
                 .limit(limit).all())
     events = [{
         "kind": "backup",
+        "collection_id": rc.collection_id,
         "source": _source_label(rc.collection_id),
         "source_type": _source_type(rc.collection_id),
         "destination": rc.destination,
