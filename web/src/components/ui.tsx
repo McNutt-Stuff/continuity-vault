@@ -33,9 +33,17 @@ export function bytes(n: number): string {
 
 export function timeAgo(iso: string | null): string {
   if (!iso) return "never";
-  const d = (Date.now() - new Date(iso).getTime()) / 1000;
+  const d = (Date.now() - serverDate(iso).getTime()) / 1000;
   if (d < 60) return "just now";
   if (d < 3600) return `${Math.floor(d / 60)}m ago`;
   if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
   return `${Math.floor(d / 86400)}d ago`;
+}
+
+// The API serializes naive UTC datetimes (no timezone suffix). Parse a
+// timezone-less value as UTC — otherwise the browser reads it as local time and
+// everything looks like it happened "just now"/in the future.
+export function serverDate(iso: string): Date {
+  const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(iso);
+  return new Date(hasTz ? iso : iso + "Z");
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Card, Pill, Stat, bytes } from "../components/ui";
+import { Card, Pill, Stat, bytes, serverDate } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 
@@ -20,7 +20,7 @@ interface Activity {
 
 function ago(iso?: string | null): string {
   if (!iso) return "";
-  const d = (Date.now() - new Date(iso).getTime()) / 1000;
+  const d = (Date.now() - serverDate(iso).getTime()) / 1000;
   if (d < 60) return "just now";
   if (d < 3600) return `${Math.floor(d / 60)}m ago`;
   if (d < 86400) return `${Math.floor(d / 3600)}h ago`;

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
-import { Card, Pill, timeAgo } from "../components/ui";
+import { Card, Pill, timeAgo, serverDate } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { notify } from "../components/dialog";
 
@@ -180,7 +180,7 @@ function Info({ label, value }: { label: string; value: string }) {
 
 function heartbeatTone(iso: string | null): "ok" | "warn" | "danger" {
   if (!iso) return "danger";
-  const secs = (Date.now() - new Date(iso).getTime()) / 1000;
+  const secs = (Date.now() - serverDate(iso).getTime()) / 1000;
   if (secs < 90) return "ok";
   if (secs < 600) return "warn";
   return "danger";

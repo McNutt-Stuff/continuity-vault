@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import { Card, Pill, bytes } from "../components/ui";
+import { Card, Pill, bytes, serverDate } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, notify } from "../components/dialog";
@@ -20,6 +20,8 @@ interface Mapping {
   index_fields: string[]; available_fields: string[];
   last_backup_at: string | null; last_object_count: number; last_recoverable: boolean;
   offpolicy_points: number;
+  backup_interval_minutes: number | null; default_interval_minutes: number;
+  last_backup_run_at: string | null;
 }
 interface ActivityEvent {
   kind: string; collection_id?: string; source: string; source_type?: string;
@@ -54,6 +56,8 @@ export default function Mappings() {
   const [editId, setEditId] = useState<string | null>(null);
   const [editDests, setEditDests] = useState<string[]>([]);
   const [editFields, setEditFields] = useState<string[]>([]);
+  // -1 = use the global default, 0 = manual only, >0 = every N minutes.
+  const [editInterval, setEditInterval] = useState<number>(-1);
   const [activity, setActivity] = useState<Activity | null>(null);
   // collection_id -> epoch ms when a sync was triggered (live indicator).
   const [syncing, setSyncing] = useState<Record<string, number>>({});
@@ -91,7 +95,7 @@ export default function Mappings() {
       for (const [cid, ts] of Object.entries(cur)) {
         const activeJob = (activity.jobs || []).some((j) => j.collection_id === cid);
         const landed = activity.events.some(
-          (e) => e.collection_id === cid && e.at && new Date(e.at).getTime() >= ts - 2000);
+          (e) => e.collection_id === cid && e.at && serverDate(e.at).getTime() >= ts - 2000);
         // A running job supersedes the local spinner; otherwise clear on a fresh
         // event or after a long timeout.
         const stale = Date.now() - ts > 180000;
@@ -178,6 +182,7 @@ export default function Mappings() {
     setEditDests(m.destinations && m.destinations.length ? [...m.destinations] : ["cv-cloud"]);
     // Default the indexed fields to the mapping's override, or all available.
     setEditFields(m.index_fields && m.index_fields.length ? [...m.index_fields] : [...m.available_fields]);
+    setEditInterval(m.backup_interval_minutes == null ? -1 : m.backup_interval_minutes);
   }
 
   function toggleEditDest(id: string) {
@@ -191,7 +196,10 @@ export default function Mappings() {
   async function saveRouting(m: Mapping) {
     if (editDests.length === 0) return flash("Pick at least one destination");
     try {
-      await api.put(`/collections/${m.id}`, { destinations: editDests, index_fields: editFields });
+      await api.put(`/collections/${m.id}`, {
+        destinations: editDests, index_fields: editFields,
+        backup_interval_minutes: editInterval,
+      });
       setEditId(null);
       flash("Mapping updated");
       await load();
@@ -334,6 +342,9 @@ export default function Mappings() {
                     {(m.destinations || []).map((d) => (
                       <Pill key={d} tone={isApplianceDest(d) ? "ok" : "info"}>{destLabel(d)}</Pill>
                     ))}
+                    <Pill tone={m.backup_interval_minutes === 0 ? "warn" : "info"}>
+                      <Icon name="clock" size={11} /> {scheduleLabel(m)}
+                    </Pill>
                     {(m.index_fields && m.index_fields.length ? m.index_fields : m.available_fields)
                       .slice(0, 6).map((f) => (
                         <span key={f} className="chip" style={{ padding: "1px 8px", fontSize: 10.5 }}>{f}</span>
@@ -446,6 +457,27 @@ export default function Mappings() {
                         </div>
                       </div>
                     )}
+                    <div className="stack" style={{ gap: 6 }}>
+                      <span className="faint" style={{ fontSize: 11.5 }}>
+                        Back up automatically
+                      </span>
+                      <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <select style={{ padding: "5px 8px", borderRadius: 6 }}
+                                value={editInterval}
+                                onChange={(e) => setEditInterval(Number(e.target.value))}>
+                          {INTERVAL_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.value === -1 ? `Use default (${intervalText(m.default_interval_minutes)})` : o.label}
+                            </option>
+                          ))}
+                        </select>
+                        <span className="faint" style={{ fontSize: 11 }}>
+                          {editInterval === 0
+                            ? "Only backs up when you click Sync/Back up now."
+                            : `Runs in the background ${intervalText(editInterval < 0 ? m.default_interval_minutes : editInterval)}.`}
+                        </span>
+                      </div>
+                    </div>
                     <div className="row" style={{ gap: 8 }}>
                       <button className="btn sm primary" onClick={() => saveRouting(m)}>Save</button>
                       <button className="btn sm ghost" onClick={() => setEditId(null)}>Cancel</button>
@@ -478,9 +510,33 @@ export default function Mappings() {
 
 function fmtTime(iso?: string | null): string {
   if (!iso) return "never";
-  const d = (Date.now() - new Date(iso).getTime()) / 1000;
+  const d = (Date.now() - serverDate(iso).getTime()) / 1000;
   if (d < 60) return "just now";
   if (d < 3600) return `${Math.floor(d / 60)}m ago`;
   if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
   return `${Math.floor(d / 86400)}d ago`;
+}
+
+const INTERVAL_OPTIONS: { value: number; label: string }[] = [
+  { value: -1, label: "Use default" },
+  { value: 0, label: "Manual only" },
+  { value: 15, label: "Every 15 min" },
+  { value: 30, label: "Every 30 min" },
+  { value: 60, label: "Hourly" },
+  { value: 360, label: "Every 6 hours" },
+  { value: 720, label: "Every 12 hours" },
+  { value: 1440, label: "Daily" },
+];
+
+function intervalText(minutes: number): string {
+  if (minutes <= 0) return "manual only";
+  if (minutes < 60) return `every ${minutes} min`;
+  if (minutes < 1440) { const h = minutes / 60; return h === 1 ? "hourly" : `every ${h}h`; }
+  const d = minutes / 1440; return d === 1 ? "daily" : `every ${d}d`;
+}
+
+function scheduleLabel(m: Mapping): string {
+  if (m.backup_interval_minutes == null) return `Auto · ${intervalText(m.default_interval_minutes)}`;
+  if (m.backup_interval_minutes === 0) return "Manual only";
+  return `Auto · ${intervalText(m.backup_interval_minutes)}`;
 }

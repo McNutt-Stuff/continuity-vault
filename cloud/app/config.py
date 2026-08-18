@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     # Scheduled connector sync (background delta worker).
     sync_enabled: bool = True
     sync_interval_minutes: int = 30
+    # How often the scheduler wakes to check each mapping's per-mapping cadence.
+    scheduler_tick_seconds: int = 60
     # Safety cap on how many items a single full backup pulls from a source.
     sync_max_items: int = 5000
     # Max raw content pulled/held per object during a sync (memory bound). Larger

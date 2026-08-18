@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .. import audit, security
+from ..config import get_settings
 from ..db import get_db
 from ..connectors import get_connector
 from ..models import (
@@ -78,6 +80,7 @@ class UpdateCollectionRequest(BaseModel):
     sensitivity: str | None = None
     destinations: list[str] | None = None
     index_fields: list[str] | None = None
+    backup_interval_minutes: int | None = None  # NULL=default, 0=manual, >0=every N min
 
 
 @router.put("/{collection_id}")
@@ -101,6 +104,10 @@ def update_collection(collection_id: str, body: UpdateCollectionRequest,
         coll.destinations = body.destinations or ["cv-cloud"]
     if body.index_fields is not None:
         coll.index_fields = body.index_fields
+    if body.backup_interval_minutes is not None:
+        # <0 → NULL (use the global default); 0 → manual only; >0 → every N min.
+        coll.backup_interval_minutes = (None if body.backup_interval_minutes < 0
+                                        else body.backup_interval_minutes)
     db.commit()
     db.refresh(coll)
     audit.record(db, actor=principal.user_id, action="collection.updated",
@@ -165,6 +172,9 @@ def _collection_view(db: Session, c: Collection) -> dict:
         "last_object_count": indexed,
         "last_recoverable": bool(last.recoverable) if last else False,
         "offpolicy_points": offpolicy_points,
+        "backup_interval_minutes": c.backup_interval_minutes,  # NULL = use default
+        "default_interval_minutes": get_settings().sync_interval_minutes,
+        "last_backup_run_at": c.last_backup_run_at.isoformat() if c.last_backup_run_at else None,
     }
 
 
@@ -242,6 +252,8 @@ def backup(collection_id: str, body: BackupRequest,
     dests = body.destinations or coll.destinations or ["cv-cloud"]
     # Long pulls run as a tracked background job so the UI can show progress.
     job = start_backup_job(db, tenant.id, coll.id, kind="backup", destinations=dests)
+    coll.last_backup_run_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
     audit.record(db, actor=principal.user_id, action="source.sync_requested",
                  tenant_id=tenant.id, resource=coll.id, detail={"kind": "connector"})
     return {"job_id": job.id, "status": job.status, "kind": "connector",
@@ -280,6 +292,7 @@ def sync(collection_id: str,
         for a in targeted:
             a.pending_command = {"type": "collect", "params": {}}
             queued += 1
+        coll.last_backup_run_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
         audit.record(db, actor=principal.user_id, action="source.sync_requested",
                      tenant_id=tenant.id, resource=coll.id,
@@ -292,6 +305,8 @@ def sync(collection_id: str,
     dests = coll.destinations or ["cv-cloud"]
     # Connector pull runs as a tracked background job (progress in Activity).
     job = start_backup_job(db, tenant.id, coll.id, kind="sync", destinations=dests)
+    coll.last_backup_run_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
     audit.record(db, actor=principal.user_id, action="source.sync_requested",
                  tenant_id=tenant.id, resource=coll.id, detail={"kind": "connector"})
     return {"kind": "connector", "job_id": job.id, "status": job.status,
