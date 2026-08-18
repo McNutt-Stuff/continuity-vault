@@ -284,12 +284,16 @@ class Agent:
             else:
                 result = {"note": f"acknowledged {ctype}"}
 
-        await client.post(f"{settings.cloud_base_url}/appliance/command-result",
-                          json={"command_id": cmd_id, "accepted": accepted,
-                                "result": result, "receipt": receipt},
-                          headers=self._headers())
-        self.log.info("command %s result: %s", ctype,
-                      "error" if result.get("error") else "ok")
+        resp = await client.post(f"{settings.cloud_base_url}/appliance/command-result",
+                                 json={"command_id": cmd_id, "accepted": accepted,
+                                       "result": result, "receipt": receipt},
+                                 headers=self._headers())
+        if resp.status_code != 200:
+            self.log.warning("command %s result POST failed: %s %s",
+                             ctype, resp.status_code, resp.text[:200])
+        else:
+            self.log.info("command %s result: %s", ctype,
+                          "error" if result.get("error") else "ok")
 
     # -- command implementations --------------------------------------
 

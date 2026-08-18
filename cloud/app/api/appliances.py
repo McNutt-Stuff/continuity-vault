@@ -684,6 +684,16 @@ def command_result(body: CommandResultRequest,
                    appliance: Appliance = Depends(_agent_appliance),
                    db: Session = Depends(get_db)):
     cmd = db.get(ApplianceCommand, body.command_id)
+    if cmd is None or cmd.appliance_id != appliance.id:
+        # Legacy rows created before the row id was keyed to the signed
+        # commandId: resolve by matching the envelope's commandId instead.
+        candidates = (db.query(ApplianceCommand)
+                      .filter(ApplianceCommand.appliance_id == appliance.id,
+                              ApplianceCommand.status.in_(["pending", "delivered"]))
+                      .all())
+        cmd = next((c for c in candidates
+                    if (c.envelope or {}).get("payload", {}).get("commandId") == body.command_id),
+                   None)
     if not cmd or cmd.appliance_id != appliance.id:
         raise HTTPException(404, "command not found")
     cmd.status = "acked" if body.accepted else "rejected"

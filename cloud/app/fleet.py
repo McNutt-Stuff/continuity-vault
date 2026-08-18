@@ -109,6 +109,11 @@ def issue_command(db: Session, appliance: Appliance, command_type: str,
         requested_by=requested_by,
         status="pending",
     )
+    # Key the row by the signed envelope's commandId so the appliance's
+    # command-result (which echoes payload.commandId) resolves to this row.
+    envelope_cmd_id = envelope.get("payload", {}).get("commandId")
+    if envelope_cmd_id:
+        cmd.id = envelope_cmd_id
     db.add(cmd)
     db.commit()
     db.refresh(cmd)
