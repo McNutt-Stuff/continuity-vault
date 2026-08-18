@@ -168,6 +168,11 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
     if connector is None:
         raise ValueError(f"no connector for {collection.source_type}")
 
+    # Default to the mapping's own destinations so scheduled/auto runs honour the
+    # Data Map routing (e.g. an appliance) instead of falling back to the cloud.
+    if destinations is None:
+        destinations = collection.destinations or ["cv-cloud"]
+
     label = account.account_label if account else collection.name
     if progress:
         progress(0, 0, f"Fetching from {label}…")
