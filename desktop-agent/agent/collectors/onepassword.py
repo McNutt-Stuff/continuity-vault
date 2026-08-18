@@ -17,9 +17,13 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from typing import List
 
 log = logging.getLogger("arkive")
+
+# Short-lived cache so telemetry doesn't run `op whoami` on every heartbeat.
+_auth_cache = {"ts": 0.0, "state": None, "key": None}
 
 # 1Password item category -> canonical kind (category is derived server-side).
 _OP_KIND = {
@@ -56,23 +60,33 @@ def _env(token: str) -> dict:
     return env
 
 
-def auth_state(token: str = "") -> str:
-    """Report whether op can actually authenticate (surfaced in telemetry)."""
+def auth_state(token: str = "", max_age: float = 300.0) -> str:
+    """Report whether op can authenticate (surfaced in telemetry).
+
+    Cached briefly so telemetry doesn't spawn `op whoami` on every heartbeat."""
     if not available():
         return "absent"
+    now = time.time()
+    key = hash(token)
+    if _auth_cache["state"] and _auth_cache["key"] == key \
+            and now - _auth_cache["ts"] < max_age:
+        return _auth_cache["state"]
     env = _env(token)
     try:
         r = subprocess.run([_op_path(), "whoami"], capture_output=True, text=True,
                            env=env, timeout=20)
         if r.returncode == 0:
             log.debug("op whoami ok: %s", (r.stdout or "").strip())
-            return "service-account" if token else "interactive"
-        log.debug("op whoami failed (exit %s): %s", r.returncode,
-                  (r.stderr or r.stdout or "").strip())
-        return "unauthenticated"
+            state = "service-account" if token else "interactive"
+        else:
+            log.debug("op whoami failed (exit %s): %s", r.returncode,
+                      (r.stderr or r.stdout or "").strip())
+            state = "unauthenticated"
     except Exception as exc:
         log.debug("op whoami error: %s", exc)
-        return "unauthenticated"
+        state = "unauthenticated"
+    _auth_cache.update(ts=now, state=state, key=key)
+    return state
 
 
 def _op(args: List[str], env: dict) -> str:
@@ -91,13 +105,11 @@ def _op(args: List[str], env: dict) -> str:
 
 
 def collect(op_token: str = "") -> List[dict]:
-    """Return normalized agent objects for every reachable 1Password item."""
+    """Return normalized agent objects for every reachable 1Password item.
+
+    Runs op directly; if no account is signed in, op raises a clear error that the
+    caller classifies as a skip (see agent collect loop)."""
     env = _env(op_token)
-    if auth_state(op_token) == "unauthenticated":
-        raise RuntimeError(
-            "1Password is not authenticated. Provide a service-account token "
-            "(OP_SERVICE_ACCOUNT_TOKEN) for unattended collection, or sign in to "
-            "the 1Password app and enable the CLI integration.")
     items = json.loads(_op(["item", "list", "--format=json"], env))
     objects: List[dict] = []
     for it in items:

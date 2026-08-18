@@ -240,19 +240,17 @@ class Agent:
                 self.log.warning("collector %s: op CLI not installed", name)
                 results.append({"collector": name, "error": "op CLI not installed"})
                 continue
-            # 1Password app integration can't be approved unattended and service
-            # accounts need a Business plan — if not authenticated, skip quietly
-            # (only collect when a token is present or the app authorizes it).
-            if onepassword.auth_state(self.cfg.op_service_account_token) == "unauthenticated":
-                self.log.info("collector %s skipped: 1Password not authenticated "
-                              "(interactive sign-in or service-account token required)", name)
-                results.append({"collector": name, "skipped": "not authenticated"})
-                continue
             try:
                 objects = onepassword.collect(self.cfg.op_service_account_token)
             except Exception as exc:
-                self.log.error("collector %s failed: %s", name, exc)
-                results.append({"collector": name, "error": str(exc)})
+                msg = str(exc).lower()
+                if "not signed in" in msg or "not authenticated" in msg or "no account" in msg:
+                    self.log.info("collector %s skipped: 1Password not signed in "
+                                  "(unlock the app + enable CLI integration, or add a token)", name)
+                    results.append({"collector": name, "skipped": "not signed in"})
+                else:
+                    self.log.error("collector %s failed: %s", name, exc)
+                    results.append({"collector": name, "error": str(exc)})
                 continue
             if not objects:
                 results.append({"collector": name, "objects": 0})
