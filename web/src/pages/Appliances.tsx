@@ -16,7 +16,7 @@ interface Store {
   path?: string | null; mount?: string | null; health: StoreHealth;
 }
 interface StoredItem {
-  snapshot_id: string; source: string; storage: string;
+  snapshot_id: string; source: string; storage: string; path?: string;
   object_count: number; total_bytes: number; recoverable: boolean; at: string;
 }
 interface StoredData {
@@ -286,6 +286,7 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
               <div className="faint" style={{ fontSize: 11.5 }}>
                 {it.storage} · {it.object_count} objects · {bytes(it.total_bytes)} · {timeAgo(it.at)}
               </div>
+              {it.path && <div className="faint mono" style={{ fontSize: 11, marginTop: 2 }}>{it.path}</div>}
             </div>
             <Pill tone={it.recoverable ? "ok" : "warn"}>{it.recoverable ? "recoverable" : "sealing"}</Pill>
           </div>

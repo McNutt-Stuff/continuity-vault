@@ -17,6 +17,7 @@ handles metadata previews permitted by the vault's key-ownership mode
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -219,9 +220,13 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     n_total = len(src_list)
     for idx, src in enumerate(src_list):
         enc = encrypt_object(snapshot_key, src.content, src.object_id)
-        enc["plaintextBytes"] = src.size_bytes
+        # Account by what is ACTUALLY stored (the encrypted content), not the
+        # source item's logical size — connectors capture metadata/index content,
+        # so src.size_bytes (e.g. a 400MB file) is the item's size, not our footprint.
+        stored_bytes = len(src.content)
+        enc["plaintextBytes"] = stored_bytes
         encrypted_objects.append(enc)
-        total_bytes += src.size_bytes
+        total_bytes += stored_bytes
         if progress and (idx % 25 == 0):
             progress(idx, n_total, f"Encrypting {idx}/{n_total}…")
         # Index only discrete, connector-declared metadata — no body/content. The
@@ -284,8 +289,10 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
             if kind in ("cv-cloud", "customer-s3"):
                 dest = build_destination(kind)
                 for obj in encrypted_objects:
+                    # Store the full envelope (nonce + wrapped DEK + ciphertext) so
+                    # the content can be decrypted on retrieval — not just the ct.
                     dest.put_object(tenant_prefix, f"{snapshot_id}/{obj['objectId']}",
-                                    obj["ciphertext"].encode())
+                                    json.dumps(obj).encode())
                 dest.put_manifest(tenant_prefix, snapshot_id, manifest)
                 recoverable = True
             elif kind == "appliance" or kind.startswith("appliance:") or kind.startswith("store:"):

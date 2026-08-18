@@ -32,6 +32,11 @@ def _oid(connector: str, label: str, n: int) -> str:
     return hashlib.sha256(f"{connector}:{label}:{n}".encode()).hexdigest()[:24]
 
 
+def _content_cap() -> int:
+    from ..config import get_settings
+    return get_settings().content_max_bytes
+
+
 @register_connector
 class OnePasswordConnector(Connector):
     connector_type = "onepassword"
@@ -117,9 +122,10 @@ class GmailConnector(Connector):
         config = config or {}
         if config.get("access_token"):
             from ..config import get_settings  # avoid import cycle at module load
+            s = get_settings()
             objects, new_cursor = live.fetch_gmail(
                 config["access_token"], cursor=cursor,
-                max_messages=get_settings().sync_max_items)
+                max_messages=s.sync_max_items, content_cap=s.content_max_bytes)
             return FetchResult(objects=objects, cursor=new_cursor, has_more=False)
         return FetchResult(objects=list(self.fetch_objects(account_label, config=config)))
 
@@ -174,7 +180,7 @@ class OutlookConnector(Connector):
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}
         if config.get("access_token"):
-            yield from live.fetch_graph_mail(config["access_token"])
+            yield from live.fetch_graph_mail(config["access_token"], content_cap=_content_cap())
             return
         emails = [
             ("Contract renewal", "legal@partner.com", "The renewal terms are attached for signature.", "Legal"),
@@ -223,7 +229,7 @@ class OneDriveConnector(Connector):
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}
         if config.get("access_token"):
-            yield from live.fetch_graph_files(config["access_token"])
+            yield from live.fetch_graph_files(config["access_token"], content_cap=_content_cap())
             return
         files = [
             ("2025 Tax Return.pdf", 842_000, "application/pdf", "/Documents/Finance"),
@@ -272,7 +278,7 @@ class DropboxConnector(Connector):
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}
         if config.get("access_token"):
-            yield from live.fetch_dropbox(config["access_token"])
+            yield from live.fetch_dropbox(config["access_token"], content_cap=_content_cap())
             return
         files = [
             ("Wedding Photos.zip", 2_400_000_000, "application/zip", "/Media"),
@@ -320,7 +326,7 @@ class ICloudConnector(Connector):
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}
         if config.get("token"):
-            yield from live.fetch_icloud(config)
+            yield from live.fetch_icloud(config.get("username", ""), config["token"], _content_cap())
             return
         items = [
             ("IMG_4821.HEIC", "photo", 3_800_000, "Recents"),

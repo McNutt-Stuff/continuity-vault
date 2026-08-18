@@ -7,9 +7,11 @@ small and the simulated fallbacks remain for local/demo use.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from datetime import datetime, timezone
+from email import message_from_bytes
 from typing import Iterable, List, Optional, Tuple
 
 import httpx
@@ -20,36 +22,53 @@ from ..taxonomy import classify_file, map_1password
 logger = logging.getLogger("cv.connectors.live")
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
+_DEFAULT_CAP = 26214400  # 25 MiB
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _capped(raw: bytes, cap: int) -> Tuple[bytes, bool]:
+    """Store the full raw content, or an indexed-only marker when it exceeds the
+    per-object cap. Returns (content, backed_up)."""
+    if raw and len(raw) <= cap:
+        return raw, True
+    marker = json.dumps({"_arkive": "content_exceeds_cap", "bytes": len(raw)}).encode()
+    return marker, False
+
+
 class _HistoryGone(Exception):
     """Gmail history is too old to page from; a full resync is required."""
 
 
-def _gmail_message(c: httpx.Client, headers: dict, mid: str) -> Optional[SourceObject]:
-    r = c.get(f"{GMAIL}/messages/{mid}", headers=headers,
-              params={"format": "metadata",
-                      "metadataHeaders": ["Subject", "From", "To", "Date"]})
+def _gmail_message(c: httpx.Client, headers: dict, mid: str,
+                   cap: int = _DEFAULT_CAP) -> Optional[SourceObject]:
+    # format=raw returns the full RFC822 message (body + attachments) plus
+    # labelIds/snippet — the actual content we back up, not just metadata.
+    r = c.get(f"{GMAIL}/messages/{mid}", headers=headers, params={"format": "raw"})
     if r.status_code == 404:
         return None  # deleted between listing and fetch
     r.raise_for_status()
     m = r.json()
-    hdrs = {h["name"]: h["value"] for h in m.get("payload", {}).get("headers", [])}
+    raw_b64 = m.get("raw", "")
+    raw = base64.urlsafe_b64decode(raw_b64 + "===") if raw_b64 else b""
+    parsed = message_from_bytes(raw) if raw else None
+    subject = (parsed.get("Subject") if parsed else "") or "(no subject)"
+    label_ids = m.get("labelIds", [])
+    content, backed = _capped(raw, cap)
     return SourceObject(
         object_id=f"gmail:{mid}",
         doc_type="email",
-        title=hdrs.get("Subject", "(no subject)"),
-        content=json.dumps({"headers": hdrs, "snippet": m.get("snippet")}).encode(),
+        title=subject,
+        content=content,  # full raw email (or indexed-only marker if oversized)
         preview=(m.get("snippet") or "")[:200],
-        meta={"from": hdrs.get("From", ""), "to": hdrs.get("To", ""),
-              "folder": _gmail_folder(m.get("labelIds", [])),
-              "labelIds": m.get("labelIds", [])},
-        labels=[l for l in m.get("labelIds", []) if not l.startswith("Label_")],
-        size_bytes=int(m.get("sizeEstimate", 0)) or None,  # type: ignore
+        meta={"from": (parsed.get("From") if parsed else "") or "",
+              "to": (parsed.get("To") if parsed else "") or "",
+              "folder": _gmail_folder(label_ids),
+              "labelIds": label_ids, "content_backed_up": backed},
+        labels=[l for l in label_ids if not l.startswith("Label_")],
+        size_bytes=len(raw) or int(m.get("sizeEstimate", 0)) or None,  # type: ignore
     )
 
 
@@ -110,7 +129,8 @@ def _gmail_history_id(c: httpx.Client, headers: dict) -> str:
 
 
 def fetch_gmail(access_token: str, cursor: Optional[dict] = None,
-                max_messages: int = 5000) -> Tuple[List[SourceObject], dict]:
+                max_messages: int = 5000,
+                content_cap: int = _DEFAULT_CAP) -> Tuple[List[SourceObject], dict]:
     """Pull Gmail. First run does a full, paginated backup; subsequent runs pull
     only messages added/changed since the stored historyId. Returns the objects
     plus the new cursor to persist."""
@@ -127,17 +147,18 @@ def fetch_gmail(access_token: str, cursor: Optional[dict] = None,
                 ids = _gmail_list_ids(c, headers, max_messages)
         else:
             ids = _gmail_list_ids(c, headers, max_messages)
-        objects = [o for o in (_gmail_message(c, headers, mid) for mid in ids) if o]
+        objects = [o for o in (_gmail_message(c, headers, mid, content_cap) for mid in ids) if o]
         new_cursor = {"history_id": _gmail_history_id(c, headers)}
     return objects, new_cursor
 
 
-def fetch_graph_mail(access_token: str, limit: int = 40) -> Iterable[SourceObject]:
+def fetch_graph_mail(access_token: str, limit: int = 40,
+                     content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
     headers = {"Authorization": f"Bearer {access_token}"}
-    with httpx.Client(timeout=30) as c:
+    with httpx.Client(timeout=60) as c:
         url: Optional[str] = "https://graph.microsoft.com/v1.0/me/messages"
         params: Optional[dict] = {"$top": 100,
-                                  "$select": "subject,from,bodyPreview,receivedDateTime,webLink"}
+                                  "$select": "id,subject,from,bodyPreview,receivedDateTime,parentFolderId,webLink"}
         seen = 0
         while url and seen < limit:
             r = c.get(url, headers=headers, params=params)
@@ -145,25 +166,33 @@ def fetch_graph_mail(access_token: str, limit: int = 40) -> Iterable[SourceObjec
             body = r.json()
             for m in body.get("value", []):
                 sender = (m.get("from") or {}).get("emailAddress", {}).get("address", "")
+                # Full MIME (headers + body + attachments) = the backed-up content.
+                mime = c.get(f"https://graph.microsoft.com/v1.0/me/messages/{m['id']}/$value",
+                             headers=headers)
+                raw = mime.content if mime.status_code < 400 else b""
+                content, backed = _capped(raw, content_cap)
                 seen += 1
                 yield SourceObject(
                     object_id=f"outlook:{m['id']}",
                     doc_type="email",
                     title=m.get("subject") or "(no subject)",
-                    content=json.dumps(m).encode(),
+                    content=content,
                     preview=(m.get("bodyPreview") or "")[:200],
-                    meta={"from": sender, "webLink": m.get("webLink")},
+                    meta={"from": sender, "folder": "Inbox", "webLink": m.get("webLink"),
+                          "content_backed_up": backed},
                     labels=["Inbox"],
+                    size_bytes=len(raw) or None,  # type: ignore
                 )
             url, params = body.get("@odata.nextLink"), None
 
 
-def fetch_graph_files(access_token: str, limit: int = 500) -> Iterable[SourceObject]:
+def fetch_graph_files(access_token: str, limit: int = 500,
+                      content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
     headers = {"Authorization": f"Bearer {access_token}"}
-    with httpx.Client(timeout=30) as c:
+    with httpx.Client(timeout=120) as c:
         url: Optional[str] = "https://graph.microsoft.com/v1.0/me/drive/root/children"
         params: Optional[dict] = {"$top": 200,
-                                  "$select": "name,size,file,folder,parentReference,lastModifiedDateTime"}
+                                  "$select": "id,name,size,file,folder,parentReference,lastModifiedDateTime,@microsoft.graph.downloadUrl"}
         seen = 0
         while url and seen < limit:
             r = c.get(url, headers=headers, params=params)
@@ -174,26 +203,40 @@ def fetch_graph_files(access_token: str, limit: int = 500) -> Iterable[SourceObj
                     continue
                 mime = (it.get("file") or {}).get("mimeType", "application/octet-stream")
                 path = (it.get("parentReference") or {}).get("path", "/drive/root:")
+                size = int(it.get("size", 0))
                 _cat, _kind = classify_file(it.get("name", ""), mime)
+                # Download the actual file bytes (capped) as the backed-up content.
+                dl = it.get("@microsoft.graph.downloadUrl")
+                raw = b""
+                if dl and size <= content_cap:
+                    try:
+                        raw = c.get(dl).content
+                    except Exception:
+                        raw = b""
+                content, backed = _capped(raw, content_cap) if raw else (
+                    json.dumps({"_arkive": "content_exceeds_cap" if size > content_cap else "no_content",
+                                "bytes": size}).encode(), False)
                 seen += 1
                 yield SourceObject(
                     object_id=f"onedrive:{it['id']}",
                     doc_type=_kind,
                     category=_cat,
                     title=it.get("name", "file"),
-                    content=json.dumps(it).encode(),
-                    preview=f"{mime} · {int(it.get('size', 0)) // 1000} KB",
-                    meta={"mime": mime, "path": f"{path}/{it.get('name')}"},
+                    content=content,
+                    preview=f"{mime} · {size // 1000} KB",
+                    meta={"mime": mime, "path": f"{path}/{it.get('name')}",
+                          "content_backed_up": backed},
                     labels=[path.split(":")[-1] or "/"],
-                    size_bytes=int(it.get("size", 0)) or None,  # type: ignore
+                    size_bytes=size or None,  # type: ignore
                 )
             url, params = body.get("@odata.nextLink"), None
 
 
-def fetch_dropbox(access_token: str, limit: int = 1000) -> Iterable[SourceObject]:
+def fetch_dropbox(access_token: str, limit: int = 1000,
+                  content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
     headers = {"Authorization": f"Bearer {access_token}",
                "Content-Type": "application/json"}
-    with httpx.Client(timeout=30) as c:
+    with httpx.Client(timeout=120) as c:
         r = c.post("https://api.dropboxapi.com/2/files/list_folder", headers=headers,
                    content=json.dumps({"path": "", "recursive": True, "limit": 1000}))
         r.raise_for_status()
@@ -204,17 +247,32 @@ def fetch_dropbox(access_token: str, limit: int = 1000) -> Iterable[SourceObject
                 if it.get(".tag") != "file":
                     continue
                 _cat, _kind = classify_file(it.get("name", ""))
+                size = int(it.get("size", 0))
+                # Download the file bytes (capped) via the content endpoint.
+                raw = b""
+                if size <= content_cap:
+                    try:
+                        dr = c.post("https://content.dropboxapi.com/2/files/download",
+                                    headers={"Authorization": headers["Authorization"],
+                                             "Dropbox-API-Arg": json.dumps({"path": it.get("path_lower")})})
+                        raw = dr.content if dr.status_code < 400 else b""
+                    except Exception:
+                        raw = b""
+                content, backed = _capped(raw, content_cap) if raw else (
+                    json.dumps({"_arkive": "content_exceeds_cap" if size > content_cap else "no_content",
+                                "bytes": size}).encode(), False)
                 seen += 1
                 yield SourceObject(
                     object_id=f"dropbox:{it.get('id', it['path_lower'])}",
                     doc_type=_kind,
                     category=_cat,
                     title=it.get("name", "file"),
-                    content=json.dumps(it).encode(),
-                    preview=f"{int(it.get('size', 0)) // 1000} KB · {it.get('path_display', '')}",
-                    meta={"path": it.get("path_display"), "rev": it.get("rev")},
+                    content=content,
+                    preview=f"{size // 1000} KB · {it.get('path_display', '')}",
+                    meta={"path": it.get("path_display"), "rev": it.get("rev"),
+                          "content_backed_up": backed},
                     labels=["/".join(it.get("path_display", "/").split("/")[:-1]) or "/"],
-                    size_bytes=int(it.get("size", 0)) or None,  # type: ignore
+                    size_bytes=size or None,  # type: ignore
                 )
             if not body.get("has_more"):
                 break
@@ -222,6 +280,69 @@ def fetch_dropbox(access_token: str, limit: int = 1000) -> Iterable[SourceObject
                        headers=headers, content=json.dumps({"cursor": body.get("cursor")}))
             r.raise_for_status()
             body = r.json()
+
+
+def fetch_icloud(username: str, password: str,
+                 content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
+    """Best-effort iCloud pull via pyicloud: Contacts (vCard-ish JSON) and Drive
+    files (bytes, capped). Interactive-2FA accounts can't be synced headlessly."""
+    try:
+        from pyicloud import PyiCloudService  # optional dependency
+    except Exception:
+        logger.info("pyicloud not installed; skipping iCloud live pull")
+        return
+    try:
+        api = PyiCloudService(username, password)
+    except Exception as exc:
+        logger.warning("iCloud auth failed: %s", exc)
+        return
+    if getattr(api, "requires_2fa", False) or getattr(api, "requires_2sa", False):
+        logger.info("iCloud account requires interactive 2FA; cannot sync headlessly")
+        return
+
+    # Contacts
+    try:
+        for person in (api.contacts.all() or []):
+            cid = person.get("contactId") or person.get("phones", [{}])[0].get("field", "")
+            name = " ".join(filter(None, [person.get("firstName"), person.get("lastName")])) or "Contact"
+            content = json.dumps(person).encode()
+            content, backed = _capped(content, content_cap)
+            yield SourceObject(
+                object_id=f"icloud:contact:{cid}",
+                doc_type="person", category="contact", title=name,
+                content=content, preview=name,
+                meta={"kind": "contact", "content_backed_up": backed},
+                labels=["Contacts"],
+            )
+    except Exception as exc:
+        logger.info("iCloud contacts unavailable: %s", exc)
+
+    # Drive files
+    try:
+        drive = api.drive
+        for name in drive.dir():
+            node = drive[name]
+            if getattr(node, "type", "") == "file":
+                size = int(getattr(node, "size", 0) or 0)
+                raw = b""
+                if size <= content_cap:
+                    try:
+                        with node.open(stream=True) as resp:
+                            raw = resp.raw.read(content_cap + 1)
+                    except Exception:
+                        raw = b""
+                _cat, _kind = classify_file(name)
+                content, backed = _capped(raw, content_cap) if raw else (
+                    json.dumps({"_arkive": "no_content", "bytes": size}).encode(), False)
+                yield SourceObject(
+                    object_id=f"icloud:drive:{name}",
+                    doc_type=_kind, category=_cat, title=name,
+                    content=content, preview=f"{size // 1000} KB",
+                    meta={"path": f"/{name}", "content_backed_up": backed},
+                    labels=["iCloud Drive"], size_bytes=size or None,  # type: ignore
+                )
+    except Exception as exc:
+        logger.info("iCloud Drive unavailable: %s", exc)
 
 
 def _status(object_id: str, title: str, preview: str, label: str) -> SourceObject:

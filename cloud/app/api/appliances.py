@@ -187,10 +187,14 @@ def _stored_data(db: Session, a: Appliance) -> dict:
                 return acc.account_label
         return c.name
 
+    # Each snapshot is committed to <data_path>/protected/<snapshot_id> on disk.
+    base = (a.telemetry or {}).get("data_path") or ""
+    protected = f"{base.rstrip('/')}/protected" if base else "protected"
     items = [{
         "snapshot_id": r.snapshot_id,
         "source": _src(r.collection_id),
         "storage": stores.get(r.destination, "Built-In Storage"),
+        "path": f"{protected}/{r.snapshot_id}",
         "object_count": r.object_count,
         "total_bytes": r.total_bytes,
         "recoverable": bool(r.recoverable),

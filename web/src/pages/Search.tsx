@@ -60,6 +60,29 @@ const SOURCE_META: Record<string, { color: string; icon: IconName; label: string
   custom: { color: "#7a5cff", icon: "database", label: "Custom" },
 };
 
+function downloadB64(b64: string, filename: string) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes]));
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function safeName(title: string, docType: string): string {
+  const base = (title || "recovered").replace(/[^\w.\- ]+/g, "_").slice(0, 80).trim() || "recovered";
+  if (/\.[a-z0-9]{2,5}$/i.test(base)) return base;
+  return base + (docType === "email" ? ".eml" : "");
+}
+
+function fmtBytes(n: number): string {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB"]; const i = Math.floor(Math.log(n) / Math.log(1024));
+  return `${(n / Math.pow(1024, i)).toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+
 export default function Search() {
   const { me, stepUp } = useAuth();
   const [q, setQ] = useState("");
@@ -74,10 +97,16 @@ export default function Search() {
 
   async function retrieve(r: Result, loc: { destination: string; label: string }) {
     try {
-      const res = await api.post<{ message: string }>("/search/retrieve", {
+      const res = await api.post<{ message: string; content_b64?: string | null; filename?: string; size_bytes?: number }>(
+        "/search/retrieve", {
         snapshot_id: r.snapshot_id, object_id: r.object_id, destination: loc.destination,
       });
-      setMsg(res.message);
+      if (res.content_b64) {
+        downloadB64(res.content_b64, safeName(res.filename || r.title, r.doc_type));
+        setMsg(`Recovered ${fmtBytes(res.size_bytes ?? 0)} from ${loc.label} — downloading`);
+      } else {
+        setMsg(res.message);
+      }
       setTimeout(() => setMsg(""), 6000);
     } catch (e) {
       setMsg((e as ApiError).message);

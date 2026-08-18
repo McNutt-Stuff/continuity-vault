@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     sync_interval_minutes: int = 30
     # Safety cap on how many items a single full backup pulls from a source.
     sync_max_items: int = 5000
+    # Max raw content stored per object (larger items are indexed metadata-only).
+    content_max_bytes: int = 26214400  # 25 MiB
 
     # Authentication.
     allow_signup: bool = True

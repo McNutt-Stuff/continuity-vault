@@ -4,11 +4,17 @@ for the user's protected data."""
 
 from __future__ import annotations
 
+import base64
+import json
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .. import audit, fleet, security
+from cv_crypto.envelope import EnvelopeKeyHierarchy, decrypt_object
+
+from .. import audit, fleet, keybroker, security
 from ..db import get_db
 from ..connectors import get_connector
 from ..models import Appliance, ApplianceStorage, Collection, ConnectorAccount, SearchDocument, SnapshotReceipt, Tenant
@@ -16,6 +22,7 @@ from ..storage import build_destination
 from ..taxonomy import describe, sensitivity_for
 
 router = APIRouter(prefix="/search", tags=["search"])
+logger = logging.getLogger("cv.search")
 
 
 def _location_label(destination: str, store_labels: dict[str, str] | None = None) -> str:
@@ -272,16 +279,47 @@ def retrieve(body: RetrieveRequest,
                            "local approval may be required.",
                 "command_id": cmd.id}
 
-    # Cloud / customer-S3 / local: read the (client-encrypted) object directly.
+    # Cloud / customer-S3 / local: read the stored envelope and decrypt within the
+    # authorized key boundary (passkey step-up already required) so the caller can
+    # download the original content.
     try:
         dest = build_destination(body.destination if base in ("cv-cloud", "customer-s3") else "cv-cloud")
         prefix = tenant.storage_prefix or tenant.id
         data = dest.get_object(prefix, f"{body.snapshot_id}/{body.object_id}")
     except Exception as exc:
         raise HTTPException(404, f"object not found at {label}: {exc}")
+
+    # Resolve the snapshot's vault/collection to derive the decryption key.
+    receipt = (db.query(SnapshotReceipt)
+               .filter(SnapshotReceipt.tenant_id == tenant.id,
+                       SnapshotReceipt.snapshot_id == body.snapshot_id).first())
+    content_b64 = None
+    size_bytes = len(data)
+    try:
+        obj = json.loads(data.decode())
+        if receipt is not None and isinstance(obj, dict) and "wrappedDek" in obj:
+            root_key = keybroker.release_vault_root_key(receipt.vault_id)
+            snapshot_key = EnvelopeKeyHierarchy(root_key).snapshot_key(
+                receipt.vault_id, receipt.collection_id, body.snapshot_id)
+            plaintext = decrypt_object(snapshot_key, obj)
+            content_b64 = base64.b64encode(plaintext).decode()
+            size_bytes = len(plaintext)
+    except Exception as exc:  # noqa: BLE001 - legacy metadata-only objects
+        logger.info("retrieve: could not decrypt %s (%s)", body.object_id, exc)
+
+    doc = (db.query(SearchDocument)
+           .filter(SearchDocument.tenant_id == tenant.id,
+                   SearchDocument.object_id == body.object_id).first())
     audit.record(db, actor=principal.user_id, action="search.retrieve",
                  tenant_id=tenant.id, resource=body.object_id,
-                 detail={"location": label})
+                 detail={"location": label, "bytes": size_bytes})
+    if content_b64 is None:
+        return {"status": "available", "location": label, "async": False,
+                "size_bytes": size_bytes, "encrypted": True, "content_b64": None,
+                "message": f"Object available at {label} ({size_bytes} bytes). "
+                           "This item was captured before full-content backup; re-run a backup to store its content."}
     return {"status": "available", "location": label, "async": False,
-            "size_bytes": len(data), "encrypted": True,
-            "message": f"Object available at {label} ({len(data)} bytes, client-encrypted)."}
+            "size_bytes": size_bytes, "encrypted": False,
+            "content_b64": content_b64,
+            "filename": (doc.title if doc else body.object_id) or body.object_id,
+            "message": f"Recovered {size_bytes} bytes from {label}."}
