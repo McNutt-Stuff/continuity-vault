@@ -20,6 +20,7 @@ interface PromptOpts {
 export interface FormField {
   name: string; label: string; defaultValue?: string;
   placeholder?: string; password?: boolean; required?: boolean;
+  options?: { label: string; value: string }[];
 }
 interface FormOpts { title?: string; message?: string; fields: FormField[]; confirmLabel?: string; }
 
@@ -67,7 +68,7 @@ export function DialogHost() {
       if (d.kind === "prompt") setText(d.opts.defaultValue ?? "");
       if (d.kind === "form") {
         const init: Record<string, string> = {};
-        for (const f of d.opts.fields ?? []) init[f.name] = f.defaultValue ?? "";
+        for (const f of d.opts.fields ?? []) init[f.name] = f.defaultValue ?? (f.options?.[0]?.value ?? "");
         setForm(init);
       }
       setActive(d);
@@ -139,14 +140,24 @@ export function DialogHost() {
                   <span className="faint" style={{ fontSize: 11.5 }}>
                     {f.label}{f.required && <span style={{ color: "var(--danger)" }}> *</span>}
                   </span>
-                  <input
-                    ref={i === 0 ? firstInput : undefined}
-                    className="input"
-                    type={f.password ? "password" : "text"}
-                    placeholder={f.placeholder}
-                    value={form[f.name] ?? ""}
-                    onChange={(e) => setForm((cur) => ({ ...cur, [f.name]: e.target.value }))}
-                  />
+                  {f.options ? (
+                    <select
+                      className="input"
+                      value={form[f.name] ?? ""}
+                      onChange={(e) => setForm((cur) => ({ ...cur, [f.name]: e.target.value }))}
+                    >
+                      {f.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      ref={i === 0 ? firstInput : undefined}
+                      className="input"
+                      type={f.password ? "password" : "text"}
+                      placeholder={f.placeholder}
+                      value={form[f.name] ?? ""}
+                      onChange={(e) => setForm((cur) => ({ ...cur, [f.name]: e.target.value }))}
+                    />
+                  )}
                 </label>
               ))}
             </div>

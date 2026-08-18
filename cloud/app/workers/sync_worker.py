@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -126,9 +126,13 @@ def _storage_id(kind: str) -> Optional[str]:
     return kind.split(":", 1)[1] if kind.startswith("store:") else None
 
 
-def run_backup(db: Session, collection: Collection, destinations: Optional[List[str]] = None
+def run_backup(db: Session, collection: Collection, destinations: Optional[List[str]] = None,
+               progress: Optional[Callable[[int, int, str], None]] = None
                ) -> SnapshotReceipt:
-    """Pull from the source connector and ingest into protected storage."""
+    """Pull from the source connector and ingest into protected storage.
+
+    ``progress(processed, total, message)`` is called at milestones so a tracked
+    job can show live status for long pulls (e.g. a full Gmail backup)."""
     account = (
         db.get(ConnectorAccount, collection.connector_account_id)
         if collection.connector_account_id
@@ -139,6 +143,8 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
         raise ValueError(f"no connector for {collection.source_type}")
 
     label = account.account_label if account else collection.name
+    if progress:
+        progress(0, 0, f"Fetching from {label}…")
     config = _account_config(db, collection, account)
     caps = connector.capabilities()
     # Incremental: pass the stored cursor; the connector returns a new cursor to
@@ -158,11 +164,16 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
             if result.cursor is not None:
                 account.sync_cursor = result.cursor
             db.commit()
+            if progress:
+                progress(0, 0, "No new items")
             return prior
 
+    if progress:
+        progress(0, len(objects), f"Encrypting & storing {len(objects)} items…")
     receipt = ingest_objects(db, collection, objects, destinations,
                              searchable_fields=caps.searchable_fields,
-                             facet_fields=caps.facet_fields, actor="sync-worker")
+                             facet_fields=caps.facet_fields, actor="sync-worker",
+                             progress=progress)
     if account:
         account.last_sync_at = datetime.now(timezone.utc)
         if result.cursor is not None:
@@ -175,7 +186,8 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                    destinations: Optional[List[str]] = None,
                    searchable_fields: Optional[List[str]] = None,
                    facet_fields: Optional[List[str]] = None,
-                   actor: str = "ingest") -> SnapshotReceipt:
+                   actor: str = "ingest",
+                   progress: Optional[Callable[[int, int, str], None]] = None) -> SnapshotReceipt:
     """Encrypt, snapshot, index, and store a set of normalized source objects.
 
     Shared by the cloud sync worker (connector pulls) and pushed ingest from the
@@ -203,11 +215,15 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     index_rows: List[SearchDocument] = []
     total_bytes = 0
 
-    for src in source_objects:
+    src_list = list(source_objects)
+    n_total = len(src_list)
+    for idx, src in enumerate(src_list):
         enc = encrypt_object(snapshot_key, src.content, src.object_id)
         enc["plaintextBytes"] = src.size_bytes
         encrypted_objects.append(enc)
         total_bytes += src.size_bytes
+        if progress and (idx % 25 == 0):
+            progress(idx, n_total, f"Encrypting {idx}/{n_total}…")
         # Index only discrete, connector-declared metadata — no body/content. The
         # preview is a composed "Field: value" summary of that metadata (empty for
         # zero-knowledge vaults, which index the title only).

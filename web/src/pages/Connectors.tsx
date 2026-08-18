@@ -26,11 +26,13 @@ interface Account {
   last_sync_at: string | null;
 }
 interface Vault { id: string; name: string; }
+interface Agent { id: string; name: string; hostname: string; collectors: string[]; }
 
 export default function Connectors() {
   const { me, stepUp } = useAuth();
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [setup, setSetup] = useState<CatalogItem | null>(null);
   const [toast, setToast] = useState("");
@@ -38,6 +40,7 @@ export default function Connectors() {
   async function load() {
     setCatalog(await api.get<CatalogItem[]>("/connectors/catalog"));
     setAccounts(await api.get<Account[]>("/connectors/accounts"));
+    setAgents(await api.get<Agent[]>("/agents").catch(() => [] as Agent[]));
     const t = await api.get<{ vaults: Vault[] }>("/tenant");
     setVaults(t.vaults);
   }
@@ -61,10 +64,43 @@ export default function Connectors() {
   }
 
   async function connect(c: CatalogItem) {
-    // Agent-collected sources (e.g. 1Password) are gathered by a local desktop
-    // agent, not a cloud pull — route the user to agent setup instead.
+    // Agent-collected sources (e.g. 1Password): pick which linked desktop agent
+    // collects it and create the agent-bound source. Only show install
+    // instructions when no agent is linked yet.
     if (c.requiresAgent) {
-      setSetup(c);
+      const eligible = agents.filter((a) => (a.collectors || []).includes(c.type));
+      const pool = eligible.length ? eligible : agents;
+      if (pool.length === 0) { setSetup(c); return; }
+      const vault = vaults[0];
+      if (!vault) return notify({ message: "No vault is available to store this source.", tone: "warn" });
+      const res = await formDialog({
+        title: `Collect ${c.displayName} with a desktop agent`,
+        message: "Choose the agent on the device where this source lives. It collects locally and pushes encrypted data to the vault.",
+        confirmLabel: "Add source",
+        fields: [{
+          name: "agent", label: "Desktop agent", required: true,
+          options: pool.map((a) => ({
+            label: `${a.hostname || a.name}${(a.collectors || []).includes(c.type) ? "" : " (collector not reported)"}`,
+            value: a.id,
+          })),
+        }],
+      });
+      if (!res || !res.agent) return;
+      const agent = pool.find((a) => a.id === res.agent);
+      try {
+        await api.post("/collections", {
+          vault_id: vault.id,
+          name: `${c.type} (${agent?.hostname || agent?.name || "agent"})`,
+          source_type: c.type,
+          agent_id: res.agent,
+          sensitivity: "restricted",
+          destinations: ["cv-cloud"],
+        });
+        flash(`${c.displayName} added — route & sync it in the Data Map`);
+        await load();
+      } catch (e) {
+        await notify({ title: "Couldn't add source", message: (e as ApiError).message, tone: "danger" });
+      }
       return;
     }
     if (!me?.passkey_verified) {
@@ -137,28 +173,26 @@ export default function Connectors() {
     // the destinations configured there; only create a cloud-default mapping when
     // the source has not been mapped yet (routing is managed in the Data Map).
     let collId: string | null = null;
-    let routedDests: string[] | null = null;
     try {
-      const mappings = await api.get<Array<{ id: string; connector_account_id: string | null; destinations: string[] }>>("/collections");
+      const mappings = await api.get<Array<{ id: string; connector_account_id: string | null }>>("/collections");
       const existing = mappings.find((m) => m.connector_account_id === a.id);
-      if (existing) { collId = existing.id; routedDests = existing.destinations; }
+      if (existing) collId = existing.id;
     } catch { /* fall back to creating one */ }
     if (!collId) {
-      const dests = ["cv-cloud"];
       const coll = await api.post<{ id: string }>("/collections", {
         vault_id: vault.id,
         name: a.account_label,
         source_type: a.connector_type,
         connector_account_id: a.id,
-        destinations: dests,
+        destinations: ["cv-cloud"],
       });
       collId = coll.id;
-      routedDests = dests;
     }
     try {
-      const res = await api.post<{ object_count: number }>(
+      const res = await api.post<{ job_id?: string; object_count?: number }>(
         `/collections/${collId}/backup`, {});
-      flash(`Backed up ${res.object_count} objects from ${a.account_label} → ${(routedDests || ["cv-cloud"]).join(", ")}`);
+      if (res.job_id) flash(`Backup started for ${a.account_label} — see Activity for progress`);
+      else flash(`Backed up ${res.object_count ?? 0} objects from ${a.account_label}`);
     } catch (e) {
       await notify({ title: "Backup failed", message: (e as ApiError).message, tone: "danger" });
     }

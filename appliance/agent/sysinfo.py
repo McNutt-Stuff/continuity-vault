@@ -112,6 +112,17 @@ def disk_stats(path: str) -> dict:
         return {"disk_total_bytes": 0, "disk_used_bytes": 0, "disk_free_bytes": 0}
 
 
+def mount_device(path: str) -> str:
+    """The block device / filesystem backing ``path`` (best-effort)."""
+    out = _run(["findmnt", "-n", "-o", "SOURCE", "--target", path])
+    if out:
+        return out.splitlines()[0].strip()
+    dfl = _run(["df", "-P", path]).splitlines()
+    if len(dfl) >= 2:
+        return dfl[-1].split()[0]
+    return ""
+
+
 def smart_status() -> dict:
     """Best-effort SMART health for the primary disk (needs smartmontools)."""
     out = _run(["smartctl", "-H", "/dev/sda"])

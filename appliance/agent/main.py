@@ -168,6 +168,9 @@ class Agent:
             "drive_health": "healthy",
             "power": "ok",
             "temperature_c": 34,
+            # Where recovery data physically lives on the appliance.
+            "data_path": str(DATA),
+            "data_mount": sysinfo.mount_device(str(DATA)),
             # Per-storage capacity + health (mapped onto the cloud storage objects).
             "storages": sysinfo.storage_report(
                 str(DATA), "Built-In Storage", "builtin",

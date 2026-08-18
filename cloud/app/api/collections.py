@@ -20,7 +20,7 @@ from ..models import (
     Tenant,
     Vault,
 )
-from ..workers.sync_worker import run_backup
+from ..workers.jobs import start_backup_job
 
 router = APIRouter(prefix="/collections", tags=["collections"])
 logger = logging.getLogger("cv.collections")
@@ -200,19 +200,12 @@ def backup(collection_id: str, body: BackupRequest,
     if not coll or coll.tenant_id != tenant.id:
         raise HTTPException(404, "collection not found")
     dests = body.destinations or coll.destinations or ["cv-cloud"]
-    try:
-        receipt = run_backup(db, coll, dests)
-    except Exception as exc:
-        logger.exception("backup failed for collection %s (%s)", coll.id, coll.source_type)
-        raise HTTPException(502, f"backup failed: {exc}")
-    return {
-        "snapshot_id": receipt.snapshot_id,
-        "object_count": receipt.object_count,
-        "total_bytes": receipt.total_bytes,
-        "destinations": dests,
-        "recoverable": receipt.recoverable,
-        "manifest_hash": receipt.manifest_hash,
-    }
+    # Long pulls run as a tracked background job so the UI can show progress.
+    job = start_backup_job(db, tenant.id, coll.id, kind="backup", destinations=dests)
+    audit.record(db, actor=principal.user_id, action="source.sync_requested",
+                 tenant_id=tenant.id, resource=coll.id, detail={"kind": "connector"})
+    return {"job_id": job.id, "status": job.status, "kind": "connector",
+            "destinations": dests}
 
 
 @router.post("/{collection_id}/sync")
@@ -257,11 +250,9 @@ def sync(collection_id: str,
                 "message": f"Queued collection on {queued} agent(s); data will arrive shortly."}
 
     dests = coll.destinations or ["cv-cloud"]
-    try:
-        receipt = run_backup(db, coll, dests)
-    except Exception as exc:
-        logger.exception("sync failed for collection %s (%s)", coll.id, coll.source_type)
-        raise HTTPException(502, f"sync failed: {exc}")
-    return {"kind": "connector", "snapshot_id": receipt.snapshot_id,
-            "object_count": receipt.object_count, "destinations": dests,
-            "recoverable": receipt.recoverable}
+    # Connector pull runs as a tracked background job (progress in Activity).
+    job = start_backup_job(db, tenant.id, coll.id, kind="sync", destinations=dests)
+    audit.record(db, actor=principal.user_id, action="source.sync_requested",
+                 tenant_id=tenant.id, resource=coll.id, detail={"kind": "connector"})
+    return {"kind": "connector", "job_id": job.id, "status": job.status,
+            "destinations": dests}

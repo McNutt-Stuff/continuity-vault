@@ -162,7 +162,46 @@ def get_appliance(appliance_id: str,
     view["recent_commands"] = [{"type": c.command_type, "status": c.status,
                                 "sequence": c.sequence,
                                 "created_at": c.created_at.isoformat()} for c in commands]
+    view["stored_data"] = _stored_data(db, a)
     return view
+
+
+def _stored_data(db: Session, a: Appliance) -> dict:
+    """Recovery points physically stored on this appliance, grouped by source."""
+    from ..models import Collection, ConnectorAccount, ApplianceStorage as _AS  # noqa
+    receipts = (db.query(SnapshotReceipt)
+                .filter(SnapshotReceipt.appliance_id == a.id)
+                .order_by(SnapshotReceipt.created_at.desc()).all())
+    colls = {c.id: c for c in db.query(Collection)
+             .filter(Collection.tenant_id == a.tenant_id).all()}
+    stores = {f"store:{s.id}": s.name for s in db.query(ApplianceStorage)
+              .filter(ApplianceStorage.appliance_id == a.id).all()}
+
+    def _src(cid: str) -> str:
+        c = colls.get(cid)
+        if not c:
+            return "unknown source"
+        if c.connector_account_id:
+            acc = db.get(ConnectorAccount, c.connector_account_id)
+            if acc:
+                return acc.account_label
+        return c.name
+
+    items = [{
+        "snapshot_id": r.snapshot_id,
+        "source": _src(r.collection_id),
+        "storage": stores.get(r.destination, "Built-In Storage"),
+        "object_count": r.object_count,
+        "total_bytes": r.total_bytes,
+        "recoverable": bool(r.recoverable),
+        "at": r.created_at.isoformat(),
+    } for r in receipts[:50]]
+    return {
+        "recovery_points": len(receipts),
+        "objects": sum(r.object_count for r in receipts),
+        "bytes": sum(r.total_bytes for r in receipts),
+        "items": items,
+    }
 
 
 class CommandRequest(BaseModel):
@@ -195,11 +234,23 @@ def _appliance_view(a: Appliance) -> dict:
         for s in (db.query(ApplianceStorage)
                   .filter(ApplianceStorage.appliance_id == a.id)
                   .order_by(ApplianceStorage.kind.desc(), ApplianceStorage.created_at.asc()).all()):
+            cap = s.capacity_bytes or 0
+            used = s.used_bytes or 0
+            health = s.health or {}
+            # Fallback: if the storage record hasn't been synced from a heartbeat
+            # yet, show the appliance's reported capacity for the built-in volume.
+            if s.kind == "builtin" and not cap:
+                cap = int(tel.get("capacity_total_bytes") or 0)
+                used = int(tel.get("capacity_used_bytes") or 0)
+                if not health:
+                    health = {"drive_health": tel.get("drive_health", "healthy"),
+                              "temperature_c": tel.get("temperature_c")}
             stores.append({"id": s.id, "name": s.name, "kind": s.kind,
-                           "capacity_bytes": s.capacity_bytes or 0,
-                           "used_bytes": s.used_bytes or 0,
-                           "free_bytes": max((s.capacity_bytes or 0) - (s.used_bytes or 0), 0),
-                           "health": s.health or {}})
+                           "capacity_bytes": cap, "used_bytes": used,
+                           "free_bytes": max(cap - used, 0),
+                           "path": tel.get("data_path") if s.kind == "builtin" else None,
+                           "mount": tel.get("data_mount") if s.kind == "builtin" else None,
+                           "health": health})
     finally:
         db.close()
     return {

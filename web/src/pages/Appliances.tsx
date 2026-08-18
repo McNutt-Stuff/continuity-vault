@@ -12,14 +12,22 @@ interface StoreHealth {
 }
 interface Store {
   id: string; name: string; kind: string;
-  capacity_bytes: number; used_bytes: number; free_bytes: number; health: StoreHealth;
+  capacity_bytes: number; used_bytes: number; free_bytes: number;
+  path?: string | null; mount?: string | null; health: StoreHealth;
+}
+interface StoredItem {
+  snapshot_id: string; source: string; storage: string;
+  object_count: number; total_bytes: number; recoverable: boolean; at: string;
+}
+interface StoredData {
+  recovery_points: number; objects: number; bytes: number; items: StoredItem[];
 }
 interface Appliance {
   id: string; serial: string; model: string; name: string; location_label: string;
   state: string; isolation_state: string; software_version: string;
   attestation_ok: boolean; tamper_state: string;
   last_heartbeat_at: string | null; last_attestation_at: string | null;
-  telemetry: any; stores?: Store[];
+  telemetry: any; stores?: Store[]; stored_data?: StoredData;
 }
 
 export default function Appliances() {
@@ -32,13 +40,22 @@ export default function Appliances() {
   async function load() {
     const list = await api.get<Appliance[]>("/appliances");
     setApps(list);
-    if (selected) setSelected(list.find((a) => a.id === selected.id) ?? null);
+    // Refresh the open appliance's full detail (stores, capacity, stored data).
+    if (selected) {
+      try { setSelected(await api.get<Appliance>(`/appliances/${selected.id}`)); }
+      catch { setSelected(list.find((a) => a.id === selected.id) ?? null); }
+    }
   }
   useEffect(() => {
     void load();
     const t = setInterval(load, 8000);
     return () => clearInterval(t);
-  }, []);
+  }, [selected?.id]);
+
+  async function select(a: Appliance) {
+    setSelected(a);  // immediate
+    try { setSelected(await api.get<Appliance>(`/appliances/${a.id}`)); } catch { /* keep list item */ }
+  }
 
   async function newCode() {
     const res = await api.post<{ code: string }>("/appliances/linking-code", {
@@ -135,7 +152,7 @@ export default function Appliances() {
             key={a.id}
             className={`dest-card ${selected?.id === a.id ? "selected" : ""}`}
             style={{ marginBottom: 12 }}
-            onClick={() => setSelected(a)}
+            onClick={() => select(a)}
           >
             <div className="spread">
               <div className="row">
@@ -242,6 +259,40 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
       </Card>
 
       <Card style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ marginBottom: 10 }}>
+          <h3 style={{ margin: 0 }}>Stored data</h3>
+          {a.stored_data && (
+            <span className="faint" style={{ fontSize: 12 }}>
+              {a.stored_data.recovery_points} recovery points · {a.stored_data.objects} objects · {bytes(a.stored_data.bytes)}
+            </span>
+          )}
+        </div>
+        {t.data_path && (
+          <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
+            Data location: <span className="mono">{t.data_path}</span>
+            {t.data_mount ? <> on <span className="mono">{t.data_mount}</span></> : null} · client-encrypted (AES-256-GCM), sealed at rest
+          </div>
+        )}
+        {(!a.stored_data || a.stored_data.items.length === 0) && (
+          <div className="muted">No recovery points stored on this appliance yet.</div>
+        )}
+        {a.stored_data && a.stored_data.items.map((it) => (
+          <div key={it.snapshot_id} className="result-row">
+            <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 30, height: 30 }}>
+              <Icon name="clock" size={14} />
+            </div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>{it.source}</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>
+                {it.storage} · {it.object_count} objects · {bytes(it.total_bytes)} · {timeAgo(it.at)}
+              </div>
+            </div>
+            <Pill tone={it.recoverable ? "ok" : "warn"}>{it.recoverable ? "recoverable" : "sealing"}</Pill>
+          </div>
+        ))}
+      </Card>
+
+      <Card style={{ marginBottom: 16 }}>
         <h3 style={{ marginBottom: 12 }}>System & platform</h3>
         <div className="grid grid-3">
           <Info label="Type" value={t.model_kind === "vm" ? `VM (${t.virtualization || "?"})` : "Hardware"} />
@@ -331,6 +382,7 @@ function StorageItem({ a, s, onRename, onDelete }:
             <div style={{ fontWeight: 600 }}>{s.name}</div>
             <div className="faint" style={{ fontSize: 11.5 }}>
               {s.kind === "builtin" ? "Built-in storage" : "External storage"} · store:{s.id.slice(0, 8)}
+              {s.path && <> · <span className="mono">{s.path}</span>{s.mount ? ` on ${s.mount}` : ""}</>}
             </div>
           </div>
         </div>

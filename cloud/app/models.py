@@ -346,6 +346,25 @@ class UpdateJob(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class SyncJob(Base):
+    """A tracked, long-running backup/sync run so the UI can show live progress."""
+
+    __tablename__ = "sync_jobs"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    collection_id = Column(String, index=True)
+    kind = Column(String, default="backup")  # backup | sync
+    status = Column(String, default="queued")  # queued | running | done | failed
+    processed = Column(Integer, default=0)
+    total = Column(Integer, default=0)
+    message = Column(String, default="")
+    error = Column(String, default="")
+    snapshot_id = Column(String, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+
 class AuditEvent(Base):
     """Tamper-evident audit ledger (append-only, hash-chained)."""
 

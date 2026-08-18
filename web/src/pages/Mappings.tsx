@@ -25,9 +25,13 @@ interface ActivityEvent {
   destination?: string; object_count?: number; total_bytes?: number;
   status: string; at?: string; command?: string;
 }
+interface Job {
+  id: string; collection_id?: string; source: string; kind: string;
+  status: string; processed: number; total: number; message: string;
+}
 interface Activity {
-  in_flight: ActivityEvent[]; events: ActivityEvent[];
-  summary: { recent: number; pending: number; queued_agents: number };
+  in_flight: ActivityEvent[]; events: ActivityEvent[]; jobs: Job[];
+  summary: { recent: number; pending: number; queued_agents: number; active_jobs: number };
 }
 
 export default function Mappings() {
@@ -84,10 +88,13 @@ export default function Mappings() {
       const next = { ...cur };
       let changed = false;
       for (const [cid, ts] of Object.entries(cur)) {
+        const activeJob = (activity.jobs || []).some((j) => j.collection_id === cid);
         const landed = activity.events.some(
           (e) => e.collection_id === cid && e.at && new Date(e.at).getTime() >= ts - 2000);
-        const stale = Date.now() - ts > 90000; // give up after 90s
-        if (landed || stale) { delete next[cid]; changed = true; }
+        // A running job supersedes the local spinner; otherwise clear on a fresh
+        // event or after a long timeout.
+        const stale = Date.now() - ts > 180000;
+        if (activeJob || landed || stale) { delete next[cid]; changed = true; }
       }
       return changed ? next : cur;
     });
@@ -95,6 +102,10 @@ export default function Mappings() {
 
   function eventsFor(collectionId: string): ActivityEvent[] {
     return (activity?.events || []).filter((e) => e.collection_id === collectionId).slice(0, 4);
+  }
+
+  function jobFor(collectionId: string): Job | undefined {
+    return (activity?.jobs || []).find((j) => j.collection_id === collectionId);
   }
 
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
@@ -192,8 +203,9 @@ export default function Mappings() {
     setSyncing((cur) => ({ ...cur, [m.id]: Date.now() }));
     setOpenActivity((cur) => ({ ...cur, [m.id]: true }));
     try {
-      const res = await api.post<{ kind: string; queued_agents?: number; object_count?: number }>(`/collections/${m.id}/sync`, {});
+      const res = await api.post<{ kind: string; queued_agents?: number; object_count?: number; job_id?: string }>(`/collections/${m.id}/sync`, {});
       if (res.kind === "agent") flash(`Queued sync on ${res.queued_agents} agent(s)`);
+      else if (res.job_id) flash("Sync started — progress below");
       else flash(`Synced ${res.object_count ?? 0} objects`);
       await load();
     } catch (e) {
@@ -266,8 +278,9 @@ export default function Mappings() {
         </div>
       </Card>
 
-      {activity && (activity.summary.recent > 0 || activity.summary.queued_agents > 0) && (
+      {activity && (activity.summary.recent > 0 || activity.summary.queued_agents > 0 || activity.summary.active_jobs > 0) && (
         <div className="row" style={{ gap: 8, marginBottom: 12, justifyContent: "flex-end" }}>
+          {activity.summary.active_jobs > 0 && <Pill tone="warn">{activity.summary.active_jobs} running</Pill>}
           {activity.summary.queued_agents > 0 && <Pill tone="warn">{activity.summary.queued_agents} syncing</Pill>}
           {activity.summary.pending > 0 && <Pill tone="info">{activity.summary.pending} sealing</Pill>}
           <span className="faint" style={{ fontSize: 12, alignSelf: "center" }}>
@@ -309,11 +322,13 @@ export default function Mappings() {
                     {m.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
                   </div>
                 )}
-                {!editing && (syncing[m.id] || eventsFor(m.id).length > 0) && (() => {
+                {!editing && (syncing[m.id] || jobFor(m.id) || eventsFor(m.id).length > 0) && (() => {
                   const evs = eventsFor(m.id);
-                  const isSyncing = !!syncing[m.id];
+                  const job = jobFor(m.id);
+                  const isSyncing = !!syncing[m.id] || !!job;
                   const expanded = openActivity[m.id] || isSyncing;
                   const latest = evs[0];
+                  const pct = job && job.total > 0 ? Math.min(100, (job.processed / job.total) * 100) : 0;
                   return (
                     <div style={{ marginTop: 8 }}>
                       <button
@@ -323,9 +338,9 @@ export default function Mappings() {
                         <span className="row" style={{ gap: 6, alignItems: "center" }}>
                           {isSyncing ? <span className="spinner-dot" /> : <Icon name="activity" size={13} />}
                           <span style={{ fontWeight: 600, fontSize: 12 }}>
-                            {isSyncing ? "Syncing…" : "Activity"}
+                            {job ? (job.message || "Syncing…") : isSyncing ? "Syncing…" : "Activity"}
                           </span>
-                          {evs.length > 0 && (
+                          {!job && evs.length > 0 && (
                             <span className="faint" style={{ fontSize: 11.5 }}>
                               · {latest.object_count ?? 0} objects → {destLabel(latest.destination || "cv-cloud")} · {fmtTime(latest.at)}
                             </span>
@@ -335,7 +350,18 @@ export default function Mappings() {
                       </button>
                       {expanded && (
                         <div className="map-activity">
-                          {isSyncing && (
+                          {job && (
+                            <div className="stack" style={{ gap: 6 }}>
+                              <div className="spread faint" style={{ fontSize: 12 }}>
+                                <span>{job.message || "Working…"}</span>
+                                {job.total > 0 && <span>{job.processed}/{job.total}</span>}
+                              </div>
+                              <div className="progress">
+                                <span style={{ width: job.total > 0 ? `${pct}%` : "40%", opacity: job.total > 0 ? 1 : 0.5 }} />
+                              </div>
+                            </div>
+                          )}
+                          {!job && isSyncing && (
                             <div className="row" style={{ gap: 8, fontSize: 12.5, alignItems: "center" }}>
                               <span className="spinner-dot" />
                               <span className="faint">
@@ -343,7 +369,7 @@ export default function Mappings() {
                               </span>
                             </div>
                           )}
-                          {evs.length === 0 && !isSyncing && (
+                          {!job && evs.length === 0 && !isSyncing && (
                             <span className="faint" style={{ fontSize: 12 }}>No activity yet.</span>
                           )}
                           {evs.map((e, i) => (

@@ -21,6 +21,7 @@ from ..models import (
     ConnectorAccount,
     DesktopAgent,
     SnapshotReceipt,
+    SyncJob,
     Tenant,
 )
 
@@ -106,14 +107,34 @@ def activity(limit: int = 40,
                 "command": (a.pending_command or {}).get("type"),
             })
 
+    # Tracked connector backup/sync jobs (running + recently finished).
+    jobs = (db.query(SyncJob)
+            .filter(SyncJob.tenant_id == tenant.id,
+                    SyncJob.status.in_(["queued", "running"]))
+            .order_by(SyncJob.created_at.desc()).all())
+    job_items = [{
+        "id": j.id,
+        "collection_id": j.collection_id,
+        "source": _source_label(j.collection_id),
+        "source_type": _source_type(j.collection_id),
+        "kind": j.kind,
+        "status": j.status,
+        "processed": j.processed or 0,
+        "total": j.total or 0,
+        "message": j.message or "",
+        "at": (j.started_at or j.created_at).isoformat(),
+    } for j in jobs]
+
     pending = sum(1 for e in events if e["status"] == "pending")
     return {
         "in_flight": in_flight,
         "events": events,
+        "jobs": job_items,
         "summary": {
             "recent": len(events),
             "pending": pending,
             "queued_agents": len(in_flight),
+            "active_jobs": len(job_items),
         },
     }
 

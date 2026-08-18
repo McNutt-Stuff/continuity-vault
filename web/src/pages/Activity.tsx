@@ -9,9 +9,13 @@ interface Event {
   destination_label?: string; object_count?: number; total_bytes?: number; status: string;
   snapshot_id?: string; at?: string; command?: string;
 }
+interface Job {
+  id: string; source: string; source_type?: string; kind: string;
+  status: string; processed: number; total: number; message: string;
+}
 interface Activity {
-  in_flight: Event[]; events: Event[];
-  summary: { recent: number; pending: number; queued_agents: number };
+  in_flight: Event[]; events: Event[]; jobs: Job[];
+  summary: { recent: number; pending: number; queued_agents: number; active_jobs: number };
 }
 
 function ago(iso?: string | null): string {
@@ -60,15 +64,36 @@ export default function ActivityPage() {
     <>
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
         <Stat label="Recent events" value={data?.summary.recent ?? 0} />
-        <Stat label="Syncing now" value={data?.summary.queued_agents ?? 0}
-          hint={data && data.summary.queued_agents > 0 ? "agents collecting" : "idle"} />
+        <Stat label="Running now" value={(data?.summary.active_jobs ?? 0) + (data?.summary.queued_agents ?? 0)}
+          hint={(data?.summary.active_jobs || data?.summary.queued_agents) ? "backups in progress" : "idle"} />
         <Stat label="Sealing" value={data?.summary.pending ?? 0} hint="awaiting appliance seal" />
         <Stat label="Objects ingested" value={objectsTotal} hint={bytes(bytesTotal)} />
       </div>
 
-      {data && data.in_flight.length > 0 && (
+      {data && (data.jobs.length > 0 || data.in_flight.length > 0) && (
         <Card style={{ marginBottom: 16 }}>
           <h3 style={{ marginBottom: 10 }}>In progress</h3>
+          {data.jobs.map((j) => {
+            const pct = j.total > 0 ? Math.min(100, (j.processed / j.total) * 100) : 0;
+            return (
+              <div key={j.id} className="result-row" style={{ alignItems: "flex-start" }}>
+                <div className="result-icon" style={{ background: brandForSource(j.source_type || "") ? "#0e1524" : "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
+                  <SourceGlyph type={j.source_type} size={18} />
+                </div>
+                <div className="flex1">
+                  <div style={{ fontWeight: 600 }}>{j.source}</div>
+                  <div className="spread faint" style={{ fontSize: 12, margin: "4px 0" }}>
+                    <span>{j.message || "Working…"}</span>
+                    {j.total > 0 && <span>{j.processed}/{j.total}</span>}
+                  </div>
+                  <div className="progress">
+                    <span style={{ width: j.total > 0 ? `${pct}%` : "40%", opacity: j.total > 0 ? 1 : 0.5 }} />
+                  </div>
+                </div>
+                <Pill tone="warn">{j.status}</Pill>
+              </div>
+            );
+          })}
           {data.in_flight.map((e, i) => (
             <div key={i} className="result-row">
               <div className="result-icon" style={{ background: "#0e1524" }}>
