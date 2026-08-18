@@ -95,6 +95,19 @@ build_web() {
   npm run build
 }
 
+validate_app() {
+  # Import the app in a throwaway environment so import/route errors surface
+  # here with a full traceback, before the service is started.
+  cd "$INSTALL_DIR/cloud"
+  CV_DATABASE_URL="sqlite:////tmp/cv_probe.db" \
+  CV_SEED_DEMO_DATA=false \
+  CV_KEY_STORE=/tmp/cv_probe_keys \
+  CV_OBJECT_STORE=/tmp/cv_probe_obj \
+  CV_FLEET_SIGNER=/tmp/cv_probe_signer.json \
+    "$INSTALL_DIR/.venv/bin/python" -c "import app.main; print('app import OK:', len(app.main.app.routes), 'routes')"
+  rm -rf /tmp/cv_probe.db /tmp/cv_probe_keys /tmp/cv_probe_obj /tmp/cv_probe_signer.json
+}
+
 write_env() {
   # Generate secrets only on first write so re-runs don't invalidate sessions.
   if [[ ! -f /etc/continuity-vault.env ]]; then
@@ -167,6 +180,7 @@ step_always "Copying application files"    sync_code
 step "Configuring PostgreSQL database"     setup_database
 step "Installing Python control plane"     install_python
 step_always "Building web portal"          build_web
+step_always "Validating application"       validate_app
 step_always "Writing configuration"        write_env
 step_always "Starting control-plane service" install_service
 step_always "Configuring TLS reverse proxy" configure_caddy

@@ -28,19 +28,19 @@ from cv_crypto.envelope import EnvelopeKeyHierarchy, encrypt_object
 from cv_crypto.provider import hexdigest
 from cv_crypto.signing import HybridSigner
 
-from . import audit, keybroker
-from .connectors import get_connector
-from .models import (
+from .. import audit, keybroker
+from ..connectors import get_connector
+from ..models import (
     Collection,
     ConnectorAccount,
     SearchDocument,
     SnapshotReceipt,
     Vault,
 )
-from .storage import build_destination
+from ..storage import build_destination
 
 # The cloud manifest signer (distinct from the fleet command signer).
-from .fleet import fleet_signer
+from ..fleet import fleet_signer
 
 
 def run_backup(db: Session, collection: Collection, destinations: Optional[List[str]] = None
@@ -157,7 +157,7 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
 
 
 def _tenant_prefix(db: Session, tenant_id: str) -> str:
-    from .models import Tenant
+    from ..models import Tenant
 
     tenant = db.get(Tenant, tenant_id)
     return tenant.storage_prefix if tenant else tenant_id

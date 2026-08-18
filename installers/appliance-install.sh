@@ -56,6 +56,14 @@ install_python() {
   "$INSTALL_DIR/.venv/bin/pip" install oqs || true
 }
 
+validate_app() {
+  # Import the agent in a throwaway data dir to surface import errors early.
+  cd "$INSTALL_DIR/appliance"
+  CVA_DATA_DIR=/tmp/cv_probe_agent \
+    "$INSTALL_DIR/.venv/bin/python" -c "import agent.main; print('agent import OK')"
+  rm -rf /tmp/cv_probe_agent
+}
+
 write_config() {
   mkdir -p /etc/continuity-vault
   cat > /etc/continuity-vault/appliance.env <<EOF
@@ -103,6 +111,7 @@ step "Installing system packages"          install_os_deps
 step "Creating service user & directories" create_user_dirs
 step_always "Copying application files"    sync_code
 step "Installing appliance agent"          install_python
+step_always "Validating agent"             validate_app
 step_always "Writing appliance configuration" write_config
 step_always "Starting appliance agent"     install_service
 step_always "Verifying activation with cloud" verify_agent
