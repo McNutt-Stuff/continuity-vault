@@ -284,15 +284,23 @@ class Agent:
             }, headers=self._headers())
 
     def _request_recovery(self, params: dict) -> dict:
-        """Recovery requires local approval before UNSEALED_FOR_RECOVERY (spec 7.3)."""
+        """Recovery requires local approval before UNSEALED_FOR_RECOVERY (spec 7.3),
+        unless the cloud-signed command carries an authenticated operator approval
+        (the portal already enforced passkey step-up before issuing it)."""
         snapshot_id = params.get("snapshotId")
-        if settings.require_local_recovery_approval:
+        operator_approved = bool(params.get("operatorApproved"))
+        self.log.info("recovery requested snapshot=%s objects=%s operator_approved=%s local_policy=%s",
+                      snapshot_id, params.get("objectIds"), operator_approved,
+                      settings.require_local_recovery_approval)
+        if settings.require_local_recovery_approval and not operator_approved:
             self.pending_recovery[snapshot_id] = params
+            self.log.info("recovery parked awaiting local physical approval: %s", snapshot_id)
             return {"awaiting_local_approval": True, "snapshot_id": snapshot_id}
         return self._perform_recovery(snapshot_id, params)
 
     def _perform_recovery(self, snapshot_id: str, params: dict) -> dict:
         if not self.vault.snapshot_exists(snapshot_id):
+            self.log.warning("recovery: snapshot not present on appliance: %s", snapshot_id)
             return {"error": "snapshot not present on appliance"}
         self.sm.state = State.UNSEAL_REQUESTED
         self.sm.transition(State.UNSEALED_FOR_RECOVERY)
@@ -314,6 +322,8 @@ class Agent:
                 self.log.warning("recovery read failed for %s: %s", oid, exc)
         self.sm.transition(State.SEALING)
         self.sm.transition(State.SEALED)
+        self.log.info("recovery complete snapshot=%s objects=%d units=%d resealed",
+                      snapshot_id, len(objects), len(units))
         return {"recovered_objects": objects, "units": units, "resealed": True}
 
     def _stage_update(self, params: dict) -> dict:

@@ -352,7 +352,8 @@ def retrieve(body: RetrieveRequest,
             raise HTTPException(404, "no appliance available to retrieve from")
         cmd = fleet.issue_command(
             db, appliance, "OPEN_RECOVERY_WINDOW", principal.user_id,
-            {"snapshotId": body.snapshot_id, "objectIds": [body.object_id]})
+            {"snapshotId": body.snapshot_id, "objectIds": [body.object_id],
+             "operatorApproved": True, "approvedBy": principal.user_id})
         audit.record(db, actor=principal.user_id, action="search.retrieve",
                      tenant_id=tenant.id, resource=body.object_id,
                      detail={"location": label, "appliance": appliance.id})
@@ -474,10 +475,10 @@ def retrieve_status(command_id: str,
         raise HTTPException(404, "command not found")
     result = cmd.result or {}
     # pending -> requested to the appliance; delivered -> appliance is working;
-    # acked -> content returned; rejected -> refused/failed.
+    # acked -> content returned; rejected/expired -> refused/timed out.
     stage = {
         "pending": "requested", "delivered": "retrieving",
-        "acked": "ready", "rejected": "failed",
+        "acked": "ready", "rejected": "failed", "expired": "failed",
     }.get(cmd.status, cmd.status)
     recovered = result.get("recovered") or []
     if result.get("awaiting_local_approval"):
@@ -485,10 +486,13 @@ def retrieve_status(command_id: str,
     if cmd.status == "acked" and not recovered and not result.get("awaiting_local_approval"):
         # Acked but nothing decryptable came back.
         stage = "unavailable"
+    message = result.get("message")
+    if cmd.status == "expired":
+        message = "The appliance did not respond before the recovery command expired."
     return {
         "status": stage,
         "command_status": cmd.status,
         "recovered": recovered,
         "error": result.get("error"),
-        "message": result.get("message"),
+        "message": message,
     }

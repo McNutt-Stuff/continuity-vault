@@ -621,16 +621,34 @@ def heartbeat(body: HeartbeatRequest,
         db.rollback()
         logger.exception("storage telemetry sync failed for appliance %s", appliance.id)
 
-    # Deliver pending signed commands (management plane only).
-    pending = (db.query(ApplianceCommand)
-               .filter(ApplianceCommand.appliance_id == appliance.id,
-                       ApplianceCommand.status == "pending")
-               .order_by(ApplianceCommand.sequence.asc()).all())
+    # Deliver pending signed commands (management plane only). Delivery is
+    # at-least-once: a command that was handed out but never acked (appliance
+    # missed it, crashed mid-handling, or its result POST failed) is redelivered
+    # on a later heartbeat until it is acked or its signed TTL expires. This stops
+    # recovery/ingest from stalling forever on a single dropped delivery.
+    ttl = settings.command_ttl_seconds or 900
+    redeliver_after = max(60, settings.heartbeat_interval_seconds * 2)
+    cmds = (db.query(ApplianceCommand)
+            .filter(ApplianceCommand.appliance_id == appliance.id,
+                    ApplianceCommand.status.in_(["pending", "delivered"]))
+            .order_by(ApplianceCommand.sequence.asc()).all())
     delivered = []
-    for c in pending:
-        c.status = "delivered"
-        delivered.append(c.envelope)
+    delivered_types = []
+    for c in cmds:
+        age = (_now() - (c.created_at.replace(tzinfo=None) if c.created_at
+                         and c.created_at.tzinfo else c.created_at)).total_seconds() \
+            if c.created_at else 0.0
+        if age > ttl:
+            c.status = "expired"  # signed command no longer valid; appliance would reject it
+            continue
+        if c.status == "pending" or age > redeliver_after:
+            c.status = "delivered"
+            delivered.append(c.envelope)
+            delivered_types.append(c.command_type)
     db.commit()
+    if delivered:
+        logger.info("delivered %d command(s) to appliance %s: %s",
+                    len(delivered), appliance.id, delivered_types)
     return {"commands": delivered,
             "latest_version": _appliance_bundle_version(),
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
@@ -652,6 +670,8 @@ def command_result(body: CommandResultRequest,
         raise HTTPException(404, "command not found")
     cmd.status = "acked" if body.accepted else "rejected"
     result = dict(body.result or {})
+    logger.info("command-result %s type=%s accepted=%s result_keys=%s",
+                cmd.id, cmd.command_type, body.accepted, list(result.keys()))
     # Recovery windows: the appliance returns the encrypted object units it read
     # out of sealed storage. Decrypt them here (inside the key boundary) and stage
     # them into the same time-limited recovery window used by cloud retrieval, so
@@ -683,16 +703,22 @@ def _stage_recovered_from_appliance(db: Session, appliance: Appliance,
     snapshot_id = params.get("snapshotId")
     object_ids = params.get("objectIds", [])
     if not units or not snapshot_id:
+        logger.warning("recovery staging: nothing to stage (units=%d snapshot=%s) for %s",
+                       len(units), snapshot_id, cmd.id)
         return []
     receipt = (db.query(SnapshotReceipt)
                .filter(SnapshotReceipt.tenant_id == appliance.tenant_id,
                        SnapshotReceipt.snapshot_id == snapshot_id).first())
     if receipt is None:
+        logger.warning("recovery staging: no receipt for snapshot %s (tenant %s)",
+                       snapshot_id, appliance.tenant_id)
         return []
     staged: list[dict] = []
     for oid in object_ids:
         plaintext, client_encrypted = decrypt_recovered_units(db, receipt, oid, units)
         if plaintext is None or client_encrypted:
+            logger.warning("recovery staging: %s not staged (plaintext=%s client_encrypted=%s)",
+                           oid, plaintext is not None, client_encrypted)
             continue
         doc = (db.query(SearchDocument)
                .filter(SearchDocument.tenant_id == appliance.tenant_id,
@@ -709,6 +735,8 @@ def _stage_recovered_from_appliance(db: Session, appliance: Appliance,
             "mime": item.mime, "size_bytes": item.size_bytes,
             "doc_type": item.doc_type, "source_type": item.source_type,
         })
+    logger.info("recovery staging: staged %d/%d item(s) from appliance %s",
+                len(staged), len(object_ids), appliance.id)
     return staged
 
 
