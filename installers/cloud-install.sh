@@ -23,8 +23,18 @@ INSTALL_DIR="/opt/continuity-vault"
 DATA_DIR="/var/lib/continuity-vault"
 REPO_SRC="${REPO_SRC:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 CV_USER="cvault"
-DB_PASSWORD="${CV_DB_PASSWORD:-$(openssl rand -hex 16)}"
 export DEBIAN_FRONTEND=noninteractive
+
+# Keep the DB password stable across runs so the role and the app config never
+# drift: prefer an explicit override, then the value already in the env file,
+# else generate a fresh one.
+_existing_db_pw() {
+  [[ -f /etc/continuity-vault.env ]] || return 0
+  sed -n 's#^CV_DATABASE_URL=postgresql+psycopg://cvault:\(.*\)@localhost/continuity#\1#p' \
+    /etc/continuity-vault.env | head -1
+}
+DB_PASSWORD="${CV_DB_PASSWORD:-$(_existing_db_pw)}"
+DB_PASSWORD="${DB_PASSWORD:-$(openssl rand -hex 16)}"
 
 # --- step implementations ---------------------------------------------------
 
@@ -177,7 +187,7 @@ step "Installing Node.js 20"               install_node
 step "Installing Caddy (Let's Encrypt)"    install_caddy
 step "Creating service user & directories" create_user_dirs
 step_always "Copying application files"    sync_code
-step "Configuring PostgreSQL database"     setup_database
+step_always "Configuring PostgreSQL database" setup_database
 step "Installing Python control plane"     install_python
 step_always "Building web portal"          build_web
 step_always "Validating application"       validate_app
