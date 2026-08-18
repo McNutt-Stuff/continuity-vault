@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import shutil
 import subprocess
 from typing import List
+
+log = logging.getLogger("arkive")
 
 # 1Password item category -> canonical kind (category is derived server-side).
 _OP_KIND = {
@@ -59,10 +62,16 @@ def auth_state(token: str = "") -> str:
         return "absent"
     env = _env(token)
     try:
-        subprocess.run([_op_path(), "whoami"], capture_output=True, text=True,
-                       env=env, check=True, timeout=20)
-        return "service-account" if token else "interactive"
-    except Exception:
+        r = subprocess.run([_op_path(), "whoami"], capture_output=True, text=True,
+                           env=env, timeout=20)
+        if r.returncode == 0:
+            log.debug("op whoami ok: %s", (r.stdout or "").strip())
+            return "service-account" if token else "interactive"
+        log.debug("op whoami failed (exit %s): %s", r.returncode,
+                  (r.stderr or r.stdout or "").strip())
+        return "unauthenticated"
+    except Exception as exc:
+        log.debug("op whoami error: %s", exc)
         return "unauthenticated"
 
 
@@ -70,10 +79,12 @@ def _op(args: List[str], env: dict) -> str:
     op = _op_path()
     if not op:
         raise RuntimeError("1Password CLI (op) not found")
+    log.debug("running: op %s", " ".join(args))
     proc = subprocess.run([op, *args], capture_output=True, text=True,
                           env=env, timeout=60)
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout or "").strip()
+        log.debug("op %s -> exit %s: %s", args[0] if args else "", proc.returncode, msg)
         raise RuntimeError(
             f"op {' '.join(args)} failed (exit {proc.returncode}): {msg}")
     return proc.stdout

@@ -14,7 +14,7 @@ import time
 
 from .config import Config
 from .main import Agent
-from . import status_ui
+from . import native_status
 
 
 def _agent_loop(agent: Agent, on_status) -> None:
@@ -67,9 +67,11 @@ def run() -> None:
 
         def show_status(self, _):
             try:
-                path = cfg.data_dir / "status.html"
-                path.write_text(status_ui.render(agent.status_snapshot()))
-                subprocess.Popen(["open", str(path)])
+                action = native_status.show(agent.status_snapshot())
+                if action == "sync":
+                    self.sync(None)
+                elif action == "logs":
+                    self.logs(None)
             except Exception as exc:
                 rumps.notification("Arkive", "Could not open status", str(exc))
 

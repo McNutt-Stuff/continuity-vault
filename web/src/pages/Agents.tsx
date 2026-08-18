@@ -190,6 +190,7 @@ function AgentStatusModal({
 }: { agent: Agent; onClose: () => void; onCommand: (type: string) => void }) {
   const t = agent.telemetry || {};
   const crypto = t.crypto || {};
+  const [verbose, setVerbose] = useState<boolean>(!!agent.config?.verbose_logging);
   const online = heartbeatTone(agent.last_heartbeat_at);
   const opState: "missing" | "interactive" | "ready" =
     t.op_available === false ? "missing" : t.op_auth === "unauthenticated" ? "interactive" : "ready";
@@ -306,6 +307,32 @@ function AgentStatusModal({
               <Info label="Agent version" value={agent.version} />
               <Info label="OS" value={t.os || "—"} />
               <Info label="State" value={agent.state} />
+            </div>
+          </section>
+
+          <section className="status-section">
+            <div className="status-h"><Icon name="key" size={14} /> Advanced</div>
+            <div className="collector-row">
+              <div className="row" style={{ gap: 10 }}>
+                <Icon name="search" size={16} />
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>Verbose logging (DEBUG)</div>
+                  <div className="faint" style={{ fontSize: 11.5 }}>
+                    Applies on the agent's next heartbeat (~30s). Use for troubleshooting.
+                  </div>
+                </div>
+              </div>
+              <button
+                className={`btn sm ${verbose ? "primary" : ""}`}
+                onClick={async () => {
+                  const next = !verbose;
+                  setVerbose(next);
+                  try { await api.put(`/agents/${agent.id}/config`, { verbose_logging: next }); }
+                  catch { setVerbose(!next); }
+                }}
+              >
+                {verbose ? "On" : "Off"}
+              </button>
             </div>
           </section>
 

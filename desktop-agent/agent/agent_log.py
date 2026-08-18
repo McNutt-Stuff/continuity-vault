@@ -37,6 +37,11 @@ def setup_logging(log_file: Path) -> logging.Logger:
     return logger
 
 
+def set_verbose(verbose: bool) -> None:
+    """Toggle DEBUG logging (driven by the cloud advanced setting)."""
+    logging.getLogger("arkive").setLevel(logging.DEBUG if verbose else logging.INFO)
+
+
 def tail(log_file: Path, lines: int = 50) -> list[str]:
     try:
         return log_file.read_text(errors="replace").splitlines()[-lines:]

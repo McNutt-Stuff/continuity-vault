@@ -58,6 +58,7 @@ DEFAULT_AGENT_CONFIG = {
     "destinations": ["cv-cloud"],
     "schedule_minutes": 360,
     "appliance_endpoint": None,  # set to push directly to an appliance ingest gateway
+    "verbose_logging": False,  # advanced: DEBUG-level agent logging
 }
 
 
@@ -160,6 +161,7 @@ class AgentConfigUpdate(BaseModel):
     schedule_minutes: int | None = None
     collectors: list[str] | None = None
     appliance_endpoint: str | None = None
+    verbose_logging: bool | None = None
 
 
 @fleet_router.put("/{agent_id}/config")

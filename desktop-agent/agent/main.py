@@ -181,6 +181,8 @@ class Agent:
         self._last_heartbeat = time.time()
         data = r.json()
         self.reg["config"] = data.get("config", self.reg.get("config", {}))
+        # Cloud-driven advanced setting: verbose (DEBUG) logging.
+        agent_log.set_verbose(bool(self.reg.get("config", {}).get("verbose_logging")))
         self.cfg.registration_file.write_text(json.dumps(self.reg))
         # Auto-update: pull a new bundle when the cloud advertises a newer version.
         self._maybe_self_update(data.get("latest_version"))
