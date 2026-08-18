@@ -11,9 +11,14 @@ INSTALL_DIR="/opt/continuity-vault"
 SRC_DIR="${ARKIVE_SRC_DIR:-/opt/arkive-src}"
 ENV_FILE="/etc/continuity-vault/appliance.env"
 
-# shellcheck disable=SC1090
-[ -f "$ENV_FILE" ] && . "$ENV_FILE"
-CLOUD_URL="${CVA_CLOUD_BASE_URL:-https://vault.arkive.life/api}"
+# Extract only the cloud URL — never `source` the env file, since values like
+# `CVA_MODEL=CV Edge 8` are unquoted (valid for systemd EnvironmentFile but not
+# for bash `source`, which would try to run `Edge 8`).
+CLOUD_URL="https://vault.arkive.life/api"
+if [ -f "$ENV_FILE" ]; then
+  _u="$(sed -n 's/^CVA_CLOUD_BASE_URL=//p' "$ENV_FILE" | tr -d '"' | head -1)"
+  [ -n "$_u" ] && CLOUD_URL="$_u"
+fi
 
 cur=""
 [ -f "$INSTALL_DIR/appliance/VERSION" ] && cur="$(cat "$INSTALL_DIR/appliance/VERSION")"
