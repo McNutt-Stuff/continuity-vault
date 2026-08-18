@@ -14,6 +14,7 @@ import Restore from "./pages/Restore";
 import Onboarding from "./pages/Onboarding";
 import Admin from "./pages/Admin";
 import Agents from "./pages/Agents";
+import Audit from "./pages/Audit";
 import Settings from "./pages/Settings";
 
 const NAV: { to: string; label: string; icon: IconName }[] = [
@@ -25,6 +26,7 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/appliances", label: "Appliances", icon: "server" },
   { to: "/agents", label: "Desktop Agents", icon: "user" },
   { to: "/restore", label: "Restore", icon: "restore" },
+  { to: "/audit", label: "Audit Log", icon: "shield" },
   { to: "/settings", label: "Settings", icon: "gear" },
 ];
 
@@ -57,6 +59,7 @@ export default function App() {
             <Route path="/appliances" element={<Appliances />} />
             <Route path="/agents" element={<Agents />} />
             <Route path="/restore" element={<Restore />} />
+            <Route path="/audit" element={<Audit />} />
             <Route path="/settings" element={<Settings />} />
             {me.is_platform_admin && <Route path="/admin" element={<Admin />} />}
             <Route path="*" element={<Navigate to="/" />} />

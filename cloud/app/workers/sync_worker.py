@@ -152,10 +152,13 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     vault = db.get(Vault, collection.vault_id)
     zero_knowledge = vault.key_ownership_model == "zero-knowledge"
     # Only the discrete metadata fields the connector declares are indexed or
-    # shown in search — never the object's body/content. facet_fields come first
-    # (they are the most identifying), then any extra searchable metadata keys.
+    # shown in search — never the object's body/content. A per-source override
+    # (collection.index_fields, set in the Data Map) wins when present; otherwise
+    # facet_fields come first (most identifying), then extra searchable keys.
+    override = list(collection.index_fields or [])
     display_keys: List[str] = []
-    for k in [*(facet_fields or []), *(searchable_fields or [])]:
+    source_keys = override if override else [*(facet_fields or []), *(searchable_fields or [])]
+    for k in source_keys:
         if k and k != "*" and k not in display_keys:
             display_keys.append(k)
 
@@ -323,6 +326,10 @@ def _account_config(db: Session, collection: Collection,
         creds = credstore.decrypt(collection.tenant_id, account.encrypted_credentials)
     except Exception:
         return {}
+    # Credential access is security-relevant — record it in the audit ledger.
+    audit.record(db, actor="sync-worker", action="connector.credentials_accessed",
+                 tenant_id=collection.tenant_id, resource=account.id,
+                 detail={"type": collection.source_type, "account": account.account_label})
     # Refresh the OAuth access token if it is expired and we have a refresh token.
     if creds.get("access_token") and creds.get("expires_at", 0) < time.time():
         if creds.get("refresh_token"):

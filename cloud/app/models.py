@@ -114,6 +114,7 @@ class Collection(Base):
     policy_id = Column(String, ForeignKey("protection_policies.id"), nullable=True)
     sensitivity = Column(String, default="standard")  # standard | sensitive | restricted
     destinations = Column(JSON, default=list)  # where this mapping stores data
+    index_fields = Column(JSON, default=list)  # override of connector metadata keys to index
     created_at = Column(DateTime, default=_now)
 
     vault = relationship("Vault", back_populates="collections")
@@ -335,6 +336,8 @@ class AuditEvent(Base):
     action = Column(String, nullable=False)
     resource = Column(String, default="")
     detail = Column(JSON, default=dict)
+    severity = Column(String, default="info")     # info | notice | warning | critical
+    category = Column(String, default="activity")  # activity | security | credential | admin | system
     prev_hash = Column(String, default="")
     entry_hash = Column(String, default="")
     created_at = Column(DateTime, default=_now)

@@ -11,8 +11,58 @@ from cv_crypto.provider import hexdigest
 from .models import AuditEvent
 
 
+# Action → (category, severity) classification. Anything not listed defaults to
+# ("activity", "info"). Failures/anomalies are bumped to warning/critical so the
+# audit log can surface abnormal usage and credential access at a glance.
+_CLASSIFY: dict[str, tuple[str, str]] = {
+    # Authentication & step-up
+    "auth.login": ("security", "notice"),
+    "auth.login_failed": ("security", "warning"),
+    "auth.logout": ("security", "info"),
+    "auth.passkey_registered": ("security", "notice"),
+    "auth.stepup": ("security", "notice"),
+    "auth.stepup_failed": ("security", "warning"),
+    # Credential / secret access
+    "search.retrieve": ("credential", "notice"),
+    "connector.credentials_accessed": ("credential", "notice"),
+    "restore.requested": ("credential", "notice"),
+    "restore.approved": ("credential", "notice"),
+    "restore.executed": ("credential", "warning"),
+    # Connector / source lifecycle
+    "connector.linked": ("activity", "notice"),
+    "connector.unlinked": ("activity", "notice"),
+    "connector.reauth_required": ("security", "warning"),
+    # Admin / fleet
+    "agent.command": ("admin", "notice"),
+    "appliance.command": ("admin", "notice"),
+    "appliance.quarantined": ("security", "critical"),
+    "appliance.attestation_failed": ("security", "critical"),
+    # Backups / sync
+    "backup.completed": ("activity", "info"),
+    "backup.failed": ("system", "warning"),
+    "agent.ingest": ("activity", "info"),
+}
+
+
+def classify(action: str) -> tuple[str, str]:
+    if action in _CLASSIFY:
+        return _CLASSIFY[action]
+    # Heuristics for actions not explicitly mapped.
+    if action.endswith("_failed") or action.endswith(".failed"):
+        return ("system", "warning")
+    if action.startswith("auth.") or action.startswith("security."):
+        return ("security", "notice")
+    if action.startswith("admin.") or action.endswith(".command"):
+        return ("admin", "notice")
+    return ("activity", "info")
+
+
 def record(db: Session, actor: str, action: str, tenant_id: Optional[str] = None,
-           resource: str = "", detail: Optional[dict] = None) -> AuditEvent:
+           resource: str = "", detail: Optional[dict] = None,
+           category: Optional[str] = None, severity: Optional[str] = None) -> AuditEvent:
+    default_cat, default_sev = classify(action)
+    category = category or default_cat
+    severity = severity or default_sev
     last = (
         db.query(AuditEvent)
         .order_by(AuditEvent.created_at.desc())
@@ -27,6 +77,8 @@ def record(db: Session, actor: str, action: str, tenant_id: Optional[str] = None
         action=action,
         resource=resource,
         detail=detail or {},
+        category=category,
+        severity=severity,
         prev_hash=prev_hash,
         entry_hash=entry_hash,
     )

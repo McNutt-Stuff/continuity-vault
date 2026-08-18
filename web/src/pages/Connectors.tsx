@@ -26,15 +26,12 @@ interface Account {
   last_sync_at: string | null;
 }
 interface Vault { id: string; name: string; }
-interface Appliance { id: string; name: string; serial: string; state: string; }
 
 export default function Connectors() {
   const { me, stepUp } = useAuth();
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
-  const [appliances, setAppliances] = useState<Appliance[]>([]);
-  const [dest, setDest] = useState<string>("cv-cloud");
   const [setup, setSetup] = useState<CatalogItem | null>(null);
   const [toast, setToast] = useState("");
 
@@ -43,13 +40,6 @@ export default function Connectors() {
     setAccounts(await api.get<Account[]>("/connectors/accounts"));
     const t = await api.get<{ vaults: Vault[] }>("/tenant");
     setVaults(t.vaults);
-    try { setAppliances(await api.get<Appliance[]>("/appliances")); } catch { /* ignore */ }
-  }
-
-  function destinations(): string[] {
-    if (dest === "appliance") return ["appliance"];
-    if (dest === "both") return ["cv-cloud", "appliance"];
-    return ["cv-cloud"];
   }
 
   useEffect(() => {
@@ -144,8 +134,8 @@ export default function Connectors() {
     const vault = vaults[0];
     if (!vault) return notify({ message: "No vault is available to store this backup.", tone: "warn" });
     // Prefer an existing Data Map mapping for this source so the sync routes to
-    // the destinations configured there; only fall back to a page-level choice
-    // when the source has not been mapped yet.
+    // the destinations configured there; only create a cloud-default mapping when
+    // the source has not been mapped yet (routing is managed in the Data Map).
     let collId: string | null = null;
     let routedDests: string[] | null = null;
     try {
@@ -154,7 +144,7 @@ export default function Connectors() {
       if (existing) { collId = existing.id; routedDests = existing.destinations; }
     } catch { /* fall back to creating one */ }
     if (!collId) {
-      const dests = destinations();
+      const dests = ["cv-cloud"];
       const coll = await api.post<{ id: string }>("/collections", {
         vault_id: vault.id,
         name: a.account_label,
@@ -252,14 +242,9 @@ export default function Connectors() {
       <Card>
         <div className="spread" style={{ marginBottom: 12 }}>
           <h2>Linked accounts</h2>
-          <label className="row" style={{ gap: 8, fontSize: 12.5 }}>
-            <span className="faint">Back up to</span>
-            <select className="input sm" value={dest} onChange={(e) => setDest(e.target.value)}>
-              <option value="cv-cloud">Cloud</option>
-              {appliances.length > 0 && <option value="appliance">Appliance</option>}
-              {appliances.length > 0 && <option value="both">Cloud + Appliance</option>}
-            </select>
-          </label>
+          <span className="faint" style={{ fontSize: 12 }}>
+            Routing is managed in <a href="/mappings">Data Map</a>
+          </span>
         </div>
         {accounts.length === 0 && <div className="muted">No sources linked yet.</div>}
         {accounts.map((a) => {

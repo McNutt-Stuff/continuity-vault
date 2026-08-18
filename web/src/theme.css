@@ -203,6 +203,16 @@ h3 { font-size: 15px; }
   font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid;
   background: rgba(255,255,255,.02); white-space: nowrap; }
 
+/* Live activity spinner dot */
+.spinner-dot { width: 9px; height: 9px; border-radius: 50%; flex: none;
+  background: var(--brand); box-shadow: 0 0 0 0 rgba(79,124,255,.5);
+  animation: pulse-dot 1.4s ease-out infinite; }
+@keyframes pulse-dot {
+  0% { box-shadow: 0 0 0 0 rgba(79,124,255,.5); }
+  70% { box-shadow: 0 0 0 7px rgba(79,124,255,0); }
+  100% { box-shadow: 0 0 0 0 rgba(79,124,255,0); }
+}
+
 /* Promise-based confirm/prompt/notify dialogs */
 .dialog-panel { width: min(460px, 100%); }
 .dialog-head { display: flex; align-items: center; gap: 12px; padding: 18px 20px 4px; }

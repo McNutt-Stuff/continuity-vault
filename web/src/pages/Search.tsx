@@ -10,6 +10,8 @@ interface Result {
   object_id: string;
   snapshot_id: string;
   source_type: string;
+  source_label: string;
+  source_display: string;
   doc_type: string;
   category: string;
   sensitivity: string;
@@ -30,7 +32,9 @@ interface SearchResp {
     type: Record<string, number>;
     category: Record<string, number>;
     label: Record<string, number>;
+    attributes: Record<string, Record<string, number>>;
   };
+  source_display: Record<string, string>;
 }
 
 const CATEGORY_META: Record<string, { icon: IconName; label: string; color: string }> = {
@@ -62,6 +66,7 @@ export default function Search() {
   const [source, setSource] = useState<string | null>(null);
   const [category, setCategory] = useState<string | null>(null);
   const [label, setLabel] = useState<string | null>(null);
+  const [attr, setAttr] = useState<string | null>(null);
   const [data, setData] = useState<SearchResp | null>(null);
   const [locked, setLocked] = useState(false);
   const [msg, setMsg] = useState("");
@@ -86,6 +91,7 @@ export default function Search() {
       if (source) params.set("source_type", source);
       if (category) params.set("category", category);
       if (label) params.set("label", label);
+      if (attr) params.set("attr", attr);
       setData(await api.get<SearchResp>(`/search?${params.toString()}`));
       setLocked(false);
     } catch (e) {
@@ -96,7 +102,7 @@ export default function Search() {
   useEffect(() => {
     if (me?.passkey_verified) void run();
     else setLocked(true);
-  }, [me?.passkey_verified, source, category, label]);
+  }, [me?.passkey_verified, source, category, label, attr]);
 
   if (locked) {
     return (
@@ -160,14 +166,15 @@ export default function Search() {
           Object.entries(data.facets.source).map(([s, n]) => {
             const sm = SOURCE_META[s] ?? { color: "#9aa7bf", icon: "database" as IconName, label: s };
             const brand = brandForSource(s);
+            const label = data.source_display?.[s] ?? sm.label;
             return (
               <span key={s} className={`chip ${source === s ? "active" : ""}`}
                 style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-                onClick={() => setSource(source === s ? null : s)}>
+                onClick={() => { setAttr(null); setSource(source === s ? null : s); }}>
                 {brand
                   ? <BrandIcon name={brand} size={14} />
                   : <span style={{ color: sm.color, display: "inline-flex" }}><Icon name={sm.icon} size={13} /></span>}
-                {sm.label} · {n}
+                {label} · {n}
               </span>
             );
           })}
@@ -185,6 +192,33 @@ export default function Search() {
                 {l} · {n}
               </span>
             ))}
+        </div>
+      )}
+
+      {data && Object.keys(data.facets.attributes || {}).length > 0 && (
+        <div className="stack" style={{ gap: 8, marginBottom: 18 }}>
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <span className="faint" style={{ fontSize: 11 }}>Attributes</span>
+            {attr && (
+              <span className="chip active" onClick={() => setAttr(null)}>
+                {attr.replace(":", ": ")} <Icon name="check" size={11} /> clear
+              </span>
+            )}
+          </div>
+          {Object.entries(data.facets.attributes).map(([key, vals]) => (
+            <div key={key} className="chips" style={{ gap: 6 }}>
+              <span className="faint" style={{ fontSize: 11, alignSelf: "center", minWidth: 66, textTransform: "capitalize" }}>{key}</span>
+              {Object.entries(vals).map(([val, n]) => {
+                const id = `${key}:${val}`;
+                return (
+                  <span key={id} className={`chip ${attr === id ? "active" : ""}`}
+                    onClick={() => setAttr(attr === id ? null : id)}>
+                    {val} · {n}
+                  </span>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
 
@@ -207,7 +241,7 @@ export default function Search() {
                 <span style={{ fontWeight: 600 }}>{r.title}</span>
                 <span className="src-tag" style={{ borderColor: sm.color, color: sm.color }}>
                   {brand ? <BrandIcon name={brand} size={11} /> : <Icon name={sm.icon} size={11} />}
-                  {sm.label}
+                  {r.source_label || r.source_display || sm.label}
                 </span>
               </div>
               <div className="faint" style={{ fontSize: 12.5 }}>

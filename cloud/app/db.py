@@ -46,6 +46,9 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE desktop_agents ADD COLUMN agent_token_hash VARCHAR",
         "ALTER TABLE appliances ADD COLUMN agent_token_hash VARCHAR",
         "ALTER TABLE collections ADD COLUMN destinations JSON",
+        "ALTER TABLE collections ADD COLUMN index_fields JSON",
+        "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",
+        "ALTER TABLE audit_events ADD COLUMN category VARCHAR DEFAULT 'activity'",
     ]
     for statement in statements:
         try:

@@ -12,9 +12,20 @@ interface StorageTarget {
   state?: string; online?: boolean;
 }
 interface Mapping {
-  id: string; name: string; source_type: string; vault_id: string;
+  id: string; name: string; source_type: string; source_display: string;
+  source_label: string; is_agent: boolean; vault_id: string;
   vault_name: string | null; connector_account_id: string | null;
   account_label: string | null; sensitivity: string; destinations: string[];
+  index_fields: string[]; available_fields: string[];
+  last_backup_at: string | null; last_object_count: number; last_recoverable: boolean;
+}
+interface ActivityEvent {
+  kind: string; source: string; destination?: string; object_count?: number;
+  status: string; at?: string; command?: string;
+}
+interface Activity {
+  in_flight: ActivityEvent[]; events: ActivityEvent[];
+  summary: { recent: number; pending: number; queued_agents: number };
 }
 
 export default function Mappings() {
@@ -32,6 +43,8 @@ export default function Mappings() {
   // Inline routing editor for an existing mapping.
   const [editId, setEditId] = useState<string | null>(null);
   const [editDests, setEditDests] = useState<string[]>([]);
+  const [editFields, setEditFields] = useState<string[]>([]);
+  const [activity, setActivity] = useState<Activity | null>(null);
 
   async function load() {
     const [acc, tenant, coll, tgts] = await Promise.all([
@@ -46,8 +59,13 @@ export default function Mappings() {
     setTargets(tgts);
     if (!vaultId && tenant.vaults[0]) setVaultId(tenant.vaults[0].id);
     if (!accountId && acc[0]) setAccountId(acc[0].id);
+    try { setActivity(await api.get<Activity>("/activity")); } catch { /* ignore */ }
   }
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    void load();
+    const t = setInterval(() => { api.get<Activity>("/activity").then(setActivity).catch(() => {}); }, 6000);
+    return () => clearInterval(t);
+  }, []);
 
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
 
@@ -99,21 +117,38 @@ export default function Mappings() {
   function startEdit(m: Mapping) {
     setEditId(m.id);
     setEditDests(m.destinations && m.destinations.length ? [...m.destinations] : ["cv-cloud"]);
+    // Default the indexed fields to the mapping's override, or all available.
+    setEditFields(m.index_fields && m.index_fields.length ? [...m.index_fields] : [...m.available_fields]);
   }
 
   function toggleEditDest(id: string) {
     setEditDests((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]);
   }
 
+  function toggleEditField(id: string) {
+    setEditFields((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]);
+  }
+
   async function saveRouting(m: Mapping) {
     if (editDests.length === 0) return flash("Pick at least one destination");
     try {
-      await api.put(`/collections/${m.id}`, { destinations: editDests });
+      await api.put(`/collections/${m.id}`, { destinations: editDests, index_fields: editFields });
       setEditId(null);
-      flash("Routing updated");
+      flash("Mapping updated");
       await load();
     } catch (e) {
-      await notify({ title: "Couldn't update routing", message: (e as ApiError).message, tone: "danger" });
+      await notify({ title: "Couldn't update mapping", message: (e as ApiError).message, tone: "danger" });
+    }
+  }
+
+  async function syncNow(m: Mapping) {
+    try {
+      const res = await api.post<{ kind: string; queued_agents?: number; object_count?: number }>(`/collections/${m.id}/sync`, {});
+      if (res.kind === "agent") flash(`Queued sync on ${res.queued_agents} agent(s)`);
+      else flash(`Synced ${res.object_count ?? 0} objects`);
+      await load();
+    } catch (e) {
+      await notify({ title: "Sync failed", message: (e as ApiError).message, tone: "danger" });
     }
   }
 
@@ -168,6 +203,36 @@ export default function Mappings() {
         </div>
       </Card>
 
+      {activity && (activity.events.length > 0 || activity.in_flight.length > 0) && (
+        <Card style={{ marginBottom: 16 }}>
+          <div className="spread" style={{ marginBottom: 10 }}>
+            <h3 style={{ margin: 0 }}>Activity</h3>
+            <div className="row" style={{ gap: 8 }}>
+              {activity.summary.queued_agents > 0 && <Pill tone="warn">{activity.summary.queued_agents} syncing</Pill>}
+              {activity.summary.pending > 0 && <Pill tone="info">{activity.summary.pending} sealing</Pill>}
+              <Pill tone="ok">{activity.summary.recent} recent</Pill>
+            </div>
+          </div>
+          {activity.in_flight.map((e, i) => (
+            <div key={`f${i}`} className="row" style={{ gap: 8, padding: "6px 0", fontSize: 13 }}>
+              <span className="spinner-dot" />
+              <span style={{ fontWeight: 600 }}>{e.source}</span>
+              <span className="faint">collecting on desktop agent…</span>
+            </div>
+          ))}
+          {activity.events.slice(0, 8).map((e, i) => (
+            <div key={`e${i}`} className="row" style={{ gap: 8, padding: "6px 0", fontSize: 13, flexWrap: "wrap" }}>
+              <Icon name={e.destination?.startsWith("appliance") ? "server" : "cloud"} size={13} />
+              <span style={{ fontWeight: 600 }}>{e.source}</span>
+              <span className="faint">→ {destLabel(e.destination || "cv-cloud")}</span>
+              <span className="faint">· {e.object_count ?? 0} objects</span>
+              <Pill tone={e.status === "recoverable" ? "ok" : "warn"}>{e.status}</Pill>
+              <span className="faint" style={{ marginLeft: "auto", fontSize: 11 }}>{fmtTime(e.at)}</span>
+            </div>
+          ))}
+        </Card>
+      )}
+
       <Card>
         <h3 style={{ marginBottom: 12 }}>Mappings</h3>
         {mappings.length === 0 && <div className="muted">No mappings yet. Add one above.</div>}
@@ -181,38 +246,67 @@ export default function Mappings() {
               </div>
               <div className="flex1">
                 <div style={{ fontWeight: 600 }}>
-                  {m.account_label ?? m.source_type} <span className="faint">→</span> {m.vault_name ?? m.vault_id}
+                  {m.source_label} <span className="faint">→</span> {m.vault_name ?? m.vault_id}
+                </div>
+                <div className="faint" style={{ fontSize: 11.5, marginTop: 2 }}>
+                  {m.source_display}{m.is_agent ? " · desktop agent" : ""}
+                  {m.last_backup_at
+                    ? ` · last sync ${fmtTime(m.last_backup_at)} · ${m.last_object_count} objects ${m.last_recoverable ? "✓" : "(sealing)"}`
+                    : " · never synced"}
                 </div>
                 {!editing && (
-                  <div className="row" style={{ gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-                    <Pill tone="info">{m.source_type}</Pill>
+                  <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
                     {(m.destinations || []).map((d) => (
                       <Pill key={d} tone={d.startsWith("appliance") ? "ok" : "info"}>{destLabel(d)}</Pill>
                     ))}
+                    {(m.index_fields && m.index_fields.length ? m.index_fields : m.available_fields)
+                      .slice(0, 6).map((f) => (
+                        <span key={f} className="chip" style={{ padding: "1px 8px", fontSize: 10.5 }}>{f}</span>
+                      ))}
                     {m.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
                   </div>
                 )}
                 {editing && (
-                  <div className="stack" style={{ gap: 8, marginTop: 8 }}>
-                    <span className="faint" style={{ fontSize: 11.5 }}>Route this source to</span>
-                    <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-                      {targets.map((t) => (
-                        <span
-                          key={t.id}
-                          className={`chip ${editDests.includes(t.id) ? "active" : ""}`}
-                          onClick={() => toggleEditDest(t.id)}
-                          title={t.detail}
-                        >
-                          <Icon name={t.kind === "appliance" ? "server" : "cloud"} size={13} />
-                          {t.label}
-                          {t.kind === "appliance" && t.online === false && (
-                            <span className="faint" style={{ marginLeft: 4 }}>· offline</span>
-                          )}
-                        </span>
-                      ))}
+                  <div className="stack" style={{ gap: 10, marginTop: 8 }}>
+                    <div className="stack" style={{ gap: 6 }}>
+                      <span className="faint" style={{ fontSize: 11.5 }}>Route this source to</span>
+                      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                        {targets.map((t) => (
+                          <span
+                            key={t.id}
+                            className={`chip ${editDests.includes(t.id) ? "active" : ""}`}
+                            onClick={() => toggleEditDest(t.id)}
+                            title={t.detail}
+                          >
+                            <Icon name={t.kind === "appliance" ? "server" : "cloud"} size={13} />
+                            {t.label}
+                            {t.kind === "appliance" && t.online === false && (
+                              <span className="faint" style={{ marginLeft: 4 }}>· offline</span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
                     </div>
+                    {m.available_fields.length > 0 && (
+                      <div className="stack" style={{ gap: 6 }}>
+                        <span className="faint" style={{ fontSize: 11.5 }}>
+                          What to index (discrete metadata shown in search — never file/message contents)
+                        </span>
+                        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                          {m.available_fields.map((f) => (
+                            <span
+                              key={f}
+                              className={`chip ${editFields.includes(f) ? "active" : ""}`}
+                              onClick={() => toggleEditField(f)}
+                            >
+                              {editFields.includes(f) && <Icon name="check" size={12} />} {f}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     <div className="row" style={{ gap: 8 }}>
-                      <button className="btn sm primary" onClick={() => saveRouting(m)}>Save routing</button>
+                      <button className="btn sm primary" onClick={() => saveRouting(m)}>Save</button>
                       <button className="btn sm ghost" onClick={() => setEditId(null)}>Cancel</button>
                     </div>
                   </div>
@@ -220,7 +314,8 @@ export default function Mappings() {
               </div>
               {!editing && (
                 <>
-                  <button className="btn sm" onClick={() => startEdit(m)}>Edit routing</button>
+                  <button className="btn sm primary" onClick={() => syncNow(m)}>Sync now</button>
+                  <button className="btn sm" onClick={() => startEdit(m)}>Edit</button>
                   <button className="btn sm ghost" onClick={() => remove(m)}>Remove</button>
                 </>
               )}
@@ -232,4 +327,13 @@ export default function Mappings() {
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
+}
+
+function fmtTime(iso?: string | null): string {
+  if (!iso) return "never";
+  const d = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (d < 60) return "just now";
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
 }
