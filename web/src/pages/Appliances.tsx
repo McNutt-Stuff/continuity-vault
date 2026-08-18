@@ -5,7 +5,15 @@ import { Icon } from "../components/Icon";
 import { confirmDialog, notify, promptDialog } from "../components/dialog";
 import { ApplianceStatePill } from "./Dashboard";
 
-interface Store { id: string; name: string; kind: string; capacity_bytes: number; }
+interface StoreHealth {
+  drive_health?: string; temperature_c?: number; power?: string;
+  smart?: { enabled: boolean; status?: string };
+  raid?: { enabled: boolean; status?: string };
+}
+interface Store {
+  id: string; name: string; kind: string;
+  capacity_bytes: number; used_bytes: number; free_bytes: number; health: StoreHealth;
+}
 interface Appliance {
   id: string; serial: string; model: string; name: string; location_label: string;
   state: string; isolation_state: string; software_version: string;
@@ -161,7 +169,6 @@ export default function Appliances() {
 
 function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onCommand: (a: Appliance, t: string, p?: any) => void; onRemove: (a: Appliance) => void; reload: () => Promise<void> }) {
   const t = a.telemetry ?? {};
-  const usedPct = t.capacity_total_bytes ? (t.capacity_used_bytes / t.capacity_total_bytes) * 100 : 0;
 
   async function renameAppliance() {
     const name = await promptDialog({ title: "Rename appliance", label: "Appliance name", defaultValue: a.name, confirmLabel: "Save" });
@@ -221,41 +228,17 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
       <Card style={{ marginBottom: 16 }}>
         <div className="spread" style={{ marginBottom: 12 }}>
           <h3 style={{ margin: 0 }}>Storage</h3>
-          <button className="btn sm" onClick={addStorage}><Icon name="database" size={13} /> Add storage</button>
-        </div>
-        <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
-          Mappings in the Data Map target a storage here (e.g. "{a.name} · Built-In Storage"), the same
-          way they can target the Arkive cloud or your own S3 bucket.
-        </div>
-        {(a.stores ?? []).map((s) => (
-          <div key={s.id} className="result-row">
-            <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 32, height: 32 }}>
-              <Icon name="database" size={15} />
-            </div>
-            <div className="flex1">
-              <div style={{ fontWeight: 600 }}>{s.name}</div>
-              <div className="faint" style={{ fontSize: 11.5 }}>{a.name} · store:{s.id.slice(0, 8)}</div>
-            </div>
-            <Pill tone={s.kind === "builtin" ? "info" : "ok"}>{s.kind === "builtin" ? "Built-in" : "External"}</Pill>
-            <button className="btn sm ghost" onClick={() => renameStorage(s)}>Rename</button>
-            {s.kind !== "builtin" && <button className="btn sm ghost" onClick={() => deleteStorage(s)}>Remove</button>}
+          <div className="row" style={{ gap: 10 }}>
+            <span className="faint" style={{ fontSize: 12 }}>{t.snapshots ?? 0} snapshots · {t.objects ?? 0} objects</span>
+            <button className="btn sm" onClick={addStorage}><Icon name="database" size={13} /> Add storage</button>
           </div>
-        ))}
+        </div>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>
+          Mappings target a storage here (e.g. "{a.name} · Built-In Storage"), the same way they can
+          target the Arkive cloud or your own S3 bucket. Each storage reports its own capacity & health.
+        </div>
+        {(a.stores ?? []).map((s) => <StorageItem key={s.id} a={a} s={s} onRename={renameStorage} onDelete={deleteStorage} />)}
         {(a.stores ?? []).length === 0 && <div className="muted">No storage objects yet.</div>}
-      </Card>
-
-      <Card style={{ marginBottom: 16 }}>
-        <h3 style={{ marginBottom: 12 }}>Capacity & health</h3>
-        <div className="spread" style={{ marginBottom: 6, fontSize: 13 }}>
-          <span className="muted">{bytes(t.capacity_used_bytes ?? 0)} of {bytes(t.capacity_total_bytes ?? 0)}</span>
-          <span className="muted">{t.snapshots ?? 0} snapshots · {t.objects ?? 0} objects</span>
-        </div>
-        <div className="progress"><span style={{ width: `${usedPct}%` }} /></div>
-        <div className="grid grid-3" style={{ marginTop: 14 }}>
-          <Info label="Drives" value={t.drive_health ?? "—"} tone="ok" />
-          <Info label="Power" value={t.power ?? "—"} tone="ok" />
-          <Info label="Temp" value={`${t.temperature_c ?? "—"}°C`} />
-        </div>
       </Card>
 
       <Card style={{ marginBottom: 16 }}>
@@ -322,6 +305,57 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
         </div>
       </Card>
     </>
+  );
+}
+
+function StorageItem({ a, s, onRename, onDelete }:
+  { a: Appliance; s: Store; onRename: (s: Store) => void; onDelete: (s: Store) => void }) {
+  const pct = s.capacity_bytes ? Math.min(100, (s.used_bytes / s.capacity_bytes) * 100) : 0;
+  const h = s.health || {};
+  const barTone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : undefined;
+  const chips: { label: string; value: string; tone: "ok" | "warn" | "danger" | "info" }[] = [];
+  if (h.drive_health) chips.push({ label: "Drive", value: h.drive_health, tone: h.drive_health === "healthy" ? "ok" : "danger" });
+  if (h.smart?.enabled) chips.push({ label: "SMART", value: h.smart.status ?? "—", tone: h.smart.status === "passed" ? "ok" : "danger" });
+  if (h.raid?.enabled) chips.push({ label: "RAID", value: h.raid.status ?? "—", tone: h.raid.status === "optimal" ? "ok" : "danger" });
+  if (h.temperature_c != null) chips.push({ label: "Temp", value: `${h.temperature_c}°C`, tone: h.temperature_c >= 60 ? "warn" : "info" });
+  if (h.power) chips.push({ label: "Power", value: h.power, tone: h.power === "ok" ? "ok" : "danger" });
+
+  return (
+    <div className="store-item">
+      <div className="spread">
+        <div className="row" style={{ gap: 10 }}>
+          <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 32, height: 32 }}>
+            <Icon name="database" size={15} />
+          </div>
+          <div>
+            <div style={{ fontWeight: 600 }}>{s.name}</div>
+            <div className="faint" style={{ fontSize: 11.5 }}>
+              {s.kind === "builtin" ? "Built-in storage" : "External storage"} · store:{s.id.slice(0, 8)}
+            </div>
+          </div>
+        </div>
+        <div className="row" style={{ gap: 6 }}>
+          <Pill tone={s.kind === "builtin" ? "info" : "ok"}>{s.kind === "builtin" ? "Built-in" : "External"}</Pill>
+          <button className="btn sm ghost" onClick={() => onRename(s)}>Rename</button>
+          {s.kind !== "builtin" && <button className="btn sm ghost" onClick={() => onDelete(s)}>Remove</button>}
+        </div>
+      </div>
+      <div className="spread faint" style={{ fontSize: 12, margin: "10px 0 4px" }}>
+        <span>{s.capacity_bytes ? `${bytes(s.used_bytes)} of ${bytes(s.capacity_bytes)}` : "Capacity not yet reported"}</span>
+        {s.capacity_bytes > 0 && <span>{bytes(s.free_bytes)} free · {Math.round(pct)}%</span>}
+      </div>
+      <div className="progress"><span style={{ width: `${pct}%`, background: barTone }} /></div>
+      {chips.length > 0 && (
+        <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          {chips.map((c) => (
+            <span key={c.label} className="store-health">
+              <span className="faint">{c.label}</span>
+              <Pill tone={c.tone}>{c.value}</Pill>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

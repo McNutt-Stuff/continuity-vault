@@ -90,6 +90,8 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",
         "ALTER TABLE audit_events ADD COLUMN category VARCHAR DEFAULT 'activity'",
         "ALTER TABLE connector_accounts ADD COLUMN sync_cursor JSON",
+        "ALTER TABLE appliance_storages ADD COLUMN used_bytes INTEGER DEFAULT 0",
+        "ALTER TABLE appliance_storages ADD COLUMN health JSON",
     ]
     for statement in statements:
         try:

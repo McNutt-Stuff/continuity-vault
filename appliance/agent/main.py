@@ -168,6 +168,10 @@ class Agent:
             "drive_health": "healthy",
             "power": "ok",
             "temperature_c": 34,
+            # Per-storage capacity + health (mapped onto the cloud storage objects).
+            "storages": sysinfo.storage_report(
+                str(DATA), "Built-In Storage", "builtin",
+                raw_total, cap.get("used_bytes", 0)),
             # Encryption
             "quantum_safe": bool(pq),
             "content_alg": "AES-256-GCM",

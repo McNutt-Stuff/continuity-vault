@@ -112,6 +112,59 @@ def disk_stats(path: str) -> dict:
         return {"disk_total_bytes": 0, "disk_used_bytes": 0, "disk_free_bytes": 0}
 
 
+def smart_status() -> dict:
+    """Best-effort SMART health for the primary disk (needs smartmontools)."""
+    out = _run(["smartctl", "-H", "/dev/sda"])
+    if not out:
+        return {"enabled": False}
+    passed = "PASSED" in out or "OK" in out.upper()
+    return {"enabled": True, "status": "passed" if passed else "failing"}
+
+
+def raid_status() -> dict:
+    """Best-effort software-RAID health from /proc/mdstat."""
+    md = _read("/proc/mdstat")
+    if not md or "active" not in md:
+        return {"enabled": False}
+    # [UU] = all members up; a '_' means a member is down/degraded.
+    degraded = any("_" in seg for seg in md.split() if seg.startswith("[") and seg.endswith("]"))
+    return {"enabled": True, "status": "degraded" if degraded else "optimal"}
+
+
+def drive_temperature_c() -> Optional[int]:
+    for zone in ("/sys/class/thermal/thermal_zone0/temp",):
+        raw = _read(zone)
+        if raw.isdigit():
+            return int(raw) // 1000
+    return None
+
+
+def storage_report(path: str, name: str, kind: str, raw_total: int, used_bytes: int) -> list[dict]:
+    """Per-storage capacity + health the cloud maps onto ApplianceStorage rows.
+
+    Prototype reports the primary (built-in) volume; extra health probes (SMART,
+    RAID, temperature) populate only when the tooling/hardware is present."""
+    disk = disk_stats(path)
+    total = raw_total or disk["disk_total_bytes"]
+    used = used_bytes or disk["disk_used_bytes"]
+    health = {
+        "drive_health": "healthy",
+        "smart": smart_status(),
+        "raid": raid_status(),
+    }
+    temp = drive_temperature_c()
+    if temp is not None:
+        health["temperature_c"] = temp
+    return [{
+        "name": name,
+        "kind": kind,
+        "capacity_bytes": total,
+        "used_bytes": used,
+        "free_bytes": max(total - used, 0),
+        "health": health,
+    }]
+
+
 def pq_available() -> Optional[bool]:
     try:
         from cv_crypto.provider import get_provider

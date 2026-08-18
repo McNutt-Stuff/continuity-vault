@@ -198,6 +198,8 @@ class ApplianceStorage(Base):
     name = Column(String, default="Built-In Storage")
     kind = Column(String, default="builtin")  # builtin | external
     capacity_bytes = Column(Integer, default=0)
+    used_bytes = Column(Integer, default=0)
+    health = Column(JSON, default=dict)  # drive_health, smart, raid, temperature_c
     created_at = Column(DateTime, default=_now)
 
 

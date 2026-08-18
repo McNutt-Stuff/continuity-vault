@@ -196,7 +196,10 @@ def _appliance_view(a: Appliance) -> dict:
                   .filter(ApplianceStorage.appliance_id == a.id)
                   .order_by(ApplianceStorage.kind.desc(), ApplianceStorage.created_at.asc()).all()):
             stores.append({"id": s.id, "name": s.name, "kind": s.kind,
-                           "capacity_bytes": s.capacity_bytes})
+                           "capacity_bytes": s.capacity_bytes or 0,
+                           "used_bytes": s.used_bytes or 0,
+                           "free_bytes": max((s.capacity_bytes or 0) - (s.used_bytes or 0), 0),
+                           "health": s.health or {}})
     finally:
         db.close()
     return {
@@ -228,6 +231,37 @@ def _ensure_builtin_store(db: Session, a: Appliance) -> ApplianceStorage:
         db.commit()
         db.refresh(store)
     return store
+
+
+def _sync_storage_telemetry(db: Session, a: Appliance, telemetry: dict) -> None:
+    """Reflect the appliance's reported per-volume capacity + health onto its
+    ApplianceStorage rows so each storage element shows its own usage/health."""
+    reported = telemetry.get("storages")
+    builtin = _ensure_builtin_store(db, a)
+    if not reported:
+        # Older agent: map the appliance-wide capacity onto the built-in store.
+        builtin.capacity_bytes = int(telemetry.get("capacity_total_bytes") or 0)
+        builtin.used_bytes = int(telemetry.get("capacity_used_bytes") or 0)
+        builtin.health = {"drive_health": telemetry.get("drive_health", "healthy"),
+                          "temperature_c": telemetry.get("temperature_c")}
+        db.commit()
+        return
+    existing = {s.name: s for s in (db.query(ApplianceStorage)
+                                    .filter(ApplianceStorage.appliance_id == a.id).all())}
+    for rep in reported:
+        name = rep.get("name") or "Storage"
+        s = existing.get(name)
+        if not s:
+            # Prefer updating the built-in row for the primary volume.
+            s = builtin if rep.get("kind") == "builtin" else None
+        if not s:
+            s = ApplianceStorage(tenant_id=a.tenant_id, appliance_id=a.id,
+                                 name=name, kind=rep.get("kind", "external"))
+            db.add(s)
+        s.capacity_bytes = int(rep.get("capacity_bytes") or 0)
+        s.used_bytes = int(rep.get("used_bytes") or 0)
+        s.health = rep.get("health") or {}
+    db.commit()
 
 
 class RenameApplianceRequest(BaseModel):
@@ -522,6 +556,8 @@ def heartbeat(body: HeartbeatRequest,
     if not appliance.attestation_ok and appliance.state != "QUARANTINED":
         appliance.state = "QUARANTINED"
     db.commit()
+
+    _sync_storage_telemetry(db, appliance, body.telemetry or {})
 
     # Deliver pending signed commands (management plane only).
     pending = (db.query(ApplianceCommand)
