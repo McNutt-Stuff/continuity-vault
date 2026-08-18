@@ -44,11 +44,13 @@ echo "==> Arkive updater [$COMPONENT] from ${CV_REPO_URL}"
 
 git config --global --add safe.directory "$CV_SRC_DIR" 2>/dev/null || true
 
+freshly_cloned=0
 if [[ ! -d "$CV_SRC_DIR/.git" ]]; then
   echo "==> Cloning into $CV_SRC_DIR"
   clone_args=()
   [[ -n "$CV_REPO_BRANCH" ]] && clone_args+=(--branch "$CV_REPO_BRANCH")
   git clone "${clone_args[@]}" "$CV_REPO_URL" "$CV_SRC_DIR"
+  freshly_cloned=1
 fi
 
 cd "$CV_SRC_DIR"
@@ -64,6 +66,12 @@ echo "==> Branch: ${CV_REPO_BRANCH}"
 git fetch --quiet origin "$CV_REPO_BRANCH"
 PREV="$(git rev-parse HEAD)"
 TARGET="$(git rev-parse "origin/${CV_REPO_BRANCH}")"
+
+# A fresh clone has never been deployed here, so always deploy it.
+if [[ "$PREV" == "$TARGET" && "${CV_FORCE:-0}" != "1" && "$freshly_cloned" != "1" ]]; then
+  echo "==> Already up to date (${PREV:0:12})."
+  exit 0
+fi
 
 if [[ "$PREV" == "$TARGET" && "${CV_FORCE:-0}" != "1" ]]; then
   echo "==> Already up to date (${PREV:0:12})."
