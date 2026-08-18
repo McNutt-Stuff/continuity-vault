@@ -184,8 +184,20 @@ def _appliance_view(a: Appliance) -> dict:
 agent_router = APIRouter(prefix="/appliance", tags=["appliance-agent"])
 
 
-_BUNDLE_DIRS = ("appliance", "shared", "installers", "infra", "updater")
+_BUNDLE_DIRS = ("appliance", "shared")
 _BUNDLE_EXCLUDE = (".venv", "__pycache__", "node_modules", ".git", ".pyc", "web/dist")
+# Only the specific installer/infra/updater files an appliance needs — never the
+# cloud installer, Caddy config, cloud services, or the desktop-agent installers.
+_BUNDLE_FILES = (
+    "installers/lib.sh",
+    "installers/appliance-install.sh",
+    "installers/appliance-bootstrap.sh",
+    "installers/appliance-update.sh",
+    "infra/systemd/cv-appliance-agent.service",
+    "infra/systemd/cv-appliance-selfupdate.service",
+    "infra/systemd/cv-appliance-selfupdate.timer",
+    "updater/appliance-update.sh",
+)
 
 _appliance_version_cache: str | None = None
 
@@ -226,7 +238,8 @@ def appliance_bootstrap():
 
 @agent_router.get("/bundle")
 def appliance_bundle():
-    """Serve the appliance install bundle (appliance + shared + installers + infra)."""
+    """Serve the appliance install bundle: only appliance + shared code plus the
+    specific appliance installer/service files (no cloud code)."""
     root = _repo_root()
     buf = io.BytesIO()
 
@@ -238,6 +251,10 @@ def appliance_bundle():
             p = root / d
             if p.exists():
                 tar.add(str(p), arcname=d, filter=_filter)
+        for f in _BUNDLE_FILES:
+            p = root / f
+            if p.exists():
+                tar.add(str(p), arcname=f)
         # Stamp a build version so the appliance can detect when to self-update.
         version = _appliance_bundle_version().encode()
         vi = tarfile.TarInfo("appliance/VERSION")

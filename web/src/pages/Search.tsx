@@ -17,6 +17,7 @@ interface Result {
   labels: string[];
   size_bytes: number;
   modified_at: string | null;
+  locations?: { destination: string; label: string; recoverable: boolean }[];
 }
 interface SearchResp {
   count: number;
@@ -61,6 +62,20 @@ export default function Search() {
   const [label, setLabel] = useState<string | null>(null);
   const [data, setData] = useState<SearchResp | null>(null);
   const [locked, setLocked] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  async function retrieve(r: Result, loc: { destination: string; label: string }) {
+    try {
+      const res = await api.post<{ message: string }>("/search/retrieve", {
+        snapshot_id: r.snapshot_id, object_id: r.object_id, destination: loc.destination,
+      });
+      setMsg(res.message);
+      setTimeout(() => setMsg(""), 6000);
+    } catch (e) {
+      setMsg((e as ApiError).message);
+      setTimeout(() => setMsg(""), 6000);
+    }
+  }
 
   async function run() {
     try {
@@ -204,6 +219,23 @@ export default function Search() {
               <div className="faint" style={{ fontSize: 11 }}>
                 {bytes(r.size_bytes)} · {timeAgo(r.modified_at)}
               </div>
+              {r.locations && r.locations.length > 0 && (
+                <div className="row" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                  <span className="faint" style={{ fontSize: 10.5 }}>Stored at</span>
+                  {r.locations.map((loc) => (
+                    <button
+                      key={loc.destination}
+                      className="btn sm ghost"
+                      style={{ padding: "2px 8px", fontSize: 11 }}
+                      title={`Retrieve from ${loc.label}`}
+                      onClick={() => retrieve(r, loc)}
+                    >
+                      <Icon name={loc.destination.startsWith("appliance") ? "server" : "cloud"} size={12} />
+                      {loc.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         );
@@ -212,6 +244,8 @@ export default function Search() {
       {data && data.results.length === 0 && (
         <Card><div className="muted">No matches. Try a different query or add more sources.</div></Card>
       )}
+
+      {msg && <div className="toast"><Icon name="check" size={15} /> {msg}</div>}
     </>
   );
 }
