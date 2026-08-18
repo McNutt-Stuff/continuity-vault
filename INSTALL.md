@@ -133,16 +133,52 @@ cd ~/arkive && sudo CV_CLOUD_URL=https://vault.arkive.life/api \
 
 ---
 
-## 6. Production hardening (before real data)
+## 6. Installer behavior & recovering from a failed install
 
-The cloud installer seeds demo data and sets a default PostgreSQL password.
-Before production use, on the cloud server:
+Both installers show a clean step-by-step progress display; each step's command
+output is hidden and written to a timestamped log at
+`/var/log/arkive-install-*.log`.
+
+**The installers are resumable.** Every completed step is recorded under the
+data directory (`.../install-state/`). If a step fails, the installer prints the
+last 25 lines of the log and stops — fix the underlying issue (e.g. DNS, network,
+disk) and **run the exact same command again**; completed steps are skipped and
+it continues from the failed one.
+
+| Flag | Effect |
+|---|---|
+| _(default)_ | Hidden output, spinner, resume from last failure |
+| `CV_FORCE=1` | Ignore saved state and re-run **every** step |
+| `CV_VERBOSE=1` | Stream live command output instead of the spinner |
+
+```bash
+# Resume after fixing an issue — just re-run:
+sudo CV_DOMAIN=vault.arkive.life ./installers/cloud-install.sh
+
+# Watch full output for a specific problem:
+sudo CV_VERBOSE=1 CV_DOMAIN=vault.arkive.life ./installers/cloud-install.sh
+
+# Force a clean, full re-install:
+sudo CV_FORCE=1 CV_DOMAIN=vault.arkive.life ./installers/cloud-install.sh
+```
+
+Steps are idempotent (packages, database role, service user, config, and
+services are only created/updated as needed), so re-running is always safe. The
+appliance linking code can be left blank to install now and link later from the
+portal.
+
+---
+
+## 7. Production hardening (before real data)
+
+The cloud installer seeds demo data and generates a random PostgreSQL password
+(stored in `/etc/continuity-vault.env`). Before production use, on the cloud
+server:
 
 1. Edit `/etc/continuity-vault.env`:
    - set `CV_SEED_DEMO_DATA=false`
-   - rotate `CV_DATABASE_URL` credentials (and change the DB password in PostgreSQL)
-   - confirm `CV_SESSION_SECRET` and `CV_KEK_SECRET` are the random values the
-     installer generated (never reuse across environments)
+   - confirm `CV_DATABASE_URL`, `CV_SESSION_SECRET`, and `CV_KEK_SECRET` hold the
+     random values the installer generated (never reuse across environments)
 2. Restart the service:
    ```bash
    sudo systemctl restart cv-cloud
@@ -152,7 +188,7 @@ Before production use, on the cloud server:
 
 ---
 
-## 7. Service reference
+## 8. Service reference
 
 | Component | Service | Port (local) | Notes |
 |---|---|---|---|
@@ -170,7 +206,7 @@ journalctl -u cv-appliance-agent -f  # appliance
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Check |
 |---|---|

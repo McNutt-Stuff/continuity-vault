@@ -4,7 +4,7 @@ import { api } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo } from "../components/ui";
 import { Icon } from "../components/Icon";
 
-interface Snapshot { snapshot_id: string; destination: string; object_count: number; total_bytes: number; recoverable: boolean; created_at: string; }
+interface Snapshot { id: string; snapshot_id: string; destination: string; object_count: number; total_bytes: number; recoverable: boolean; created_at: string; }
 interface Appliance { id: string; name: string; model: string; state: string; isolation_state: string; attestation_ok: boolean; last_heartbeat_at: string | null; telemetry: any; }
 interface Account { id: string; connector_type: string; account_label: string; last_sync_at: string | null; }
 interface Tenant { name: string; plan: string; key_ownership_model: string; vaults: any[]; }
