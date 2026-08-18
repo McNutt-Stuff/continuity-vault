@@ -28,7 +28,20 @@ interface RetrieveStatus {
 interface Retrieving {
   commandId: string; title: string; location: string; stage: string; error?: string;
 }
-interface Viewing { item: Recovered; kind: "text" | "image" | "binary"; text?: string; url?: string; }
+interface EmailView {
+  from?: string; to?: string; cc?: string; subject?: string; date?: string;
+  html?: string; text?: string;
+}
+interface OpField { label: string; value: string; concealed: boolean; kind: string; }
+interface OnePasswordView {
+  title: string; category: string; vault?: string; updatedAt?: string;
+  fields: OpField[]; urls: { label?: string; href: string }[]; notes?: string;
+}
+interface Viewing {
+  item: Recovered;
+  kind: "text" | "image" | "binary" | "email" | "onepassword";
+  text?: string; url?: string; email?: EmailView; onePassword?: OnePasswordView;
+}
 
 interface Result {
   object_id: string;
@@ -111,6 +124,156 @@ function fmtCountdown(s: number): string {
   if (s <= 0) return "expired";
   const m = Math.floor(s / 60), sec = s % 60;
   return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+// --- Recovered-content parsers (email MIME + 1Password item) --------------
+
+function safeDecode(bytes: Uint8Array, charset?: string): string {
+  try { return new TextDecoder(charset || "utf-8").decode(bytes); }
+  catch { return new TextDecoder("utf-8").decode(bytes); }
+}
+
+function decodeQuotedPrintable(s: string, charset?: string): string {
+  const noSoft = s.replace(/=\r?\n/g, "");
+  const out: number[] = [];
+  for (let i = 0; i < noSoft.length; i++) {
+    const ch = noSoft[i];
+    if (ch === "=" && /^[0-9A-Fa-f]{2}$/.test(noSoft.substr(i + 1, 2))) {
+      out.push(parseInt(noSoft.substr(i + 1, 2), 16)); i += 2;
+    } else out.push(ch.charCodeAt(0));
+  }
+  return safeDecode(Uint8Array.from(out), charset);
+}
+
+function decodeBase64(s: string, charset?: string): string {
+  try {
+    const bin = atob(s.replace(/\s+/g, ""));
+    return safeDecode(Uint8Array.from(bin, (c) => c.charCodeAt(0)), charset);
+  } catch { return s; }
+}
+
+function decodeTransfer(body: string, encoding: string, charset?: string): string {
+  const enc = (encoding || "").toLowerCase();
+  if (enc === "base64") return decodeBase64(body, charset);
+  if (enc === "quoted-printable") return decodeQuotedPrintable(body, charset);
+  return body;
+}
+
+// Decode RFC 2047 encoded-words in header values (=?utf-8?B?...?= / ?Q?...?=).
+function decodeMimeWords(s?: string): string | undefined {
+  if (!s) return s;
+  return s.replace(/=\?([^?]+)\?([BQ])\?([^?]*)\?=/gi, (_m, charset: string, enc: string, txt: string) =>
+    enc.toUpperCase() === "B"
+      ? decodeBase64(txt, charset)
+      : decodeQuotedPrintable(txt.replace(/_/g, " "), charset));
+}
+
+function splitHeadersBody(raw: string): [string, string] {
+  const m = raw.match(/\r?\n\r?\n/);
+  if (!m || m.index === undefined) return [raw, ""];
+  return [raw.slice(0, m.index), raw.slice(m.index + m[0].length)];
+}
+
+function parseHeaders(head: string): Record<string, string> {
+  const unfolded: string[] = [];
+  for (const line of head.split(/\r?\n/)) {
+    if (/^\s/.test(line) && unfolded.length) unfolded[unfolded.length - 1] += " " + line.trim();
+    else unfolded.push(line);
+  }
+  const out: Record<string, string> = {};
+  for (const l of unfolded) {
+    const m = l.match(/^([^:]+):\s?(.*)$/);
+    if (m) out[m[1].toLowerCase()] = m[2];
+  }
+  return out;
+}
+
+function ctParam(ct: string, name: string): string | undefined {
+  const m = ct.match(new RegExp(`${name}="?([^";]+)"?`, "i"));
+  return m ? m[1] : undefined;
+}
+
+function splitMimeParts(body: string, boundary: string): string[] {
+  const parts: string[] = [];
+  for (let seg of body.split("--" + boundary)) {
+    if (seg.startsWith("--")) continue;              // closing delimiter
+    seg = seg.replace(/^\r?\n/, "");
+    if (seg.trim()) parts.push(seg);
+  }
+  return parts;
+}
+
+function findMimeBodies(raw: string): { html?: string; text?: string } {
+  const [head, body] = splitHeadersBody(raw);
+  const headers = parseHeaders(head);
+  const ct = headers["content-type"] || "text/plain";
+  if (/^multipart\//i.test(ct)) {
+    const boundary = ctParam(ct, "boundary");
+    if (!boundary) return {};
+    let html: string | undefined, text: string | undefined;
+    for (const p of splitMimeParts(body, boundary)) {
+      const found = findMimeBodies(p);
+      if (found.html && !html) html = found.html;
+      if (found.text && !text) text = found.text;
+    }
+    return { html, text };
+  }
+  const charset = ctParam(ct, "charset");
+  const decoded = decodeTransfer(body, headers["content-transfer-encoding"] || "", charset);
+  if (/text\/html/i.test(ct)) return { html: decoded };
+  if (/text\/plain/i.test(ct)) return { text: decoded };
+  return {};
+}
+
+function parseEmail(raw: string): EmailView {
+  const [head] = splitHeadersBody(raw);
+  const h = parseHeaders(head);
+  const bodies = findMimeBodies(raw);
+  return {
+    from: decodeMimeWords(h["from"]),
+    to: decodeMimeWords(h["to"]),
+    cc: decodeMimeWords(h["cc"]),
+    subject: decodeMimeWords(h["subject"]),
+    date: h["date"],
+    html: bodies.html,
+    text: bodies.text,
+  };
+}
+
+function prettyOpCategory(c: string): string {
+  return (c || "Item").split("_").map((w) => w.charAt(0) + w.slice(1).toLowerCase()).join(" ");
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parse1Password(d: any): OnePasswordView {
+  const fields: OpField[] = [];
+  let notes: string | undefined;
+  for (const f of (d.fields || [])) {
+    const value = f.value;
+    if (value === undefined || value === null || value === "") continue;
+    if (f.purpose === "NOTES" || f.id === "notesPlain") { notes = String(value); continue; }
+    fields.push({
+      label: f.label || f.id || "field",
+      value: String(value),
+      concealed: f.type === "CONCEALED" || f.purpose === "PASSWORD",
+      kind: String(f.type || "").toLowerCase(),
+    });
+  }
+  return {
+    title: d.title || "(untitled)",
+    category: prettyOpCategory(d.category || ""),
+    vault: (d.vault || {}).name,
+    updatedAt: d.updated_at,
+    fields,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    urls: (d.urls || []).filter((u: any) => u.href).map((u: any) => ({ label: u.label, href: u.href })),
+    notes,
+  };
+}
+
+function isOnePassword(item: Recovered): boolean {
+  return item.source_type === "onepassword"
+    || ["login", "password", "secret", "note", "identity", "api_key", "credit_card"].includes(item.doc_type);
 }
 
 export default function Search() {
@@ -226,13 +389,33 @@ export default function Search() {
       if (!res.ok) { setMsg(res.status === 410 ? "Recovery window expired" : "Could not open item"); return; }
       const blob = await res.blob();
       const mime = item.mime || blob.type;
+      const url = URL.createObjectURL(blob);
       if (mime.startsWith("image/")) {
-        setViewing({ item, kind: "image", url: URL.createObjectURL(blob) });
-      } else if (mime.startsWith("text/") || mime === "application/json"
-                 || mime === "message/rfc822" || mime === "application/xml") {
-        setViewing({ item, kind: "text", text: await blob.text(), url: URL.createObjectURL(blob) });
+        setViewing({ item, kind: "image", url });
+        await loadRecovered();
+        return;
+      }
+      const text = await blob.text();
+      const oversized = text.trimStart().startsWith("{") && text.includes("content_exceeds_cap");
+      // 1Password items: parse the op JSON into a structured credential display.
+      if (!oversized && isOnePassword(item)) {
+        try {
+          setViewing({ item, kind: "onepassword", onePassword: parse1Password(JSON.parse(text)), url });
+          await loadRecovered();
+          return;
+        } catch { /* fall through to generic rendering */ }
+      }
+      // Email: parse the RFC822 MIME and render its HTML (or text) body.
+      if (!oversized && (mime === "message/rfc822" || item.doc_type === "email")) {
+        setViewing({ item, kind: "email", email: parseEmail(text), url });
+        await loadRecovered();
+        return;
+      }
+      if (mime.startsWith("text/") || mime === "application/json"
+          || mime === "message/rfc822" || mime === "application/xml") {
+        setViewing({ item, kind: "text", text, url });
       } else {
-        setViewing({ item, kind: "binary", url: URL.createObjectURL(blob) });
+        setViewing({ item, kind: "binary", url });
       }
       await loadRecovered();
     } catch { setMsg("Could not open item"); }
@@ -518,6 +701,12 @@ export default function Search() {
               {viewing.kind === "text" && (
                 <pre className="log-pane" style={{ maxHeight: "60vh" }}>{viewing.text}</pre>
               )}
+              {viewing.kind === "email" && viewing.email && (
+                <EmailCard data={viewing.email} />
+              )}
+              {viewing.kind === "onepassword" && viewing.onePassword && (
+                <OnePasswordCard data={viewing.onePassword} />
+              )}
               {viewing.kind === "image" && (
                 <img src={viewing.url} alt={viewing.item.title} style={{ maxWidth: "100%", borderRadius: 8 }} />
               )}
@@ -605,3 +794,127 @@ export default function Search() {
     </>
   );
 }
+
+// Rendered email: decoded headers + the HTML body in a locked-down iframe (no
+// scripts, no form submission) so recovered mail displays as intended but safely.
+function EmailCard({ data }: { data: EmailView }) {
+  const [showText, setShowText] = useState(false);
+  const hasHtml = !!data.html;
+  const rows: [string, string | undefined][] = [
+    ["From", data.from], ["To", data.to], ["Cc", data.cc], ["Date", data.date],
+  ];
+  return (
+    <div>
+      <div style={{ border: "1px solid var(--border,#22304a)", borderRadius: 8, padding: "10px 12px", marginBottom: 10 }}>
+        {data.subject && <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>{data.subject}</div>}
+        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "2px 10px", fontSize: 12.5 }}>
+          {rows.filter(([, v]) => v).map(([k, v]) => (
+            <div key={k} style={{ display: "contents" }}>
+              <span className="faint">{k}</span>
+              <span style={{ overflowWrap: "anywhere" }}>{v}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      {hasHtml && data.text && (
+        <div className="row" style={{ gap: 8, marginBottom: 8 }}>
+          <button className={`chip ${!showText ? "active" : ""}`} onClick={() => setShowText(false)}>HTML</button>
+          <button className={`chip ${showText ? "active" : ""}`} onClick={() => setShowText(true)}>Plain text</button>
+        </div>
+      )}
+      {hasHtml && !showText ? (
+        <iframe
+          title="email"
+          sandbox=""
+          srcDoc={data.html}
+          style={{ width: "100%", height: "58vh", border: "1px solid var(--border,#22304a)",
+                   borderRadius: 8, background: "#fff" }}
+        />
+      ) : (data.text || data.html) ? (
+        <pre className="log-pane" style={{ maxHeight: "58vh", whiteSpace: "pre-wrap" }}>
+          {data.text ?? data.html}
+        </pre>
+      ) : (
+        <div className="muted" style={{ padding: 16 }}>This message has no readable body.</div>
+      )}
+    </div>
+  );
+}
+
+// Rendered 1Password item: fields laid out like the 1Password app, with
+// concealed values masked behind a reveal toggle and copy-to-clipboard.
+function OnePasswordCard({ data }: { data: OnePasswordView }) {
+  const [revealed, setRevealed] = useState<Record<number, boolean>>({});
+  const [copied, setCopied] = useState<string>("");
+  async function copy(value: string, tag: string) {
+    try { await navigator.clipboard.writeText(value); setCopied(tag); setTimeout(() => setCopied(""), 1500); }
+    catch { /* clipboard blocked */ }
+  }
+  return (
+    <div style={{ maxHeight: "62vh", overflow: "auto" }}>
+      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 12 }}>
+        <div style={{ width: 38, height: 38, borderRadius: 9, display: "grid", placeItems: "center",
+                      background: "#0364d3" }}>
+          <BrandIcon name="onepassword" size={20} />
+        </div>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 15 }}>{data.title}</div>
+          <div className="faint" style={{ fontSize: 12 }}>
+            {data.category}{data.vault ? ` · ${data.vault}` : ""}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gap: 8 }}>
+        {data.fields.map((f, i) => {
+          const show = !!revealed[i] || !f.concealed;
+          const tag = `f${i}`;
+          return (
+            <div key={i} style={{ border: "1px solid var(--border,#22304a)", borderRadius: 8, padding: "8px 10px" }}>
+              <div className="faint" style={{ fontSize: 11, textTransform: "capitalize", marginBottom: 2 }}>{f.label}</div>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <span style={{ fontFamily: f.concealed ? "monospace" : undefined, overflowWrap: "anywhere", flex: 1 }}>
+                  {show ? f.value : "•".repeat(Math.min(12, f.value.length || 8))}
+                </span>
+                {f.concealed && (
+                  <button className="btn ghost sm" title={show ? "Hide" : "Reveal"}
+                          onClick={() => setRevealed((c) => ({ ...c, [i]: !c[i] }))}>
+                    <Icon name={show ? "lock" : "key"} size={13} />
+                  </button>
+                )}
+                <button className="btn ghost sm" title="Copy" onClick={() => copy(f.value, tag)}>
+                  <Icon name={copied === tag ? "check" : "file"} size={13} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+
+        {data.urls.length > 0 && (
+          <div style={{ border: "1px solid var(--border,#22304a)", borderRadius: 8, padding: "8px 10px" }}>
+            <div className="faint" style={{ fontSize: 11, marginBottom: 4 }}>Websites</div>
+            {data.urls.map((u, i) => (
+              <div key={i}>
+                <a href={u.href} target="_blank" rel="noreferrer noopener" style={{ color: "var(--accent,#4f7cff)", overflowWrap: "anywhere" }}>
+                  {u.href}
+                </a>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {data.notes && (
+          <div style={{ border: "1px solid var(--border,#22304a)", borderRadius: 8, padding: "8px 10px" }}>
+            <div className="faint" style={{ fontSize: 11, marginBottom: 4 }}>Notes</div>
+            <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "inherit", fontSize: 13 }}>{data.notes}</pre>
+          </div>
+        )}
+      </div>
+
+      {data.updatedAt && (
+        <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>Last modified {data.updatedAt}</div>
+      )}
+    </div>
+  );
+}
+

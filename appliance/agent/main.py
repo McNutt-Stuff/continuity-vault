@@ -268,21 +268,30 @@ class Agent:
         receipt = None
 
         if accepted:
-            if ctype == "OPEN_INGEST_WINDOW":
-                receipt, result = self._do_ingest(payload["parameters"])
-            elif ctype == "OPEN_RECOVERY_WINDOW":
-                result = self._request_recovery(payload["parameters"])
-            elif ctype == "QUARANTINE":
-                self.sm.state = State.QUARANTINED
-                result = {"state": self.sm.state.value}
-            elif ctype == "STAGE_UPDATE":
-                result = self._stage_update(payload["parameters"])
-            elif ctype == "APPLY_UPDATE":
-                result = {"applied": True}
-            elif ctype == "REQUEST_VERIFICATION":
-                result = {"integrity": "verified"}
-            else:
-                result = {"note": f"acknowledged {ctype}"}
+            try:
+                if ctype == "OPEN_INGEST_WINDOW":
+                    receipt, result = self._do_ingest(payload["parameters"])
+                elif ctype == "OPEN_RECOVERY_WINDOW":
+                    result = self._request_recovery(payload["parameters"])
+                elif ctype == "QUARANTINE":
+                    self.sm.state = State.QUARANTINED
+                    result = {"state": self.sm.state.value}
+                elif ctype == "STAGE_UPDATE":
+                    result = self._stage_update(payload["parameters"])
+                elif ctype == "APPLY_UPDATE":
+                    result = {"applied": True}
+                elif ctype == "REQUEST_VERIFICATION":
+                    result = {"integrity": "verified"}
+                else:
+                    result = {"note": f"acknowledged {ctype}"}
+            except Exception as exc:
+                # Never let a command handler crash the heartbeat: report the error
+                # so the command is acked-with-error and stops being redelivered.
+                self.log.exception("command %s (%s) failed", ctype, cmd_id[:8])
+                result = {"error": str(exc)}
+                # Return to a sealed, safe state if a handler left storage open.
+                if self.sm.storage_accessible:
+                    self.sm.state = State.SEALED
 
         resp = await client.post(f"{settings.cloud_base_url}/appliance/command-result",
                                  json={"command_id": cmd_id, "accepted": accepted,

@@ -40,16 +40,28 @@ class VaultStore:
 
     def commit_snapshot(self, snapshot_id: str, objects: list[dict],
                         manifest: dict) -> Path:
-        """Write objects + manifest into protected storage (spec 6.1 step 9)."""
+        """Write objects + manifest into protected storage (spec 6.1 step 9).
+
+        Idempotent: snapshots are immutable, so an object/manifest that is already
+        committed is left untouched (rewriting a 0o444 file would raise). This lets
+        a redelivered ingest command re-run safely instead of failing."""
         self._require_open()
         snap_dir = self._protected / snapshot_id
         snap_dir.mkdir(parents=True, exist_ok=True)
         for obj in objects:
-            (snap_dir / obj["objectId"]).write_text(json.dumps(obj))
-        (snap_dir / "manifest.json").write_text(json.dumps(manifest))
-        # Immutable: remove write permission (emulated object-lock).
+            p = snap_dir / obj["objectId"]
+            if p.exists():
+                continue  # already committed (immutable) — do not rewrite
+            p.write_text(json.dumps(obj))
+        mp = snap_dir / "manifest.json"
+        if not mp.exists():
+            mp.write_text(json.dumps(manifest))
+        # Immutable: remove write permission (emulated object-lock), best-effort.
         for p in snap_dir.rglob("*"):
-            os.chmod(p, 0o444)
+            try:
+                os.chmod(p, 0o444)
+            except OSError:
+                pass
         return snap_dir
 
     def read_object(self, snapshot_id: str, object_id: str) -> dict:
