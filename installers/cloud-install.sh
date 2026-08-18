@@ -36,6 +36,10 @@ _existing_db_pw() {
 DB_PASSWORD="${CV_DB_PASSWORD:-$(_existing_db_pw)}"
 DB_PASSWORD="${DB_PASSWORD:-$(openssl rand -hex 16)}"
 
+# Native liboqs version to build for real post-quantum crypto (ML-KEM / ML-DSA /
+# SLH-DSA). Must be recent enough to expose the standardized names.
+LIBOQS_VERSION="${LIBOQS_VERSION:-0.12.0}"
+
 # --- step implementations ---------------------------------------------------
 
 install_os_deps() {
@@ -94,9 +98,62 @@ install_python() {
   "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip wheel
   "$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR/shared"
   "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/cloud/requirements.txt"
-  # Post-quantum primitives are best-effort; the app runs with a flagged
-  # fallback if liboqs cannot be built here.
-  "$INSTALL_DIR/.venv/bin/pip" install oqs || true
+}
+
+# True when the real liboqs binding is importable and the required algorithms
+# are available (i.e. genuine post-quantum crypto, not the classical fallback).
+pq_selftest() {
+  "$INSTALL_DIR/.venv/bin/python" - <<'PY' 2>/dev/null
+import oqs
+oqs.KeyEncapsulation("ML-KEM-768")
+oqs.Signature("ML-DSA-65")
+PY
+}
+
+build_pqcrypto() {
+  if pq_selftest; then
+    echo "liboqs-python already functional (real post-quantum crypto active)"
+    return 0
+  fi
+
+  # The unrelated PyPI package literally named 'oqs' shadows the real binding.
+  "$INSTALL_DIR/.venv/bin/pip" uninstall -y oqs 2>/dev/null || true
+
+  apt-get install -y cmake ninja-build gcc g++ libssl-dev git
+
+  # Build & install the native liboqs shared library if it is not present.
+  if ! ldconfig -p | grep -qi 'liboqs\.so'; then
+    local src="/opt/liboqs-src"
+    rm -rf "$src"
+    git clone --depth 1 --branch "$LIBOQS_VERSION" \
+      https://github.com/open-quantum-safe/liboqs.git "$src"
+    cmake -S "$src" -B "$src/build" -GNinja \
+      -DBUILD_SHARED_LIBS=ON -DOQS_BUILD_ONLY_LIB=ON \
+      -DCMAKE_INSTALL_PREFIX=/usr/local
+    cmake --build "$src/build" --parallel
+    cmake --install "$src/build"
+    ldconfig
+  fi
+
+  # Install the real Open Quantum Safe Python binding (imports as 'oqs'); it
+  # loads the native liboqs.so we just installed via the dynamic loader.
+  "$INSTALL_DIR/.venv/bin/pip" install liboqs-python \
+    || "$INSTALL_DIR/.venv/bin/pip" install \
+         "git+https://github.com/open-quantum-safe/liboqs-python.git@${LIBOQS_VERSION}"
+
+  if pq_selftest; then
+    echo "liboqs OK — ML-KEM-768 / ML-DSA-65 available (quantum-safe active)"
+    return 0
+  fi
+
+  echo "!! liboqs verification FAILED — real post-quantum crypto is NOT active."
+  if [[ "${CV_ALLOW_CLASSICAL_FALLBACK:-0}" == "1" ]]; then
+    echo "CV_ALLOW_CLASSICAL_FALLBACK=1 set; continuing with the flagged classical fallback."
+    return 0
+  fi
+  echo "Refusing to continue without quantum-safe crypto."
+  echo "Set CV_ALLOW_CLASSICAL_FALLBACK=1 to install anyway (NOT quantum-safe)."
+  return 1
 }
 
 build_web() {
@@ -208,6 +265,7 @@ step "Creating service user & directories" create_user_dirs
 step_always "Copying application files"    sync_code
 step_always "Configuring PostgreSQL database" setup_database
 step_always "Installing Python control plane" install_python
+step_always "Building quantum-safe crypto (liboqs)" build_pqcrypto
 step_always "Building web portal"          build_web
 step_always "Validating application"       validate_app
 step_always "Writing configuration"        write_env

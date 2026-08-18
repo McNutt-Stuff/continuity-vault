@@ -259,6 +259,13 @@ def activate(body: AgentActivate, db: Session = Depends(get_db)):
         last_heartbeat_at=_now(),
     )
     agent.config["collectors"] = body.collectors
+
+    # Provision escrow material BEFORE consuming the code so a transient failure
+    # never burns a single-use linking code.
+    vault = db.query(Vault).filter(Vault.tenant_id == lc.tenant_id).first()
+    recovery = keybroker.provision_recovery_keypair(vault.id) if vault else {}
+    cloud_bundle = fleet.cloud_public_bundle()
+
     db.add(agent)
     lc.consumed = True
     db.commit()
@@ -269,13 +276,9 @@ def activate(body: AgentActivate, db: Session = Depends(get_db)):
     audit.record(db, actor=f"agent:{body.hostname}", action="agent.activated",
                  tenant_id=lc.tenant_id, resource=agent.id)
 
-    # Recovery public key for endpoint (client-side) encryption escrow.
-    vault = db.query(Vault).filter(Vault.tenant_id == lc.tenant_id).first()
-    recovery = keybroker.provision_recovery_keypair(vault.id) if vault else {}
-
     return {
         "agent_id": agent.id, "agent_token": token, "tenant_id": lc.tenant_id,
-        "config": agent.config, "cloud_public_bundle": fleet.cloud_public_bundle(),
+        "config": agent.config, "cloud_public_bundle": cloud_bundle,
         "recovery_public_key": recovery.get("public_key"),
         "recovery_kem_alg": recovery.get("kem_alg"),
         "heartbeat_interval_seconds": settings.heartbeat_interval_seconds,

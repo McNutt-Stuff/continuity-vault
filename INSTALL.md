@@ -179,6 +179,21 @@ server:
 3. Create your real platform-admin and customer accounts, then remove the demo
    tenants.
 
+### Quantum-safe crypto (liboqs)
+
+The installer builds the native **liboqs** library and installs the real
+`liboqs-python` binding, then verifies that ML-KEM-768 and ML-DSA-65 are
+available. Hybrid envelopes and command signatures then use genuine
+post-quantum primitives (X25519+ML-KEM, Ed25519+ML-DSA).
+
+- If the liboqs build cannot complete on the host, the install **aborts** rather
+  than silently downgrading. To proceed with the clearly-flagged classical
+  fallback (X25519/Ed25519 only — **not** quantum-safe), re-run with
+  `CV_ALLOW_CLASSICAL_FALLBACK=1`.
+- Pin a specific library version with `LIBOQS_VERSION=<tag>` (default `0.12.0`).
+- Do **not** `pip install oqs` — that PyPI package is an unrelated project and
+  lacks the liboqs API; the correct binding is `liboqs-python`.
+
 ---
 
 ## 8. Service reference
