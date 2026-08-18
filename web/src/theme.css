@@ -172,3 +172,28 @@ h3 { font-size: 15px; }
 
 .lock-banner { display: flex; align-items: center; gap: 12px; padding: 14px 18px;
   border: 1px solid rgba(245,166,35,.35); background: rgba(245,166,35,.07); border-radius: 12px; }
+
+/* Agent status modal */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(4,8,16,.62);
+  backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center;
+  z-index: 100; padding: 24px; animation: fade-in .12s ease; }
+.modal-panel { width: min(720px, 100%); max-height: 88vh; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
+  box-shadow: var(--shadow); overflow: hidden; animation: pop-in .14s ease; }
+.modal-panel > .spread { padding: 18px 20px; border-bottom: 1px solid var(--border-soft); }
+.modal-body { padding: 6px 20px 12px; overflow-y: auto; }
+.modal-foot { display: flex; align-items: center; gap: 8px; padding: 14px 20px;
+  border-top: 1px solid var(--border-soft); background: var(--bg-elev-2); }
+.status-section { padding: 14px 0; border-bottom: 1px solid var(--border-soft); }
+.status-section:last-child { border-bottom: none; }
+.status-h { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .5px; color: var(--text-dim); margin-bottom: 12px; }
+.collector-row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 11px 13px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--bg-elev-2); }
+.hint-box { margin-top: 10px; padding: 10px 13px; font-size: 12.5px; line-height: 1.55;
+  border: 1px solid rgba(245,166,35,.35); background: rgba(245,166,35,.07); border-radius: 10px; }
+.log-pane { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto; margin: 0;
+  padding: 12px; background: rgba(0,0,0,.28); border: 1px solid var(--border-soft); border-radius: 10px; }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pop-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }

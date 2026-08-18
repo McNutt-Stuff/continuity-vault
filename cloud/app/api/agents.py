@@ -211,6 +211,35 @@ def bootstrap():
 
 _EXCLUDE = (".venv", "__pycache__", "node_modules", ".git", ".pyc")
 
+_bundle_version_cache: str | None = None
+
+
+def _agent_bundle_version() -> str:
+    """Stable content hash of the agent bundle; changes only when code changes.
+
+    Cached for the process lifetime (a deploy restarts the process), so heartbeats
+    don't re-hash every call. The agent compares this to its installed VERSION and
+    self-updates when they differ."""
+    global _bundle_version_cache
+    if _bundle_version_cache:
+        return _bundle_version_cache
+    root = _repo_root()
+    h = hashlib.sha256()
+    for d in ("desktop-agent", "shared"):
+        base = root / d
+        if not base.exists():
+            continue
+        for f in sorted(base.rglob("*")):
+            if f.is_file() and not any(x in str(f) for x in _EXCLUDE) \
+                    and f.name != "VERSION":
+                h.update(str(f.relative_to(root)).encode())
+                try:
+                    h.update(f.read_bytes())
+                except Exception:
+                    pass
+    _bundle_version_cache = h.hexdigest()[:12]
+    return _bundle_version_cache
+
 
 @agent_router.get("/bundle")
 def bundle():
@@ -226,9 +255,8 @@ def bundle():
             p = root / d
             if p.exists():
                 tar.add(str(p), arcname=d, filter=_filter)
-        # Stamp a build version so the agent reports (and visibly changes) its
-        # version after each self-update.
-        version = f"{datetime.now(timezone.utc):%Y%m%d.%H%M%S}".encode()
+        # Stamp the stable bundle version so the agent can detect when to update.
+        version = _agent_bundle_version().encode()
         vi = tarfile.TarInfo("desktop-agent/VERSION")
         vi.size = len(version)
         tar.addfile(vi, io.BytesIO(version))
@@ -356,6 +384,7 @@ def heartbeat(body: AgentHeartbeat, agent: DesktopAgent = Depends(_auth_agent),
     agent.pending_command = None  # consume
     db.commit()
     return {"config": agent.config, "command": command,
+            "latest_version": _agent_bundle_version(),
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
 
 

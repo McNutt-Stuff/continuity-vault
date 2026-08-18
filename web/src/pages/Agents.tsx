@@ -15,9 +15,12 @@ export default function Agents() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [code, setCode] = useState<string | null>(null);
   const [toast, setToast] = useState("");
+  const [detail, setDetail] = useState<Agent | null>(null);
 
   async function load() {
-    setAgents(await api.get<Agent[]>("/agents"));
+    const list = await api.get<Agent[]>("/agents");
+    setAgents(list);
+    setDetail((d) => (d ? list.find((a) => a.id === d.id) ?? null : null));
   }
   useEffect(() => {
     void load();
@@ -124,6 +127,9 @@ export default function Agents() {
               <button className="btn sm primary" onClick={() => command(a, "collect")}>Collect now</button>
               <button className="btn sm" onClick={() => command(a, "update")}>Update</button>
               <button className="btn sm" onClick={() => command(a, "reconfigure")}>Reconfigure</button>
+              <button className="btn sm" onClick={() => setDetail(a)}>
+                <Icon name="search" size={13} /> Status
+              </button>
             </div>
             {Array.isArray(a.telemetry?.recent_logs) && a.telemetry.recent_logs.length > 0 && (
               <details style={{ marginTop: 12 }}>
@@ -153,6 +159,13 @@ export default function Agents() {
       </Card>
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+      {detail && (
+        <AgentStatusModal
+          agent={detail}
+          onClose={() => setDetail(null)}
+          onCommand={(type) => command(detail, type)}
+        />
+      )}
     </div>
   );
 }
@@ -162,6 +175,155 @@ function Info({ label, value }: { label: string; value: string }) {
     <div className="stack">
       <div className="faint" style={{ fontSize: 11.5 }}>{label}</div>
       <div style={{ fontWeight: 600, fontSize: 13 }}>{value}</div>
+    </div>
+  );
+}
+
+function heartbeatTone(iso: string | null): "ok" | "warn" | "danger" {
+  if (!iso) return "danger";
+  const secs = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (secs < 90) return "ok";
+  if (secs < 600) return "warn";
+  return "danger";
+}
+
+function AgentStatusModal({
+  agent, onClose, onCommand,
+}: { agent: Agent; onClose: () => void; onCommand: (type: string) => void }) {
+  const t = agent.telemetry || {};
+  const crypto = t.crypto || {};
+  const online = heartbeatTone(agent.last_heartbeat_at);
+  const opTone: "ok" | "warn" | "danger" =
+    t.op_available === false ? "danger" : t.op_auth === "unauthenticated" ? "warn" : "ok";
+  const logs: string[] = Array.isArray(t.recent_logs) ? t.recent_logs : [];
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="spread" style={{ marginBottom: 4 }}>
+          <div className="row">
+            <div className="result-icon" style={{ background: "linear-gradient(135deg,#7a5cff,#4f7cff)", width: 40, height: 40 }}>
+              <Icon name="user" size={20} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>{agent.name}</div>
+              <div className="faint mono" style={{ fontSize: 11 }}>
+                {agent.hostname} · v{agent.version} · {t.os || agent.platform}
+              </div>
+            </div>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <Pill tone={online === "ok" ? "ok" : online === "warn" ? "warn" : "danger"}>
+              {online === "ok" ? "online" : online === "warn" ? "stale" : "offline"}
+            </Pill>
+            <button className="btn sm ghost" onClick={onClose} aria-label="Close">✕</button>
+          </div>
+        </div>
+
+        <div className="modal-body">
+          <section className="status-section">
+            <div className="status-h"><Icon name="server" size={14} /> Cloud connectivity</div>
+            <div className="grid grid-3">
+              <Info label="Last heartbeat" value={timeAgo(agent.last_heartbeat_at)} />
+              <Info label="Last reported" value={timeAgo(t.reported_at || null)} />
+              <Info label="Endpoint" value={t.cloud_url || "—"} />
+            </div>
+          </section>
+
+          <section className="status-section">
+            <div className="status-h"><Icon name="link" size={14} /> Collectors</div>
+            <div className="collector-row">
+              <div className="row" style={{ gap: 10 }}>
+                <Icon name="lock" size={16} />
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>1Password (op CLI)</div>
+                  <div className="faint" style={{ fontSize: 11.5 }}>
+                    {t.op_available === false
+                      ? "CLI not installed"
+                      : t.op_auth === "unauthenticated"
+                      ? "installed · not authenticated"
+                      : `installed · ${t.op_auth || "ready"}`}
+                  </div>
+                </div>
+              </div>
+              <Pill tone={opTone}>
+                {opTone === "ok" ? "ready" : opTone === "warn" ? "needs sign-in" : "missing"}
+              </Pill>
+            </div>
+            {t.op_auth === "unauthenticated" && (
+              <div className="hint-box">
+                Background collection needs a <b>1Password service-account token</b>
+                (the app CLI integration can't be approved unattended). Add a token and
+                re-run the installer, or run <span className="mono">Collect now</span> while
+                the 1Password app is unlocked.
+              </div>
+            )}
+            <div className="grid grid-3" style={{ marginTop: 10 }}>
+              <Info label="Last collection" value={timeAgo(agent.last_collection_at)} />
+              <Info label="Collectors" value={(agent.collectors || []).join(", ") || "—"} />
+              <Info label="Schedule" value={`${agent.config?.schedule_minutes ?? 360} min`} />
+            </div>
+          </section>
+
+          <section className="status-section">
+            <div className="status-h"><Icon name="lock" size={14} /> Security</div>
+            <div className="grid grid-2" style={{ gap: 10 }}>
+              <div className="collector-row">
+                <div className="row" style={{ gap: 10 }}>
+                  <Icon name="lock" size={16} />
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>Client-side encryption</div>
+                </div>
+                <Pill tone="ok">{crypto.content_alg || "AES-256-GCM"}</Pill>
+              </div>
+              <div className="collector-row">
+                <div className="row" style={{ gap: 10 }}>
+                  <Icon name="shield" size={16} />
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>Quantum-safe crypto</div>
+                </div>
+                <Pill tone={crypto.pq_available ? "ok" : "warn"}>
+                  {crypto.pq_available ? "enabled (ML-KEM/ML-DSA)" : "classical fallback"}
+                </Pill>
+              </div>
+              <div className="collector-row">
+                <div className="row" style={{ gap: 10 }}>
+                  <Icon name="key" size={16} />
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>Recovery escrow</div>
+                </div>
+                <Pill tone={crypto.recovery_escrow === "escrowed" ? "ok" : "warn"}>
+                  {crypto.recovery_escrow === "escrowed"
+                    ? `escrowed · ${crypto.recovery_kem_alg || "KEM"}`
+                    : "pending"}
+                </Pill>
+              </div>
+            </div>
+          </section>
+
+          <section className="status-section">
+            <div className="status-h"><Icon name="user" size={14} /> Host & communication</div>
+            <div className="grid grid-3">
+              <Info label="Hostname" value={t.hostname || agent.hostname} />
+              <Info label="Local IP" value={t.local_ip || "—"} />
+              <Info label="Local user" value={t.local_user || "—"} />
+              <Info label="Agent version" value={agent.version} />
+              <Info label="OS" value={t.os || "—"} />
+              <Info label="State" value={agent.state} />
+            </div>
+          </section>
+
+          <section className="status-section">
+            <div className="status-h"><Icon name="search" size={14} /> Recent activity</div>
+            <pre className="log-pane">{logs.length ? logs.join("\n") : "No logs reported yet."}</pre>
+          </section>
+        </div>
+
+        <div className="modal-foot">
+          <button className="btn sm primary" onClick={() => onCommand("collect")}>Collect now</button>
+          <button className="btn sm" onClick={() => onCommand("update")}>Update</button>
+          <button className="btn sm" onClick={() => onCommand("reconfigure")}>Reconfigure</button>
+          <div style={{ flex: 1 }} />
+          <button className="btn sm ghost" onClick={onClose}>Close</button>
+        </div>
+      </div>
     </div>
   );
 }

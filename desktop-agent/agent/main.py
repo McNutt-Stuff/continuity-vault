@@ -63,6 +63,7 @@ class Agent:
         self.log = agent_log.setup_logging(cfg.log_file)
         self.reg = self._load_registration()
         self._last_collect = 0.0
+        self._last_update_attempt = 0.0
         self._agent_key: Optional[bytes] = None
 
     @property
@@ -119,6 +120,12 @@ class Agent:
     # -- telemetry ----------------------------------------------------
 
     def telemetry(self) -> dict:
+        cfg = (self.reg or {}).get("config", {})
+        try:
+            from cv_crypto.provider import get_provider
+            pq = get_provider().pq_available
+        except Exception:
+            pq = False
         return {
             "hostname": socket.gethostname(),
             "local_ip": _local_ip(),
@@ -127,7 +134,15 @@ class Agent:
             "op_available": onepassword.available(),
             "op_auth": onepassword.auth_state(self.cfg.op_service_account_token),
             "version": self.cfg.version,
+            "cloud_url": self.cfg.cloud_base_url,
             "last_collection_at": (self.reg or {}).get("last_collection_at"),
+            "crypto": {
+                "client_side_encryption": True,
+                "content_alg": "AES-256-GCM",
+                "pq_available": pq,
+                "recovery_kem_alg": self.reg.get("recovery_kem_alg") if self.reg else None,
+                "recovery_escrow": "escrowed" if cfg.get("escrow_wrapped_key") else "pending",
+            },
             "recent_logs": agent_log.tail(self.cfg.log_file, 50),
             "reported_at": _now_iso(),
         }
@@ -150,10 +165,23 @@ class Agent:
         data = r.json()
         self.reg["config"] = data.get("config", self.reg.get("config", {}))
         self.cfg.registration_file.write_text(json.dumps(self.reg))
+        # Auto-update: pull a new bundle when the cloud advertises a newer version.
+        self._maybe_self_update(data.get("latest_version"))
         command = data.get("command")
         if command:
             self._handle_command(command)
         return data
+
+    def _maybe_self_update(self, latest: Optional[str]) -> None:
+        if not latest or latest == self.cfg.version:
+            return
+        # Throttle so a failing update doesn't loop every heartbeat.
+        if time.time() - self._last_update_attempt < 300:
+            return
+        self._last_update_attempt = time.time()
+        self.log.info("new agent version available (%s -> %s); self-updating",
+                      self.cfg.version, latest)
+        self.self_update()
 
     def _handle_command(self, command: dict) -> None:
         ctype = command.get("type")

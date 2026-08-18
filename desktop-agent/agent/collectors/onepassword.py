@@ -45,6 +45,11 @@ def _env(token: str) -> dict:
     env = os.environ.copy()
     if token:
         env["OP_SERVICE_ACCOUNT_TOKEN"] = token
+    else:
+        # An empty OP_SERVICE_ACCOUNT_TOKEN (launchd sets the key blank when no
+        # token is configured) makes op attempt service-account auth and fail.
+        # Remove it so op falls back to the 1Password app CLI integration.
+        env.pop("OP_SERVICE_ACCOUNT_TOKEN", None)
     return env
 
 
