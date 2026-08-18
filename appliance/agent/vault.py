@@ -62,12 +62,20 @@ class VaultStore:
     def capacity(self) -> dict:
         used = sum(f.stat().st_size for f in self._protected.rglob("*")
                    if f.is_file()) if self._protected.exists() else 0
-        return {"used_bytes": used, "snapshots": self._count_snapshots()}
+        return {"used_bytes": used, "snapshots": self._count_snapshots(),
+                "objects": self._count_objects()}
 
     def _count_snapshots(self) -> int:
         if not self._protected.exists():
             return 0
         return sum(1 for d in self._protected.iterdir() if d.is_dir())
+
+    def _count_objects(self) -> int:
+        if not self._protected.exists():
+            return 0
+        # Stored object files, excluding the per-snapshot manifest.
+        return sum(1 for f in self._protected.rglob("*")
+                   if f.is_file() and f.name != "manifest.json")
 
     def seal(self, signer: HybridSigner, appliance_id: str, snapshot_id: str,
              manifest_hash: str, object_count: int, total_bytes: int) -> dict:

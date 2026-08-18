@@ -1,0 +1,120 @@
+"""Real system, network, storage, and platform telemetry for the appliance.
+
+All probes are best-effort and degrade gracefully so a heartbeat never fails
+because a metric is unavailable on a given host/VM.
+"""
+
+from __future__ import annotations
+
+import os
+import platform
+import shutil
+import socket
+import subprocess
+import time
+from typing import Optional
+
+_BOOT = time.time()
+
+
+def _run(cmd: list[str], timeout: float = 3.0) -> str:
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _read(path: str) -> str:
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def local_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return ""
+
+
+def detect_platform() -> dict:
+    """Distinguish a physical appliance from a VM and capture model/vendor."""
+    virt = _run(["systemd-detect-virt"]) or ""
+    # systemd-detect-virt prints 'none' on bare metal and returns 1 (empty here).
+    is_vm = bool(virt) and virt not in ("none", "")
+    product = _read("/sys/class/dmi/id/product_name")
+    vendor = _read("/sys/class/dmi/id/sys_vendor")
+    board = _read("/sys/class/dmi/id/board_name")
+    # Common VM signatures as a fallback when systemd-detect-virt is absent.
+    vm_hints = ("virtual", "vmware", "kvm", "qemu", "xen", "hyper-v", "hyperv",
+                "bochs", "amazon ec2", "google", "droplet")
+    blob = f"{product} {vendor} {board}".lower()
+    if not is_vm and any(h in blob for h in vm_hints):
+        is_vm = True
+        virt = virt or next((h for h in vm_hints if h in blob), "vm")
+    return {
+        "kind": "vm" if is_vm else "hardware",
+        "virtualization": virt or "none",
+        "product": product or "unknown",
+        "vendor": vendor or "unknown",
+        "board": board or "",
+    }
+
+
+def system_stats() -> dict:
+    load1 = load5 = load15 = 0.0
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except Exception:
+        pass
+    mem_total = mem_avail = 0
+    meminfo = _read("/proc/meminfo")
+    for line in meminfo.splitlines():
+        if line.startswith("MemTotal:"):
+            mem_total = int(line.split()[1]) * 1024
+        elif line.startswith("MemAvailable:"):
+            mem_avail = int(line.split()[1]) * 1024
+    uptime = 0.0
+    up = _read("/proc/uptime")
+    if up:
+        try:
+            uptime = float(up.split()[0])
+        except Exception:
+            uptime = time.time() - _BOOT
+    return {
+        "hostname": socket.gethostname(),
+        "os": platform.platform(),
+        "kernel": platform.release(),
+        "arch": platform.machine(),
+        "cpu_count": os.cpu_count() or 0,
+        "load_avg": [round(load1, 2), round(load5, 2), round(load15, 2)],
+        "mem_total_bytes": mem_total,
+        "mem_available_bytes": mem_avail,
+        "uptime_seconds": int(uptime),
+        "agent_uptime_seconds": int(time.time() - _BOOT),
+    }
+
+
+def disk_stats(path: str) -> dict:
+    try:
+        total, used, free = shutil.disk_usage(path)
+        return {"disk_total_bytes": total, "disk_used_bytes": used,
+                "disk_free_bytes": free}
+    except Exception:
+        return {"disk_total_bytes": 0, "disk_used_bytes": 0, "disk_free_bytes": 0}
+
+
+def pq_available() -> Optional[bool]:
+    try:
+        from cv_crypto.provider import get_provider
+        return get_provider().pq_available
+    except Exception:
+        return None

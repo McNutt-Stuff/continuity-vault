@@ -2,8 +2,8 @@
 Description=Run Arkive appliance self-update periodically
 
 [Timer]
-OnBootSec=3min
-OnUnitActiveSec=30min
+OnBootSec=2min
+OnUnitActiveSec=10min
 Persistent=true
 
 [Install]

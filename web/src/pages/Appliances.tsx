@@ -150,7 +150,14 @@ function ApplianceDetail({ a, onCommand }: { a: Appliance; onCommand: (a: Applia
             <h2>{a.name}</h2>
             <div className="faint" style={{ fontSize: 12 }}>{a.model} · v{a.software_version}</div>
           </div>
-          <ApplianceStatePill state={a.state} isolation={a.isolation_state} ok={a.attestation_ok} />
+          <div className="row" style={{ gap: 8 }}>
+            {t.model_kind && (
+              <Pill tone={t.model_kind === "hardware" ? "ok" : "info"}>
+                {t.model_kind === "hardware" ? "Hardware" : "Virtual"}
+              </Pill>
+            )}
+            <ApplianceStatePill state={a.state} isolation={a.isolation_state} ok={a.attestation_ok} />
+          </div>
         </div>
         <div className="grid grid-2">
           <Info label="Isolation" value={a.isolation_state === "sealed" ? "Sealed (offline)" : "Open"} />
@@ -164,7 +171,7 @@ function ApplianceDetail({ a, onCommand }: { a: Appliance; onCommand: (a: Applia
         <h3 style={{ marginBottom: 12 }}>Capacity & health</h3>
         <div className="spread" style={{ marginBottom: 6, fontSize: 13 }}>
           <span className="muted">{bytes(t.capacity_used_bytes ?? 0)} of {bytes(t.capacity_total_bytes ?? 0)}</span>
-          <span className="muted">{t.snapshots ?? 0} snapshots</span>
+          <span className="muted">{t.snapshots ?? 0} snapshots · {t.objects ?? 0} objects</span>
         </div>
         <div className="progress"><span style={{ width: `${usedPct}%` }} /></div>
         <div className="grid grid-3" style={{ marginTop: 14 }}>
@@ -173,6 +180,42 @@ function ApplianceDetail({ a, onCommand }: { a: Appliance; onCommand: (a: Applia
           <Info label="Temp" value={`${t.temperature_c ?? "—"}°C`} />
         </div>
       </Card>
+
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ marginBottom: 12 }}>System & platform</h3>
+        <div className="grid grid-3">
+          <Info label="Type" value={t.model_kind === "vm" ? `VM (${t.virtualization || "?"})` : "Hardware"} />
+          <Info label="Product" value={t.hardware_product ?? "—"} />
+          <Info label="Vendor" value={t.hardware_vendor ?? "—"} />
+          <Info label="OS" value={t.os ?? "—"} />
+          <Info label="Arch" value={t.arch ?? "—"} />
+          <Info label="CPUs" value={String(t.cpu_count ?? "—")} />
+          <Info label="Load" value={Array.isArray(t.load_avg) ? t.load_avg.join(" ") : "—"} />
+          <Info label="Memory" value={t.mem_total_bytes ? `${bytes(t.mem_available_bytes ?? 0)} free / ${bytes(t.mem_total_bytes)}` : "—"} />
+          <Info label="Uptime" value={t.uptime_seconds ? `${Math.floor(t.uptime_seconds / 3600)}h` : "—"} />
+        </div>
+      </Card>
+
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ marginBottom: 12 }}>Network & encryption</h3>
+        <div className="grid grid-2">
+          <Info label="Local IP" value={t.local_ip ?? "—"} />
+          <Info label="Cloud" value={t.cloud_url ?? "—"} />
+          <Info label="Client encryption" value={t.content_alg ?? "AES-256-GCM"} tone="ok" />
+          <Info label="Quantum-safe" value={t.quantum_safe ? "Enabled" : "Classical"} tone={t.quantum_safe ? "ok" : "danger"} />
+          <Info label="Signing" value={t.signing_alg ?? "—"} />
+        </div>
+      </Card>
+
+      {Array.isArray(t.recent_logs) && t.recent_logs.length > 0 && (
+        <Card style={{ marginBottom: 16 }}>
+          <h3 style={{ marginBottom: 10 }}>Recent activity</h3>
+          <pre className="mono" style={{ fontSize: 11, maxHeight: 220, overflow: "auto",
+               background: "rgba(0,0,0,0.28)", padding: 12, borderRadius: 10, margin: 0 }}>
+            {t.recent_logs.join("\n")}
+          </pre>
+        </Card>
+      )}
 
       <Card>
         <h3 style={{ marginBottom: 12 }}>Management commands</h3>

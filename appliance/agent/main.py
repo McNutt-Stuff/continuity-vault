@@ -32,6 +32,7 @@ from .config import get_settings
 from .identity import ApplianceIdentity, build_attestation
 from .state_machine import StateMachine, State
 from .vault import VaultStore
+from . import agent_log, sysinfo
 
 settings = get_settings()
 app = FastAPI(title="Arkive Appliance Agent", version="1.0.0")
@@ -39,6 +40,7 @@ app = FastAPI(title="Arkive Appliance Agent", version="1.0.0")
 DATA = Path(settings.data_dir)
 DATA.mkdir(parents=True, exist_ok=True)
 _REG = DATA / "registration.json"
+_LOG_FILE = DATA / "agent.log"
 
 
 class Agent:
@@ -53,6 +55,8 @@ class Agent:
         self.config: dict = {}
         self.tamper_state = "normal"
         self.pending_recovery: dict = {}  # snapshot -> awaiting local approval
+        self.log = agent_log.setup_logging(_LOG_FILE)
+        self._last_update_note = ""
         self._load_registration()
 
     # -- registration / activation ------------------------------------
@@ -111,20 +115,64 @@ class Agent:
             r = await client.post(f"{settings.cloud_base_url}/appliance/heartbeat",
                                   json=body, headers=self._headers())
             if r.status_code != 200:
+                self.log.warning("heartbeat rejected: %s", r.status_code)
                 return
-            for command in r.json().get("commands", []):
+            data = r.json()
+            # Cloud advertises the current bundle version; the root self-update
+            # timer applies it headlessly. Log when an update is pending.
+            latest = data.get("latest_version")
+            if latest and latest != settings.software_version and latest != self._last_update_note:
+                self._last_update_note = latest
+                self.log.info("update available: %s -> %s (headless self-update will apply it)",
+                              settings.software_version, latest)
+            for command in data.get("commands", []):
                 await self._handle_command(client, command)
 
     def _telemetry(self) -> dict:
         cap = self.vault.capacity()
-        total = 8 * 1024**4  # CV Edge 8 = 8 TB
+        plat = sysinfo.detect_platform()
+        sysd = sysinfo.system_stats()
+        disk = sysinfo.disk_stats(str(DATA))
+        # Physical appliances advertise a fixed raw capacity; VMs report the disk.
+        raw_total = 8 * 1024**4 if plat["kind"] == "hardware" else disk["disk_total_bytes"]
+        pq = sysinfo.pq_available()
         return {
-            "capacity_total_bytes": total,
-            "capacity_used_bytes": cap["used_bytes"],
-            "snapshots": cap["snapshots"],
+            # System
+            "hostname": sysd["hostname"],
+            "os": sysd["os"],
+            "kernel": sysd["kernel"],
+            "arch": sysd["arch"],
+            "cpu_count": sysd["cpu_count"],
+            "load_avg": sysd["load_avg"],
+            "mem_total_bytes": sysd["mem_total_bytes"],
+            "mem_available_bytes": sysd["mem_available_bytes"],
+            "uptime_seconds": sysd["uptime_seconds"],
+            # Platform / model
+            "model": settings.model,
+            "model_kind": plat["kind"],          # hardware | vm
+            "virtualization": plat["virtualization"],
+            "hardware_product": plat["product"],
+            "hardware_vendor": plat["vendor"],
+            # Network
+            "local_ip": sysinfo.local_ip(),
+            "cloud_url": settings.cloud_base_url,
+            # Storage / stored data
+            "capacity_total_bytes": raw_total,
+            "capacity_used_bytes": cap.get("used_bytes", 0),
+            "disk_free_bytes": disk["disk_free_bytes"],
+            "snapshots": cap.get("snapshots", 0),
+            "objects": cap.get("objects", cap.get("snapshots", 0)),
             "drive_health": "healthy",
             "power": "ok",
             "temperature_c": 34,
+            # Encryption
+            "quantum_safe": bool(pq),
+            "content_alg": "AES-256-GCM",
+            "signing_alg": (self.identity.signer.pq_alg if self.identity else None),
+            "isolation_state": self.sm.isolation_state,
+            # Logs (forwarded like the endpoint agent)
+            "recent_logs": agent_log.tail(_LOG_FILE, 50),
+            "software_version": settings.software_version,
         }
 
     def _verify_command(self, command: dict) -> bool:

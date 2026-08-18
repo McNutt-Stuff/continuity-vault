@@ -344,9 +344,12 @@ def heartbeat(body: HeartbeatRequest,
     appliance.tamper_state = body.tamper_state
     appliance.last_heartbeat_at = _now()
     appliance.last_attestation_at = _now()
-    # Failed attestation -> restricted/quarantined (spec 5.3).
-    appliance.attestation_ok = bool(body.attestation.get("secure_boot")) and \
-        body.tamper_state == "normal"
+    # Attestation: hardware appliances require secure-boot; VM models attest on
+    # tamper-state only (no firmware secure-boot measurement to verify).
+    model_kind = (body.telemetry or {}).get("model_kind", "hardware")
+    secure = bool(body.attestation.get("secure_boot"))
+    appliance.attestation_ok = body.tamper_state == "normal" and \
+        (secure or model_kind == "vm")
     if not appliance.attestation_ok and appliance.state != "QUARANTINED":
         appliance.state = "QUARANTINED"
     db.commit()
@@ -362,6 +365,7 @@ def heartbeat(body: HeartbeatRequest,
         delivered.append(c.envelope)
     db.commit()
     return {"commands": delivered,
+            "latest_version": _appliance_bundle_version(),
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
 
 
