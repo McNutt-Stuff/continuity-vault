@@ -13,6 +13,7 @@ interface CatalogItem {
   docTypes: string[];
   mode: "oauth" | "token";
   configured: boolean;
+  requiresAgent?: boolean;
   setup: string[];
 }
 interface Account {
@@ -23,12 +24,15 @@ interface Account {
   last_sync_at: string | null;
 }
 interface Vault { id: string; name: string; }
+interface Appliance { id: string; name: string; serial: string; state: string; }
 
 export default function Connectors() {
   const { me, stepUp } = useAuth();
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
+  const [appliances, setAppliances] = useState<Appliance[]>([]);
+  const [dest, setDest] = useState<string>("cv-cloud");
   const [setup, setSetup] = useState<CatalogItem | null>(null);
   const [toast, setToast] = useState("");
 
@@ -37,6 +41,13 @@ export default function Connectors() {
     setAccounts(await api.get<Account[]>("/connectors/accounts"));
     const t = await api.get<{ vaults: Vault[] }>("/tenant");
     setVaults(t.vaults);
+    try { setAppliances(await api.get<Appliance[]>("/appliances")); } catch { /* ignore */ }
+  }
+
+  function destinations(): string[] {
+    if (dest === "appliance") return ["appliance"];
+    if (dest === "both") return ["cv-cloud", "appliance"];
+    return ["cv-cloud"];
   }
 
   useEffect(() => {
@@ -58,6 +69,12 @@ export default function Connectors() {
   }
 
   async function connect(c: CatalogItem) {
+    // Agent-collected sources (e.g. 1Password) are gathered by a local desktop
+    // agent, not a cloud pull — route the user to agent setup instead.
+    if (c.requiresAgent) {
+      setSetup(c);
+      return;
+    }
     if (!me?.passkey_verified) {
       try { await stepUp(); } catch (e) { return alert((e as Error).message); }
     }
@@ -101,17 +118,18 @@ export default function Connectors() {
   async function backup(a: Account) {
     const vault = vaults[0];
     if (!vault) return alert("No vault available");
+    const dests = destinations();
     const coll = await api.post<{ id: string }>("/collections", {
       vault_id: vault.id,
       name: a.account_label,
       source_type: a.connector_type,
       connector_account_id: a.id,
-      destinations: ["cv-cloud"],
+      destinations: dests,
     });
     try {
       const res = await api.post<{ object_count: number }>(
-        `/collections/${coll.id}/backup`, { destinations: ["cv-cloud"] });
-      flash(`Backed up ${res.object_count} objects from ${a.account_label}`);
+        `/collections/${coll.id}/backup`, { destinations: dests });
+      flash(`Backed up ${res.object_count} objects from ${a.account_label} → ${dest === "cv-cloud" ? "cloud" : dest}`);
     } catch (e) {
       alert(`Backup failed: ${(e as ApiError).message}`);
     }
@@ -148,7 +166,9 @@ export default function Connectors() {
                     <div className="faint" style={{ fontSize: 11.5 }}>{c.mode === "oauth" ? "OAuth" : "Token"}</div>
                   </div>
                 </div>
-                {c.mode === "oauth" && !c.configured
+                {c.requiresAgent
+                  ? <Pill tone="info">Desktop agent</Pill>
+                  : c.mode === "oauth" && !c.configured
                   ? <Pill tone="warn">Needs setup</Pill>
                   : <Pill tone="ok">Ready</Pill>}
               </div>
@@ -165,16 +185,34 @@ export default function Connectors() {
             <button className="btn ghost sm" onClick={() => setSetup(null)}>Close</button>
           </div>
           <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
-            This provider needs an OAuth app configured on the server before it can be connected.
+            {setup.requiresAgent
+              ? `${setup.displayName} is collected by a local Arkive desktop agent (it uses the native app/CLI on the device). Install an agent, then it appears here automatically.`
+              : "This provider needs an OAuth app configured on the server before it can be connected."}
           </div>
           <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.7 }}>
             {setup.setup.map((s, i) => <li key={i}>{s}</li>)}
           </ol>
+          {setup.requiresAgent && (
+            <button className="btn primary sm" style={{ marginTop: 12 }}
+                    onClick={() => window.location.assign("/agents")}>
+              <Icon name="user" size={14} /> Go to Desktop Agents
+            </button>
+          )}
         </Card>
       )}
 
       <Card>
-        <h2 style={{ marginBottom: 12 }}>Linked accounts</h2>
+        <div className="spread" style={{ marginBottom: 12 }}>
+          <h2>Linked accounts</h2>
+          <label className="row" style={{ gap: 8, fontSize: 12.5 }}>
+            <span className="faint">Back up to</span>
+            <select className="input sm" value={dest} onChange={(e) => setDest(e.target.value)}>
+              <option value="cv-cloud">Cloud</option>
+              {appliances.length > 0 && <option value="appliance">Appliance</option>}
+              {appliances.length > 0 && <option value="both">Cloud + Appliance</option>}
+            </select>
+          </label>
+        </div>
         {accounts.length === 0 && <div className="muted">No sources linked yet.</div>}
         {accounts.map((a) => {
           const c = catalog.find((x) => x.type === a.connector_type);

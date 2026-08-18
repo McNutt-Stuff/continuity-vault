@@ -28,10 +28,11 @@ from cv_crypto.envelope import EnvelopeKeyHierarchy, encrypt_object
 from cv_crypto.provider import hexdigest
 from cv_crypto.signing import HybridSigner
 
-from .. import audit, credstore, keybroker, taxonomy
+from .. import audit, credstore, fleet, keybroker, taxonomy
 from ..connectors import get_connector
 from ..connectors import oauth
 from ..models import (
+    Appliance,
     Collection,
     ConnectorAccount,
     SearchDocument,
@@ -42,6 +43,19 @@ from ..storage import build_destination
 
 # The cloud manifest signer (distinct from the fleet command signer).
 from ..fleet import fleet_signer
+
+
+def _resolve_appliance(db: Session, tenant_id: str, kind: str) -> Optional[Appliance]:
+    """Resolve an 'appliance' or 'appliance:<id>' destination to a live appliance."""
+    if ":" in kind:
+        aid = kind.split(":", 1)[1]
+        a = db.get(Appliance, aid)
+        return a if a and a.tenant_id == tenant_id else None
+    return (db.query(Appliance)
+            .filter(Appliance.tenant_id == tenant_id,
+                    Appliance.state.in_(["SEALED", "ONLINE_STAGING", "READY_TO_SEAL"]))
+            .order_by(Appliance.last_heartbeat_at.desc())
+            .first())
 
 
 def run_backup(db: Session, collection: Collection, destinations: Optional[List[str]] = None
@@ -145,6 +159,26 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                                 obj["ciphertext"].encode())
             dest.put_manifest(tenant_prefix, snapshot_id, manifest)
             recoverable = True
+        elif kind == "appliance" or kind.startswith("appliance:"):
+            # Hand the (already-encrypted) objects to the appliance via a signed,
+            # sequenced OPEN_INGEST_WINDOW command. The appliance commits them to
+            # its local vault and returns a seal receipt (which marks the snapshot
+            # recoverable). Until then the receipt is recorded as not-yet-recoverable.
+            appliance = _resolve_appliance(db, collection.tenant_id, kind)
+            if appliance:
+                fleet.issue_command(
+                    db, appliance, "OPEN_INGEST_WINDOW", actor,
+                    {
+                        "snapshotId": snapshot_id,
+                        "vaultId": vault.id,
+                        "collectionId": collection.id,
+                        "objects": [
+                            {"objectId": o["objectId"], "ciphertext": o["ciphertext"],
+                             "plaintextBytes": int(o.get("plaintextBytes", 0))}
+                            for o in encrypted_objects
+                        ],
+                    },
+                )
 
         receipt = SnapshotReceipt(
             tenant_id=collection.tenant_id,

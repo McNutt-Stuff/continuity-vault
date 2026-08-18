@@ -48,9 +48,10 @@ def _setup_instructions(connector_type: str) -> list[str]:
         ]
     if connector_type == "onepassword":
         return [
-            "Deploy 1Password Connect (or use your hosted Connect) with a Connect token.",
-            "Grant the token read access to the vaults you want to protect.",
-            "Connect with the Connect server URL (host) and the Connect token.",
+            "1Password is collected by a local Arkive desktop agent (not a cloud pull).",
+            "Install the desktop agent on a Mac that has the 1Password app.",
+            "Unlock 1Password and enable Settings → Developer → Integrate with 1Password CLI.",
+            "The agent extracts items with the `op` CLI and pushes them encrypted.",
         ]
     if connector_type == "icloud":
         return [
@@ -79,6 +80,7 @@ def catalog(tenant: Tenant = Depends(security.get_tenant)):
             "docTypes": spec.doc_types,
             "mode": mode,
             "configured": oauth.is_configured(ctype),
+            "requiresAgent": caps.requires_agent,
             "setup": _setup_instructions(ctype),
             "capabilities": {
                 "incremental": caps.incremental,

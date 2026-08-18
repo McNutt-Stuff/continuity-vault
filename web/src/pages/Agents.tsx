@@ -191,6 +191,13 @@ function AgentStatusModal({
   const t = agent.telemetry || {};
   const crypto = t.crypto || {};
   const [verbose, setVerbose] = useState<boolean>(!!agent.config?.verbose_logging);
+  const [dest, setDest] = useState<string>(
+    (() => {
+      const arr = agent.config?.destinations || ["cv-cloud"];
+      if (arr.includes("appliance")) return arr.includes("cv-cloud") ? "both" : "appliance";
+      return "cv-cloud";
+    })()
+  );
   const online = heartbeatTone(agent.last_heartbeat_at);
   const opState: "missing" | "interactive" | "ready" =
     t.op_available === false ? "missing" : t.op_auth === "unauthenticated" ? "interactive" : "ready";
@@ -313,6 +320,33 @@ function AgentStatusModal({
           <section className="status-section">
             <div className="status-h"><Icon name="key" size={14} /> Advanced</div>
             <div className="collector-row">
+              <div className="row" style={{ gap: 10 }}>
+                <Icon name="server" size={16} />
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>Backup destination</div>
+                  <div className="faint" style={{ fontSize: 11.5 }}>
+                    Where the agent pushes collected data.
+                  </div>
+                </div>
+              </div>
+              <select
+                className="input"
+                value={dest}
+                onChange={async (e) => {
+                  const v = e.target.value;
+                  setDest(v);
+                  const destinations = v === "appliance" ? ["appliance"]
+                    : v === "both" ? ["cv-cloud", "appliance"] : ["cv-cloud"];
+                  try { await api.put(`/agents/${agent.id}/config`, { destinations }); }
+                  catch { /* revert handled on next poll */ }
+                }}
+              >
+                <option value="cv-cloud">Cloud</option>
+                <option value="appliance">Appliance</option>
+                <option value="both">Cloud + Appliance</option>
+              </select>
+            </div>
+            <div className="collector-row" style={{ marginTop: 10 }}>
               <div className="row" style={{ gap: 10 }}>
                 <Icon name="search" size={16} />
                 <div>

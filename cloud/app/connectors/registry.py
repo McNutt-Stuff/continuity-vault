@@ -39,6 +39,7 @@ class OnePasswordConnector(Connector):
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
             incremental=True,
+            requires_agent=True,  # collected locally via the 1Password `op` CLI
             searchable_fields=["url", "username", "kind", "vault", "tags"],
             facet_fields=["vault", "kind"],
         )

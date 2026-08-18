@@ -187,6 +187,32 @@ agent_router = APIRouter(prefix="/appliance", tags=["appliance-agent"])
 _BUNDLE_DIRS = ("appliance", "shared", "installers", "infra", "updater")
 _BUNDLE_EXCLUDE = (".venv", "__pycache__", "node_modules", ".git", ".pyc", "web/dist")
 
+_appliance_version_cache: str | None = None
+
+
+def _appliance_bundle_version() -> str:
+    """Stable content hash of the appliance bundle; changes only when code changes,
+    so the headless self-update timer only re-installs on real updates."""
+    global _appliance_version_cache
+    if _appliance_version_cache:
+        return _appliance_version_cache
+    root = _repo_root()
+    h = hashlib.sha256()
+    for d in ("appliance", "shared"):
+        base = root / d
+        if not base.exists():
+            continue
+        for f in sorted(base.rglob("*")):
+            if f.is_file() and not any(x in str(f) for x in _BUNDLE_EXCLUDE) \
+                    and f.name != "VERSION":
+                h.update(str(f.relative_to(root)).encode())
+                try:
+                    h.update(f.read_bytes())
+                except Exception:
+                    pass
+    _appliance_version_cache = h.hexdigest()[:12]
+    return _appliance_version_cache
+
 
 @agent_router.get("/bootstrap")
 def appliance_bootstrap():
@@ -213,7 +239,7 @@ def appliance_bundle():
             if p.exists():
                 tar.add(str(p), arcname=d, filter=_filter)
         # Stamp a build version so the appliance can detect when to self-update.
-        version = f"{datetime.now(timezone.utc):%Y%m%d.%H%M%S}".encode()
+        version = _appliance_bundle_version().encode()
         vi = tarfile.TarInfo("appliance/VERSION")
         vi.size = len(version)
         tar.addfile(vi, io.BytesIO(version))

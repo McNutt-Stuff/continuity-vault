@@ -82,6 +82,8 @@ class ConnectorCapabilities:
     incremental: bool = False
     supports_pagination: bool = False
     rate_limit_per_min: int = 600
+    # Source is collected by a local desktop agent (native CLI), not a cloud pull.
+    requires_agent: bool = False
     # Metadata keys promoted into the searchable index blob.
     searchable_fields: List[str] = field(default_factory=list)
     # Metadata keys exposed as filter facets in the UI.
