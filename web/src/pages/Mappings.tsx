@@ -5,21 +5,20 @@ import { Icon } from "../components/Icon";
 
 interface Account { id: string; connector_type: string; account_label: string; }
 interface Vault { id: string; name: string; }
-interface Appliance { id: string; name: string; serial: string; state: string; }
+interface StorageTarget {
+  id: string; kind: string; label: string; detail?: string;
+  state?: string; online?: boolean;
+}
 interface Mapping {
   id: string; name: string; source_type: string; vault_id: string;
   vault_name: string | null; connector_account_id: string | null;
   account_label: string | null; sensitivity: string; destinations: string[];
 }
 
-const DEST_LABEL: Record<string, string> = {
-  "cv-cloud": "Cloud", "customer-s3": "Customer S3", appliance: "Appliance",
-};
-
 export default function Mappings() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
-  const [appliances, setAppliances] = useState<Appliance[]>([]);
+  const [targets, setTargets] = useState<StorageTarget[]>([]);
   const [mappings, setMappings] = useState<Mapping[]>([]);
   const [toast, setToast] = useState("");
 
@@ -29,15 +28,16 @@ export default function Mappings() {
   const [dests, setDests] = useState<string[]>(["cv-cloud"]);
 
   async function load() {
-    const [acc, tenant, coll] = await Promise.all([
+    const [acc, tenant, coll, tgts] = await Promise.all([
       api.get<Account[]>("/connectors/accounts"),
       api.get<{ vaults: Vault[] }>("/tenant"),
       api.get<Mapping[]>("/collections"),
+      api.get<StorageTarget[]>("/tenant/storage-targets"),
     ]);
     setAccounts(acc);
     setVaults(tenant.vaults);
     setMappings(coll);
-    try { setAppliances(await api.get<Appliance[]>("/appliances")); } catch { /* ignore */ }
+    setTargets(tgts);
     if (!vaultId && tenant.vaults[0]) setVaultId(tenant.vaults[0].id);
     if (!accountId && acc[0]) setAccountId(acc[0].id);
   }
@@ -45,8 +45,17 @@ export default function Mappings() {
 
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
 
-  function toggleDest(d: string) {
-    setDests((cur) => cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d]);
+  function destLabel(id: string): string {
+    const t = targets.find((x) => x.id === id);
+    if (t) return t.label;
+    if (id === "cv-cloud") return "Arkive Cloud";
+    if (id === "customer-s3") return "Customer S3";
+    if (id.startsWith("appliance:")) return "Appliance (removed)";
+    return id;
+  }
+
+  function toggleDest(id: string) {
+    setDests((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]);
   }
 
   async function addMapping() {
@@ -74,24 +83,15 @@ export default function Mappings() {
     catch (e) { flash((e as ApiError).message); }
   }
 
-  async function backup(m: Mapping) {
-    try {
-      const res = await api.post<{ object_count: number }>(`/collections/${m.id}/backup`, {});
-      flash(`Backed up ${res.object_count} objects (${m.destinations.map((d) => DEST_LABEL[d] ?? d).join(", ")})`);
-      await load();
-    } catch (e) { flash(`Backup failed: ${(e as ApiError).message}`); }
-  }
-
-  const destOptions = ["cv-cloud", ...(appliances.length ? ["appliance"] : []), "customer-s3"];
-
   return (
     <>
       <Card style={{ marginBottom: 16 }}>
         <h2 style={{ marginBottom: 4 }}>Map sources to vaults</h2>
         <div className="muted" style={{ fontSize: 13, marginBottom: 14 }}>
-          Route each source into one or more vaults, and choose where each mapping stores its
-          data (cloud, an appliance, or customer S3). A source can feed many vaults, and a vault
-          can hold many sources — configure the many-to-many layout that fits your context.
+          Route each source into a vault and choose exactly where that mapping stores its data —
+          the Arkive cloud, a specific appliance, or your own cloud bucket. A source can feed many
+          vaults and a vault can hold many sources. Backups run automatically when the source syncs
+          (connector poll or desktop-agent push); this page only defines the routing.
         </div>
         <div className="grid grid-3" style={{ gap: 12, alignItems: "end" }}>
           <label className="stack">
@@ -113,17 +113,24 @@ export default function Mappings() {
             <Icon name="link" size={15} /> Add mapping
           </button>
         </div>
-        <div className="row" style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-          <span className="faint" style={{ fontSize: 11.5, alignSelf: "center" }}>Destinations</span>
-          {destOptions.map((d) => (
-            <span
-              key={d}
-              className={`chip ${dests.includes(d) ? "active" : ""}`}
-              onClick={() => toggleDest(d)}
-            >
-              {DEST_LABEL[d] ?? d}
-            </span>
-          ))}
+        <div className="stack" style={{ gap: 6, marginTop: 14 }}>
+          <span className="faint" style={{ fontSize: 11.5 }}>Destinations</span>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            {targets.map((t) => (
+              <span
+                key={t.id}
+                className={`chip ${dests.includes(t.id) ? "active" : ""}`}
+                onClick={() => toggleDest(t.id)}
+                title={t.detail}
+              >
+                <Icon name={t.kind === "appliance" ? "server" : "cloud"} size={13} />
+                {t.label}
+                {t.kind === "appliance" && t.online === false && (
+                  <span className="faint" style={{ marginLeft: 4 }}>· offline</span>
+                )}
+              </span>
+            ))}
+          </div>
         </div>
       </Card>
 
@@ -142,12 +149,11 @@ export default function Mappings() {
               <div className="row" style={{ gap: 6, marginTop: 4, flexWrap: "wrap" }}>
                 <Pill tone="info">{m.source_type}</Pill>
                 {(m.destinations || []).map((d) => (
-                  <Pill key={d} tone={d === "appliance" ? "ok" : "info"}>{DEST_LABEL[d] ?? d}</Pill>
+                  <Pill key={d} tone={d.startsWith("appliance") ? "ok" : "info"}>{destLabel(d)}</Pill>
                 ))}
                 {m.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
               </div>
             </div>
-            <button className="btn sm primary" onClick={() => backup(m)}>Back up now</button>
             <button className="btn sm ghost" onClick={() => remove(m)}>Remove</button>
           </div>
         ))}

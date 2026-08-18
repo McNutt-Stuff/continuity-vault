@@ -165,20 +165,23 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
             # its local vault and returns a seal receipt (which marks the snapshot
             # recoverable). Until then the receipt is recorded as not-yet-recoverable.
             appliance = _resolve_appliance(db, collection.tenant_id, kind)
-            if appliance:
-                fleet.issue_command(
-                    db, appliance, "OPEN_INGEST_WINDOW", actor,
-                    {
-                        "snapshotId": snapshot_id,
-                        "vaultId": vault.id,
-                        "collectionId": collection.id,
-                        "objects": [
-                            {"objectId": o["objectId"], "ciphertext": o["ciphertext"],
-                             "plaintextBytes": int(o.get("plaintextBytes", 0))}
-                            for o in encrypted_objects
-                        ],
-                    },
-                )
+            if appliance is None:
+                raise ValueError(
+                    f"no linked appliance available for destination '{kind}' "
+                    "(appliance offline, quarantined, or not sealed)")
+            fleet.issue_command(
+                db, appliance, "OPEN_INGEST_WINDOW", actor,
+                {
+                    "snapshotId": snapshot_id,
+                    "vaultId": vault.id,
+                    "collectionId": collection.id,
+                    "objects": [
+                        {"objectId": o["objectId"], "ciphertext": o["ciphertext"],
+                         "plaintextBytes": int(o.get("plaintextBytes", 0))}
+                        for o in encrypted_objects
+                    ],
+                },
+            )
 
         receipt = SnapshotReceipt(
             tenant_id=collection.tenant_id,

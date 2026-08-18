@@ -450,7 +450,8 @@ def ingest(body: AgentIngest, agent: DesktopAgent = Depends(_auth_agent),
                      labels=o.labels, size_bytes=o.size_bytes)
         for o in body.objects
     ]
-    dests = body.destinations or agent.config.get("destinations") or ["cv-cloud"]
+    dests = (body.destinations or collection.destinations
+             or agent.config.get("destinations") or ["cv-cloud"])
     searchable = None
     conn = get_connector(body.source_type)
     if conn:

@@ -118,18 +118,32 @@ export default function Connectors() {
   async function backup(a: Account) {
     const vault = vaults[0];
     if (!vault) return alert("No vault available");
-    const dests = destinations();
-    const coll = await api.post<{ id: string }>("/collections", {
-      vault_id: vault.id,
-      name: a.account_label,
-      source_type: a.connector_type,
-      connector_account_id: a.id,
-      destinations: dests,
-    });
+    // Prefer an existing Data Map mapping for this source so the sync routes to
+    // the destinations configured there; only fall back to a page-level choice
+    // when the source has not been mapped yet.
+    let collId: string | null = null;
+    let routedDests: string[] | null = null;
+    try {
+      const mappings = await api.get<Array<{ id: string; connector_account_id: string | null; destinations: string[] }>>("/collections");
+      const existing = mappings.find((m) => m.connector_account_id === a.id);
+      if (existing) { collId = existing.id; routedDests = existing.destinations; }
+    } catch { /* fall back to creating one */ }
+    if (!collId) {
+      const dests = destinations();
+      const coll = await api.post<{ id: string }>("/collections", {
+        vault_id: vault.id,
+        name: a.account_label,
+        source_type: a.connector_type,
+        connector_account_id: a.id,
+        destinations: dests,
+      });
+      collId = coll.id;
+      routedDests = dests;
+    }
     try {
       const res = await api.post<{ object_count: number }>(
-        `/collections/${coll.id}/backup`, { destinations: dests });
-      flash(`Backed up ${res.object_count} objects from ${a.account_label} → ${dest === "cv-cloud" ? "cloud" : dest}`);
+        `/collections/${collId}/backup`, {});
+      flash(`Backed up ${res.object_count} objects from ${a.account_label} → ${(routedDests || ["cv-cloud"]).join(", ")}`);
     } catch (e) {
       alert(`Backup failed: ${(e as ApiError).message}`);
     }

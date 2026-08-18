@@ -7,8 +7,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .. import audit, keybroker, security
+from ..config import get_settings
 from ..db import get_db
-from ..models import Collection, Tenant, Vault
+from ..models import Appliance, Collection, Tenant, Vault
 
 router = APIRouter(prefix="/tenant", tags=["tenant"])
 
@@ -64,6 +65,41 @@ DESTINATION_OPTIONS = [
 @router.get("/destinations")
 def destination_options():
     return DESTINATION_OPTIONS
+
+
+@router.get("/storage-targets")
+def storage_targets(tenant: Tenant = Depends(security.get_tenant),
+                    db: Session = Depends(get_db)):
+    """Concrete, selectable storage destinations for source→vault mappings.
+
+    Unlike ``/destinations`` (which describes destination *kinds*), this returns
+    the specific targets a mapping can route to: the Arkive cloud, each linked
+    appliance by name, and the customer's own cloud bucket when configured. The
+    ``id`` is what a mapping stores in ``destinations`` (e.g. ``appliance:<id>``).
+    """
+    settings = get_settings()
+    targets: list[dict] = [
+        {"id": "cv-cloud", "label": "Arkive Cloud", "kind": "cloud",
+         "detail": "Managed vendor cloud, multi-region"},
+    ]
+    appliances = (db.query(Appliance)
+                  .filter(Appliance.tenant_id == tenant.id)
+                  .order_by(Appliance.name.asc()).all())
+    for a in appliances:
+        online = bool(a.last_heartbeat_at)
+        targets.append({
+            "id": f"appliance:{a.id}", "kind": "appliance",
+            "label": a.name or "Appliance",
+            "detail": f"{a.model} · {a.serial}",
+            "state": a.state, "online": online,
+        })
+    if settings.aws_access_key_id and settings.s3_bucket:
+        targets.append({
+            "id": "customer-s3", "kind": "cloud",
+            "label": f"Customer S3 — {settings.s3_bucket}",
+            "detail": settings.s3_region or "customer-owned bucket",
+        })
+    return targets
 
 
 @router.get("")
