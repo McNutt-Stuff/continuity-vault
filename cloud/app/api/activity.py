@@ -44,6 +44,10 @@ def activity(limit: int = 40,
                 return acc.account_label
         return c.name
 
+    def _source_type(collection_id: str) -> str:
+        c = colls.get(collection_id)
+        return c.source_type if c else ""
+
     # Recently completed snapshot receipts (the concrete "data landed" events).
     receipts = (db.query(SnapshotReceipt)
                 .filter(SnapshotReceipt.tenant_id == tenant.id)
@@ -52,6 +56,7 @@ def activity(limit: int = 40,
     events = [{
         "kind": "backup",
         "source": _source_label(rc.collection_id),
+        "source_type": _source_type(rc.collection_id),
         "destination": rc.destination,
         "object_count": rc.object_count,
         "total_bytes": rc.total_bytes,
@@ -68,6 +73,7 @@ def activity(limit: int = 40,
             in_flight.append({
                 "kind": "agent-collect",
                 "source": a.hostname or a.name,
+                "source_type": "onepassword",
                 "status": "queued",
                 "command": (a.pending_command or {}).get("type"),
             })
@@ -81,6 +87,38 @@ def activity(limit: int = 40,
             "pending": pending,
             "queued_agents": len(in_flight),
         },
+    }
+
+
+# Severities that constitute an operator-facing alert.
+_ALERT_SEVERITIES = ("warning", "critical")
+
+
+@router.get("/alerts")
+def alerts(limit: int = 50,
+           principal: security.Principal = Depends(security.get_principal),
+           tenant: Tenant = Depends(security.get_tenant),
+           db: Session = Depends(get_db)):
+    """Abnormal / security-relevant events surfaced as operator alerts.
+
+    Derived from the audit ledger (warning + critical severities): failed auth,
+    attestation failures, quarantines, backup failures, and re-auth needs.
+    """
+    rows = (db.query(AuditEvent)
+            .filter(AuditEvent.tenant_id == tenant.id,
+                    AuditEvent.severity.in_(_ALERT_SEVERITIES))
+            .order_by(AuditEvent.created_at.desc())
+            .limit(limit).all())
+    items = [{
+        "id": (e.entry_hash or "")[:16],
+        "actor": e.actor, "action": e.action, "resource": e.resource,
+        "category": e.category, "severity": e.severity,
+        "detail": e.detail, "created_at": e.created_at.isoformat(),
+    } for e in rows]
+    return {
+        "count": len(items),
+        "critical": sum(1 for i in items if i["severity"] == "critical"),
+        "alerts": items,
     }
 
 

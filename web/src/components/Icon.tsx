@@ -22,6 +22,8 @@ type IconName =
   | "note"
   | "info"
   | "alert"
+  | "activity"
+  | "bell"
   | "calendar";
 
 const paths: Record<IconName, ReactNode> = {
@@ -135,6 +137,13 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <path d="M12 3l9 16H3l9-16z" />
       <path d="M12 10v4M12 17h.01" />
+    </>
+  ),
+  activity: <path d="M3 12h4l3 8 4-16 3 8h4" />,
+  bell: (
+    <>
+      <path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9z" />
+      <path d="M13.7 21a2 2 0 01-3.4 0" />
     </>
   ),
 };

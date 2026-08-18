@@ -1,8 +1,10 @@
-import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
 import { useAuth } from "./auth";
 import { Icon, IconName } from "./components/Icon";
 import { Pill } from "./components/ui";
 import { DialogHost, notify } from "./components/dialog";
+import { api } from "./api";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Search from "./pages/Search";
@@ -15,6 +17,7 @@ import Onboarding from "./pages/Onboarding";
 import Admin from "./pages/Admin";
 import Agents from "./pages/Agents";
 import Audit from "./pages/Audit";
+import ActivityPage from "./pages/Activity";
 import Settings from "./pages/Settings";
 
 const NAV: { to: string; label: string; icon: IconName }[] = [
@@ -22,6 +25,7 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/search", label: "Unified Search", icon: "search" },
   { to: "/connectors", label: "Sources", icon: "link" },
   { to: "/mappings", label: "Data Map", icon: "database" },
+  { to: "/activity", label: "Activity", icon: "activity" },
   { to: "/snapshots", label: "Recovery Points", icon: "clock" },
   { to: "/appliances", label: "Appliances", icon: "server" },
   { to: "/agents", label: "Desktop Agents", icon: "user" },
@@ -55,6 +59,7 @@ export default function App() {
             <Route path="/search" element={<Search />} />
             <Route path="/connectors" element={<Connectors />} />
             <Route path="/mappings" element={<Mappings />} />
+            <Route path="/activity" element={<ActivityPage />} />
             <Route path="/snapshots" element={<Snapshots />} />
             <Route path="/appliances" element={<Appliances />} />
             <Route path="/agents" element={<Agents />} />
@@ -119,6 +124,7 @@ function TopBar() {
     <div className="topbar">
       <h1>{title}</h1>
       <div className="row" style={{ gap: 14 }}>
+        <AlertBell />
         {me?.passkey_verified ? (
           <Pill tone="ok">
             <Icon name="lock" size={13} /> Unlocked
@@ -142,5 +148,37 @@ function TopBar() {
         </button>
       </div>
     </div>
+  );
+}
+
+function AlertBell() {
+  const nav = useNavigate();
+  const [count, setCount] = useState(0);
+  const [critical, setCritical] = useState(0);
+
+  async function load() {
+    try {
+      const r = await api.get<{ count: number; critical: number }>("/alerts");
+      setCount(r.count);
+      setCritical(r.critical);
+    } catch { /* not authorized yet / ignore */ }
+  }
+  useEffect(() => {
+    void load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <button
+      className="btn ghost sm alert-bell"
+      title={count ? `${count} abnormal event${count === 1 ? "" : "s"}` : "No abnormal events"}
+      onClick={() => nav("/audit?abnormal=1")}
+    >
+      <Icon name="bell" size={16} />
+      {count > 0 && (
+        <span className={`alert-badge ${critical > 0 ? "crit" : ""}`}>{count > 99 ? "99+" : count}</span>
+      )}
+    </button>
   );
 }

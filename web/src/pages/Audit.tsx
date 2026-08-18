@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { api } from "../api";
 import { Card, Pill, timeAgo } from "../components/ui";
-import { Icon } from "../components/Icon";
+import { Icon, IconName } from "../components/Icon";
+import { humanizeAction, prettyKey, formatValue } from "../components/format";
 
 interface Event {
   actor: string; action: string; resource: string;
@@ -17,14 +19,27 @@ interface AuditResp {
 const SEV_TONE: Record<string, "ok" | "info" | "warn" | "danger"> = {
   info: "info", notice: "ok", warning: "warn", critical: "danger",
 };
+const CAT_ICON: Record<string, IconName> = {
+  security: "shield", credential: "key", admin: "server", system: "database", activity: "user",
+};
 const CATEGORIES = ["", "activity", "security", "credential", "admin", "system"];
 const SEVERITIES = ["", "info", "notice", "warning", "critical"];
 
 export default function Audit() {
+  const loc = useLocation();
   const [data, setData] = useState<AuditResp | null>(null);
   const [category, setCategory] = useState("");
   const [severity, setSeverity] = useState("");
   const [actor, setActor] = useState("");
+  const [abnormal, setAbnormal] = useState(false);
+  const [open, setOpen] = useState<number | null>(null);
+
+  // Deep-link support: /audit?abnormal=1 or ?severity=critical from the alert bell.
+  useEffect(() => {
+    const p = new URLSearchParams(loc.search);
+    if (p.get("abnormal")) setAbnormal(true);
+    if (p.get("severity")) setSeverity(p.get("severity")!);
+  }, [loc.search]);
 
   async function load() {
     const p = new URLSearchParams();
@@ -34,6 +49,9 @@ export default function Audit() {
     setData(await api.get<AuditResp>(`/audit?${p.toString()}`));
   }
   useEffect(() => { void load(); }, [category, severity]);
+
+  const rows = (data?.events ?? []).filter((e) =>
+    !abnormal || e.severity === "warning" || e.severity === "critical");
 
   return (
     <>
@@ -69,6 +87,9 @@ export default function Audit() {
               {s || "All"}
             </span>
           ))}
+          <span className={`chip ${abnormal ? "active" : ""}`} onClick={() => setAbnormal((v) => !v)}>
+            <Icon name="alert" size={12} /> Abnormal only
+          </span>
         </div>
         <div className="search-bar">
           <Icon name="search" />
@@ -83,27 +104,50 @@ export default function Audit() {
       </Card>
 
       <Card>
-        <table className="table">
-          <thead>
-            <tr><th>Time</th><th>Severity</th><th>Category</th><th>Actor</th><th>Action</th><th>Resource</th><th>Detail</th></tr>
-          </thead>
-          <tbody>
-            {data?.events.map((e, i) => (
-              <tr key={i}>
-                <td className="faint" style={{ whiteSpace: "nowrap" }}>{timeAgo(e.created_at)}</td>
-                <td><Pill tone={SEV_TONE[e.severity] ?? "info"}>{e.severity}</Pill></td>
-                <td className="faint">{e.category}</td>
-                <td className="mono" style={{ fontSize: 12 }}>{e.actor}</td>
-                <td><Pill tone="info">{e.action}</Pill></td>
-                <td className="mono faint">{(e.resource || "").slice(0, 12)}</td>
-                <td className="faint" style={{ fontSize: 12, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {Object.keys(e.detail || {}).length ? JSON.stringify(e.detail) : "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {data && data.events.length === 0 && <div className="muted">No matching audit events.</div>}
+        {rows.length === 0 && <div className="muted">No matching audit events.</div>}
+        {rows.map((e, i) => {
+          const detailKeys = Object.keys(e.detail || {});
+          const expanded = open === i;
+          return (
+            <div key={i} className={`audit-row ${e.severity === "critical" ? "crit" : e.severity === "warning" ? "warn" : ""}`}>
+              <div className="audit-main" onClick={() => setOpen(expanded ? null : i)}>
+                <span className={`audit-sev ${e.severity}`}>
+                  <Icon name={CAT_ICON[e.category] ?? "user"} size={14} />
+                </span>
+                <div className="flex1">
+                  <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontWeight: 600 }}>{humanizeAction(e.action)}</span>
+                    <Pill tone={SEV_TONE[e.severity] ?? "info"}>{e.severity}</Pill>
+                    <span className="faint" style={{ fontSize: 11 }}>{e.category}</span>
+                  </div>
+                  <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>
+                    <span className="mono">{e.actor}</span>
+                    {e.resource && <> · <span className="mono">{e.resource.slice(0, 16)}</span></>}
+                    {detailKeys.length > 0 && !expanded && <> · {detailKeys.length} detail field{detailKeys.length === 1 ? "" : "s"}</>}
+                  </div>
+                </div>
+                <span className="faint" style={{ fontSize: 11, whiteSpace: "nowrap" }}>{timeAgo(e.created_at)}</span>
+                {detailKeys.length > 0 && (
+                  <span className="faint" style={{ fontSize: 11 }}>{expanded ? "▲" : "▼"}</span>
+                )}
+              </div>
+              {expanded && (
+                <div className="audit-detail">
+                  {detailKeys.map((k) => (
+                    <div key={k} className="audit-kv">
+                      <span className="faint">{prettyKey(k)}</span>
+                      <span className="mono">{formatValue(e.detail[k])}</span>
+                    </div>
+                  ))}
+                  <div className="audit-kv">
+                    <span className="faint">Chain hash</span>
+                    <span className="mono">{e.entry_hash}…</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </Card>
     </>
   );
