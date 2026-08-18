@@ -264,9 +264,10 @@ class Agent:
                 o["content_b64"] = base64.b64encode(envelope).decode()
                 o["client_encrypted"] = True
                 o["size_bytes"] = len(envelope)
-            # Push in batches to keep requests reasonable.
-            for i in range(0, len(objects), 50):
-                batch = objects[i:i + 50]
+            # Push in batches to keep requests reasonable. Metadata-only items are
+            # small, so a large batch keeps most syncs a single recovery point.
+            for i in range(0, len(objects), 500):
+                batch = objects[i:i + 500]
                 r = httpx.post(f"{self.cfg.cloud_base_url}/agent/ingest", json={
                     "source_type": "onepassword",
                     "destinations": destinations,

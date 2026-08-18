@@ -134,6 +134,7 @@ class ConnectorAccount(Base):
     # Encrypted credential blob (never plaintext at rest).
     encrypted_credentials = Column(Text, nullable=True)
     scopes = Column(JSON, default=list)
+    sync_cursor = Column(JSON, nullable=True)  # incremental sync state (e.g. Gmail historyId)
     last_sync_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 

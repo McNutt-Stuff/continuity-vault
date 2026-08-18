@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # Software update publishing.
     release_channel: str = "stable"
 
+    # Scheduled connector sync (background delta worker).
+    sync_enabled: bool = True
+    sync_interval_minutes: int = 30
+    # Safety cap on how many items a single full backup pulls from a source.
+    sync_max_items: int = 5000
+
     # Authentication.
     allow_signup: bool = True
     email_code_ttl_seconds: int = 600

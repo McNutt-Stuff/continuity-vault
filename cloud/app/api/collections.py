@@ -134,6 +134,12 @@ def _collection_view(db: Session, c: Collection) -> dict:
             .order_by(SnapshotReceipt.created_at.desc()).first())
     is_agent = bool(conn and conn.capabilities().requires_agent)
     agent_label = (agent.hostname or agent.name) if agent else None
+    # Total DISTINCT objects indexed for this source (what unified search shows),
+    # not the last batch — the agent pushes in batches, so the last receipt's
+    # count is only a slice of the whole.
+    indexed = (db.query(SearchDocument.object_id)
+               .filter(SearchDocument.collection_id == c.id)
+               .distinct().count())
     return {
         "id": c.id, "name": c.name, "source_type": c.source_type,
         "source_display": conn.display_name if conn else c.source_type,
@@ -149,7 +155,7 @@ def _collection_view(db: Session, c: Collection) -> dict:
         "index_fields": list(c.index_fields or []),
         "available_fields": available,
         "last_backup_at": last.created_at.isoformat() if last else None,
-        "last_object_count": last.object_count if last else 0,
+        "last_object_count": indexed,
         "last_recoverable": bool(last.recoverable) if last else False,
     }
 

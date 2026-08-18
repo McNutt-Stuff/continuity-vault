@@ -81,6 +81,9 @@ class ConnectorCapabilities:
 
     incremental: bool = False
     supports_pagination: bool = False
+    # True when the connector returns a delta cursor (only changed items on later
+    # syncs) — the background scheduler only auto-runs delta-capable sources.
+    delta: bool = False
     rate_limit_per_min: int = 600
     # Source is collected by a local desktop agent (native CLI), not a cloud pull.
     requires_agent: bool = False

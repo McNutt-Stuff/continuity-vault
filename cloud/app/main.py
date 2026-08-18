@@ -80,6 +80,10 @@ def startup() -> None:
 
         seed()
 
+    # Start the background delta-sync scheduler (cloud connectors).
+    from .workers.scheduler import start_scheduler
+    start_scheduler()
+
 
 @app.get("/api/health")
 def health():

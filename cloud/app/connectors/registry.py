@@ -14,6 +14,7 @@ from typing import Iterable, List
 from .base import (
     Connector,
     ConnectorCapabilities,
+    FetchResult,
     OAuthSpec,
     SourceObject,
     all_connectors,
@@ -93,6 +94,7 @@ class GmailConnector(Connector):
         return ConnectorCapabilities(
             incremental=True,
             supports_pagination=True,
+            delta=True,
             searchable_fields=["from", "to", "folder", "labels"],
             facet_fields=["folder"],
         )
@@ -110,11 +112,18 @@ class GmailConnector(Connector):
             doc_types=["email"],
         )
 
-    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+    def fetch(self, account_label, cursor=None, config=None) -> FetchResult:
+        # Live Gmail: full first backup (paginated), then history-based deltas.
         config = config or {}
         if config.get("access_token"):
-            yield from live.fetch_gmail(config["access_token"])
-            return
+            from ..config import get_settings  # avoid import cycle at module load
+            objects, new_cursor = live.fetch_gmail(
+                config["access_token"], cursor=cursor,
+                max_messages=get_settings().sync_max_items)
+            return FetchResult(objects=objects, cursor=new_cursor, has_more=False)
+        return FetchResult(objects=list(self.fetch_objects(account_label, config=config)))
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         emails = [
             ("Q3 Board Deck — final", "board@company.com", "Please find attached the final deck for Thursday.", "Inbox"),
             ("Your receipt from Apple", "no_reply@apple.com", "Thank you for your purchase of iCloud+ 2TB.", "Receipts"),

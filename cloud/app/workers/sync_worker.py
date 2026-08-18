@@ -141,13 +141,32 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
     label = account.account_label if account else collection.name
     config = _account_config(db, collection, account)
     caps = connector.capabilities()
-    objects = list(connector.fetch(label, config=config).objects)
+    # Incremental: pass the stored cursor; the connector returns a new cursor to
+    # persist (full first backup, then deltas since the last sync).
+    result = connector.fetch(label, cursor=(account.sync_cursor if account else None),
+                             config=config)
+    objects = list(result.objects)
+
+    # A delta run with nothing new: advance the cursor, don't create an empty
+    # recovery point. (First-ever run still ingests to establish a baseline.)
+    if not objects and account is not None:
+        prior = (db.query(SnapshotReceipt)
+                 .filter(SnapshotReceipt.collection_id == collection.id)
+                 .order_by(SnapshotReceipt.created_at.desc()).first())
+        if prior is not None:
+            account.last_sync_at = datetime.now(timezone.utc)
+            if result.cursor is not None:
+                account.sync_cursor = result.cursor
+            db.commit()
+            return prior
 
     receipt = ingest_objects(db, collection, objects, destinations,
                              searchable_fields=caps.searchable_fields,
                              facet_fields=caps.facet_fields, actor="sync-worker")
     if account:
         account.last_sync_at = datetime.now(timezone.utc)
+        if result.cursor is not None:
+            account.sync_cursor = result.cursor
         db.commit()
     return receipt
 
