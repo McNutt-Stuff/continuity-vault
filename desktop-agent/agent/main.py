@@ -255,6 +255,7 @@ class Agent:
             if not objects:
                 results.append({"collector": name, "objects": 0})
                 continue
+            self.log.info("collector %s: collected %d items from 1Password", name, len(objects))
             # Client-side encryption: encrypt each object locally so the cloud
             # never receives plaintext secrets.
             for o in objects:
@@ -272,6 +273,8 @@ class Agent:
                     "objects": batch,
                 }, headers=self._headers(), timeout=120)
                 r.raise_for_status()
+                self.log.info("pushed batch of %d -> snapshot %s", len(batch),
+                              r.json().get("snapshot_id", "?"))
             total += len(objects)
             results.append({"collector": name, "objects": len(objects)})
         self._last_collect = time.time()
