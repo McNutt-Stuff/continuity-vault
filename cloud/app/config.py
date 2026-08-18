@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     content_max_bytes: int = 268435456  # 256 MiB
     # Content larger than this is split into encrypted chunks at rest.
     content_chunk_bytes: int = 8388608  # 8 MiB
+    # How long a recovered (decrypted) item stays viewable before auto-destroy.
+    recovered_ttl_seconds: int = 1800  # 30 min
 
     # Authentication.
     allow_signup: bool = True

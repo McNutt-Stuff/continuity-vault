@@ -336,6 +336,7 @@ def retrieve(body: RetrieveRequest,
     content_b64 = None
     size_bytes = len(data)
     client_encrypted = False
+    plaintext_bytes: bytes | None = None
     try:
         obj = json.loads(data.decode())
         decryptable = isinstance(obj, dict) and ("wrappedDek" in obj or obj.get("chunked"))
@@ -367,7 +368,7 @@ def retrieve(body: RetrieveRequest,
                     plaintext = recovered
                 else:
                     client_encrypted = True  # no escrow available to open it
-            content_b64 = base64.b64encode(plaintext).decode()
+            plaintext_bytes = plaintext
             size_bytes = len(plaintext)
     except Exception as exc:  # noqa: BLE001 - legacy metadata-only objects
         logger.info("retrieve: could not decrypt %s (%s)", body.object_id, exc)
@@ -375,22 +376,42 @@ def retrieve(body: RetrieveRequest,
     doc = (db.query(SearchDocument)
            .filter(SearchDocument.tenant_id == tenant.id,
                    SearchDocument.object_id == body.object_id).first())
-    audit.record(db, actor=principal.user_id, action="search.retrieve",
-                 tenant_id=tenant.id, resource=body.object_id,
-                 detail={"location": label, "bytes": size_bytes})
-    if content_b64 is None:
-        return {"status": "available", "location": label, "async": False,
-                "size_bytes": size_bytes, "encrypted": True, "content_b64": None,
+    title = (doc.title if doc else body.object_id) or body.object_id
+    doc_type = doc.doc_type if doc else ""
+    source_type = doc.source_type if doc else ""
+
+    if plaintext_bytes is None:
+        audit.record(db, actor=principal.user_id, action="search.retrieve",
+                     tenant_id=tenant.id, resource=body.object_id,
+                     detail={"location": label, "bytes": size_bytes})
+        return {"status": "unavailable", "location": label, "async": False,
                 "message": f"Object available at {label} ({size_bytes} bytes). "
                            "This item was captured before full-content backup; re-run a backup to store its content."}
     if client_encrypted:
-        return {"status": "available", "location": label, "async": False,
-                "size_bytes": size_bytes, "encrypted": True, "content_b64": content_b64,
-                "filename": ((doc.title if doc else body.object_id) or body.object_id) + ".enc",
+        audit.record(db, actor=principal.user_id, action="search.retrieve",
+                     tenant_id=tenant.id, resource=body.object_id,
+                     detail={"location": label, "bytes": size_bytes})
+        return {"status": "client-encrypted", "location": label, "async": False,
+                "size_bytes": size_bytes, "encrypted": True,
+                "content_b64": base64.b64encode(plaintext_bytes).decode(),
+                "filename": title + ".enc",
                 "message": f"Recovered {size_bytes} bytes from {label} (still client-encrypted — "
                            "the collecting agent has not escrowed a recovery key)."}
-    return {"status": "available", "location": label, "async": False,
-            "size_bytes": size_bytes, "encrypted": False,
-            "content_b64": content_b64,
-            "filename": (doc.title if doc else body.object_id) or body.object_id,
-            "message": f"Recovered {size_bytes} bytes from {label}."}
+
+    # Stage the decrypted item into a time-limited recovery window.
+    from . import recovery
+    item = recovery.create_recovered(
+        db, tenant.id, principal.user_id, object_id=body.object_id,
+        snapshot_id=body.snapshot_id, title=title, doc_type=doc_type,
+        source_type=source_type, location=label, content=plaintext_bytes)
+    audit.record(db, actor=principal.user_id, action="recovery.opened",
+                 tenant_id=tenant.id, resource=body.object_id,
+                 detail={"location": label, "bytes": size_bytes,
+                         "expires_at": item.expires_at.isoformat()})
+    return {
+        "status": "recovered", "async": False, "location": label,
+        "recovered_id": item.id, "title": item.title, "mime": item.mime,
+        "size_bytes": item.size_bytes, "doc_type": item.doc_type,
+        "expires_in_seconds": recovery.get_settings().recovered_ttl_seconds,
+        "message": f"Recovered {size_bytes} bytes from {label} — viewable until it expires.",
+    }

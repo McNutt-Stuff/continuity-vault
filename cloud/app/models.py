@@ -366,6 +366,30 @@ class SyncJob(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class RecoveredItem(Base):
+    """A decrypted item brought out of storage for a time-limited viewing window.
+
+    The plaintext lives in a temporary store and is automatically destroyed at
+    ``expires_at`` (or on manual destroy) — a recovery window, not a copy."""
+
+    __tablename__ = "recovered_items"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    object_id = Column(String, index=True)
+    snapshot_id = Column(String)
+    title = Column(String, default="")
+    doc_type = Column(String, default="")
+    source_type = Column(String, default="")
+    mime = Column(String, default="application/octet-stream")
+    size_bytes = Column(BigInteger, default=0)
+    location = Column(String, default="")
+    requested_by = Column(String, default="")
+    created_at = Column(DateTime, default=_now)
+    expires_at = Column(DateTime, nullable=False)
+    viewed_at = Column(DateTime, nullable=True)
+    destroyed = Column(Boolean, default=False)
+
+
 class AuditEvent(Base):
     """Tamper-evident audit ledger (append-only, hash-chained)."""
 

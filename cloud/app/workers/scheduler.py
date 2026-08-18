@@ -38,12 +38,25 @@ def start_scheduler() -> None:
                 run_due()
             except Exception:  # noqa: BLE001 - never let the thread die
                 logger.exception("scheduled sync cycle failed")
+            try:
+                _purge_recovered()
+            except Exception:  # noqa: BLE001
+                logger.exception("recovery purge failed")
             time.sleep(interval)
 
     _thread = threading.Thread(target=loop, name="cv-sync-scheduler", daemon=True)
     _thread.start()
     logger.info("connector sync scheduler started (every %d min)",
                 settings.sync_interval_minutes)
+
+
+def _purge_recovered() -> None:
+    """Destroy expired recovery windows (temporary decrypted items)."""
+    from ..api.recovery import purge_expired
+    with SessionLocal() as db:
+        n = purge_expired(db)
+        if n:
+            logger.info("purged %d expired recovery window(s)", n)
 
 
 def run_due() -> int:
