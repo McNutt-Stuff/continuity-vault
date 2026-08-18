@@ -74,6 +74,7 @@ sync_code() {
   else
     cp -r "$REPO_SRC/." "$INSTALL_DIR/"
   fi
+  chmod +x "$INSTALL_DIR"/installers/*.sh "$INSTALL_DIR"/updater/*.sh 2>/dev/null || true
 }
 
 setup_database() {

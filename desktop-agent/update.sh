@@ -13,6 +13,7 @@ if [ -d .git ]; then
   git fetch --quiet origin
   git reset --hard --quiet "origin/$(git rev-parse --abbrev-ref HEAD)"
 fi
+chmod +x "$HOME_DIR"/desktop-agent/*.sh "$HOME_DIR"/installers/*.sh "$HOME_DIR"/updater/*.sh 2>/dev/null || true
 "$HOME_DIR/.venv/bin/pip" install -q -r "$HOME_DIR/desktop-agent/requirements.txt"
 
 # Restart the launchd agent so the new code runs.

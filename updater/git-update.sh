@@ -73,14 +73,16 @@ if [[ "$PREV" == "$TARGET" && "${CV_FORCE:-0}" != "1" && "$freshly_cloned" != "1
   exit 0
 fi
 
-if [[ "$PREV" == "$TARGET" && "${CV_FORCE:-0}" != "1" ]]; then
-  echo "==> Already up to date (${PREV:0:12})."
-  exit 0
-fi
-
 echo "==> Updating ${PREV:0:12} -> ${TARGET:0:12}"
 git checkout --quiet "$CV_REPO_BRANCH"
 git reset --hard --quiet "origin/${CV_REPO_BRANCH}"
+
+ensure_executable() {
+  # git only preserves the exec bit if committed with it — make sure the
+  # updater/installer scripts are runnable regardless.
+  chmod +x "$CV_SRC_DIR"/updater/*.sh "$CV_SRC_DIR"/installers/*.sh 2>/dev/null || true
+}
+ensure_executable
 
 run_installer() {
   if [[ "$COMPONENT" == "cloud" ]]; then
@@ -97,6 +99,7 @@ if run_installer; then
 else
   echo "!! Update failed — rolling back to ${PREV:0:12}"
   git reset --hard --quiet "$PREV"
+  ensure_executable
   if run_installer; then
     echo "==> Rolled back to ${PREV:0:12}."
     exit 1

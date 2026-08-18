@@ -36,6 +36,7 @@ if [ -d "$HOME_DIR/.git" ]; then
 else
   git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$HOME_DIR"
 fi
+chmod +x "$HOME_DIR"/desktop-agent/*.sh "$HOME_DIR"/installers/*.sh "$HOME_DIR"/updater/*.sh 2>/dev/null || true
 
 say "Setting up the Python environment"
 [ -d "$HOME_DIR/.venv" ] || python3 -m venv "$HOME_DIR/.venv"
