@@ -213,6 +213,7 @@ class DesktopAgent(Base):
     pending_command = Column(JSON, nullable=True)  # {type, params}
     telemetry = Column(JSON, default=dict)
     identity_bundle = Column(JSON, nullable=True)
+    agent_token_hash = Column(String, nullable=True, index=True)  # sha256 of bearer token
     last_heartbeat_at = Column(DateTime, nullable=True)
     last_collection_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)

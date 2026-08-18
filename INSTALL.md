@@ -190,7 +190,9 @@ post-quantum primitives (X25519+ML-KEM, Ed25519+ML-DSA).
   than silently downgrading. To proceed with the clearly-flagged classical
   fallback (X25519/Ed25519 only — **not** quantum-safe), re-run with
   `CV_ALLOW_CLASSICAL_FALLBACK=1`.
-- Pin a specific library version with `LIBOQS_VERSION=<tag>` (default `0.12.0`).
+- Pin a specific library version with `LIBOQS_VERSION=<tag>` (default `0.16.0`).
+  The native library and the `liboqs-python` binding are installed at the same
+  version so their ABI matches.
 - Do **not** `pip install oqs` — that PyPI package is an unrelated project and
   lacks the liboqs API; the correct binding is `liboqs-python`.
 

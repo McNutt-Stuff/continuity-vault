@@ -37,8 +37,11 @@ DB_PASSWORD="${CV_DB_PASSWORD:-$(_existing_db_pw)}"
 DB_PASSWORD="${DB_PASSWORD:-$(openssl rand -hex 16)}"
 
 # Native liboqs version to build for real post-quantum crypto (ML-KEM / ML-DSA /
-# SLH-DSA). Must be recent enough to expose the standardized names.
-LIBOQS_VERSION="${LIBOQS_VERSION:-0.12.0}"
+# SLH-DSA). MUST match the liboqs-python binding version installed below so the
+# binding loads our system library instead of auto-building its own.
+LIBOQS_VERSION="${LIBOQS_VERSION:-0.16.0}"
+# Where the native liboqs is installed; the binding and the service load from here.
+OQS_PREFIX="/usr/local"
 
 # --- step implementations ---------------------------------------------------
 
@@ -103,10 +106,16 @@ install_python() {
 # True when the real liboqs binding is importable and the required algorithms
 # are available (i.e. genuine post-quantum crypto, not the classical fallback).
 pq_selftest() {
-  "$INSTALL_DIR/.venv/bin/python" - <<'PY' 2>/dev/null
-import oqs
-oqs.KeyEncapsulation("ML-KEM-768")
-oqs.Signature("ML-DSA-65")
+  OQS_INSTALL_PATH="$OQS_PREFIX" "$INSTALL_DIR/.venv/bin/python" - <<'PY'
+import sys
+try:
+    import oqs
+    oqs.KeyEncapsulation("ML-KEM-768")
+    oqs.Signature("ML-DSA-65")
+except BaseException as e:  # SystemExit on load failure, too
+    print("pq_selftest error:", repr(e), file=sys.stderr)
+    sys.exit(1)
+print("pq_selftest OK")
 PY
 }
 
@@ -121,23 +130,25 @@ build_pqcrypto() {
 
   apt-get install -y cmake ninja-build gcc g++ libssl-dev git
 
-  # Build & install the native liboqs shared library if it is not present.
-  if ! ldconfig -p | grep -qi 'liboqs\.so'; then
-    local src="/opt/liboqs-src"
-    rm -rf "$src"
-    git clone --depth 1 --branch "$LIBOQS_VERSION" \
-      https://github.com/open-quantum-safe/liboqs.git "$src"
-    cmake -S "$src" -B "$src/build" -GNinja \
-      -DBUILD_SHARED_LIBS=ON -DOQS_BUILD_ONLY_LIB=ON \
-      -DCMAKE_INSTALL_PREFIX=/usr/local
-    cmake --build "$src/build" --parallel
-    cmake --install "$src/build"
-    ldconfig
-  fi
+  # (Re)build & install the native liboqs at the pinned version. We only get
+  # here when the self-test failed, so always install to guarantee the native
+  # library matches the liboqs-python binding ABI (a stale mismatched lib is the
+  # usual cause of failure). cmake --install overwrites in place.
+  local src="/opt/liboqs-src"
+  rm -rf "$src"
+  git clone --depth 1 --branch "$LIBOQS_VERSION" \
+    https://github.com/open-quantum-safe/liboqs.git "$src"
+  cmake -S "$src" -B "$src/build" -GNinja \
+    -DBUILD_SHARED_LIBS=ON -DOQS_BUILD_ONLY_LIB=ON \
+    -DCMAKE_INSTALL_PREFIX="$OQS_PREFIX"
+  cmake --build "$src/build" --parallel
+  cmake --install "$src/build"
+  ldconfig
 
-  # Install the real Open Quantum Safe Python binding (imports as 'oqs'); it
-  # loads the native liboqs.so we just installed via the dynamic loader.
-  "$INSTALL_DIR/.venv/bin/pip" install liboqs-python \
+  # Install the real Open Quantum Safe Python binding (imports as 'oqs') at the
+  # SAME version as the native library so it loads our /usr/local liboqs.
+  "$INSTALL_DIR/.venv/bin/pip" install --force-reinstall --no-deps \
+    "liboqs-python==${LIBOQS_VERSION}" \
     || "$INSTALL_DIR/.venv/bin/pip" install \
          "git+https://github.com/open-quantum-safe/liboqs-python.git@${LIBOQS_VERSION}"
 
@@ -172,6 +183,7 @@ validate_app() {
   CV_KEY_STORE=/tmp/cv_probe_keys \
   CV_OBJECT_STORE=/tmp/cv_probe_obj \
   CV_FLEET_SIGNER=/tmp/cv_probe_signer.json \
+  OQS_INSTALL_PATH="$OQS_PREFIX" \
     "$INSTALL_DIR/.venv/bin/python" -c "import app.main; print('app import OK:', len(app.main.app.routes), 'routes')"
   rm -rf /tmp/cv_probe.db /tmp/cv_probe_keys /tmp/cv_probe_obj /tmp/cv_probe_signer.json
 }

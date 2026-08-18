@@ -16,8 +16,18 @@ class Config:
         self.linking_code = os.environ.get("ARKIVE_LINKING_CODE", "")
         # Optional 1Password service account token for unattended collection.
         self.op_service_account_token = os.environ.get("OP_SERVICE_ACCOUNT_TOKEN", "")
-        self.version = os.environ.get("ARKIVE_AGENT_VERSION", "1.0.0")
+        self.version = self._read_version()
         self.home = os.environ.get("ARKIVE_AGENT_HOME", str(Path(__file__).resolve().parents[1]))
+
+    @staticmethod
+    def _read_version() -> str:
+        env = os.environ.get("ARKIVE_AGENT_VERSION")
+        if env:
+            return env
+        try:
+            return (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
+        except Exception:
+            return "1.0.0"
 
     @property
     def registration_file(self) -> Path:
@@ -26,3 +36,7 @@ class Config:
     @property
     def status_file(self) -> Path:
         return self.data_dir / "status.json"
+
+    @property
+    def log_file(self) -> Path:
+        return self.data_dir / "agent.log"

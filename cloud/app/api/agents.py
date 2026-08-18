@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import io
+import hashlib
 import secrets
 import tarfile
 from datetime import datetime, timedelta, timezone
@@ -31,8 +32,13 @@ from ..workers.sync_worker import ingest_objects
 
 settings = get_settings()
 
-# Prototype agent bearer tokens (agent_token -> agent_id).
+# In-memory fast path (agent_token -> agent_id); the durable source of truth is
+# the sha256 hash persisted on the DesktopAgent row, so tokens survive restarts.
 _agent_tokens: dict[str, str] = {}
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _now():
@@ -218,6 +224,12 @@ def bundle():
             p = root / d
             if p.exists():
                 tar.add(str(p), arcname=d, filter=_filter)
+        # Stamp a build version so the agent reports (and visibly changes) its
+        # version after each self-update.
+        version = f"{datetime.now(timezone.utc):%Y%m%d.%H%M%S}".encode()
+        vi = tarfile.TarInfo("desktop-agent/VERSION")
+        vi.size = len(version)
+        tar.addfile(vi, io.BytesIO(version))
     return Response(content=buf.getvalue(), media_type="application/gzip",
                     headers={"Content-Disposition": "attachment; filename=arkive-agent.tar.gz"})
 
@@ -226,12 +238,18 @@ def _auth_agent(authorization: str = Header(default=""),
                 db: Session = Depends(get_db)) -> DesktopAgent:
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing agent token")
-    agent_id = _agent_tokens.get(authorization.split(" ", 1)[1])
-    if not agent_id:
-        raise HTTPException(401, "invalid agent token")
-    a = db.get(DesktopAgent, agent_id)
+    token = authorization.split(" ", 1)[1]
+    agent_id = _agent_tokens.get(token)
+    if agent_id:
+        a = db.get(DesktopAgent, agent_id)
+        if a:
+            return a
+    # Fall back to the durable hash so tokens survive cloud restarts.
+    a = db.query(DesktopAgent).filter(
+        DesktopAgent.agent_token_hash == _hash_token(token)).first()
     if not a:
-        raise HTTPException(404, "agent not found")
+        raise HTTPException(401, "invalid agent token")
+    _agent_tokens[token] = a.id  # repopulate fast path
     return a
 
 
@@ -272,6 +290,8 @@ def activate(body: AgentActivate, db: Session = Depends(get_db)):
     db.refresh(agent)
 
     token = secrets.token_urlsafe(32)
+    agent.agent_token_hash = _hash_token(token)
+    db.commit()
     _agent_tokens[token] = agent.id
     audit.record(db, actor=f"agent:{body.hostname}", action="agent.activated",
                  tenant_id=lc.tenant_id, resource=agent.id)

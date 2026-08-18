@@ -48,17 +48,40 @@ def _env(token: str) -> dict:
     return env
 
 
+def auth_state(token: str = "") -> str:
+    """Report whether op can actually authenticate (surfaced in telemetry)."""
+    if not available():
+        return "absent"
+    env = _env(token)
+    try:
+        subprocess.run([_op_path(), "whoami"], capture_output=True, text=True,
+                       env=env, check=True, timeout=20)
+        return "service-account" if token else "interactive"
+    except Exception:
+        return "unauthenticated"
+
+
 def _op(args: List[str], env: dict) -> str:
     op = _op_path()
     if not op:
         raise RuntimeError("1Password CLI (op) not found")
-    return subprocess.run([op, *args], capture_output=True, text=True,
-                          env=env, check=True, timeout=60).stdout
+    proc = subprocess.run([op, *args], capture_output=True, text=True,
+                          env=env, timeout=60)
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(
+            f"op {' '.join(args)} failed (exit {proc.returncode}): {msg}")
+    return proc.stdout
 
 
 def collect(op_token: str = "") -> List[dict]:
     """Return normalized agent objects for every reachable 1Password item."""
     env = _env(op_token)
+    if auth_state(op_token) == "unauthenticated":
+        raise RuntimeError(
+            "1Password is not authenticated. Provide a service-account token "
+            "(OP_SERVICE_ACCOUNT_TOKEN) for unattended collection, or sign in to "
+            "the 1Password app and enable the CLI integration.")
     items = json.loads(_op(["item", "list", "--format=json"], env))
     objects: List[dict] = []
     for it in items:

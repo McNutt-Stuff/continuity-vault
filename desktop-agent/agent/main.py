@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import getpass
 import json
+import os
 import platform
 import socket
 import subprocess
@@ -28,6 +30,7 @@ import httpx
 
 from .config import Config
 from .collectors import onepassword
+from . import agent_log
 from .crypto import encrypt_content, load_or_create_key, wrap_for_recovery
 
 
@@ -35,9 +38,29 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _local_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return ""
+
+
+def _local_user() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:
+        return os.environ.get("USER", "")
+
+
 class Agent:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
+        self.log = agent_log.setup_logging(cfg.log_file)
         self.reg = self._load_registration()
         self._last_collect = 0.0
         self._agent_key: Optional[bytes] = None
@@ -75,11 +98,11 @@ class Agent:
         self.reg = r.json()
         self.cfg.registration_file.write_text(json.dumps(self.reg))
         self.cfg.registration_file.chmod(0o600)
-        print(f"Activated as agent {self.reg['agent_id']}")
+        self.log.info("Activated as agent %s", self.reg.get("agent_id"))
         try:
             self._escrow_key()
         except Exception as exc:
-            print(f"[escrow] {exc}")
+            self.log.error("escrow failed: %s", exc)
         return self.reg
 
     def _escrow_key(self) -> None:
@@ -98,10 +121,14 @@ class Agent:
     def telemetry(self) -> dict:
         return {
             "hostname": socket.gethostname(),
+            "local_ip": _local_ip(),
+            "local_user": _local_user(),
             "os": platform.platform(),
             "op_available": onepassword.available(),
+            "op_auth": onepassword.auth_state(self.cfg.op_service_account_token),
             "version": self.cfg.version,
             "last_collection_at": (self.reg or {}).get("last_collection_at"),
+            "recent_logs": agent_log.tail(self.cfg.log_file, 50),
             "reported_at": _now_iso(),
         }
 
@@ -130,7 +157,7 @@ class Agent:
 
     def _handle_command(self, command: dict) -> None:
         ctype = command.get("type")
-        print(f"[command] {ctype}")
+        self.log.info("command received: %s", ctype)
         ok, detail = True, {}
         try:
             if ctype == "collect":
@@ -163,9 +190,15 @@ class Agent:
             if name != "onepassword":
                 continue
             if not onepassword.available():
+                self.log.warning("collector %s: op CLI not installed", name)
                 results.append({"collector": name, "error": "op CLI not installed"})
                 continue
-            objects = onepassword.collect(self.cfg.op_service_account_token)
+            try:
+                objects = onepassword.collect(self.cfg.op_service_account_token)
+            except Exception as exc:
+                self.log.error("collector %s failed: %s", name, exc)
+                results.append({"collector": name, "error": str(exc)})
+                continue
             if not objects:
                 results.append({"collector": name, "objects": 0})
                 continue
@@ -190,7 +223,7 @@ class Agent:
             results.append({"collector": name, "objects": len(objects)})
         self._last_collect = time.time()
         self._write_status({"last_collect": _now_iso(), "results": results})
-        print(f"Pushed {total} objects")
+        self.log.info("pushed %d objects", total)
         return {"objects": total, "results": results}
 
     # -- self update --------------------------------------------------
@@ -200,9 +233,12 @@ class Agent:
         if not script.exists():
             script = Path(self.cfg.home) / "update.sh"
         if script.exists():
-            subprocess.Popen(["bash", str(script)])
+            self.log.info("self-update: launching %s", script)
+            # Detach into its own session so restarting this agent (which the
+            # updater does) doesn't kill the update mid-flight.
+            subprocess.Popen(["bash", str(script)], start_new_session=True)
         else:
-            print("no update script found")
+            self.log.warning("no update script found")
 
     # -- run loop -----------------------------------------------------
 
@@ -211,7 +247,7 @@ class Agent:
             if self.cfg.linking_code:
                 self.activate(self.cfg.linking_code)
             else:
-                print("Not registered. Run: arkive-agent link <CODE>")
+                self.log.warning("Not registered. Run: arkive-agent link <CODE>")
                 return
         interval = self.reg.get("heartbeat_interval_seconds", 30)
         while True:
@@ -221,7 +257,7 @@ class Agent:
                 if time.time() - self._last_collect >= schedule_min * 60:
                     self.collect_and_push()
             except Exception as exc:
-                print(f"[loop] error: {exc}")
+                self.log.error("loop error: %s", exc)
                 self._write_status({"error": str(exc)})
             time.sleep(interval)
 

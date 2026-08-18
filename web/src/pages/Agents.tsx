@@ -108,18 +108,34 @@ export default function Agents() {
               </div>
               {a.telemetry?.op_available === false
                 ? <Pill tone="warn">op CLI missing</Pill>
+                : a.telemetry?.op_auth === "unauthenticated"
+                ? <Pill tone="warn">1Password not signed in</Pill>
                 : <Pill tone="ok">healthy</Pill>}
             </div>
             <div className="grid grid-3" style={{ marginTop: 12 }}>
               <Info label="Heartbeat" value={timeAgo(a.last_heartbeat_at)} />
               <Info label="Last collection" value={timeAgo(a.last_collection_at)} />
               <Info label="Collectors" value={(a.collectors || []).join(", ") || "—"} />
+              <Info label="Local IP" value={a.telemetry?.local_ip || "—"} />
+              <Info label="Local user" value={a.telemetry?.local_user || "—"} />
+              <Info label="1Password" value={a.telemetry?.op_auth || "—"} />
             </div>
             <div className="row" style={{ marginTop: 12, gap: 8, flexWrap: "wrap" }}>
               <button className="btn sm primary" onClick={() => command(a, "collect")}>Collect now</button>
               <button className="btn sm" onClick={() => command(a, "update")}>Update</button>
               <button className="btn sm" onClick={() => command(a, "reconfigure")}>Reconfigure</button>
             </div>
+            {Array.isArray(a.telemetry?.recent_logs) && a.telemetry.recent_logs.length > 0 && (
+              <details style={{ marginTop: 12 }}>
+                <summary className="faint" style={{ cursor: "pointer", fontSize: 12 }}>
+                  Recent logs ({a.telemetry.recent_logs.length})
+                </summary>
+                <pre className="mono" style={{ fontSize: 11, maxHeight: 220, overflow: "auto",
+                     background: "rgba(0,0,0,0.25)", padding: 10, borderRadius: 8, marginTop: 8 }}>
+                  {a.telemetry.recent_logs.join("\n")}
+                </pre>
+              </details>
+            )}
           </div>
         ))}
         {agents.length === 0 && <Card><div className="muted">No desktop agents linked yet.</div></Card>}

@@ -81,6 +81,7 @@ cat > "$PLIST" <<PLIST_EOF
   <key>EnvironmentVariables</key>
   <dict>
     <key>PYTHONPATH</key><string>${HOME_DIR}/desktop-agent</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
     <key>ARKIVE_CLOUD_URL</key><string>${CLOUD_URL}</string>
     <key>ARKIVE_AGENT_HOME</key><string>${HOME_DIR}</string>
     <key>ARKIVE_AGENT_DIR</key><string>${DATA_DIR}</string>
@@ -90,8 +91,8 @@ cat > "$PLIST" <<PLIST_EOF
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${DATA_DIR}/agent.log</string>
-  <key>StandardErrorPath</key><string>${DATA_DIR}/agent.err</string>
+  <key>StandardOutPath</key><string>${DATA_DIR}/launchd.out.log</string>
+  <key>StandardErrorPath</key><string>${DATA_DIR}/launchd.err.log</string>
 </dict>
 </plist>
 PLIST_EOF

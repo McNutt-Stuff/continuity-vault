@@ -8,6 +8,9 @@ Type=simple
 User=cvault
 Group=cvault
 EnvironmentFile=/etc/continuity-vault.env
+# Load the system liboqs (built to /usr/local) so the process never tries to
+# auto-build post-quantum libs at runtime under the sandbox.
+Environment=OQS_INSTALL_PATH=/usr/local
 WorkingDirectory=/opt/continuity-vault/cloud
 # Single worker: the all-in-one node initializes the schema and seeds on
 # startup, which must not race across workers. Scale out behind a shared,
