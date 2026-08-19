@@ -306,6 +306,30 @@ class SearchDocument(Base):
     search_blob = Column(Text, default="")
     size_bytes = Column(BigInteger, default=0)
     modified_at = Column(DateTime, nullable=True)
+    # Content-addressed versioning: sha256 of the object's plaintext content and
+    # which version this index row represents.
+    content_hash = Column(String, index=True)
+    version = Column(Integer, default=1)
+    created_at = Column(DateTime, default=_now)
+
+
+class ObjectVersion(Base):
+    """One immutable version of a logical object (identified by source_type +
+    object_id) across all snapshots. A new version is recorded only when the
+    content hash changes; identical re-collections are de-duplicated. This gives
+    every source a tamper-evident history of changes, deletions, and reversions."""
+
+    __tablename__ = "object_versions"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    source_type = Column(String, index=True)
+    object_id = Column(String, index=True)
+    collection_id = Column(String, index=True)
+    version = Column(Integer, default=1)
+    content_hash = Column(String, index=True)  # sha256 of plaintext content
+    snapshot_id = Column(String, index=True)   # snapshot holding this version's bytes
+    size_bytes = Column(BigInteger, default=0)
+    is_current = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime, default=_now)
 
 

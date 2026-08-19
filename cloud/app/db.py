@@ -91,6 +91,8 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE collections ADD COLUMN last_backup_run_at TIMESTAMP",
         "ALTER TABLE collections ADD COLUMN config JSON",
         "ALTER TABLE desktop_agents ADD COLUMN last_scan JSON",
+        "ALTER TABLE search_documents ADD COLUMN content_hash VARCHAR",
+        "ALTER TABLE search_documents ADD COLUMN version INTEGER DEFAULT 1",
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",
         "ALTER TABLE audit_events ADD COLUMN category VARCHAR DEFAULT 'activity'",
         "ALTER TABLE connector_accounts ADD COLUMN sync_cursor JSON",

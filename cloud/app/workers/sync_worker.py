@@ -17,6 +17,7 @@ handles metadata previews permitted by the vault's key-ownership mode
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
@@ -38,6 +39,7 @@ from ..models import (
     ApplianceStorage,
     Collection,
     ConnectorAccount,
+    ObjectVersion,
     SearchDocument,
     SnapshotReceipt,
     Vault,
@@ -249,18 +251,55 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
 
     storage_units: list = []  # envelopes to persist (single, or chunks + index)
     index_rows: List[SearchDocument] = []
+    new_versions: List[ObjectVersion] = []
     total_bytes = 0
 
     src_list = list(source_objects)
-    n_total = len(src_list)
+    # Content-addressed versioning: look up the current version of each object so
+    # identical re-collections are de-duplicated and only real changes create a
+    # new version. This is pipeline-standard for every source.
+    oids = list({s.object_id for s in src_list})
+    current_versions: dict = {}
+    if oids:
+        for ov in (db.query(ObjectVersion)
+                   .filter(ObjectVersion.tenant_id == collection.tenant_id,
+                           ObjectVersion.source_type == collection.source_type,
+                           ObjectVersion.object_id.in_(oids),
+                           ObjectVersion.is_current.is_(True)).all()):
+            current_versions[ov.object_id] = ov
+
+    stored = 0
+    deduped = 0
     for idx, src in enumerate(src_list):
+        # Prefer a client-supplied plaintext hash (agents encrypt with a fresh
+        # nonce each run, so the ciphertext hash is never stable); otherwise hash
+        # the content directly (connector plaintext is stable).
+        content_hash = src.content_hash or hashlib.sha256(src.content or b"").hexdigest()
+        prev = current_versions.get(src.object_id)
+        if progress and (idx % 25 == 0):
+            progress(idx, len(src_list), f"Processing {idx}/{len(src_list)}…")
+        # Unchanged since the last version → de-duplicate (don't re-store or
+        # re-index). The existing version and its bytes stand.
+        if prev is not None and prev.content_hash == content_hash:
+            deduped += 1
+            continue
+
+        # New object, or content changed → record a new immutable version.
+        version = (prev.version + 1) if prev is not None else 1
+        if prev is not None:
+            prev.is_current = False
+        new_versions.append(ObjectVersion(
+            tenant_id=collection.tenant_id, source_type=collection.source_type,
+            object_id=src.object_id, collection_id=collection.id, version=version,
+            content_hash=content_hash, snapshot_id=snapshot_id,
+            size_bytes=len(src.content or b""), is_current=True,
+        ))
         # Large content is split into encrypted chunks at rest; small content is a
         # single envelope. Either way the item stays one logical object in search.
         storage_units.extend(
             _encrypt_content_units(snapshot_key, src.content, src.object_id, chunk_size))
         total_bytes += len(src.content)
-        if progress and (idx % 25 == 0):
-            progress(idx, n_total, f"Encrypting {idx}/{n_total}…")
+        stored += 1
         # Index only discrete, connector-declared metadata — no body/content. The
         # preview is a composed "Field: value" summary of that metadata (empty for
         # zero-knowledge vaults, which index the title only).
@@ -294,8 +333,21 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                 search_blob=search_blob,
                 size_bytes=src.size_bytes,
                 modified_at=src.modified_at,
+                content_hash=content_hash,
+                version=version,
             )
         )
+
+    n_total = stored
+    # Nothing changed since the last run — no new recovery point to create.
+    if not storage_units:
+        logger.info("ingest snapshot skipped: %d object(s) unchanged (deduped) for collection %s",
+                    deduped, collection.id)
+        prior = (db.query(SnapshotReceipt)
+                 .filter(SnapshotReceipt.collection_id == collection.id)
+                 .order_by(SnapshotReceipt.created_at.desc()).first())
+        db.commit()  # persist any is_current flips (none here) — safe no-op
+        return prior
 
     # Signed snapshot manifest (hybrid ML-DSA + Ed25519).
     manifest = build_snapshot_manifest(
@@ -387,6 +439,8 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         raise RuntimeError("backup failed for all destinations: "
                            + "; ".join(f"{k}: {v}" for k, v in errors.items()))
 
+    for ov in new_versions:
+        db.add(ov)
     for row in index_rows:
         db.add(row)
     db.commit()
@@ -394,7 +448,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     audit.record(
         db, actor=actor, action="backup.completed",
         tenant_id=collection.tenant_id, resource=collection.id,
-        detail={"snapshotId": snapshot_id, "objects": len(encrypted_objects),
+        detail={"snapshotId": snapshot_id, "objects": n_total, "deduped": deduped,
                 "bytes": total_bytes, "destinations": succeeded,
                 "failed": errors or None},
     )

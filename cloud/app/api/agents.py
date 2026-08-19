@@ -473,6 +473,7 @@ class AgentObject(BaseModel):
     labels: list[str] = []
     size_bytes: int = 0
     client_encrypted: bool = False
+    content_hash: str | None = None  # sha256 of plaintext (for versioning/dedup)
 
 
 class AgentIngest(BaseModel):
@@ -531,7 +532,8 @@ def ingest(body: AgentIngest, agent: DesktopAgent = Depends(_auth_agent),
         SourceObject(object_id=o.object_id, doc_type=o.kind, title=o.title,
                      content=base64.b64decode(o.content_b64), preview=o.preview,
                      meta={**o.meta, "client_encrypted": o.client_encrypted},
-                     labels=o.labels, size_bytes=o.size_bytes)
+                     labels=o.labels, size_bytes=o.size_bytes,
+                     content_hash=o.content_hash)
         for o in body.objects
     ]
     # The operator-created source→vault mapping drives routing; changing it in the

@@ -25,6 +25,7 @@ from ..models import (
     Collection,
     ConnectorAccount,
     DesktopAgent,
+    ObjectVersion,
     SearchDocument,
     SnapshotReceipt,
     Tenant,
@@ -283,6 +284,25 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
 
     store_labels = _store_label_map(db, tenant.id)
 
+    # Version history per object (content-addressed versioning): identical
+    # re-collections dedupe; real changes accrue versions so tampering, edits, or
+    # deletions in the source stay recoverable.
+    result_oids = list({r.object_id for r in rows})
+    versions_by_oid: dict[tuple, list] = {}
+    if result_oids:
+        for ov in (db.query(ObjectVersion)
+                   .filter(ObjectVersion.tenant_id == tenant.id,
+                           ObjectVersion.object_id.in_(result_oids)).all()):
+            versions_by_oid.setdefault((ov.source_type, ov.object_id), []).append(ov)
+
+    def _versions_for(r: SearchDocument) -> list:
+        ovs = sorted(versions_by_oid.get((r.source_type, r.object_id), []),
+                     key=lambda v: v.version, reverse=True)
+        return [{"version": v.version, "snapshot_id": v.snapshot_id,
+                 "size_bytes": v.size_bytes,
+                 "created_at": v.created_at.isoformat() if v.created_at else None,
+                 "is_current": bool(v.is_current)} for v in ovs]
+
     def _locations_for(r: SearchDocument) -> list:
         out: dict[str, dict] = {}
         for snap in object_snapshots.get((r.source_type, r.object_id), set()):
@@ -317,6 +337,8 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         "first_ingested_at": (first_ingested.get((r.source_type, r.object_id)).isoformat()
                               if first_ingested.get((r.source_type, r.object_id)) else None),
         "locations": _locations_for(r),
+        "versions": _versions_for(r),
+        "version_count": len(versions_by_oid.get((r.source_type, r.object_id), [])),
     } for r in rows]
 
     return {

@@ -43,6 +43,10 @@ class SourceObject:
     modified_at: Optional[datetime] = None
     labels: List[str] = field(default_factory=list)  # tags / folders for faceting
     category: str = ""  # canonical top-level category; derived from kind if unset
+    # Stable content hash of the *plaintext* — set by client-encrypting agents so
+    # versioning/dedup works on the original bytes, not the (nonce-randomised)
+    # ciphertext. Falls back to hashing ``content`` when unset.
+    content_hash: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.size_bytes:

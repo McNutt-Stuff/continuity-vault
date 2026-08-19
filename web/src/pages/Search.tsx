@@ -60,6 +60,8 @@ interface Result {
   modified_at: string | null;
   first_ingested_at: string | null;
   locations?: { destination: string; label: string; recoverable: boolean }[];
+  versions?: { version: number; snapshot_id: string; size_bytes: number; created_at: string | null; is_current: boolean }[];
+  version_count?: number;
 }
 interface SearchResp {
   count: number;
@@ -292,6 +294,7 @@ export default function Search() {
   const [recovered, setRecovered] = useState<Recovered[]>([]);
   const [viewing, setViewing] = useState<Viewing | null>(null);
   const [retrieving, setRetrieving] = useState<Retrieving | null>(null);
+  const [versionsFor, setVersionsFor] = useState<Result | null>(null);
   const pollRef = useRef(0);
 
   async function loadRecovered() {
@@ -304,10 +307,10 @@ export default function Search() {
     return () => clearInterval(t);
   }, []);
 
-  async function retrieve(r: Result, loc: { destination: string; label: string }) {
+  async function retrieve(r: Result, loc: { destination: string; label: string }, snapshotOverride?: string) {
     try {
       const res = await api.post<RetrieveResp>("/search/retrieve", {
-        snapshot_id: r.snapshot_id, object_id: r.object_id, destination: loc.destination,
+        snapshot_id: snapshotOverride || r.snapshot_id, object_id: r.object_id, destination: loc.destination,
       });
       if (res.status === "recovered" && res.recovered_id) {
         setMsg(res.message);
@@ -652,6 +655,12 @@ export default function Search() {
             <div className="stack" style={{ alignItems: "flex-end", gap: 6 }}>
               <div className="row" style={{ gap: 6 }}>
                 {r.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
+                {(r.version_count ?? 0) > 1 && (
+                  <button className="btn sm ghost" style={{ padding: "1px 8px", fontSize: 11 }}
+                          title="View version history" onClick={() => setVersionsFor(r)}>
+                    <Icon name="clock" size={11} /> {r.version_count} versions
+                  </button>
+                )}
                 <Pill tone="info">{CATEGORY_META[r.category]?.label ?? r.category}</Pill>
                 <span className="faint" style={{ fontSize: 11 }}>{r.doc_type}</span>
               </div>
@@ -791,6 +800,47 @@ export default function Search() {
           </div>
         );
       })()}
+
+      {versionsFor && (
+        <div className="modal-backdrop" onClick={() => setVersionsFor(null)}>
+          <div className="modal-panel" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <div>
+                <h3 style={{ margin: 0 }}>Version history</h3>
+                <div className="faint" style={{ fontSize: 12 }}>{versionsFor.title}</div>
+              </div>
+              <button className="btn ghost sm" onClick={() => setVersionsFor(null)}><Icon name="logout" size={14} /></button>
+            </div>
+            <div className="modal-body">
+              <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>
+                Each change is kept as an immutable version — recover any point in time.
+              </div>
+              {(versionsFor.versions || []).map((v) => (
+                <div key={v.version} className="result-row" style={{ padding: "8px 0" }}>
+                  <div className="result-icon" style={{ width: 30, height: 30, background: "#0e1524" }}>
+                    <Icon name="clock" size={14} />
+                  </div>
+                  <div className="flex1">
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>
+                      v{v.version}{v.is_current ? <span className="faint" style={{ fontWeight: 400 }}> · current</span> : ""}
+                    </div>
+                    <div className="faint" style={{ fontSize: 11.5 }} title={fmtAbsolute(v.created_at)}>
+                      {bytes(v.size_bytes)} · {timeAgo(v.created_at)}
+                    </div>
+                  </div>
+                  <button className="btn sm primary" onClick={() => { const r = versionsFor; setVersionsFor(null); void retrieve(r, bestLocation(r), v.snapshot_id); }}>
+                    <Icon name="restore" size={13} /> Recover
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="modal-foot">
+              <div style={{ flex: 1 }} />
+              <button className="btn ghost sm" onClick={() => setVersionsFor(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {msg && <div className="toast"><Icon name="check" size={15} /> {msg}</div>}
     </>

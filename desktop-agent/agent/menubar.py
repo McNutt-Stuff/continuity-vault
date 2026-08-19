@@ -31,7 +31,7 @@ def _agent_loop(agent: Agent, on_status) -> None:
                 agent.heartbeat()
                 sched = agent.reg.get("config", {}).get("schedule_minutes", 360)
                 if time.time() - agent._last_collect >= sched * 60:
-                    agent.collect_and_push()
+                    agent._enqueue_collect(None)  # runs on the background worker
                 on_status(f"Connected · {agent.reg.get('hostname', '')}")
             else:
                 on_status("Not linked — enter a code")
@@ -77,8 +77,8 @@ def run() -> None:
 
         def sync(self, _):
             try:
-                r = agent.collect_and_push()
-                rumps.notification("Arkive", "Sync complete", f"{r.get('objects', 0)} items")
+                agent._enqueue_collect(None)
+                rumps.notification("Arkive", "Sync started", "Collecting in the background…")
             except Exception as exc:
                 rumps.notification("Arkive", "Sync failed", str(exc))
 

@@ -15,9 +15,11 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import hashlib
 import json
 import os
 import platform
+import queue
 import socket
 import subprocess
 import sys
@@ -76,6 +78,12 @@ class Agent:
         self._fs_index_file = Path(cfg.data_dir) / "fs_index.json"
         self._rebuild_event = threading.Event()
         self._indexer_started = False
+        # Collections run on a background worker so heartbeats keep flowing while
+        # a (potentially long) collection is in progress.
+        self._job_queue: "queue.Queue[dict]" = queue.Queue()
+        self._worker_started = False
+        self._queued_sources: set = set()
+        self._queued_lock = threading.Lock()
 
     @property
     def agent_key(self) -> bytes:
@@ -187,9 +195,10 @@ class Agent:
     # -- heartbeat + commands -----------------------------------------
 
     def heartbeat(self) -> dict:
-        # Ensure the background folder indexer is running regardless of entry
-        # point (headless run loop or the menu-bar app, which both call this).
+        # Ensure the background workers are running regardless of entry point
+        # (headless run loop or the menu-bar app, which both call this).
         self._start_indexer()
+        self._start_worker()
         tel = self.telemetry()
         self._last_telemetry = tel
         body = {"state": "active", "version": self.cfg.version, "telemetry": tel}
@@ -224,16 +233,18 @@ class Agent:
         ctype = command.get("type")
         params = command.get("params") or {}
         self.log.info("command received: %s", ctype)
+        # Long-running work is dispatched to the background worker so the
+        # heartbeat/command channel never blocks (no deadlock during collection).
+        if ctype == "collect":
+            self._enqueue_collect(params)
+            self._post_command_result("collect", True, {"queued": True})
+            return
+        if ctype == "scan_fs":
+            self._report_fs_scan(params)
+            return
         ok, detail = True, {}
         try:
-            if ctype == "collect":
-                detail = self.collect_and_push(params)
-            elif ctype == "scan_fs":
-                # Report the filesystem tree for a path so the operator can pick
-                # folders in the portal. Reported on a dedicated endpoint.
-                self._report_fs_scan(params)
-                return
-            elif ctype == "update":
+            if ctype == "update":
                 self.self_update()
                 detail = {"updating": True}
             elif ctype == "reconfigure":
@@ -242,6 +253,9 @@ class Agent:
                 detail = {"quarantined": True}
         except Exception as exc:
             ok, detail = False, {"error": str(exc)}
+        self._post_command_result(ctype, ok, detail)
+
+    def _post_command_result(self, ctype: str, ok: bool, detail: dict) -> None:
         try:
             httpx.post(f"{self.cfg.cloud_base_url}/agent/command-result",
                        json={"type": ctype, "ok": ok, "detail": detail},
@@ -321,6 +335,43 @@ class Agent:
             self._rebuild_event.wait(timeout=max(60, interval))
             self._rebuild_event.clear()
 
+    # -- background collection worker ---------------------------------
+
+    def _start_worker(self) -> None:
+        if self._worker_started:
+            return
+        self._worker_started = True
+        self.log.info("starting background collection worker")
+        threading.Thread(target=self._worker_loop, name="collector", daemon=True).start()
+
+    def _enqueue_collect(self, params: Optional[dict]) -> bool:
+        """Queue a collection to run on the worker. De-duplicates by source so a
+        backlog of identical requests doesn't pile up. Returns True if queued."""
+        params = params or {}
+        source = params.get("source_type") or "default"
+        with self._queued_lock:
+            if source in self._queued_sources:
+                self.log.info("collect for %s already queued/running — skipping", source)
+                return False
+            self._queued_sources.add(source)
+        self._job_queue.put(params)
+        return True
+
+    def _worker_loop(self) -> None:
+        while True:
+            params = self._job_queue.get()
+            source = params.get("source_type") or "default"
+            try:
+                detail = self.collect_and_push(params)
+                self._post_command_result("collect", True, detail)
+            except Exception as exc:
+                self.log.error("collection failed: %s", exc)
+                self._post_command_result("collect", False, {"error": str(exc)})
+            finally:
+                with self._queued_lock:
+                    self._queued_sources.discard(source)
+                self._job_queue.task_done()
+
     # -- collection + push --------------------------------------------
 
     def collect_and_push(self, params: Optional[dict] = None) -> dict:
@@ -341,6 +392,9 @@ class Agent:
         batch_bytes = 0
         for o in objects:
             plaintext = base64.b64decode(o["content_b64"])
+            # Stable plaintext hash so the cloud can version/dedupe correctly even
+            # though each envelope is encrypted with a fresh nonce.
+            o["content_hash"] = hashlib.sha256(plaintext).hexdigest()
             envelope = encrypt_content(self.agent_key, plaintext, o["object_id"])
             o["content_b64"] = base64.b64encode(envelope).decode()
             o["client_encrypted"] = True
@@ -441,13 +495,14 @@ class Agent:
                 self.log.warning("Not registered. Run: arkive-agent link <CODE>")
                 return
         self._start_indexer()  # background folder-index builder
+        self._start_worker()   # background collection worker
         interval = self.reg.get("heartbeat_interval_seconds", 30)
         while True:
             try:
                 self.heartbeat()
                 schedule_min = self.reg.get("config", {}).get("schedule_minutes", 360)
                 if time.time() - self._last_collect >= schedule_min * 60:
-                    self.collect_and_push()
+                    self._enqueue_collect(None)  # non-blocking; runs on the worker
             except Exception as exc:
                 self.log.error("loop error: %s", exc)
                 self._write_status({"error": str(exc)})
