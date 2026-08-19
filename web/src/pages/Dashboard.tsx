@@ -1,32 +1,48 @@
-import { useEffect, useState } from "react";
+import { ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
-import { Card, Pill, Stat, bytes, timeAgo } from "../components/ui";
+import { Card, Pill, bytes } from "../components/ui";
 import { Icon } from "../components/Icon";
 
-interface Snapshot { id: string; snapshot_id: string; destination: string; object_count: number; total_bytes: number; recoverable: boolean; created_at: string; }
-interface Appliance { id: string; name: string; model: string; state: string; isolation_state: string; attestation_ok: boolean; last_heartbeat_at: string | null; telemetry: any; }
-interface Account { id: string; connector_type: string; account_label: string; last_sync_at: string | null; }
-interface Tenant { name: string; plan: string; key_ownership_model: string; vaults: any[]; }
+interface SourceType { type: string; displayName: string; icon: string; color: string; count: number; }
+interface ObjectBucket { key: string; label: string; icon: string; color: string; count: number; }
+interface StorageDest { id: string; label: string; kind: string; icon: string; }
+interface Overview {
+  sources: { count: number; types: SourceType[] };
+  objects: { total: number; breakdown: ObjectBucket[] };
+  data: { protected_bytes: number; licensed_bytes: number; percent: number | null };
+  storage: { vault_count: number; destinations: StorageDest[] };
+  retention: { cloud_days: number; appliance_days: number; immutability_days: number; rpo_minutes: number };
+  protection: { key_ownership_model: string; encrypted: boolean };
+}
+interface Tenant { name: string; plan: string; key_ownership_model: string; }
+
+function fmtDuration(days: number): string {
+  if (days >= 365) { const y = days / 365; return `${Number.isInteger(y) ? y : y.toFixed(1)} yr`; }
+  if (days >= 30) return `${Math.round(days / 30)} mo`;
+  return `${days} d`;
+}
+function fmtRpo(min: number): string {
+  if (min >= 1440) return `${Math.round(min / 1440)}d`;
+  if (min >= 60) return `${Math.round(min / 60)}h`;
+  return `${min}m`;
+}
+const ICONS = ["mail", "key", "cloud", "file", "database", "image", "activity", "user", "server", "shield", "lock", "clock", "grid", "link"];
+const iconName = (n: string) => (ICONS.includes(n) ? n : "database") as never;
 
 export default function Dashboard() {
   const nav = useNavigate();
-  const [snaps, setSnaps] = useState<Snapshot[]>([]);
-  const [apps, setApps] = useState<Appliance[]>([]);
-  const [accts, setAccts] = useState<Account[]>([]);
+  const [ov, setOv] = useState<Overview | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
-  const [health, setHealth] = useState<any>(null);
+  const [health, setHealth] = useState<{ pq_available?: boolean } | null>(null);
 
   useEffect(() => {
-    api.get<Snapshot[]>("/snapshots").then(setSnaps).catch(() => {});
-    api.get<Appliance[]>("/appliances").then(setApps).catch(() => {});
-    api.get<Account[]>("/connectors/accounts").then(setAccts).catch(() => {});
+    api.get<Overview>("/overview").then(setOv).catch(() => {});
     api.get<Tenant>("/tenant").then(setTenant).catch(() => {});
-    api.get<any>("/health").then(setHealth).catch(() => {});
+    api.get<{ pq_available?: boolean }>("/health").then(setHealth).catch(() => {});
   }, []);
 
-  const totalBytes = snaps.reduce((s, x) => s + x.total_bytes, 0);
-  const recoverable = snaps.filter((s) => s.recoverable).length;
+  const objTotal = ov?.objects.breakdown.reduce((s, b) => s + b.count, 0) || 0;
 
   return (
     <>
@@ -50,57 +66,154 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* --- Top row: four headline cards --------------------------------- */}
       <div className="grid grid-4">
-        <Stat label="Protected sources" value={accts.length} hint={`${new Set(accts.map(a => a.connector_type)).size} services`} />
-        <Stat label="Recovery points" value={snaps.length} hint={`${recoverable} verified recoverable`} />
-        <Stat label="Protected data" value={bytes(totalBytes)} hint="encrypted at rest" />
-        <Stat label="Appliances" value={apps.length} hint={`${apps.filter(a => a.attestation_ok).length} attested`} />
+        {/* Protected sources + the mix of source types */}
+        <Card style={{ minHeight: 134 }}>
+          <div className="faint" style={{ fontSize: 12 }}>Protected sources</div>
+          <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1.1, marginTop: 2 }}>{ov?.sources.count ?? "—"}</div>
+          <div className="row" style={{ gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+            {(ov?.sources.types || []).map((t) => (
+              <span key={t.type} title={`${t.displayName} · ${t.count}`}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px",
+                             borderRadius: 999, fontSize: 11, background: `${t.color}22`, color: t.color, border: `1px solid ${t.color}44` }}>
+                <Icon name={iconName(t.icon)} size={12} /> {t.count}
+              </span>
+            ))}
+            {ov && ov.sources.types.length === 0 && <span className="faint" style={{ fontSize: 12 }}>No sources yet</span>}
+          </div>
+        </Card>
+
+        {/* Objects protected + type mix */}
+        <Card style={{ minHeight: 134 }}>
+          <div className="faint" style={{ fontSize: 12 }}>Objects protected</div>
+          <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1.1, marginTop: 2 }}>{(ov?.objects.total ?? 0).toLocaleString()}</div>
+          {objTotal > 0 ? (
+            <>
+              <div style={{ display: "flex", height: 8, borderRadius: 999, overflow: "hidden", marginTop: 10, background: "#0e1524" }}>
+                {ov!.objects.breakdown.map((b) => (
+                  <div key={b.key} title={`${b.label}: ${b.count}`} style={{ width: `${(b.count / objTotal) * 100}%`, background: b.color }} />
+                ))}
+              </div>
+              <div className="row" style={{ gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+                {ov!.objects.breakdown.slice(0, 3).map((b) => (
+                  <span key={b.key} className="faint" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 2, background: b.color }} /> {b.label} {b.count}
+                  </span>
+                ))}
+              </div>
+            </>
+          ) : <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>Nothing captured yet</div>}
+        </Card>
+
+        {/* Data protected vs licensed allowance */}
+        <Card style={{ minHeight: 134 }}>
+          <div className="faint" style={{ fontSize: 12 }}>Data protected</div>
+          <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1.1, marginTop: 2 }}>{bytes(ov?.data.protected_bytes ?? 0)}</div>
+          {ov && ov.data.licensed_bytes > 0 ? (
+            <>
+              <div style={{ height: 8, borderRadius: 999, marginTop: 12, background: "#0e1524", overflow: "hidden" }}>
+                <div style={{ width: `${Math.min(100, ov.data.percent ?? 0)}%`, height: "100%",
+                              background: (ov.data.percent ?? 0) > 90 ? "var(--danger-c,#f2545b)" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
+              </div>
+              <div className="faint" style={{ fontSize: 11.5, marginTop: 6 }}>
+                {ov.data.percent}% of {bytes(ov.data.licensed_bytes)} licensed
+              </div>
+            </>
+          ) : <div className="faint" style={{ fontSize: 12, marginTop: 12 }}>Encrypted at rest · unlimited plan</div>}
+        </Card>
+
+        {/* Vaults + storage destinations */}
+        <Card style={{ minHeight: 134 }}>
+          <div className="faint" style={{ fontSize: 12 }}>Vaults & storage</div>
+          <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1.1, marginTop: 2 }}>
+            {ov?.storage.vault_count ?? "—"} <span style={{ fontSize: 15, fontWeight: 500 }} className="faint">Vault{ov && ov.storage.vault_count === 1 ? "" : "s"}</span>
+          </div>
+          <div className="faint" style={{ fontSize: 11.5, marginTop: 2 }}>
+            {ov?.storage.destinations.length ?? 0} storage destination{ov && ov.storage.destinations.length === 1 ? "" : "s"}
+          </div>
+          <div className="row" style={{ gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+            {(ov?.storage.destinations || []).map((d) => (
+              <span key={d.id} title={d.label}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px", borderRadius: 8,
+                             fontSize: 11, background: "#0e1524", border: "1px solid var(--border-soft)" }}>
+                <Icon name={iconName(d.icon)} size={12} /> {d.label}
+              </span>
+            ))}
+          </div>
+        </Card>
       </div>
 
+      {/* --- Second row: what's protected + protection posture ------------ */}
       <div className="grid grid-2" style={{ marginTop: 16 }}>
         <Card>
           <div className="spread" style={{ marginBottom: 12 }}>
-            <h2>Appliance fleet</h2>
-            <a onClick={() => nav("/appliances")} style={{ cursor: "pointer", fontSize: 13 }}>View all</a>
+            <h2>What's protected</h2>
+            <a onClick={() => nav("/search")} style={{ cursor: "pointer", fontSize: 13 }}>Explore</a>
           </div>
-          {apps.length === 0 && <div className="muted">No appliances linked. Add one from the Appliances page.</div>}
-          {apps.map((a) => (
-            <div key={a.id} className="result-row" onClick={() => nav("/appliances")}>
-              <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
-                <Icon name="server" size={18} />
+          {objTotal === 0 && <div className="muted">Run a backup to start protecting your data.</div>}
+          <div className="stack" style={{ gap: 10 }}>
+            {(ov?.objects.breakdown || []).map((b) => (
+              <div key={b.key} className="row" style={{ gap: 10, alignItems: "center" }}>
+                <div className="result-icon" style={{ width: 30, height: 30, background: `${b.color}22`, color: b.color }}>
+                  <Icon name={iconName(b.icon)} size={15} />
+                </div>
+                <div className="flex1">
+                  <div className="spread" style={{ marginBottom: 4 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>{b.label}</span>
+                    <span className="faint" style={{ fontSize: 12 }}>{b.count.toLocaleString()}</span>
+                  </div>
+                  <div style={{ height: 6, borderRadius: 999, background: "#0e1524", overflow: "hidden" }}>
+                    <div style={{ width: `${(b.count / objTotal) * 100}%`, height: "100%", background: b.color }} />
+                  </div>
+                </div>
               </div>
-              <div className="flex1">
-                <div style={{ fontWeight: 600 }}>{a.name} <span className="faint">· {a.model}</span></div>
-                <div className="faint" style={{ fontSize: 12 }}>Heartbeat {timeAgo(a.last_heartbeat_at)}</div>
-              </div>
-              <ApplianceStatePill state={a.state} isolation={a.isolation_state} ok={a.attestation_ok} />
-            </div>
-          ))}
+            ))}
+          </div>
         </Card>
 
         <Card>
           <div className="spread" style={{ marginBottom: 12 }}>
-            <h2>Recent recovery points</h2>
-            <a onClick={() => nav("/snapshots")} style={{ cursor: "pointer", fontSize: 13 }}>View all</a>
+            <h2>Protection & retention</h2>
+            <a onClick={() => nav("/mappings")} style={{ cursor: "pointer", fontSize: 13 }}>Manage</a>
           </div>
-          {snaps.slice(0, 6).map((s) => (
-            <div key={s.id ?? s.snapshot_id} className="result-row">
-              <div className="result-icon" style={{ background: "#1a2234" }}>
-                <Icon name="clock" size={17} />
+          <div className="grid grid-2" style={{ gap: 12 }}>
+            <Fact icon="cloud" label="Cloud retention" value={ov ? fmtDuration(ov.retention.cloud_days) : "—"} />
+            <Fact icon="server" label="Appliance retention" value={ov ? fmtDuration(ov.retention.appliance_days) : "—"} />
+            <Fact icon="lock" label="Immutability (WORM)" value={ov ? fmtDuration(ov.retention.immutability_days) : "—"} />
+            <Fact icon="clock" label="Recovery point" value={ov ? `every ${fmtRpo(ov.retention.rpo_minutes)}` : "—"} />
+            <Fact icon="shield" label="Encryption" value={health?.pq_available ? "Hybrid post-quantum" : "Hybrid (dev)"} />
+            <Fact icon="key" label="Key ownership" value={ov?.protection.key_ownership_model ?? tenant?.key_ownership_model ?? "—"} />
+          </div>
+          {ov && ov.storage.destinations.length > 0 && (
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
+              <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>Stored across</div>
+              <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+                {ov.storage.destinations.map((d) => (
+                  <span key={d.id} className="row" style={{ gap: 5, fontSize: 12 }}>
+                    <Icon name={iconName(d.icon)} size={13} /> {d.label}
+                  </span>
+                ))}
               </div>
-              <div className="flex1">
-                <div className="mono">{s.snapshot_id.slice(0, 12)}…</div>
-                <div className="faint" style={{ fontSize: 12 }}>
-                  {s.object_count} objects · {bytes(s.total_bytes)} · {s.destination}
-                </div>
-              </div>
-              {s.recoverable ? <Pill tone="ok">Recoverable</Pill> : <Pill tone="warn">Pending seal</Pill>}
             </div>
-          ))}
-          {snaps.length === 0 && <div className="muted">Run a backup to create recovery points.</div>}
+          )}
         </Card>
       </div>
     </>
+  );
+}
+
+function Fact({ icon, label, value }: { icon: string; label: string; value: ReactNode }) {
+  return (
+    <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
+      <div className="result-icon" style={{ width: 28, height: 28, background: "#0e1524" }}>
+        <Icon name={iconName(icon)} size={14} />
+      </div>
+      <div>
+        <div className="faint" style={{ fontSize: 11.5 }}>{label}</div>
+        <div style={{ fontSize: 13.5, fontWeight: 600 }}>{value}</div>
+      </div>
+    </div>
   );
 }
 

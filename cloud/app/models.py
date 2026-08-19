@@ -43,6 +43,7 @@ class Tenant(Base):
     plan = Column(String, default="business")  # consumer | family | business | enterprise
     key_ownership_model = Column(String, default="customer-managed")  # spec 10.x
     storage_prefix = Column(String, nullable=False)  # tenant isolation in S3
+    licensed_bytes = Column(BigInteger, default=0)  # data allowance they pay for (0 = unlimited)
     status = Column(String, default="active")
     created_at = Column(DateTime, default=_now)
 
