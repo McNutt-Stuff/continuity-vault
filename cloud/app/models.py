@@ -16,6 +16,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     JSON,
@@ -44,6 +45,8 @@ class Tenant(Base):
     key_ownership_model = Column(String, default="customer-managed")  # spec 10.x
     storage_prefix = Column(String, nullable=False)  # tenant isolation in S3
     licensed_bytes = Column(BigInteger, default=0)  # data allowance they pay for (0 = unlimited)
+    protection_options = Column(JSON, default=list)  # enabled storage tiers (feature gating)
+    appliance_plan = Column(JSON, default=list)  # desired appliances [{capacity_tb, qty}]
     status = Column(String, default="active")
     created_at = Column(DateTime, default=_now)
 
@@ -473,3 +476,23 @@ class AuditEvent(Base):
     prev_hash = Column(String, default="")
     entry_hash = Column(String, default="")
     created_at = Column(DateTime, default=_now)
+
+
+class PricingConfig(Base):
+    """Platform-wide pricing + data-value model, editable by platform admins and
+    read by the customer Protection Setup / billing page. Single row (id="default")."""
+
+    __tablename__ = "pricing_config"
+    id = Column(String, primary_key=True, default="default")
+    currency = Column(String, default="USD")
+    # Recurring, per TB / month.
+    protection_price_per_tb_month = Column(Float, default=6.0)   # the data-protection subscription
+    cloud_price_per_tb_month = Column(Float, default=10.0)       # Arkive Cloud storage
+    s3_price_per_tb_month = Column(Float, default=23.0)          # AWS S3 Standard estimate
+    azure_price_per_tb_month = Column(Float, default=18.0)       # Azure Blob Hot estimate
+    # One-time appliance device pricing: [{capacity_tb, price, model}].
+    appliance_tiers = Column(JSON, default=list)
+    # Estimated value per protected object, keyed by object bucket.
+    data_value_per_type = Column(JSON, default=dict)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+

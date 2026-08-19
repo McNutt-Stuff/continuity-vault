@@ -22,6 +22,7 @@ import Settings from "./pages/Settings";
 
 const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/", label: "Overview", icon: "grid" },
+  { to: "/onboarding", label: "Protection Setup", icon: "shield" },
   { to: "/search", label: "Unified Search", icon: "search" },
   { to: "/connectors", label: "Sources", icon: "link" },
   { to: "/mappings", label: "Data Map", icon: "database" },
@@ -33,6 +34,10 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/audit", label: "Audit Log", icon: "shield" },
   { to: "/settings", label: "Settings", icon: "gear" },
 ];
+
+// A nav item is hidden when the tenant has chosen storage tiers that don't
+// include the one it depends on (feature gating). Empty = not configured = show all.
+const NAV_REQUIRES: Record<string, string> = { "/appliances": "appliance" };
 
 export default function App() {
   const { me, loading } = useAuth();
@@ -77,6 +82,16 @@ export default function App() {
 
 function Sidebar() {
   const { me } = useAuth();
+  const [options, setOptions] = useState<string[] | null>(null);
+  useEffect(() => {
+    api.get<{ protection_options?: string[] }>("/tenant")
+      .then((t) => setOptions(t.protection_options || [])).catch(() => setOptions([]));
+  }, []);
+  const nav = NAV.filter((n) => {
+    const req = NAV_REQUIRES[n.to];
+    if (!req || !options || options.length === 0) return true;  // unconfigured → show all
+    return options.includes(req);
+  });
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -86,7 +101,7 @@ function Sidebar() {
           <div className="faint" style={{ fontSize: 11 }}>vault.arkive.life</div>
         </div>
       </div>
-      {NAV.map((n) => (
+      {nav.map((n) => (
         <NavLink
           key={n.to}
           to={n.to}

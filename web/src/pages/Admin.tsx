@@ -4,14 +4,14 @@ import { Card, Pill, Stat, timeAgo } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { promptDialog } from "../components/dialog";
 
-type Tab = "overview" | "tenants" | "fleet" | "crypto" | "audit" | "updates";
+type Tab = "overview" | "tenants" | "fleet" | "pricing" | "crypto" | "audit" | "updates";
 
 export default function Admin() {
   const [tab, setTab] = useState<Tab>("overview");
   return (
     <>
       <div className="chips" style={{ marginBottom: 18 }}>
-        {(["overview", "tenants", "fleet", "crypto", "audit", "updates"] as Tab[]).map((t) => (
+        {(["overview", "tenants", "fleet", "pricing", "crypto", "audit", "updates"] as Tab[]).map((t) => (
           <span key={t} className={`chip ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
             {t[0].toUpperCase() + t.slice(1)}
           </span>
@@ -20,6 +20,7 @@ export default function Admin() {
       {tab === "overview" && <Overview />}
       {tab === "tenants" && <Tenants />}
       {tab === "fleet" && <Fleet />}
+      {tab === "pricing" && <Pricing />}
       {tab === "crypto" && <Crypto />}
       {tab === "audit" && <Audit />}
       {tab === "updates" && <Updates />}
@@ -241,5 +242,85 @@ function Updates() {
       </div>
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
+  );
+}
+
+interface PricingCfg {
+  currency: string;
+  protection_price_per_tb_month: number;
+  cloud_price_per_tb_month: number;
+  s3_price_per_tb_month: number;
+  azure_price_per_tb_month: number;
+  appliance_tiers: { capacity_tb: number; price: number; model: string }[];
+  data_value_per_type: Record<string, number>;
+}
+
+function Pricing() {
+  const [p, setP] = useState<PricingCfg | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => { api.get<PricingCfg>("/admin/pricing").then(setP).catch(() => {}); }, []);
+  function set<K extends keyof PricingCfg>(k: K, v: PricingCfg[K]) { setSaved(false); setP((c) => c ? { ...c, [k]: v } : c); }
+  async function save() {
+    if (!p) return;
+    try { const r = await api.put<PricingCfg>("/admin/pricing", p); setP(r); setSaved(true); } catch { /* ignore */ }
+  }
+  if (!p) return <Card><div className="muted">Loading pricing…</div></Card>;
+
+  const num = (v: string) => Number(v) || 0;
+  const valueKeys = ["email", "credential", "document", "photo", "media", "file", "contact"];
+
+  return (
+    <>
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Recurring pricing (per TB · month)</h3>
+        <div className="grid grid-4" style={{ gap: 12 }}>
+          <PriceField label="Data protection" value={p.protection_price_per_tb_month} onChange={(v) => set("protection_price_per_tb_month", num(v))} />
+          <PriceField label="Arkive Cloud storage" value={p.cloud_price_per_tb_month} onChange={(v) => set("cloud_price_per_tb_month", num(v))} />
+          <PriceField label="AWS S3 estimate" value={p.s3_price_per_tb_month} onChange={(v) => set("s3_price_per_tb_month", num(v))} />
+          <PriceField label="Azure estimate" value={p.azure_price_per_tb_month} onChange={(v) => set("azure_price_per_tb_month", num(v))} />
+        </div>
+      </Card>
+
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Appliance hardware (one-time)</h3>
+        <table className="table">
+          <thead><tr><th>Model</th><th>Capacity (TB)</th><th>Price ($)</th></tr></thead>
+          <tbody>
+            {p.appliance_tiers.map((t, i) => (
+              <tr key={i}>
+                <td><input className="input sm" value={t.model} onChange={(e) => { const a = [...p.appliance_tiers]; a[i] = { ...t, model: e.target.value }; set("appliance_tiers", a); }} /></td>
+                <td><input className="input sm" type="number" value={t.capacity_tb} onChange={(e) => { const a = [...p.appliance_tiers]; a[i] = { ...t, capacity_tb: num(e.target.value) }; set("appliance_tiers", a); }} style={{ width: 90 }} /></td>
+                <td><input className="input sm" type="number" value={t.price} onChange={(e) => { const a = [...p.appliance_tiers]; a[i] = { ...t, price: num(e.target.value) }; set("appliance_tiers", a); }} style={{ width: 110 }} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Estimated value per object ($)</h3>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>Drives the customer's data-value / cost-benefit estimate.</div>
+        <div className="grid grid-4" style={{ gap: 12 }}>
+          {valueKeys.map((k) => (
+            <PriceField key={k} label={k[0].toUpperCase() + k.slice(1)} value={p.data_value_per_type[k] ?? 0}
+                        onChange={(v) => set("data_value_per_type", { ...p.data_value_per_type, [k]: num(v) })} />
+          ))}
+        </div>
+      </Card>
+
+      <div className="row">
+        <button className="btn primary" onClick={save}>{saved ? "Saved ✓" : "Save pricing"}</button>
+      </div>
+    </>
+  );
+}
+
+function PriceField({ label, value, onChange }: { label: string; value: number; onChange: (v: string) => void }) {
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <label className="faint" style={{ fontSize: 12 }}>{label}</label>
+      <input className="input sm" type="number" step="0.01" value={value} onChange={(e) => onChange(e.target.value)} />
+    </div>
   );
 }

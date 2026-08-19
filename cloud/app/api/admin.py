@@ -22,15 +22,43 @@ from ..models import (
     Appliance,
     AuditEvent,
     ConnectorAccount,
+    PricingConfig,
     SnapshotReceipt,
     SoftwareRelease,
     Tenant,
     UpdateJob,
     User,
 )
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/admin", tags=["admin"],
                    dependencies=[Depends(security.require_platform_admin)])
+
+
+@router.get("/pricing")
+def get_pricing(db: Session = Depends(get_db)):
+    from .billing import get_pricing as _get, pricing_public
+    return pricing_public(_get(db))
+
+
+class PricingUpdate(BaseModel):
+    currency: str | None = None
+    protection_price_per_tb_month: float | None = None
+    cloud_price_per_tb_month: float | None = None
+    s3_price_per_tb_month: float | None = None
+    azure_price_per_tb_month: float | None = None
+    appliance_tiers: list[dict] | None = None
+    data_value_per_type: dict | None = None
+
+
+@router.put("/pricing")
+def update_pricing(body: PricingUpdate, db: Session = Depends(get_db)):
+    from .billing import get_pricing as _get, pricing_public
+    p = _get(db)
+    for k, v in body.dict(exclude_none=True).items():
+        setattr(p, k, v)
+    db.commit()
+    return pricing_public(p)
 
 
 @router.get("/overview")

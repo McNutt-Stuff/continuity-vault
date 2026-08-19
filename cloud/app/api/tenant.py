@@ -77,10 +77,15 @@ def storage_targets(tenant: Tenant = Depends(security.get_tenant),
     (``store:<id>``, e.g. "My Home Appliance · Built-In Storage").
     """
     settings = get_settings()
-    targets: list[dict] = [
-        {"id": "cv-cloud", "label": "Arkive Cloud", "kind": "cloud",
-         "detail": "Managed vendor cloud, multi-region"},
-    ]
+    # Feature gating: only offer the storage tiers the tenant has enabled in
+    # Protection Setup. A tenant that hasn't chosen yet (empty) sees everything.
+    enabled = set(tenant.protection_options or [])
+    def _on(tier: str) -> bool:
+        return not enabled or tier in enabled
+    targets: list[dict] = []
+    if _on("cv-cloud"):
+        targets.append({"id": "cv-cloud", "label": "Arkive Cloud", "kind": "cloud",
+                        "detail": "Managed vendor cloud, multi-region"})
     appliances = {a.id: a for a in db.query(Appliance)
                   .filter(Appliance.tenant_id == tenant.id).all()}
     stores = (db.query(ApplianceStorage)
@@ -88,7 +93,7 @@ def storage_targets(tenant: Tenant = Depends(security.get_tenant),
     for s in sorted(stores, key=lambda s: (appliances.get(s.appliance_id).name
                                            if appliances.get(s.appliance_id) else "", s.name)):
         a = appliances.get(s.appliance_id)
-        if not a:
+        if not a or not _on("appliance"):
             continue
         targets.append({
             "id": f"store:{s.id}", "kind": "appliance",
@@ -98,7 +103,7 @@ def storage_targets(tenant: Tenant = Depends(security.get_tenant),
             "store_name": s.name, "store_kind": s.kind,
             "state": a.state, "online": bool(a.last_heartbeat_at),
         })
-    if settings.aws_access_key_id and settings.s3_bucket:
+    if _on("customer-cloud") and settings.aws_access_key_id and settings.s3_bucket:
         targets.append({
             "id": "customer-s3", "kind": "cloud",
             "label": f"Customer S3 — {settings.s3_bucket}",
@@ -116,6 +121,8 @@ def get_tenant_info(tenant: Tenant = Depends(security.get_tenant),
         "name": tenant.name,
         "plan": tenant.plan,
         "key_ownership_model": tenant.key_ownership_model,
+        "protection_options": tenant.protection_options or [],
+        "licensed_bytes": int(tenant.licensed_bytes or 0),
         "vaults": [{"id": v.id, "name": v.name,
                     "key_ownership_model": v.key_ownership_model,
                     "crypto_profile_id": v.crypto_profile_id} for v in vaults],

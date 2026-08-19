@@ -95,6 +95,8 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE recovered_items ADD COLUMN version INTEGER",
         "ALTER TABLE recovered_items ADD COLUMN version_created_at TIMESTAMP",
         "ALTER TABLE tenants ADD COLUMN licensed_bytes BIGINT DEFAULT 0",
+        "ALTER TABLE tenants ADD COLUMN protection_options JSON",
+        "ALTER TABLE tenants ADD COLUMN appliance_plan JSON",
         "ALTER TABLE search_documents ADD COLUMN content_hash VARCHAR",
         "ALTER TABLE search_documents ADD COLUMN version INTEGER DEFAULT 1",
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",
