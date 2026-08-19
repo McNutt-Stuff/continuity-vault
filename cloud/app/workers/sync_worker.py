@@ -302,6 +302,8 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     manifest_hash = manifest["signature"]["payloadHash"]
 
     dest_kinds = destinations or ["cv-cloud"]
+    logger.info("ingest snapshot=%s collection=%s (%s) source=%s → destinations=%s",
+                snapshot_id, collection.id, collection.name, collection.source_type, dest_kinds)
     tenant_prefix = _tenant_prefix(db, collection.tenant_id)
     last_receipt: Optional[SnapshotReceipt] = None
     succeeded: List[str] = []

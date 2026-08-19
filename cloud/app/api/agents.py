@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import io
 import hashlib
+import logging
 import secrets
 import tarfile
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,7 @@ from ..models import Collection, DesktopAgent, LinkingCode, Tenant, Vault
 from ..workers.sync_worker import ingest_objects
 
 settings = get_settings()
+logger = logging.getLogger("cv.agents")
 
 # In-memory fast path (agent_token -> agent_id); the durable source of truth is
 # the sha256 hash persisted on the DesktopAgent row, so tokens survive restarts.
@@ -443,10 +445,21 @@ def ingest(body: AgentIngest, agent: DesktopAgent = Depends(_auth_agent),
     # The agent NEVER auto-creates a source — that caused duplicate entries. If no
     # source is configured yet, the discovered collector is recorded on the agent
     # and the push is skipped until the operator adds it in the portal.
-    collection = (db.query(Collection)
-                  .filter(Collection.tenant_id == agent.tenant_id,
-                          Collection.agent_id == agent.id,
-                          Collection.source_type == body.source_type).first())
+    matches = (db.query(Collection)
+               .filter(Collection.tenant_id == agent.tenant_id,
+                       Collection.agent_id == agent.id,
+                       Collection.source_type == body.source_type)
+               .order_by(Collection.created_at.desc()).all())
+    if len(matches) > 1:
+        # Duplicate mappings for the same source route non-deterministically —
+        # some pushes could land at a different (e.g. cloud) destination. Use the
+        # most recently created one (the mapping the operator configured last) and
+        # flag it so the operator can remove the stale duplicates.
+        logger.warning("agent %s has %d mappings for source %s (%s) — using %s; "
+                       "remove duplicates in the Data Map to avoid split routing",
+                       agent.id, len(matches), body.source_type,
+                       [f"{c.id}:{c.destinations}" for c in matches], matches[0].id)
+    collection = matches[0] if matches else None
     if not collection:
         # Fall back to a legacy agent-collected source (bound before agent_id
         # existed) matched by source type + no connector account, then adopt it.

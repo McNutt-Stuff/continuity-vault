@@ -47,3 +47,12 @@ export function serverDate(iso: string): Date {
   const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(iso);
   return new Date(hasTz ? iso : iso + "Z");
 }
+
+// Absolute local date/time for tooltips — consistent across the app.
+export function fmtAbsolute(iso: string | null): string {
+  if (!iso) return "—";
+  return serverDate(iso).toLocaleString([], {
+    year: "numeric", month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
+}

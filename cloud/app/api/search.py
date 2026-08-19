@@ -163,11 +163,18 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     unique: list[SearchDocument] = []
     seen: set[tuple] = set()
     object_snapshots: dict[tuple, set[str]] = {}
+    # Earliest index time per object = when the entity was first ingested. Rows
+    # arrive newest-first, so the last row seen for a key is the oldest.
+    first_ingested: dict[tuple, object] = {}
     for r in all_docs:
         key = (r.source_type, r.object_id)
         object_snapshots.setdefault(key, set())
         if r.snapshot_id:
             object_snapshots[key].add(r.snapshot_id)
+        if r.created_at is not None:
+            cur = first_ingested.get(key)
+            if cur is None or r.created_at < cur:
+                first_ingested[key] = r.created_at
         if key in seen:
             continue
         seen.add(key)
@@ -254,7 +261,12 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         return str(v) == attr_val
 
     filtered = [r for r in base if _matches_attr(r)]
-    filtered.sort(key=lambda r: r.modified_at or r.created_at, reverse=True)
+    # Order newest-first by when the entity was first ingested (matches what the
+    # UI shows), falling back to modified/created when unknown.
+    filtered.sort(
+        key=lambda r: (first_ingested.get((r.source_type, r.object_id))
+                       or r.modified_at or r.created_at),
+        reverse=True)
     rows = filtered[:limit]
 
     # Map each result's object to every destination it is stored in (across all
@@ -302,6 +314,8 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         "labels": r.labels,
         "size_bytes": r.size_bytes,
         "modified_at": r.modified_at.isoformat() if r.modified_at else None,
+        "first_ingested_at": (first_ingested.get((r.source_type, r.object_id)).isoformat()
+                              if first_ingested.get((r.source_type, r.object_id)) else None),
         "locations": _locations_for(r),
     } for r in rows]
 

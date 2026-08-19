@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError, getToken } from "../api";
 import { useAuth } from "../auth";
-import { Card, Pill, bytes, timeAgo } from "../components/ui";
+import { Card, Pill, bytes, timeAgo, fmtAbsolute } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { notify } from "../components/dialog";
@@ -58,6 +58,7 @@ interface Result {
   labels: string[];
   size_bytes: number;
   modified_at: string | null;
+  first_ingested_at: string | null;
   locations?: { destination: string; label: string; recoverable: boolean }[];
 }
 interface SearchResp {
@@ -653,8 +654,8 @@ export default function Search() {
                 <Pill tone="info">{CATEGORY_META[r.category]?.label ?? r.category}</Pill>
                 <span className="faint" style={{ fontSize: 11 }}>{r.doc_type}</span>
               </div>
-              <div className="faint" style={{ fontSize: 11 }}>
-                {bytes(r.size_bytes)} · {timeAgo(r.modified_at)}
+              <div className="faint" style={{ fontSize: 11 }} title={`First ingested ${fmtAbsolute(r.first_ingested_at)}`}>
+                {bytes(r.size_bytes)} · ingested {timeAgo(r.first_ingested_at)}
               </div>
               <button className="btn sm primary" style={{ padding: "3px 12px" }} onClick={() => recover(r)}>
                 <Icon name="restore" size={13} /> Recover
