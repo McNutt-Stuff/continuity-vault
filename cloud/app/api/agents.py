@@ -182,6 +182,36 @@ def update_config(agent_id: str, body: AgentConfigUpdate,
     return {"ok": True, "config": cfg}
 
 
+class FsScanRequest(BaseModel):
+    path: str = ""  # "" = list roots/drives
+
+
+@fleet_router.post("/{agent_id}/fs-scan")
+def request_fs_scan(agent_id: str, body: FsScanRequest,
+                    principal: security.Principal = Depends(security.get_principal),
+                    tenant: Tenant = Depends(security.get_tenant),
+                    db: Session = Depends(get_db)):
+    """Ask the agent to report the folder tree under ``path`` so the operator can
+    pick folders in the Data Map. The agent answers on its next heartbeat."""
+    a = db.get(DesktopAgent, agent_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "agent not found")
+    request_id = secrets.token_hex(8)
+    a.pending_command = {"type": "scan_fs", "params": {"path": body.path, "request_id": request_id}}
+    db.commit()
+    return {"request_id": request_id, "queued": True,
+            "message": "Scanning — the agent answers on its next heartbeat (~30s)."}
+
+
+@fleet_router.get("/{agent_id}/fs-scan")
+def get_fs_scan(agent_id: str, tenant: Tenant = Depends(security.get_tenant),
+                db: Session = Depends(get_db)):
+    a = db.get(DesktopAgent, agent_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "agent not found")
+    return {"scan": a.last_scan}
+
+
 def _agent_view(a: DesktopAgent) -> dict:
     return {
         "id": a.id, "name": a.name, "platform": a.platform, "hostname": a.hostname,
@@ -400,6 +430,13 @@ def heartbeat(body: AgentHeartbeat, request: Request,
     agent.state = body.state
     agent.version = body.version
     agent.telemetry = tel
+    # Let the agent advertise which collectors it supports so new capabilities
+    # (e.g. endpoint files) appear for already-linked agents after they update.
+    advertised = tel.get("collectors")
+    if isinstance(advertised, list) and advertised:
+        merged = list(dict.fromkeys([*(agent.collectors or []), *advertised]))
+        if merged != (agent.collectors or []):
+            agent.collectors = merged
     agent.last_heartbeat_at = _now()
     command = agent.pending_command
     agent.pending_command = None  # consume
@@ -528,4 +565,27 @@ def command_result(body: AgentCommandResult, agent: DesktopAgent = Depends(_auth
     audit.record(db, actor=f"agent:{agent.hostname}", action="agent.command_result",
                  tenant_id=agent.tenant_id, resource=agent.id,
                  detail={"type": body.type, "ok": body.ok})
+    return {"ok": True}
+
+
+class FsScanResultBody(BaseModel):
+    request_id: str = ""
+    ok: bool = True
+    error: str | None = None
+    result: dict = {}
+
+
+@agent_router.post("/fs-scan-result")
+def fs_scan_result(body: FsScanResultBody, agent: DesktopAgent = Depends(_auth_agent),
+                   db: Session = Depends(get_db)):
+    """Store the folder tree the agent reported for a scan request so the portal
+    can render it in the Data Map file picker."""
+    scan = dict(body.result or {})
+    scan["request_id"] = body.request_id
+    scan["ok"] = body.ok
+    scan["at"] = _now().isoformat()
+    if body.error:
+        scan["error"] = body.error
+    agent.last_scan = scan
+    db.commit()
     return {"ok": True}

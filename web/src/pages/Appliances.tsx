@@ -284,6 +284,44 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
     catch (e) { await notify({ title: "Couldn't remove storage", message: (e as ApiError).message, tone: "danger" }); }
   }
 
+  function showAdvanced() {
+    const rows: [string, string][] = [
+      ["Name", a.name],
+      ["Serial", a.serial],
+      ["Model", a.model],
+      ["Software version", a.software_version],
+      ["State", a.state],
+      ["Isolation", a.isolation_state],
+      ["Attestation", a.attestation_ok ? "verified" : "failed"],
+      ["Tamper", a.tamper_state],
+      ["Type", t.model_kind === "vm" ? `VM (${t.virtualization || "?"})` : "Hardware"],
+      ["Product", t.hardware_product || "—"],
+      ["Vendor", t.hardware_vendor || "—"],
+      ["OS", t.os || "—"],
+      ["Kernel", t.kernel || "—"],
+      ["Arch", t.arch || "—"],
+      ["CPUs", String(t.cpu_count ?? "—")],
+      ["Memory", t.mem_total_bytes ? `${bytes(t.mem_available_bytes ?? 0)} free / ${bytes(t.mem_total_bytes)}` : "—"],
+      ["Uptime", t.uptime_seconds ? fmtUptime(t.uptime_seconds) : "—"],
+      ["Local IP", t.local_ip || "—"],
+      ["Public IP", t.public_ip || "—"],
+      ["Cloud endpoint", t.cloud_url || "—"],
+      ["Latency", t.cloud_latency_ms != null ? `${t.cloud_latency_ms} ms` : "—"],
+      ["Channel", t.channel_encryption || "TLS 1.3"],
+      ["Content encryption", t.content_alg || "AES-256-GCM"],
+      ["Quantum-safe", t.quantum_safe ? "enabled (ML-KEM/ML-DSA)" : "classical fallback"],
+      ["Signing", t.signing_alg || "—"],
+      ["Data sent", t.net_bytes_sent != null ? bytes(t.net_bytes_sent) : "—"],
+      ["Data received", t.net_bytes_recv != null ? bytes(t.net_bytes_recv) : "—"],
+      ["Data path", t.data_path || "—"],
+      ["Data mount", t.data_mount || "—"],
+      ["Heartbeat", fmtAbsolute(a.last_heartbeat_at)],
+      ["Last attestation", fmtAbsolute(a.last_attestation_at)],
+      ["Appliance ID", a.id],
+    ];
+    setKv({ title: `${a.name} — details`, rows });
+  }
+
   return (
     <>
       <Card style={{ marginBottom: 16 }}>
@@ -328,7 +366,9 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
             : <button className="btn sm danger" onClick={() => onCommand(a, "QUARANTINE")}>
                 <Icon name="lock" size={13} /> Quarantine
               </button>}
-          <span className="faint" style={{ fontSize: 11 }}>Commands are hybrid-signed & sequenced</span>
+          <button className="btn sm ghost" onClick={showAdvanced}>
+            <Icon name="search" size={13} /> Advanced
+          </button>
           <div style={{ flex: 1 }} />
           <button className="btn sm ghost danger" onClick={() => onRemove(a)}>
             <Icon name="logout" size={13} /> Remove

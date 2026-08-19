@@ -30,6 +30,7 @@ import httpx
 
 from .config import Config
 from .collectors import onepassword
+from .collectors import files as files_collector
 from . import agent_log
 from .crypto import encrypt_content, load_or_create_key, wrap_for_recovery
 
@@ -94,7 +95,7 @@ class Agent:
             "hostname": socket.gethostname(),
             "platform": "macos",
             "version": self.cfg.version,
-            "collectors": ["onepassword"],
+            "collectors": ["onepassword", "endpoint_files"],
         }
         r = httpx.post(f"{self.cfg.cloud_base_url}/agent/activate", json=body, timeout=30)
         r.raise_for_status()
@@ -135,6 +136,7 @@ class Agent:
             "os": platform.platform(),
             "op_available": onepassword.available(),
             "op_auth": onepassword.auth_state(self.cfg.op_service_account_token),
+            "collectors": ["onepassword", "endpoint_files"],
             "version": self.cfg.version,
             "cloud_url": self.cfg.cloud_base_url,
             "last_collection_at": (self.reg or {}).get("last_collection_at"),
@@ -204,11 +206,17 @@ class Agent:
 
     def _handle_command(self, command: dict) -> None:
         ctype = command.get("type")
+        params = command.get("params") or {}
         self.log.info("command received: %s", ctype)
         ok, detail = True, {}
         try:
             if ctype == "collect":
-                detail = self.collect_and_push()
+                detail = self.collect_and_push(params)
+            elif ctype == "scan_fs":
+                # Report the filesystem tree for a path so the operator can pick
+                # folders in the portal. Reported on a dedicated endpoint.
+                self._report_fs_scan(params)
+                return
             elif ctype == "update":
                 self.self_update()
                 detail = {"updating": True}
@@ -225,9 +233,84 @@ class Agent:
         except Exception:
             pass
 
+    def _report_fs_scan(self, params: dict) -> None:
+        path = params.get("path", "")
+        request_id = params.get("request_id", "")
+        try:
+            result = files_collector.scan(path)
+            ok, err = True, None
+        except Exception as exc:
+            result, ok, err = {"path": path, "dirs": []}, False, str(exc)
+        try:
+            httpx.post(f"{self.cfg.cloud_base_url}/agent/fs-scan-result", json={
+                "request_id": request_id, "ok": ok, "error": err, "result": result,
+            }, headers=self._headers(), timeout=30)
+            self.log.info("fs-scan reported for %s (%d dirs)",
+                          path or "roots", len(result.get("dirs", [])))
+        except Exception as exc:
+            self.log.error("fs-scan report failed: %s", exc)
+
     # -- collection + push --------------------------------------------
 
-    def collect_and_push(self) -> dict:
+    def collect_and_push(self, params: Optional[dict] = None) -> dict:
+        """Run a collection. When the collect command targets endpoint files
+        (carrying the Data Map's file selection), run the file collector; else run
+        the configured collectors (1Password)."""
+        params = params or {}
+        if params.get("source_type") == "endpoint_files" or params.get("file_config"):
+            return self._collect_files(params.get("file_config") or {})
+        return self._collect_onepassword()
+
+    def _push_objects(self, source_type: str, objects: list, destinations: list,
+                      max_batch_bytes: int = 32 * 1024 * 1024, max_batch: int = 500) -> int:
+        """Client-encrypt each object and push in batches bounded by cumulative
+        size (files can be large) so no single request is oversized."""
+        pushed = 0
+        batch: list = []
+        batch_bytes = 0
+        for o in objects:
+            plaintext = base64.b64decode(o["content_b64"])
+            envelope = encrypt_content(self.agent_key, plaintext, o["object_id"])
+            o["content_b64"] = base64.b64encode(envelope).decode()
+            o["client_encrypted"] = True
+            o["size_bytes"] = len(envelope)
+            if batch and (batch_bytes + len(envelope) > max_batch_bytes or len(batch) >= max_batch):
+                pushed += self._push_batch(source_type, batch, destinations)
+                batch, batch_bytes = [], 0
+            batch.append(o)
+            batch_bytes += len(envelope)
+        if batch:
+            pushed += self._push_batch(source_type, batch, destinations)
+        return pushed
+
+    def _push_batch(self, source_type: str, batch: list, destinations: list) -> int:
+        r = httpx.post(f"{self.cfg.cloud_base_url}/agent/ingest", json={
+            "source_type": source_type,
+            "destinations": destinations,
+            "objects": batch,
+        }, headers=self._headers(), timeout=180)
+        r.raise_for_status()
+        self.log.info("pushed batch of %d (%s) -> snapshot %s", len(batch), source_type,
+                      r.json().get("snapshot_id", "?"))
+        return len(batch)
+
+    def _collect_files(self, file_config: dict) -> dict:
+        destinations = self.reg.get("config", {}).get("destinations", ["cv-cloud"])
+        roots = file_config.get("roots") or []
+        if not roots:
+            self.log.info("endpoint_files: no folders selected — nothing to collect")
+            self._write_status({"last_collect": _now_iso(), "results": [{"collector": "endpoint_files", "objects": 0}]})
+            return {"objects": 0, "results": [{"collector": "endpoint_files", "skipped": "no folders selected"}]}
+        self.log.info("endpoint_files: scanning %d root(s)", len(roots))
+        objects = files_collector.collect(file_config)
+        total = self._push_objects("endpoint_files", objects, destinations) if objects else 0
+        self._last_collect = time.time()
+        self._write_status({"last_collect": _now_iso(),
+                            "results": [{"collector": "endpoint_files", "objects": total}]})
+        self.log.info("endpoint_files: pushed %d files", total)
+        return {"objects": total, "results": [{"collector": "endpoint_files", "objects": total}]}
+
+    def _collect_onepassword(self) -> dict:
         cfg = self.reg.get("config", {})
         collectors = cfg.get("collectors", ["onepassword"])
         destinations = cfg.get("destinations", ["cv-cloud"])
@@ -256,27 +339,7 @@ class Agent:
                 results.append({"collector": name, "objects": 0})
                 continue
             self.log.info("collector %s: collected %d items from 1Password", name, len(objects))
-            # Client-side encryption: encrypt each object locally so the cloud
-            # never receives plaintext secrets.
-            for o in objects:
-                plaintext = base64.b64decode(o["content_b64"])
-                envelope = encrypt_content(self.agent_key, plaintext, o["object_id"])
-                o["content_b64"] = base64.b64encode(envelope).decode()
-                o["client_encrypted"] = True
-                o["size_bytes"] = len(envelope)
-            # Push in batches to keep requests reasonable. Metadata-only items are
-            # small, so a large batch keeps most syncs a single recovery point.
-            for i in range(0, len(objects), 500):
-                batch = objects[i:i + 500]
-                r = httpx.post(f"{self.cfg.cloud_base_url}/agent/ingest", json={
-                    "source_type": "onepassword",
-                    "destinations": destinations,
-                    "objects": batch,
-                }, headers=self._headers(), timeout=120)
-                r.raise_for_status()
-                self.log.info("pushed batch of %d -> snapshot %s", len(batch),
-                              r.json().get("snapshot_id", "?"))
-            total += len(objects)
+            total += self._push_objects("onepassword", objects, destinations)
             results.append({"collector": name, "objects": len(objects)})
         self._last_collect = time.time()
         self._write_status({"last_collect": _now_iso(), "results": results})

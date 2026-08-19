@@ -12,9 +12,13 @@ interface StorageTarget {
   id: string; kind: string; label: string; detail?: string;
   state?: string; online?: boolean;
 }
+interface FileConfig {
+  roots?: string[]; excludeExts?: string[]; maxSizeBytes?: number;
+  excludeFolders?: string[]; includeSpamTrash?: boolean;
+}
 interface Mapping {
   id: string; name: string; source_type: string; source_display: string;
-  source_label: string; is_agent: boolean; vault_id: string;
+  source_label: string; is_agent: boolean; vault_id: string; agent_id: string | null;
   vault_name: string | null; connector_account_id: string | null;
   account_label: string | null; sensitivity: string; destinations: string[];
   index_fields: string[]; available_fields: string[];
@@ -22,6 +26,7 @@ interface Mapping {
   offpolicy_points: number;
   backup_interval_minutes: number | null; default_interval_minutes: number;
   last_backup_run_at: string | null;
+  config?: FileConfig;
 }
 interface ActivityEvent {
   kind: string; collection_id?: string; source: string; source_type?: string;
@@ -58,6 +63,11 @@ export default function Mappings() {
   const [editFields, setEditFields] = useState<string[]>([]);
   // -1 = use the global default, 0 = manual only, >0 = every N minutes.
   const [editInterval, setEditInterval] = useState<number>(-1);
+  // Gmail: which folders to skip + whether to include Spam/Trash.
+  const [editGmailExclude, setEditGmailExclude] = useState<string[]>([]);
+  const [editGmailSpamTrash, setEditGmailSpamTrash] = useState<boolean>(false);
+  // Endpoint-files folder picker: which mapping/agent it's configuring.
+  const [picker, setPicker] = useState<{ agentId: string; mappingId: string; initial: FileConfig } | null>(null);
   const [activity, setActivity] = useState<Activity | null>(null);
   // collection_id -> epoch ms when a sync was triggered (live indicator).
   const [syncing, setSyncing] = useState<Record<string, number>>({});
@@ -140,14 +150,21 @@ export default function Mappings() {
       if (sourceSel.startsWith("agent:")) {
         const [, agentId, collector] = sourceSel.split(":");
         const agent = agents.find((a) => a.id === agentId);
-        await api.post("/collections", {
+        const created = await api.post<Mapping>("/collections", {
           vault_id: vaultId,
-          name: `${collector} (${agent?.hostname || agent?.name || "agent"})`,
+          name: `${collectorLabel(collector)} (${agent?.hostname || agent?.name || "agent"})`,
           source_type: collector,
           agent_id: agentId,
           sensitivity: "restricted",
           destinations: dests,
         });
+        await load();
+        flash("Source added");
+        // Endpoint files need a folder selection before anything is collected.
+        if (collector === "endpoint_files") {
+          setPicker({ agentId, mappingId: created.id, initial: created.config || {} });
+        }
+        return;
       } else {
         const acct = accounts.find((a) => a.id === sourceSel.replace(/^acct:/, ""));
         if (!acct) return flash("Pick a source");
@@ -183,6 +200,8 @@ export default function Mappings() {
     // Default the indexed fields to the mapping's override, or all available.
     setEditFields(m.index_fields && m.index_fields.length ? [...m.index_fields] : [...m.available_fields]);
     setEditInterval(m.backup_interval_minutes == null ? -1 : m.backup_interval_minutes);
+    setEditGmailExclude([...(m.config?.excludeFolders || [])]);
+    setEditGmailSpamTrash(!!m.config?.includeSpamTrash);
   }
 
   function toggleEditDest(id: string) {
@@ -196,10 +215,15 @@ export default function Mappings() {
   async function saveRouting(m: Mapping) {
     if (editDests.length === 0) return flash("Pick at least one destination");
     try {
-      await api.put(`/collections/${m.id}`, {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = {
         destinations: editDests, index_fields: editFields,
         backup_interval_minutes: editInterval,
-      });
+      };
+      if (m.source_type === "gmail") {
+        body.config = { ...(m.config || {}), excludeFolders: editGmailExclude, includeSpamTrash: editGmailSpamTrash };
+      }
+      await api.put(`/collections/${m.id}`, body);
       setEditId(null);
       flash("Mapping updated");
       await load();
@@ -267,7 +291,7 @@ export default function Mappings() {
                 <optgroup label="Desktop agents">
                   {agents.flatMap((a) => (a.collectors || []).map((c) => (
                     <option key={`${a.id}:${c}`} value={`agent:${a.id}:${c}`}>
-                      {c} — {a.hostname || a.name}
+                      {collectorLabel(c)} — {a.hostname || a.name}
                     </option>
                   )))}
                 </optgroup>
@@ -345,6 +369,16 @@ export default function Mappings() {
                     <Pill tone={m.backup_interval_minutes === 0 ? "warn" : "info"}>
                       <Icon name="clock" size={11} /> {scheduleLabel(m)}
                     </Pill>
+                    {m.source_type === "endpoint_files" && (
+                      <Pill tone={(m.config?.roots?.length || 0) > 0 ? "info" : "warn"}>
+                        <Icon name="database" size={11} /> {m.config?.roots?.length || 0} folders
+                      </Pill>
+                    )}
+                    {m.source_type === "gmail" && (m.config?.excludeFolders?.length || 0) > 0 && (
+                      <Pill tone="warn">
+                        <Icon name="mail" size={11} /> skipping {m.config?.excludeFolders?.length}
+                      </Pill>
+                    )}
                     {(m.index_fields && m.index_fields.length ? m.index_fields : m.available_fields)
                       .slice(0, 6).map((f) => (
                         <span key={f} className="chip" style={{ padding: "1px 8px", fontSize: 10.5 }}>{f}</span>
@@ -478,6 +512,43 @@ export default function Mappings() {
                         </span>
                       </div>
                     </div>
+                    {m.source_type === "gmail" && (
+                      <div className="stack" style={{ gap: 6 }}>
+                        <span className="faint" style={{ fontSize: 11.5 }}>Skip folders (excluded from backup)</span>
+                        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                          {GMAIL_FOLDERS.map((f) => (
+                            <span
+                              key={f.id}
+                              className={`chip ${editGmailExclude.includes(f.id) ? "active" : ""}`}
+                              onClick={() => setEditGmailExclude((cur) =>
+                                cur.includes(f.id) ? cur.filter((x) => x !== f.id) : [...cur, f.id])}
+                            >
+                              {editGmailExclude.includes(f.id) && <Icon name="check" size={12} />} {f.label}
+                            </span>
+                          ))}
+                        </div>
+                        <label className="row" style={{ gap: 6, alignItems: "center", fontSize: 12 }}>
+                          <input type="checkbox" checked={editGmailSpamTrash}
+                                 onChange={(e) => setEditGmailSpamTrash(e.target.checked)} />
+                          Also back up Spam &amp; Trash (Gmail excludes them by default)
+                        </label>
+                      </div>
+                    )}
+                    {m.source_type === "endpoint_files" && (
+                      <div className="stack" style={{ gap: 6 }}>
+                        <span className="faint" style={{ fontSize: 11.5 }}>Folders to back up</span>
+                        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <button className="btn sm" disabled={!m.agent_id}
+                                  onClick={() => m.agent_id && setPicker({ agentId: m.agent_id, mappingId: m.id, initial: m.config || {} })}>
+                            <Icon name="database" size={13} /> Choose folders…
+                          </button>
+                          <span className="faint" style={{ fontSize: 11 }}>
+                            {(m.config?.roots?.length || 0)} folder(s) selected
+                            {m.config?.excludeExts?.length ? ` · excluding ${m.config.excludeExts.join(", ")}` : ""}
+                          </span>
+                        </div>
+                      </div>
+                    )}
                     <div className="row" style={{ gap: 8 }}>
                       <button className="btn sm primary" onClick={() => saveRouting(m)}>Save</button>
                       <button className="btn sm ghost" onClick={() => setEditId(null)}>Cancel</button>
@@ -504,6 +575,15 @@ export default function Mappings() {
       </Card>
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+      {picker && (
+        <FilePicker
+          agentId={picker.agentId}
+          mappingId={picker.mappingId}
+          initial={picker.initial}
+          onClose={() => setPicker(null)}
+          onSaved={() => { flash("Folder selection saved"); void load(); }}
+        />
+      )}
     </>
   );
 }
@@ -539,4 +619,170 @@ function scheduleLabel(m: Mapping): string {
   if (m.backup_interval_minutes == null) return `Auto · ${intervalText(m.default_interval_minutes)}`;
   if (m.backup_interval_minutes === 0) return "Manual only";
   return `Auto · ${intervalText(m.backup_interval_minutes)}`;
+}
+
+function collectorLabel(c: string): string {
+  return c === "onepassword" ? "1Password" : c === "endpoint_files" ? "Endpoint Files" : c;
+}
+
+// Gmail folders/labels the operator can skip (excluded via a Gmail search query).
+const GMAIL_FOLDERS: { id: string; label: string }[] = [
+  { id: "SPAM", label: "Spam" },
+  { id: "TRASH", label: "Trash" },
+  { id: "CATEGORY_PROMOTIONS", label: "Promotions" },
+  { id: "CATEGORY_SOCIAL", label: "Social" },
+  { id: "CATEGORY_UPDATES", label: "Updates" },
+  { id: "CATEGORY_FORUMS", label: "Forums" },
+];
+
+interface FsNode { path: string; name: string; hasChildren: boolean }
+interface FsScan {
+  path: string; name?: string; dirs?: FsNode[]; files?: number; bytes?: number;
+  error?: string; request_id?: string;
+}
+
+// Folder picker for the Endpoint Files source: browses the agent's drives (via a
+// scan command answered on the agent's heartbeat) and lets the operator choose
+// which folders to back up, plus file-type / size exclusions.
+function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
+  agentId: string; mappingId: string; initial: FileConfig;
+  onClose: () => void; onSaved: () => void;
+}) {
+  const [nodes, setNodes] = useState<Record<string, FsScan>>({});
+  const [expanded, setExpanded] = useState<Set<string>>(new Set([""]));
+  const [scanning, setScanning] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set(initial.roots || []));
+  const [excl, setExcl] = useState<string>((initial.excludeExts || []).join(", "));
+  const [maxMb, setMaxMb] = useState<number>(Math.round((initial.maxSizeBytes || 100 * 1024 * 1024) / (1024 * 1024)));
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function scan(path: string) {
+    setScanning(path);
+    setErr("");
+    try {
+      const req = await api.post<{ request_id: string }>(`/agents/${agentId}/fs-scan`, { path });
+      const deadline = Date.now() + 45000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const { scan: s } = await api.get<{ scan: FsScan | null }>(`/agents/${agentId}/fs-scan`);
+        if (s && s.request_id === req.request_id) {
+          if (s.error) setErr(s.error);
+          setNodes((cur) => ({ ...cur, [path]: s }));
+          setScanning((cur) => (cur === path ? null : cur));
+          return;
+        }
+      }
+      setErr("The agent didn't respond in time — make sure it's online.");
+    } catch (e) { setErr((e as ApiError).message); }
+    setScanning((cur) => (cur === path ? null : cur));
+  }
+
+  useEffect(() => { void scan(""); /* roots */ // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function toggleExpand(path: string) {
+    setExpanded((cur) => {
+      const n = new Set(cur);
+      // One scan at a time — the agent answers a single command per heartbeat.
+      if (n.has(path)) { n.delete(path); } else { n.add(path); if (!nodes[path] && !scanning) void scan(path); }
+      return n;
+    });
+  }
+  function toggleSelect(path: string) {
+    setSelected((cur) => { const n = new Set(cur); if (n.has(path)) n.delete(path); else n.add(path); return n; });
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      const config: FileConfig = {
+        roots: [...selected],
+        excludeExts: excl.split(",").map((s) => s.trim().replace(/^\./, "").toLowerCase()).filter(Boolean),
+        maxSizeBytes: Math.max(1, maxMb) * 1024 * 1024,
+      };
+      await api.put(`/collections/${mappingId}`, { config });
+      onSaved();
+      onClose();
+    } catch (e) { setErr((e as ApiError).message); setSaving(false); }
+  }
+
+  function renderDir(node: FsNode, depth: number) {
+    const isSel = selected.has(node.path);
+    const isExp = expanded.has(node.path);
+    const child = nodes[node.path];
+    return (
+      <div key={node.path}>
+        <div className="row" style={{ gap: 6, alignItems: "center", padding: "3px 0", paddingLeft: depth * 16 }}>
+          {node.hasChildren ? (
+            <button className="btn ghost sm" style={{ padding: "0 4px", minWidth: 18 }} onClick={() => toggleExpand(node.path)}>
+              {isExp ? "▾" : "▸"}
+            </button>
+          ) : <span style={{ width: 18 }} />}
+          <input type="checkbox" checked={isSel} onChange={() => toggleSelect(node.path)} />
+          <Icon name="database" size={13} />
+          <span style={{ fontSize: 12.5 }}>{node.name}</span>
+        </div>
+        {isExp && (
+          <div>
+            {scanning === node.path && (
+              <div className="faint" style={{ paddingLeft: (depth + 1) * 16 + 24, fontSize: 11 }}>
+                <span className="spinner-dot" /> scanning…
+              </div>
+            )}
+            {(child?.dirs || []).map((d) => renderDir(d, depth + 1))}
+            {child && (child.dirs || []).length === 0 && scanning !== node.path && (
+              <div className="faint" style={{ paddingLeft: (depth + 1) * 16 + 24, fontSize: 11 }}>
+                {child.files ? `${child.files} files · ${bytes(child.bytes || 0)} · no subfolders` : "empty"}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const roots = nodes[""]?.dirs || [];
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" style={{ maxWidth: 640 }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread">
+          <div>
+            <h3 style={{ margin: 0 }}>Choose folders to back up</h3>
+            <div className="faint" style={{ fontSize: 12 }}>Select folders on the endpoint's drives. Child folders are included.</div>
+          </div>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="logout" size={14} /></button>
+        </div>
+        <div className="modal-body">
+          {err && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 8 }}>{err}</div>}
+          <div style={{ maxHeight: "42vh", overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, padding: 8 }}>
+            {scanning === "" && roots.length === 0 && (
+              <div className="faint"><span className="spinner-dot" /> scanning drives… (the agent answers on its next heartbeat)</div>
+            )}
+            {roots.map((r) => renderDir(r, 0))}
+            {scanning !== "" && roots.length === 0 && <div className="muted">No drives reported. Is the agent online?</div>}
+          </div>
+          <div className="row" style={{ gap: 12, marginTop: 12, flexWrap: "wrap" }}>
+            <label className="stack" style={{ flex: 1, minWidth: 200 }}>
+              <span className="faint" style={{ fontSize: 11.5 }}>Exclude file types (comma-separated)</span>
+              <input className="input" value={excl} placeholder="mp4, iso, dmg" onChange={(e) => setExcl(e.target.value)} />
+            </label>
+            <label className="stack" style={{ width: 160 }}>
+              <span className="faint" style={{ fontSize: 11.5 }}>Max file size (MB)</span>
+              <input className="input" type="number" min={1} value={maxMb} onChange={(e) => setMaxMb(Number(e.target.value))} />
+            </label>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 8 }}>
+            {selected.size} folder(s) selected · each file is client-encrypted before upload.
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn ghost sm" onClick={() => void scan("")}>Rescan drives</button>
+          <div style={{ flex: 1 }} />
+          <button className="btn sm" onClick={onClose}>Cancel</button>
+          <button className="btn primary sm" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save selection"}</button>
+        </div>
+      </div>
+    </div>
+  );
 }

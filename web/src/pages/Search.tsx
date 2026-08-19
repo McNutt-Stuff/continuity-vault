@@ -96,6 +96,7 @@ const SOURCE_META: Record<string, { color: string; icon: IconName; label: string
   icloud: { color: "#3693f3", icon: "cloud", label: "iCloud" },
   onepassword: { color: "#0364d3", icon: "key", label: "1Password" },
   custom: { color: "#7a5cff", icon: "database", label: "Custom" },
+  endpoint_files: { color: "#7a5cff", icon: "file", label: "Endpoint Files" },
 };
 
 function downloadB64(b64: string, filename: string) {

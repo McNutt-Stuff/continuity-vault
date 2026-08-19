@@ -36,6 +36,7 @@ class CreateCollectionRequest(BaseModel):
     agent_id: str | None = None  # bind an agent-collected source to a device
     sensitivity: str = "standard"
     destinations: list[str] = ["cv-cloud"]
+    config: dict | None = None  # source-specific settings (e.g. endpoint-files selection)
 
 
 @router.post("")
@@ -65,6 +66,7 @@ def create_collection(body: CreateCollectionRequest,
         agent_id=body.agent_id,
         sensitivity=body.sensitivity,
         destinations=body.destinations or ["cv-cloud"],
+        config=body.config or {},
     )
     db.add(coll)
     db.commit()
@@ -81,6 +83,7 @@ class UpdateCollectionRequest(BaseModel):
     destinations: list[str] | None = None
     index_fields: list[str] | None = None
     backup_interval_minutes: int | None = None  # NULL=default, 0=manual, >0=every N min
+    config: dict | None = None
 
 
 @router.put("/{collection_id}")
@@ -108,6 +111,8 @@ def update_collection(collection_id: str, body: UpdateCollectionRequest,
         # <0 → NULL (use the global default); 0 → manual only; >0 → every N min.
         coll.backup_interval_minutes = (None if body.backup_interval_minutes < 0
                                         else body.backup_interval_minutes)
+    if body.config is not None:
+        coll.config = body.config
     db.commit()
     db.refresh(coll)
     audit.record(db, actor=principal.user_id, action="collection.updated",
@@ -175,6 +180,7 @@ def _collection_view(db: Session, c: Collection) -> dict:
         "backup_interval_minutes": c.backup_interval_minutes,  # NULL = use default
         "default_interval_minutes": get_settings().sync_interval_minutes,
         "last_backup_run_at": c.last_backup_run_at.isoformat() if c.last_backup_run_at else None,
+        "config": c.config or {},
     }
 
 
@@ -290,7 +296,9 @@ def sync(collection_id: str,
                         if coll.source_type in (a.collectors or [])]
         queued = 0
         for a in targeted:
-            a.pending_command = {"type": "collect", "params": {}}
+            a.pending_command = {"type": "collect",
+                                 "params": {"source_type": coll.source_type,
+                                            "file_config": coll.config or {}}}
             queued += 1
         coll.last_backup_run_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()

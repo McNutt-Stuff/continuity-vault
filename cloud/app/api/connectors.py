@@ -53,6 +53,13 @@ def _setup_instructions(connector_type: str) -> list[str]:
             "Unlock 1Password and enable Settings → Developer → Integrate with 1Password CLI.",
             "The agent extracts items with the `op` CLI and pushes them encrypted.",
         ]
+    if connector_type == "endpoint_files":
+        return [
+            "Endpoint files are collected by a local Arkive desktop agent (not a cloud pull).",
+            "Add the source in the Data Map and pick the agent to collect from.",
+            "Browse the agent's drives and choose which folders to back up, plus any file-type",
+            "or size exclusions. The agent walks them and pushes each file client-encrypted.",
+        ]
     if connector_type == "icloud":
         return [
             "At appleid.apple.com, generate an app-specific password.",

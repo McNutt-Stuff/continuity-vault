@@ -117,6 +117,7 @@ class Collection(Base):
     sensitivity = Column(String, default="standard")  # standard | sensitive | restricted
     destinations = Column(JSON, default=list)  # where this mapping stores data
     index_fields = Column(JSON, default=list)  # override of connector metadata keys to index
+    config = Column(JSON, default=dict)  # source-specific settings (e.g. endpoint-files selection)
     # Auto-backup cadence: NULL = use the global default; 0 = manual only; >0 = every N minutes.
     backup_interval_minutes = Column(Integer, nullable=True)
     last_backup_run_at = Column(DateTime, nullable=True)  # last time the scheduler ran this mapping
@@ -239,6 +240,7 @@ class DesktopAgent(Base):
     config = Column(JSON, default=dict)  # destinations, schedule, collector opts
     pending_command = Column(JSON, nullable=True)  # {type, params}
     telemetry = Column(JSON, default=dict)
+    last_scan = Column(JSON, nullable=True)  # latest endpoint filesystem scan result
     identity_bundle = Column(JSON, nullable=True)
     agent_token_hash = Column(String, nullable=True, index=True)  # sha256 of bearer token
     last_heartbeat_at = Column(DateTime, nullable=True)

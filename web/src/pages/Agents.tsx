@@ -312,6 +312,20 @@ function AgentDetail({ a, onCommand, reload }:
           </div>
           <Pill tone={opTone}>{opState === "missing" ? "missing" : opState === "interactive" ? "interactive only" : "ready"}</Pill>
         </div>
+        {(a.collectors || []).includes("endpoint_files") && (
+          <div className="collector-row" style={{ marginTop: 10 }}>
+            <div className="row" style={{ gap: 10 }}>
+              <Icon name="database" size={16} />
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13 }}>Endpoint files</div>
+                <div className="faint" style={{ fontSize: 11.5 }}>
+                  Backs up folders you select in the Data Map (local, external & network drives).
+                </div>
+              </div>
+            </div>
+            <Pill tone="ok">ready</Pill>
+          </div>
+        )}
         {opState === "interactive" && (
           <div className="hint-box" style={{ marginTop: 10 }}>
             1Password collects <b>interactively</b>: open and unlock the 1Password app, then use

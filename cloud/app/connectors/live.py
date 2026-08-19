@@ -12,6 +12,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from email import message_from_bytes
+from email.header import decode_header, make_header
 from typing import Iterable, List, Optional, Tuple
 
 import httpx
@@ -23,6 +24,33 @@ logger = logging.getLogger("cv.connectors.live")
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 _DEFAULT_CAP = 268435456  # 256 MiB
+
+# Gmail folder/label ids -> a Gmail search token so we can skip whole folders
+# (e.g. Spam, Promotions) at list time; anything else is filtered by label id.
+_GMAIL_EXCLUDE_QUERY = {
+    "SPAM": "-in:spam",
+    "TRASH": "-in:trash",
+    "CATEGORY_PROMOTIONS": "-category:promotions",
+    "CATEGORY_SOCIAL": "-category:social",
+    "CATEGORY_UPDATES": "-category:updates",
+    "CATEGORY_FORUMS": "-category:forums",
+}
+
+
+def _hdr(parsed, name: str) -> str:
+    """Decode a possibly MIME-encoded email header (=?utf-8?..?=) to plain text.
+
+    ``Message.get`` can return an ``email.header.Header`` for encoded values,
+    which is not a str — decode it so indexing/joining never crashes."""
+    if parsed is None:
+        return ""
+    raw = parsed.get(name)
+    if raw is None:
+        return ""
+    try:
+        return str(make_header(decode_header(raw)))
+    except Exception:
+        return str(raw)
 
 
 def _now() -> datetime:
@@ -54,7 +82,7 @@ def _gmail_message(c: httpx.Client, headers: dict, mid: str,
     raw_b64 = m.get("raw", "")
     raw = base64.urlsafe_b64decode(raw_b64 + "===") if raw_b64 else b""
     parsed = message_from_bytes(raw) if raw else None
-    subject = (parsed.get("Subject") if parsed else "") or "(no subject)"
+    subject = _hdr(parsed, "Subject") or "(no subject)"
     label_ids = m.get("labelIds", [])
     content, backed = _capped(raw, cap)
     return SourceObject(
@@ -63,8 +91,8 @@ def _gmail_message(c: httpx.Client, headers: dict, mid: str,
         title=subject,
         content=content,  # full raw email (or indexed-only marker if oversized)
         preview=(m.get("snippet") or "")[:200],
-        meta={"from": (parsed.get("From") if parsed else "") or "",
-              "to": (parsed.get("To") if parsed else "") or "",
+        meta={"from": _hdr(parsed, "From"),
+              "to": _hdr(parsed, "To"),
               "folder": _gmail_folder(label_ids),
               "labelIds": label_ids, "content_backed_up": backed},
         labels=[l for l in label_ids if not l.startswith("Label_")],
@@ -79,12 +107,21 @@ def _gmail_folder(label_ids: List[str]) -> str:
     return "Mail"
 
 
-def _gmail_list_ids(c: httpx.Client, headers: dict, cap: int) -> List[str]:
-    """All message ids (full sync), paging until exhausted or the safety cap."""
+def _gmail_list_ids(c: httpx.Client, headers: dict, cap: int,
+                    query: str = "", include_spam_trash: bool = False) -> List[str]:
+    """All message ids (full sync), paging until exhausted or the safety cap.
+
+    ``query`` is a Gmail search string used to skip whole folders (e.g.
+    ``-in:spam -category:promotions``); ``include_spam_trash`` opts Spam/Trash in
+    (Gmail lists exclude them by default)."""
     ids: List[str] = []
     token: Optional[str] = None
     while len(ids) < cap:
-        params = {"maxResults": 500}
+        params: dict = {"maxResults": 500}
+        if query:
+            params["q"] = query
+        if include_spam_trash:
+            params["includeSpamTrash"] = "true"
         if token:
             params["pageToken"] = token
         r = c.get(f"{GMAIL}/messages", headers=headers, params=params)
@@ -130,12 +167,18 @@ def _gmail_history_id(c: httpx.Client, headers: dict) -> str:
 
 def fetch_gmail(access_token: str, cursor: Optional[dict] = None,
                 max_messages: int = 5000,
-                content_cap: int = _DEFAULT_CAP) -> Tuple[List[SourceObject], dict]:
+                content_cap: int = _DEFAULT_CAP,
+                options: Optional[dict] = None) -> Tuple[List[SourceObject], dict]:
     """Pull Gmail. First run does a full, paginated backup; subsequent runs pull
-    only messages added/changed since the stored historyId. Returns the objects
-    plus the new cursor to persist."""
+    only messages added/changed since the stored historyId. ``options`` may carry
+    ``excludeFolders`` (label ids to skip, e.g. SPAM/CATEGORY_PROMOTIONS) and
+    ``includeSpamTrash``. Returns the objects plus the new cursor to persist."""
     headers = {"Authorization": f"Bearer {access_token}"}
     cursor = cursor or {}
+    options = options or {}
+    exclude = {str(f).upper() for f in (options.get("excludeFolders") or [])}
+    include_spam_trash = bool(options.get("includeSpamTrash")) and not (exclude & {"SPAM", "TRASH"})
+    query = " ".join(_GMAIL_EXCLUDE_QUERY[f] for f in exclude if f in _GMAIL_EXCLUDE_QUERY)
     with httpx.Client(timeout=60) as c:
         history_id = cursor.get("history_id")
         ids: List[str]
@@ -144,10 +187,15 @@ def fetch_gmail(access_token: str, cursor: Optional[dict] = None,
                 ids = _gmail_history_ids(c, headers, str(history_id), max_messages)
             except _HistoryGone:
                 logger.info("gmail history %s expired; full resync", history_id)
-                ids = _gmail_list_ids(c, headers, max_messages)
+                ids = _gmail_list_ids(c, headers, max_messages, query, include_spam_trash)
         else:
-            ids = _gmail_list_ids(c, headers, max_messages)
+            ids = _gmail_list_ids(c, headers, max_messages, query, include_spam_trash)
         objects = [o for o in (_gmail_message(c, headers, mid, content_cap) for mid in ids) if o]
+        # Post-filter by label id so the delta (history) path and any custom
+        # labels are also honoured, not just the list-time query.
+        if exclude:
+            objects = [o for o in objects
+                       if not (set(o.meta.get("labelIds", [])) & exclude)]
         new_cursor = {"history_id": _gmail_history_id(c, headers)}
     return objects, new_cursor
 

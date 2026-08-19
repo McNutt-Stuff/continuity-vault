@@ -38,6 +38,42 @@ def _content_cap() -> int:
 
 
 @register_connector
+class EndpointFilesConnector(Connector):
+    """Files collected from a desktop agent (local, external, and network drives).
+
+    Agent-collected like 1Password: the operator picks folders in the Data Map,
+    the agent walks them and pushes client-encrypted files. There is no cloud
+    pull, so ``fetch_objects`` yields nothing."""
+
+    connector_type = "endpoint_files"
+    display_name = "Endpoint Files"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            requires_agent=True,
+            searchable_fields=["path", "folder", "extension", "drive", "kind"],
+            facet_fields=["extension", "drive", "kind"],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type,
+            display_name=self.display_name,
+            auth_type="agent",
+            authorize_url="",
+            token_url="",
+            scopes=[],
+            icon="folder",
+            color="#7a5cff",
+            doc_types=["file", "pdf", "image", "video", "audio", "spreadsheet",
+                       "presentation", "text", "archive"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        return iter(())  # agent-pushed; no cloud pull
+
+
+@register_connector
 class OnePasswordConnector(Connector):
     connector_type = "onepassword"
     display_name = "1Password"
@@ -125,7 +161,9 @@ class GmailConnector(Connector):
             s = get_settings()
             objects, new_cursor = live.fetch_gmail(
                 config["access_token"], cursor=cursor,
-                max_messages=s.sync_max_items, content_cap=s.content_max_bytes)
+                max_messages=s.sync_max_items, content_cap=s.content_max_bytes,
+                options={"excludeFolders": config.get("excludeFolders"),
+                         "includeSpamTrash": config.get("includeSpamTrash")})
             return FetchResult(objects=objects, cursor=new_cursor, has_more=False)
         return FetchResult(objects=list(self.fetch_objects(account_label, config=config)))
 

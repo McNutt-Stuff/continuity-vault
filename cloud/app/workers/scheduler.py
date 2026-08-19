@@ -84,7 +84,8 @@ def _is_due(c: Collection, interval_minutes: int, now: datetime) -> bool:
 
 
 def _queue_agent_collect(db, c: Collection) -> int:
-    """Queue a collect command to the agent(s) bound to this mapping."""
+    """Queue a collect command to the agent(s) bound to this mapping, carrying the
+    source type + any file selection so the agent knows what to collect."""
     q = db.query(DesktopAgent).filter(DesktopAgent.tenant_id == c.tenant_id)
     if c.agent_id:
         agents = q.filter(DesktopAgent.id == c.agent_id).all()
@@ -92,7 +93,9 @@ def _queue_agent_collect(db, c: Collection) -> int:
         agents = [a for a in q.all() if c.source_type in (a.collectors or [])]
     queued = 0
     for a in agents:
-        a.pending_command = {"type": "collect", "params": {}}
+        a.pending_command = {"type": "collect",
+                             "params": {"source_type": c.source_type,
+                                        "file_config": c.config or {}}}
         queued += 1
     return queued
 

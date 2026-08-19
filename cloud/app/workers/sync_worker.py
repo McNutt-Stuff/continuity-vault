@@ -177,6 +177,10 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
     if progress:
         progress(0, 0, f"Fetching from {label}…")
     config = _account_config(db, collection, account)
+    # Fold the mapping's own settings (e.g. Gmail folder exclusions) into the
+    # connector config alongside the credentials.
+    if collection.config:
+        config = {**config, **collection.config}
     caps = connector.capabilities()
     # Incremental: pass the stored cursor; the connector returns a new cursor to
     # persist (full first backup, then deltas since the last sync).
@@ -267,8 +271,11 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         else:
             discrete_meta = _discrete_metadata(src.meta, display_keys)
             preview = _compose_preview(discrete_meta)
+            # Coerce every part to str — some connectors (e.g. Gmail) can surface
+            # non-str header objects, which would break the join.
             search_blob = " ".join(
-                [src.title, *(src.labels or []), *_flatten_values(discrete_meta)]
+                str(x) for x in [src.title, *(src.labels or []), *_flatten_values(discrete_meta)]
+                if x is not None
             ).strip()
         index_rows.append(
             SearchDocument(
@@ -280,7 +287,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                 source_type=collection.source_type,
                 doc_type=src.doc_type,
                 category=src.category,
-                title=src.title,
+                title=str(src.title) if src.title is not None else "",
                 preview=preview,
                 meta=discrete_meta,
                 labels=[] if zero_knowledge else (src.labels or []),
