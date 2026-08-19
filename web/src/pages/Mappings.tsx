@@ -635,62 +635,88 @@ const GMAIL_FOLDERS: { id: string; label: string }[] = [
   { id: "CATEGORY_FORUMS", label: "Forums" },
 ];
 
-interface FsNode { path: string; name: string; hasChildren: boolean }
-interface FsScan {
-  path: string; name?: string; dirs?: FsNode[]; files?: number; bytes?: number;
-  error?: string; request_id?: string;
+interface FsNode {
+  path: string; name: string; files?: number; bytes?: number;
+  children?: FsNode[]; hasMore?: boolean; kind?: string; error?: string;
+}
+interface FsIndex {
+  built_at?: string | null; roots?: FsNode[]; nodes?: number;
+  building?: boolean; error?: string;
 }
 
-// Folder picker for the Endpoint Files source: browses the agent's drives (via a
-// scan command answered on the agent's heartbeat) and lets the operator choose
-// which folders to back up, plus file-type / size exclusions.
+// Folder picker for the Endpoint Files source. The agent maintains a cached
+// folder index (rebuilt in the background), so this loads the whole tree once
+// and navigates it locally — no per-folder scan round trips.
 function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
   agentId: string; mappingId: string; initial: FileConfig;
   onClose: () => void; onSaved: () => void;
 }) {
-  const [nodes, setNodes] = useState<Record<string, FsScan>>({});
-  const [expanded, setExpanded] = useState<Set<string>>(new Set([""]));
-  const [scanning, setScanning] = useState<string | null>(null);
+  const [index, setIndex] = useState<FsIndex | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set(initial.roots || []));
   const [excl, setExcl] = useState<string>((initial.excludeExts || []).join(", "));
   const [maxMb, setMaxMb] = useState<number>(Math.round((initial.maxSizeBytes || 100 * 1024 * 1024) / (1024 * 1024)));
+  const [loading, setLoading] = useState(false);
+  const [rebuilding, setRebuilding] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
 
-  async function scan(path: string) {
-    setScanning(path);
-    setErr("");
-    try {
-      const req = await api.post<{ request_id: string }>(`/agents/${agentId}/fs-scan`, { path });
-      const deadline = Date.now() + 45000;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2500));
-        const { scan: s } = await api.get<{ scan: FsScan | null }>(`/agents/${agentId}/fs-scan`);
-        if (s && s.request_id === req.request_id) {
-          if (s.error) setErr(s.error);
-          setNodes((cur) => ({ ...cur, [path]: s }));
-          setScanning((cur) => (cur === path ? null : cur));
-          return;
-        }
-      }
-      setErr("The agent didn't respond in time — make sure it's online.");
-    } catch (e) { setErr((e as ApiError).message); }
-    setScanning((cur) => (cur === path ? null : cur));
+  function applyIndex(idx: FsIndex | null) {
+    if (idx && idx.roots && idx.roots.length) {
+      setIndex(idx);
+      setExpanded((cur) => (cur.size ? cur : new Set(idx.roots!.map((r) => r.path))));
+      return true;
+    }
+    return false;
   }
 
-  useEffect(() => { void scan(""); /* roots */ // eslint-disable-next-line react-hooks/exhaustive-deps
+  async function loadIndex() {
+    setLoading(true); setErr("");
+    try {
+      // Serve the agent's cached index first (usually already present).
+      const first = await api.get<{ scan: FsIndex | null }>(`/agents/${agentId}/fs-scan`);
+      let have = applyIndex(first.scan);
+      // Nudge the agent to push its current cache; wait only if we have nothing.
+      await api.post(`/agents/${agentId}/fs-scan`, { rebuild: false });
+      if (!have) {
+        const deadline = Date.now() + 60000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 2500));
+          const res = await api.get<{ scan: FsIndex | null }>(`/agents/${agentId}/fs-scan`);
+          if (applyIndex(res.scan)) { have = true; break; }
+        }
+        if (!have) setErr("Waiting for the agent to build its folder index — is it online?");
+      }
+    } catch (e) { setErr((e as ApiError).message); }
+    setLoading(false);
+  }
+
+  useEffect(() => { void loadIndex(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  async function rescan() {
+    setRebuilding(true); setErr("");
+    const prev = index?.built_at || "";
+    try {
+      await api.post(`/agents/${agentId}/fs-scan`, { rebuild: true });
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const { scan } = await api.get<{ scan: FsIndex | null }>(`/agents/${agentId}/fs-scan`);
+        if (scan && scan.built_at && scan.built_at !== prev && scan.roots?.length) {
+          setIndex(scan);
+          break;
+        }
+      }
+    } catch (e) { setErr((e as ApiError).message); }
+    setRebuilding(false);
+  }
+
   function toggleExpand(path: string) {
-    setExpanded((cur) => {
-      const n = new Set(cur);
-      // One scan at a time — the agent answers a single command per heartbeat.
-      if (n.has(path)) { n.delete(path); } else { n.add(path); if (!nodes[path] && !scanning) void scan(path); }
-      return n;
-    });
+    setExpanded((cur) => { const n = new Set(cur); n.has(path) ? n.delete(path) : n.add(path); return n; });
   }
   function toggleSelect(path: string) {
-    setSelected((cur) => { const n = new Set(cur); if (n.has(path)) n.delete(path); else n.add(path); return n; });
+    setSelected((cur) => { const n = new Set(cur); n.has(path) ? n.delete(path) : n.add(path); return n; });
   }
 
   async function save() {
@@ -707,14 +733,15 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
     } catch (e) { setErr((e as ApiError).message); setSaving(false); }
   }
 
-  function renderDir(node: FsNode, depth: number) {
+  function renderNode(node: FsNode, depth: number) {
     const isSel = selected.has(node.path);
     const isExp = expanded.has(node.path);
-    const child = nodes[node.path];
+    const kids = node.children || [];
+    const canExpand = kids.length > 0 || node.hasMore;
     return (
       <div key={node.path}>
         <div className="row" style={{ gap: 6, alignItems: "center", padding: "3px 0", paddingLeft: depth * 16 }}>
-          {node.hasChildren ? (
+          {canExpand ? (
             <button className="btn ghost sm" style={{ padding: "0 4px", minWidth: 18 }} onClick={() => toggleExpand(node.path)}>
               {isExp ? "▾" : "▸"}
             </button>
@@ -722,19 +749,20 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
           <input type="checkbox" checked={isSel} onChange={() => toggleSelect(node.path)} />
           <Icon name="database" size={13} />
           <span style={{ fontSize: 12.5 }}>{node.name}</span>
+          {(node.files || 0) > 0 && (
+            <span className="faint" style={{ fontSize: 10.5 }}>· {node.files} files · {bytes(node.bytes || 0)}</span>
+          )}
         </div>
         {isExp && (
           <div>
-            {scanning === node.path && (
+            {kids.map((c) => renderNode(c, depth + 1))}
+            {kids.length === 0 && node.hasMore && (
               <div className="faint" style={{ paddingLeft: (depth + 1) * 16 + 24, fontSize: 11 }}>
-                <span className="spinner-dot" /> scanning…
+                deeper folders not indexed — selecting this folder still backs them up
               </div>
             )}
-            {(child?.dirs || []).map((d) => renderDir(d, depth + 1))}
-            {child && (child.dirs || []).length === 0 && scanning !== node.path && (
-              <div className="faint" style={{ paddingLeft: (depth + 1) * 16 + 24, fontSize: 11 }}>
-                {child.files ? `${child.files} files · ${bytes(child.bytes || 0)} · no subfolders` : "empty"}
-              </div>
+            {kids.length === 0 && !node.hasMore && (node.files || 0) === 0 && (
+              <div className="faint" style={{ paddingLeft: (depth + 1) * 16 + 24, fontSize: 11 }}>empty</div>
             )}
           </div>
         )}
@@ -742,25 +770,28 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
     );
   }
 
-  const roots = nodes[""]?.dirs || [];
+  const roots = index?.roots || [];
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-panel" style={{ maxWidth: 640 }} onClick={(e) => e.stopPropagation()}>
         <div className="spread">
           <div>
             <h3 style={{ margin: 0 }}>Choose folders to back up</h3>
-            <div className="faint" style={{ fontSize: 12 }}>Select folders on the endpoint's drives. Child folders are included.</div>
+            <div className="faint" style={{ fontSize: 12 }}>
+              Selecting a folder includes everything beneath it.
+              {index?.built_at ? ` · indexed ${timeAgo(index.built_at)}` : ""}
+            </div>
           </div>
           <button className="btn ghost sm" onClick={onClose}><Icon name="logout" size={14} /></button>
         </div>
         <div className="modal-body">
           {err && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 8 }}>{err}</div>}
-          <div style={{ maxHeight: "42vh", overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, padding: 8 }}>
-            {scanning === "" && roots.length === 0 && (
-              <div className="faint"><span className="spinner-dot" /> scanning drives… (the agent answers on its next heartbeat)</div>
+          <div style={{ maxHeight: "44vh", overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, padding: 8 }}>
+            {loading && roots.length === 0 && (
+              <div className="faint"><span className="spinner-dot" /> loading the agent's folder index…</div>
             )}
-            {roots.map((r) => renderDir(r, 0))}
-            {scanning !== "" && roots.length === 0 && <div className="muted">No drives reported. Is the agent online?</div>}
+            {roots.map((r) => renderNode(r, 0))}
+            {!loading && roots.length === 0 && <div className="muted">No folder index yet. Try Rescan — is the agent online?</div>}
           </div>
           <div className="row" style={{ gap: 12, marginTop: 12, flexWrap: "wrap" }}>
             <label className="stack" style={{ flex: 1, minWidth: 200 }}>
@@ -777,7 +808,9 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
           </div>
         </div>
         <div className="modal-foot">
-          <button className="btn ghost sm" onClick={() => void scan("")}>Rescan drives</button>
+          <button className="btn ghost sm" disabled={rebuilding} onClick={() => void rescan()}>
+            {rebuilding ? <><span className="spinner-dot" /> Rebuilding…</> : "Rescan drives"}
+          </button>
           <div style={{ flex: 1 }} />
           <button className="btn sm" onClick={onClose}>Cancel</button>
           <button className="btn primary sm" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save selection"}</button>

@@ -21,6 +21,7 @@ import platform
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +69,13 @@ class Agent:
         self._last_update_attempt = 0.0
         self._last_telemetry: dict = {}
         self._agent_key: Optional[bytes] = None
+        # Cached filesystem folder index (rebuilt in the background so the portal
+        # can navigate the tree instantly instead of scanning per-folder).
+        self._fs_index: Optional[dict] = None
+        self._fs_index_lock = threading.Lock()
+        self._fs_index_file = Path(cfg.data_dir) / "fs_index.json"
+        self._rebuild_event = threading.Event()
+        self._indexer_started = False
 
     @property
     def agent_key(self) -> bytes:
@@ -234,21 +242,74 @@ class Agent:
             pass
 
     def _report_fs_scan(self, params: dict) -> None:
-        path = params.get("path", "")
+        """Serve the folder tree from the cached index (fast) and, if asked,
+        signal a background rebuild. Never scans inline so the heartbeat can't
+        block on a slow filesystem walk."""
         request_id = params.get("request_id", "")
-        try:
-            result = files_collector.scan(path)
-            ok, err = True, None
-        except Exception as exc:
-            result, ok, err = {"path": path, "dirs": []}, False, str(exc)
+        if params.get("rebuild"):
+            self._rebuild_event.set()
+        index = self._current_index()
+        self._post_fs_index(index, request_id=request_id)
+
+    def _post_fs_index(self, index: dict, request_id: str = "auto-index",
+                       ok: bool = True, err: Optional[str] = None) -> None:
         try:
             httpx.post(f"{self.cfg.cloud_base_url}/agent/fs-scan-result", json={
-                "request_id": request_id, "ok": ok, "error": err, "result": result,
-            }, headers=self._headers(), timeout=30)
-            self.log.info("fs-scan reported for %s (%d dirs)",
-                          path or "roots", len(result.get("dirs", [])))
+                "request_id": request_id, "ok": ok, "error": err, "result": index,
+            }, headers=self._headers(), timeout=60)
+            self.log.info("fs-index reported (%d folders, req=%s)",
+                          index.get("nodes", 0), request_id)
         except Exception as exc:
-            self.log.error("fs-scan report failed: %s", exc)
+            self.log.error("fs-index report failed: %s", exc)
+
+    # -- filesystem index (background) --------------------------------
+
+    def _current_index(self) -> dict:
+        """Return the in-memory index, falling back to the on-disk cache; if
+        neither exists yet, trigger a build and return an empty placeholder."""
+        with self._fs_index_lock:
+            if self._fs_index is not None:
+                return self._fs_index
+        try:
+            if self._fs_index_file.exists():
+                idx = json.loads(self._fs_index_file.read_text())
+                with self._fs_index_lock:
+                    self._fs_index = idx
+                return idx
+        except Exception:
+            pass
+        self._rebuild_event.set()
+        return {"roots": [], "built_at": None, "nodes": 0, "building": True}
+
+    def _rebuild_index(self) -> None:
+        idx = files_collector.build_index()
+        with self._fs_index_lock:
+            self._fs_index = idx
+        try:
+            self._fs_index_file.write_text(json.dumps(idx))
+        except Exception as exc:
+            self.log.warning("could not cache fs index: %s", exc)
+        self.log.info("filesystem index built (%d folders)", idx.get("nodes", 0))
+        # Push the fresh tree so the portal always has a current view.
+        if self.registered:
+            self._post_fs_index(idx, request_id="auto-index")
+
+    def _start_indexer(self) -> None:
+        if self._indexer_started:
+            return
+        self._indexer_started = True
+        threading.Thread(target=self._indexer_loop, name="fs-indexer", daemon=True).start()
+
+    def _indexer_loop(self) -> None:
+        interval = int(self.reg.get("config", {}).get("index_interval_seconds", 900)) if self.reg else 900
+        while True:
+            try:
+                self._rebuild_index()
+            except Exception as exc:
+                self.log.error("index rebuild failed: %s", exc)
+            # Rebuild every interval, or sooner if a rebuild was requested.
+            self._rebuild_event.wait(timeout=max(60, interval))
+            self._rebuild_event.clear()
 
     # -- collection + push --------------------------------------------
 
@@ -369,6 +430,7 @@ class Agent:
             else:
                 self.log.warning("Not registered. Run: arkive-agent link <CODE>")
                 return
+        self._start_indexer()  # background folder-index builder
         interval = self.reg.get("heartbeat_interval_seconds", 30)
         while True:
             try:

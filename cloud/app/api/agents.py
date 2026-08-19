@@ -184,6 +184,7 @@ def update_config(agent_id: str, body: AgentConfigUpdate,
 
 class FsScanRequest(BaseModel):
     path: str = ""  # "" = list roots/drives
+    rebuild: bool = False  # force a fresh index rebuild (vs. serve the cache)
 
 
 @fleet_router.post("/{agent_id}/fs-scan")
@@ -191,16 +192,19 @@ def request_fs_scan(agent_id: str, body: FsScanRequest,
                     principal: security.Principal = Depends(security.get_principal),
                     tenant: Tenant = Depends(security.get_tenant),
                     db: Session = Depends(get_db)):
-    """Ask the agent to report the folder tree under ``path`` so the operator can
-    pick folders in the Data Map. The agent answers on its next heartbeat."""
+    """Ask the agent for its cached folder tree (served instantly from its index)
+    or, with ``rebuild``, to rebuild the index. The agent answers on its next
+    heartbeat; its background indexer also pushes a fresh tree periodically."""
     a = db.get(DesktopAgent, agent_id)
     if not a or a.tenant_id != tenant.id:
         raise HTTPException(404, "agent not found")
     request_id = secrets.token_hex(8)
-    a.pending_command = {"type": "scan_fs", "params": {"path": body.path, "request_id": request_id}}
+    a.pending_command = {"type": "scan_fs",
+                         "params": {"path": body.path, "request_id": request_id,
+                                    "rebuild": body.rebuild}}
     db.commit()
     return {"request_id": request_id, "queued": True,
-            "message": "Scanning — the agent answers on its next heartbeat (~30s)."}
+            "message": "The agent serves its cached folder index on its next heartbeat."}
 
 
 @fleet_router.get("/{agent_id}/fs-scan")

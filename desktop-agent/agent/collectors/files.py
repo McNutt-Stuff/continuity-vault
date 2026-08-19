@@ -27,7 +27,18 @@ _SKIP_DIRS = {
     ".git", "node_modules", "__pycache__", ".cache", ".Trash", ".npm", ".venv",
     "venv", ".gradle", ".m2", "Caches", "CachedData", ".DS_Store",
 }
+# Extra system trees skipped when indexing from the system root so a full-tree
+# index stays fast and relevant (user data lives under Home / Volumes).
+_ROOT_SKIP = {
+    "System", "private", "dev", "proc", "sys", "usr", "bin", "sbin", "cores",
+    "opt", "var", "Library", "Applications", "lost+found", "run", "boot",
+}
 _DEFAULT_MAX_BYTES = 100 * 1024 * 1024   # 100 MiB per file
+# Bounds for the cached folder index so a rebuild is fast and the payload sane.
+_INDEX_MAX_DEPTH = 5
+_INDEX_ROOT_DEPTH = 2      # system root ("/") is only indexed shallowly
+_INDEX_MAX_ENTRIES = 600   # subfolders indexed per directory
+_INDEX_MAX_NODES = 20000   # total folders across the whole index
 _DEFAULT_MAX_FILES = 5000                # safety cap per collection run
 
 # Extension -> canonical kind (matches the server taxonomy KINDS).
@@ -138,6 +149,74 @@ def scan(path: str, max_entries: int = 400) -> dict:
     dirs.sort(key=lambda d: d["name"].lower())
     return {"path": path, "name": p.name or path,
             "dirs": dirs[:max_entries], "files": files, "bytes": total}
+
+
+def build_index(max_depth: int = _INDEX_MAX_DEPTH, max_entries: int = _INDEX_MAX_ENTRIES,
+                max_nodes: int = _INDEX_MAX_NODES) -> dict:
+    """Build the full (bounded) folder hierarchy in one pass so the portal can
+    navigate it instantly instead of scanning per-folder.
+
+    Each node carries its immediate file count/bytes and its child folders down to
+    ``max_depth`` (the system root is only walked ``_INDEX_ROOT_DEPTH`` deep).
+    ``hasMore`` marks folders whose children were truncated or depth-limited."""
+    counter = [0]
+
+    def walk(path: str, depth: int, depth_limit: int, extra_skip: set) -> dict:
+        node: dict = {"path": path, "name": Path(path).name or path}
+        subdirs: list = []
+        files = 0
+        total = 0
+        try:
+            with os.scandir(path) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            if e.name in _SKIP_DIRS or e.name in extra_skip or e.name.startswith("."):
+                                continue
+                            subdirs.append((e.name, e.path))
+                        elif e.is_file(follow_symlinks=False):
+                            files += 1
+                            try:
+                                total += e.stat().st_size
+                            except OSError:
+                                pass
+                    except OSError:
+                        continue
+        except OSError as exc:
+            node["error"] = str(exc)
+        node["files"] = files
+        node["bytes"] = total
+        subdirs.sort(key=lambda d: d[0].lower())
+        truncated = len(subdirs) > max_entries
+        subdirs = subdirs[:max_entries]
+        children: list = []
+        if depth < depth_limit:
+            for _name, cpath in subdirs:
+                if counter[0] >= max_nodes:
+                    truncated = True
+                    break
+                counter[0] += 1
+                children.append(walk(cpath, depth + 1, depth_limit, extra_skip))
+            node["children"] = children
+            node["hasMore"] = truncated
+        else:
+            # Depth limit: don't descend, but note whether deeper folders exist.
+            node["children"] = []
+            node["hasMore"] = len(subdirs) > 0
+        return node
+
+    roots: list = []
+    for r in list_roots():
+        counter[0] += 1
+        is_root = r.get("kind") == "root"
+        limit = _INDEX_ROOT_DEPTH if is_root else max_depth
+        # Skip big system trees when indexing from "/" so the build stays fast.
+        node = walk(r["path"], 1, limit, _ROOT_SKIP if is_root else set())
+        node["name"] = r["name"]
+        node["kind"] = r.get("kind")
+        roots.append(node)
+    return {"built_at": datetime.now(timezone.utc).isoformat(),
+            "roots": roots, "nodes": counter[0]}
 
 
 def _excluded(fp: Path, excl_ext: set, excl_glob: List[str]) -> bool:
