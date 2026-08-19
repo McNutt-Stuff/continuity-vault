@@ -18,7 +18,7 @@ import tarfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -388,11 +388,18 @@ class AgentHeartbeat(BaseModel):
 
 
 @agent_router.post("/heartbeat")
-def heartbeat(body: AgentHeartbeat, agent: DesktopAgent = Depends(_auth_agent),
+def heartbeat(body: AgentHeartbeat, request: Request,
+              agent: DesktopAgent = Depends(_auth_agent),
               db: Session = Depends(get_db)):
+    fwd = request.headers.get("x-forwarded-for", "")
+    public_ip = (fwd.split(",")[0].strip() if fwd
+                 else (request.client.host if request.client else None))
+    tel = dict(body.telemetry or {})
+    if public_ip:
+        tel["public_ip"] = public_ip
     agent.state = body.state
     agent.version = body.version
-    agent.telemetry = body.telemetry
+    agent.telemetry = tel
     agent.last_heartbeat_at = _now()
     command = agent.pending_command
     agent.pending_command = None  # consume

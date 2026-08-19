@@ -1,14 +1,67 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
-import { Card, Pill, timeAgo, serverDate } from "../components/ui";
+import { Card, Pill, timeAgo, serverDate, fmtAbsolute } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { BrandIcon } from "../components/BrandIcon";
 import { notify } from "../components/dialog";
 
 interface Agent {
   id: string; name: string; hostname: string; platform: string; version: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   state: string; collectors: string[]; config: any; telemetry: any;
   last_heartbeat_at: string | null; last_collection_at: string | null;
+}
+
+// Online = a heartbeat within the last ~90s.
+function isOnline(a: Agent): boolean {
+  if (!a.last_heartbeat_at) return false;
+  return (Date.now() - serverDate(a.last_heartbeat_at).getTime()) / 1000 < 90;
+}
+
+type HealthLevel = "healthy" | "warning" | "critical";
+function healthOf(a: Agent): { level: HealthLevel; label: string } {
+  const t = a.telemetry || {};
+  if (!isOnline(a)) return { level: "warning", label: "Offline" };
+  if (t.op_available === false) return { level: "warning", label: "1Password CLI missing" };
+  if (t.op_auth === "unauthenticated") return { level: "warning", label: "1Password locked" };
+  return { level: "healthy", label: "Healthy" };
+}
+
+const HEALTH_COLOR: Record<HealthLevel, string> = {
+  healthy: "#35d0a5", warning: "#f5a623", critical: "#f2545b",
+};
+
+function StatusDot({ color, pulse }: { color: string; pulse?: boolean }) {
+  return (
+    <span style={{
+      width: 9, height: 9, borderRadius: "50%", background: color, flex: "none",
+      boxShadow: `0 0 0 3px ${color}22`, display: "inline-block",
+      animation: pulse ? "badge-pulse 1.6s ease-in-out infinite" : undefined,
+    }} />
+  );
+}
+
+function OnlinePill({ a }: { a: Agent }) {
+  const online = isOnline(a);
+  return (
+    <span className="row" style={{ gap: 6, alignItems: "center" }}>
+      <StatusDot color={online ? "#35d0a5" : "#6b7688"} pulse={online} />
+      <span style={{ fontSize: 12, fontWeight: 600, color: online ? "#35d0a5" : "var(--faint,#8892a6)" }}>
+        {online ? "Online" : "Offline"}
+      </span>
+    </span>
+  );
+}
+
+function HealthPill({ a }: { a: Agent }) {
+  const h = healthOf(a);
+  return (
+    <span className="row" style={{ gap: 6, alignItems: "center" }}>
+      <StatusDot color={HEALTH_COLOR[h.level]} />
+      <span style={{ fontSize: 12, fontWeight: 600, color: HEALTH_COLOR[h.level] }}>{h.label}</span>
+    </span>
+  );
 }
 
 export default function Agents() {
@@ -16,13 +69,14 @@ export default function Agents() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [code, setCode] = useState<string | null>(null);
   const [toast, setToast] = useState("");
-  const [detail, setDetail] = useState<Agent | null>(null);
+  const [selected, setSelected] = useState<Agent | null>(null);
 
   async function load() {
     const list = await api.get<Agent[]>("/agents");
     setAgents(list);
-    setDetail((d) => (d ? list.find((a) => a.id === d.id) ?? null : null));
+    setSelected((d) => (d ? list.find((a) => a.id === d.id) ?? d : (list[0] ?? null)));
   }
+  function select(a: Agent) { setSelected(a); }
   useEffect(() => {
     void load();
     const t = setInterval(load, 8000);
@@ -99,7 +153,12 @@ export default function Agents() {
         </Card>
 
         {agents.map((a) => (
-          <div key={a.id} className="dest-card" style={{ marginBottom: 12 }}>
+          <div
+            key={a.id}
+            className={`dest-card ${selected?.id === a.id ? "selected" : ""}`}
+            style={{ marginBottom: 12 }}
+            onClick={() => select(a)}
+          >
             <div className="spread">
               <div className="row">
                 <div className="result-icon" style={{ background: "linear-gradient(135deg,#7a5cff,#4f7cff)", width: 36, height: 36 }}>
@@ -110,279 +169,281 @@ export default function Agents() {
                   <div className="faint mono" style={{ fontSize: 11 }}>{a.hostname} · v{a.version}</div>
                 </div>
               </div>
-              {a.telemetry?.op_available === false
-                ? <Pill tone="warn">op CLI missing</Pill>
-                : <Pill tone="ok">healthy</Pill>}
+              <StatusDot color={isOnline(a) ? "#35d0a5" : "#6b7688"} pulse={isOnline(a)} />
             </div>
-            <div className="grid grid-3" style={{ marginTop: 12 }}>
-              <Info label="Heartbeat" value={timeAgo(a.last_heartbeat_at)} />
-              <Info label="Last collection" value={timeAgo(a.last_collection_at)} />
-              <Info label="Collectors" value={(a.collectors || []).join(", ") || "—"} />
-              <Info label="Local IP" value={a.telemetry?.local_ip || "—"} />
-              <Info label="Local user" value={a.telemetry?.local_user || "—"} />
-              <Info label="1Password" value={a.telemetry?.op_auth || "—"} />
+            <div className="row" style={{ gap: 12, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)" }}>
+              <OnlinePill a={a} />
+              <HealthPill a={a} />
             </div>
-            <div className="row" style={{ marginTop: 12, gap: 8, flexWrap: "wrap" }}>
-              <button className="btn sm primary" onClick={() => command(a, "collect")}>Collect now</button>
-              <button className="btn sm" onClick={() => command(a, "update")}>Update</button>
-              <button className="btn sm" onClick={() => command(a, "reconfigure")}>Reconfigure</button>
-              <button className="btn sm" onClick={() => setDetail(a)}>
-                <Icon name="search" size={13} /> Status
-              </button>
-            </div>
-            {Array.isArray(a.telemetry?.recent_logs) && a.telemetry.recent_logs.length > 0 && (
-              <details style={{ marginTop: 12 }}>
-                <summary className="faint" style={{ cursor: "pointer", fontSize: 12 }}>
-                  Recent logs ({a.telemetry.recent_logs.length})
-                </summary>
-                <pre className="mono" style={{ fontSize: 11, maxHeight: 220, overflow: "auto",
-                     background: "rgba(0,0,0,0.25)", padding: 10, borderRadius: 8, marginTop: 8 }}>
-                  {a.telemetry.recent_logs.join("\n")}
-                </pre>
-              </details>
-            )}
           </div>
         ))}
         {agents.length === 0 && <Card><div className="muted">No desktop agents linked yet.</div></Card>}
       </div>
 
-      <Card>
-        <h3 style={{ marginBottom: 10 }}>How it works</h3>
-        <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.8 }}>
-          <li>Generate a linking code and run the macOS installer on the endpoint.</li>
-          <li>The agent registers (like an appliance), receives its config, and starts.</li>
-          <li>It collects via the 1Password CLI and pushes encrypted data to the cloud
-              (or directly to an appliance).</li>
-          <li>It reports telemetry on a heartbeat and self-updates on the <b>Update</b> command.</li>
-        </ol>
-      </Card>
+      <div>
+        {selected ? (
+          <AgentDetail a={selected} onCommand={(type) => command(selected, type)} reload={load} />
+        ) : (
+          <Card><div className="muted">Select an agent to view its dashboard.</div></Card>
+        )}
+      </div>
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
-      {detail && (
-        <AgentStatusModal
-          agent={detail}
-          onClose={() => setDetail(null)}
-          onCommand={(type) => command(detail, type)}
-        />
-      )}
     </div>
   );
 }
 
-function Info({ label, value }: { label: string; value: string }) {
+function Info({ label, value, tone, title }: { label: string; value: string; tone?: "ok" | "warn" | "danger" | "info"; title?: string }) {
   return (
-    <div className="stack">
+    <div className="stack" title={title}>
       <div className="faint" style={{ fontSize: 11.5 }}>{label}</div>
-      <div style={{ fontWeight: 600, fontSize: 13 }}>{value}</div>
+      {tone ? <Pill tone={tone}>{value}</Pill> : <div style={{ fontWeight: 600, fontSize: 13 }}>{value}</div>}
     </div>
   );
 }
 
-function heartbeatTone(iso: string | null): "ok" | "warn" | "danger" {
-  if (!iso) return "danger";
-  const secs = (Date.now() - serverDate(iso).getTime()) / 1000;
-  if (secs < 90) return "ok";
-  if (secs < 600) return "warn";
-  return "danger";
-}
-
-function AgentStatusModal({
-  agent, onClose, onCommand,
-}: { agent: Agent; onClose: () => void; onCommand: (type: string) => void }) {
-  const t = agent.telemetry || {};
+function AgentDetail({ a, onCommand, reload }:
+  { a: Agent; onCommand: (type: string) => void; reload: () => Promise<void> }) {
+  const t = a.telemetry || {};
   const crypto = t.crypto || {};
-  const [verbose, setVerbose] = useState<boolean>(!!agent.config?.verbose_logging);
-  const [dest, setDest] = useState<string>(
-    (() => {
-      const arr = agent.config?.destinations || ["cv-cloud"];
-      if (arr.includes("appliance")) return arr.includes("cv-cloud") ? "both" : "appliance";
-      return "cv-cloud";
-    })()
-  );
-  const online = heartbeatTone(agent.last_heartbeat_at);
+  const online = isOnline(a);
+  const [kv, setKv] = useState<{ title: string; rows: [string, string][] } | null>(null);
+  const [verbose, setVerbose] = useState<boolean>(!!a.config?.verbose_logging);
+  const [dest, setDest] = useState<string>(() => {
+    const arr = a.config?.destinations || ["cv-cloud"];
+    if (arr.includes("appliance")) return arr.includes("cv-cloud") ? "both" : "appliance";
+    return "cv-cloud";
+  });
   const opState: "missing" | "interactive" | "ready" =
     t.op_available === false ? "missing" : t.op_auth === "unauthenticated" ? "interactive" : "ready";
   const opTone: "ok" | "info" | "danger" =
     opState === "missing" ? "danger" : opState === "interactive" ? "info" : "ok";
   const logs: string[] = Array.isArray(t.recent_logs) ? t.recent_logs : [];
 
+  function showAdvanced() {
+    const rows: [string, string][] = [
+      ["Name", a.name],
+      ["Hostname", t.hostname || a.hostname],
+      ["Agent ID", a.id],
+      ["Platform / OS", t.os || a.platform || "—"],
+      ["Agent version", a.version],
+      ["State", a.state],
+      ["Local user", t.local_user || "—"],
+      ["Local IP", t.local_ip || "—"],
+      ["Public IP", t.public_ip || "—"],
+      ["Cloud endpoint", t.cloud_url || "—"],
+      ["Collectors", (a.collectors || []).join(", ") || "—"],
+      ["Schedule", `${a.config?.schedule_minutes ?? 360} min`],
+      ["Content encryption", crypto.content_alg || "AES-256-GCM"],
+      ["Quantum-safe", crypto.pq_available ? "enabled (ML-KEM/ML-DSA)" : "classical fallback"],
+      ["Recovery escrow", crypto.recovery_escrow === "escrowed"
+        ? `escrowed · ${crypto.recovery_kem_alg || "KEM"}` : "pending"],
+      ["1Password auth", t.op_auth || "—"],
+    ];
+    setKv({ title: `${a.name} — details`, rows });
+  }
+
+  async function setConfig(patch: Record<string, unknown>) {
+    try { await api.put(`/agents/${a.id}/config`, patch); await reload(); }
+    catch (e) { await notify({ title: "Couldn't update agent", message: (e as ApiError).message, tone: "danger" }); }
+  }
+
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
-        <div className="spread" style={{ marginBottom: 4 }}>
-          <div className="row">
-            <div className="result-icon" style={{ background: "linear-gradient(135deg,#7a5cff,#4f7cff)", width: 40, height: 40 }}>
-              <Icon name="user" size={20} />
+    <>
+      <Card style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ alignItems: "flex-start", gap: 12 }}>
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            <div className="result-icon" style={{ background: "linear-gradient(135deg,#7a5cff,#4f7cff)", width: 46, height: 46 }}>
+              <Icon name="user" size={22} />
             </div>
             <div>
-              <div style={{ fontWeight: 700, fontSize: 16 }}>{agent.name}</div>
-              <div className="faint mono" style={{ fontSize: 11 }}>
-                {agent.hostname} · v{agent.version} · {t.os || agent.platform}
-              </div>
+              <h2 style={{ margin: 0 }}>{a.name}</h2>
+              <div className="faint mono" style={{ fontSize: 11.5 }}>{a.hostname} · v{a.version} · {t.os || a.platform}</div>
             </div>
           </div>
-          <div className="row" style={{ gap: 8 }}>
-            <Pill tone={online === "ok" ? "ok" : online === "warn" ? "warn" : "danger"}>
-              {online === "ok" ? "online" : online === "warn" ? "stale" : "offline"}
-            </Pill>
-            <button className="btn sm ghost" onClick={onClose} aria-label="Close">✕</button>
+          <div className="stack" style={{ alignItems: "flex-end", gap: 8 }}>
+            <div className="row" style={{ gap: 16 }}>
+              <OnlinePill a={a} />
+              <HealthPill a={a} />
+            </div>
+            <Pill tone="info">Desktop agent</Pill>
           </div>
         </div>
 
+        {/* Controls header bar */}
+        <div className="row" style={{ gap: 8, marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border-soft)", flexWrap: "wrap", alignItems: "center" }}>
+          <button className="btn sm primary" onClick={() => onCommand("collect")}>
+            <Icon name="restore" size={13} /> Collect now
+          </button>
+          <button className="btn sm" onClick={() => onCommand("update")}>
+            <Icon name="server" size={13} /> Update
+          </button>
+          <button className="btn sm" onClick={() => onCommand("reconfigure")}>
+            <Icon name="gear" size={13} /> Reconfigure
+          </button>
+          <button className="btn sm ghost" onClick={showAdvanced}>
+            <Icon name="search" size={13} /> Advanced
+          </button>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 14 }}>
+          <Info label="Heartbeat" value={timeAgo(a.last_heartbeat_at)} title={fmtAbsolute(a.last_heartbeat_at)} />
+          <Info label="Last collection" value={timeAgo(a.last_collection_at)} title={fmtAbsolute(a.last_collection_at)} />
+          <Info label="State" value={a.state} tone={online ? "ok" : "warn"} />
+          <Info label="Schedule" value={`${a.config?.schedule_minutes ?? 360} min`} />
+        </div>
+      </Card>
+
+      {/* Collectors */}
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ marginBottom: 12 }}>Collectors</h3>
+        <div className="collector-row">
+          <div className="row" style={{ gap: 10 }}>
+            <BrandIcon name="onepassword" size={18} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>1Password (op CLI)</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>
+                {opState === "missing" ? "CLI not installed"
+                  : opState === "interactive" ? "installed · collects interactively"
+                  : `installed · ${t.op_auth || "ready"}`}
+              </div>
+            </div>
+          </div>
+          <Pill tone={opTone}>{opState === "missing" ? "missing" : opState === "interactive" ? "interactive only" : "ready"}</Pill>
+        </div>
+        {opState === "interactive" && (
+          <div className="hint-box" style={{ marginTop: 10 }}>
+            1Password collects <b>interactively</b>: open and unlock the 1Password app, then use
+            <span className="mono"> Collect now</span>. Unattended background collection needs a
+            1Password service account (Business plan).
+          </div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 12 }}>
+          <Info label="Last collection" value={timeAgo(a.last_collection_at)} />
+          <Info label="Collectors" value={(a.collectors || []).join(", ") || "—"} />
+          <Info label="1Password auth" value={t.op_auth || "—"} />
+        </div>
+      </Card>
+
+      {/* Security */}
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ marginBottom: 12 }}>Security</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+          <Info label="Client encryption" value={crypto.content_alg || "AES-256-GCM"} tone="ok" />
+          <Info label="Quantum-safe" value={crypto.pq_available ? "Enabled" : "Classical"} tone={crypto.pq_available ? "ok" : "warn"} />
+          <Info label="Recovery escrow" value={crypto.recovery_escrow === "escrowed" ? "Escrowed" : "Pending"} tone={crypto.recovery_escrow === "escrowed" ? "ok" : "warn"} />
+        </div>
+        <div className="faint" style={{ fontSize: 11.5, marginTop: 10 }}>
+          Data is encrypted on this Mac before upload — the cloud never sees plaintext.
+        </div>
+      </Card>
+
+      {/* Network */}
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ marginBottom: 12 }}>Network</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+          <Info label="Local IP" value={t.local_ip || "—"} />
+          <Info label="Public IP" value={t.public_ip || "—"} />
+          <div className="stack">
+            <div className="faint" style={{ fontSize: 11.5 }}>Cloud connectivity</div>
+            <div className="row" style={{ gap: 6, alignItems: "center" }}>
+              <StatusDot color={online ? "#35d0a5" : "#6b7688"} pulse={online} />
+              <span style={{ fontWeight: 600, color: online ? "#35d0a5" : undefined }}>{online ? "Connected" : "Disconnected"}</span>
+            </div>
+          </div>
+          <Info label="Channel" value={t.channel_encryption || "TLS 1.3"} tone="ok" />
+          <Info label="Local user" value={t.local_user || "—"} />
+          <Info label="Reported" value={timeAgo(t.reported_at || a.last_heartbeat_at)} />
+        </div>
+        <div className="faint" style={{ fontSize: 11.5, marginTop: 10 }}>
+          Cloud endpoint: <span className="mono">{t.cloud_url ?? "—"}</span>
+        </div>
+      </Card>
+
+      {/* Configuration */}
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ marginBottom: 12 }}>Configuration</h3>
+        <div className="collector-row">
+          <div className="row" style={{ gap: 10 }}>
+            <Icon name="server" size={16} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Backup destination</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>Where this agent pushes collected data.</div>
+            </div>
+          </div>
+          <select
+            value={dest}
+            style={{ padding: "5px 8px", borderRadius: 6 }}
+            onChange={(e) => {
+              const v = e.target.value;
+              setDest(v);
+              const destinations = v === "appliance" ? ["appliance"]
+                : v === "both" ? ["cv-cloud", "appliance"] : ["cv-cloud"];
+              void setConfig({ destinations });
+            }}
+          >
+            <option value="cv-cloud">Cloud</option>
+            <option value="appliance">Appliance</option>
+            <option value="both">Cloud + Appliance</option>
+          </select>
+        </div>
+        <div className="collector-row" style={{ marginTop: 10 }}>
+          <div className="row" style={{ gap: 10 }}>
+            <Icon name="search" size={16} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Verbose logging (DEBUG)</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>Applies on the next heartbeat (~30s). For troubleshooting.</div>
+            </div>
+          </div>
+          <button
+            className={`btn sm ${verbose ? "primary" : ""}`}
+            onClick={() => { const next = !verbose; setVerbose(next); void setConfig({ verbose_logging: next }); }}
+          >
+            {verbose ? "On" : "Off"}
+          </button>
+        </div>
+      </Card>
+
+      {/* Recent activity */}
+      {logs.length > 0 && (
+        <Card style={{ marginBottom: 16 }}>
+          <h3 style={{ marginBottom: 10 }}>Recent activity</h3>
+          <pre className="mono" style={{ fontSize: 11, maxHeight: 220, overflow: "auto",
+               background: "rgba(0,0,0,0.28)", padding: 12, borderRadius: 10, margin: 0 }}>
+            {logs.join("\n")}
+          </pre>
+        </Card>
+      )}
+
+      {kv && <KVModal title={kv.title} rows={kv.rows} onClose={() => setKv(null)} />}
+    </>
+  );
+}
+
+function KVModal({ title, rows, onClose }:
+  { title: string; rows: [string, string][]; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread">
+          <h3 style={{ margin: 0 }}>{title}</h3>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="logout" size={14} /></button>
+        </div>
         <div className="modal-body">
-          <section className="status-section">
-            <div className="status-h"><Icon name="server" size={14} /> Cloud connectivity</div>
-            <div className="grid grid-3">
-              <Info label="Last heartbeat" value={timeAgo(agent.last_heartbeat_at)} />
-              <Info label="Last reported" value={timeAgo(t.reported_at || null)} />
-              <Info label="Endpoint" value={t.cloud_url || "—"} />
-            </div>
-          </section>
-
-          <section className="status-section">
-            <div className="status-h"><Icon name="link" size={14} /> Collectors</div>
-            <div className="collector-row">
-              <div className="row" style={{ gap: 10 }}>
-                <Icon name="lock" size={16} />
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>1Password (op CLI)</div>
-                  <div className="faint" style={{ fontSize: 11.5 }}>
-                    {opState === "missing"
-                      ? "CLI not installed"
-                      : opState === "interactive"
-                      ? "installed · collects interactively"
-                      : `installed · ${t.op_auth || "ready"}`}
-                  </div>
-                </div>
-              </div>
-              <Pill tone={opTone}>
-                {opState === "missing" ? "missing" : opState === "interactive" ? "interactive only" : "ready"}
-              </Pill>
-            </div>
-            {opState === "interactive" && (
-              <div className="hint-box">
-                1Password collects <b>interactively</b>: open and unlock the 1Password app,
-                then use the agent’s <span className="mono">Sync now</span>. Unattended
-                background collection requires a 1Password service account (Business plan).
-              </div>
-            )}
-            <div className="grid grid-3" style={{ marginTop: 10 }}>
-              <Info label="Last collection" value={timeAgo(agent.last_collection_at)} />
-              <Info label="Collectors" value={(agent.collectors || []).join(", ") || "—"} />
-              <Info label="Schedule" value={`${agent.config?.schedule_minutes ?? 360} min`} />
-            </div>
-          </section>
-
-          <section className="status-section">
-            <div className="status-h"><Icon name="lock" size={14} /> Security</div>
-            <div className="grid grid-2" style={{ gap: 10 }}>
-              <div className="collector-row">
-                <div className="row" style={{ gap: 10 }}>
-                  <Icon name="lock" size={16} />
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>Client-side encryption</div>
-                </div>
-                <Pill tone="ok">{crypto.content_alg || "AES-256-GCM"}</Pill>
-              </div>
-              <div className="collector-row">
-                <div className="row" style={{ gap: 10 }}>
-                  <Icon name="shield" size={16} />
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>Quantum-safe crypto</div>
-                </div>
-                <Pill tone={crypto.pq_available ? "ok" : "warn"}>
-                  {crypto.pq_available ? "enabled (ML-KEM/ML-DSA)" : "classical fallback"}
-                </Pill>
-              </div>
-              <div className="collector-row">
-                <div className="row" style={{ gap: 10 }}>
-                  <Icon name="key" size={16} />
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>Recovery escrow</div>
-                </div>
-                <Pill tone={crypto.recovery_escrow === "escrowed" ? "ok" : "warn"}>
-                  {crypto.recovery_escrow === "escrowed"
-                    ? `escrowed · ${crypto.recovery_kem_alg || "KEM"}`
-                    : "pending"}
-                </Pill>
-              </div>
-            </div>
-          </section>
-
-          <section className="status-section">
-            <div className="status-h"><Icon name="user" size={14} /> Host & communication</div>
-            <div className="grid grid-3">
-              <Info label="Hostname" value={t.hostname || agent.hostname} />
-              <Info label="Local IP" value={t.local_ip || "—"} />
-              <Info label="Local user" value={t.local_user || "—"} />
-              <Info label="Agent version" value={agent.version} />
-              <Info label="OS" value={t.os || "—"} />
-              <Info label="State" value={agent.state} />
-            </div>
-          </section>
-
-          <section className="status-section">
-            <div className="status-h"><Icon name="key" size={14} /> Advanced</div>
-            <div className="collector-row">
-              <div className="row" style={{ gap: 10 }}>
-                <Icon name="server" size={16} />
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>Backup destination</div>
-                  <div className="faint" style={{ fontSize: 11.5 }}>
-                    Where the agent pushes collected data.
-                  </div>
-                </div>
-              </div>
-              <select
-                className="input"
-                value={dest}
-                onChange={async (e) => {
-                  const v = e.target.value;
-                  setDest(v);
-                  const destinations = v === "appliance" ? ["appliance"]
-                    : v === "both" ? ["cv-cloud", "appliance"] : ["cv-cloud"];
-                  try { await api.put(`/agents/${agent.id}/config`, { destinations }); }
-                  catch { /* revert handled on next poll */ }
-                }}
-              >
-                <option value="cv-cloud">Cloud</option>
-                <option value="appliance">Appliance</option>
-                <option value="both">Cloud + Appliance</option>
-              </select>
-            </div>
-            <div className="collector-row" style={{ marginTop: 10 }}>
-              <div className="row" style={{ gap: 10 }}>
-                <Icon name="search" size={16} />
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>Verbose logging (DEBUG)</div>
-                  <div className="faint" style={{ fontSize: 11.5 }}>
-                    Applies on the agent's next heartbeat (~30s). Use for troubleshooting.
-                  </div>
-                </div>
-              </div>
-              <button
-                className={`btn sm ${verbose ? "primary" : ""}`}
-                onClick={async () => {
-                  const next = !verbose;
-                  setVerbose(next);
-                  try { await api.put(`/agents/${agent.id}/config`, { verbose_logging: next }); }
-                  catch { setVerbose(!next); }
-                }}
-              >
-                {verbose ? "On" : "Off"}
-              </button>
-            </div>
-          </section>
-
-          <section className="status-section">
-            <div className="status-h"><Icon name="search" size={14} /> Recent activity</div>
-            <pre className="log-pane">{logs.length ? logs.join("\n") : "No logs reported yet."}</pre>
-          </section>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+            <tbody>
+              {rows.map(([k, v], i) => (
+                <tr key={i} style={{ borderBottom: "1px solid var(--border-soft)" }}>
+                  <td className="faint" style={{ padding: "7px 12px 7px 0", whiteSpace: "nowrap", verticalAlign: "top" }}>{k}</td>
+                  <td className="mono" style={{ padding: "7px 0", overflowWrap: "anywhere" }}>{v}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-
         <div className="modal-foot">
-          <button className="btn sm primary" onClick={() => onCommand("collect")}>Collect now</button>
-          <button className="btn sm" onClick={() => onCommand("update")}>Update</button>
-          <button className="btn sm" onClick={() => onCommand("reconfigure")}>Reconfigure</button>
           <div style={{ flex: 1 }} />
-          <button className="btn sm ghost" onClick={onClose}>Close</button>
+          <button className="btn ghost sm" onClick={onClose}>Close</button>
         </div>
       </div>
     </div>

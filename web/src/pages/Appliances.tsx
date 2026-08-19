@@ -257,6 +257,7 @@ export default function Appliances() {
 
 function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onCommand: (a: Appliance, t: string, p?: any) => void; onRemove: (a: Appliance) => void; reload: () => Promise<void> }) {
   const t = a.telemetry ?? {};
+  const [kv, setKv] = useState<{ title: string; rows: [string, string][] } | null>(null);
 
   async function renameAppliance() {
     const name = await promptDialog({ title: "Rename appliance", label: "Appliance name", defaultValue: a.name, confirmLabel: "Save" });
@@ -342,7 +343,7 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
         </div>
       </Card>
 
-      <StorageCard a={a} onAdd={addStorage} onRename={renameStorage} onDelete={deleteStorage} />
+      <StorageCard a={a} onAdd={addStorage} onRename={renameStorage} onDelete={deleteStorage} onAdvanced={setKv} />
 
       <StoredDataCard a={a} />
 
@@ -372,7 +373,39 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
           </pre>
         </Card>
       )}
+
+      {kv && <KVModal title={kv.title} rows={kv.rows} onClose={() => setKv(null)} />}
     </>
+  );
+}
+
+function KVModal({ title, rows, onClose }:
+  { title: string; rows: [string, string][]; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread">
+          <h3 style={{ margin: 0 }}>{title}</h3>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="logout" size={14} /></button>
+        </div>
+        <div className="modal-body">
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+            <tbody>
+              {rows.map(([k, v], i) => (
+                <tr key={i} style={{ borderBottom: "1px solid var(--border-soft)" }}>
+                  <td className="faint" style={{ padding: "7px 12px 7px 0", whiteSpace: "nowrap", verticalAlign: "top" }}>{k}</td>
+                  <td className="mono" style={{ padding: "7px 0", overflowWrap: "anywhere" }}>{v}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="modal-foot">
+          <div style={{ flex: 1 }} />
+          <button className="btn ghost sm" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -385,8 +418,9 @@ function fmtUptime(s: number): string {
   return `${m}m`;
 }
 
-function StorageCard({ a, onAdd, onRename, onDelete }: {
+function StorageCard({ a, onAdd, onRename, onDelete, onAdvanced }: {
   a: Appliance; onAdd: () => void; onRename: (s: Store) => void; onDelete: (s: Store) => void;
+  onAdvanced: (m: { title: string; rows: [string, string][] }) => void;
 }) {
   const stores = a.stores ?? [];
   const totalCap = stores.reduce((n, s) => n + (s.capacity_bytes || 0), 0);
@@ -408,7 +442,7 @@ function StorageCard({ a, onAdd, onRename, onDelete }: {
           <div className="progress"><span style={{ width: `${pct}%`, background: barTone }} /></div>
         </div>
       )}
-      {stores.map((s) => <StorageItem key={s.id} a={a} s={s} onRename={onRename} onDelete={onDelete} />)}
+      {stores.map((s) => <StorageItem key={s.id} s={s} onRename={onRename} onDelete={onDelete} onAdvanced={onAdvanced} />)}
       {stores.length === 0 && <div className="muted">No storage volumes reported yet.</div>}
     </Card>
   );
@@ -430,8 +464,7 @@ function StoredDataCard({ a }: { a: Appliance }) {
       </div>
       {t.data_path && (
         <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>
-          <Icon name="lock" size={12} /> <span className="mono">{t.data_path}</span>
-          {t.data_mount ? <> on <span className="mono">{t.data_mount}</span></> : null} · client-encrypted (AES-256-GCM), sealed at rest
+          <Icon name="lock" size={12} /> Client-encrypted (AES-256-GCM), sealed at rest
         </div>
       )}
       {sources.length === 0 && <div className="muted">No recovery points stored on this appliance yet.</div>}
@@ -494,8 +527,9 @@ function NetworkCard({ a }: { a: Appliance }) {
   );
 }
 
-function StorageItem({ a, s, onRename, onDelete }:
-  { a: Appliance; s: Store; onRename: (s: Store) => void; onDelete: (s: Store) => void }) {
+function StorageItem({ s, onRename, onDelete, onAdvanced }:
+  { s: Store; onRename: (s: Store) => void; onDelete: (s: Store) => void;
+    onAdvanced: (m: { title: string; rows: [string, string][] }) => void }) {
   const pct = s.capacity_bytes ? Math.min(100, (s.used_bytes / s.capacity_bytes) * 100) : 0;
   const h = s.health || {};
   const barTone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : undefined;
@@ -505,6 +539,26 @@ function StorageItem({ a, s, onRename, onDelete }:
   if (h.raid?.enabled) chips.push({ label: "RAID", value: h.raid.status ?? "—", tone: h.raid.status === "optimal" ? "ok" : "danger" });
   if (h.temperature_c != null) chips.push({ label: "Temp", value: `${h.temperature_c}°C`, tone: h.temperature_c >= 60 ? "warn" : "info" });
   if (h.power) chips.push({ label: "Power", value: h.power, tone: h.power === "ok" ? "ok" : "danger" });
+
+  function showAdvanced() {
+    const rows: [string, string][] = [
+      ["Name", s.name],
+      ["Type", s.kind === "builtin" ? "Built-in storage" : "External storage"],
+      ["Storage ID", `store:${s.id}`],
+      ["Data path", s.path || "—"],
+      ["Mount / device", s.mount || "—"],
+      ["Capacity", s.capacity_bytes ? bytes(s.capacity_bytes) : "—"],
+      ["Used", bytes(s.used_bytes)],
+      ["Free", bytes(s.free_bytes)],
+      ["Usage", s.capacity_bytes ? `${Math.round(pct)}%` : "—"],
+      ["Drive health", h.drive_health || "—"],
+      ["SMART", h.smart?.enabled ? (h.smart.status || "—") : "n/a"],
+      ["RAID", h.raid?.enabled ? (h.raid.status || "—") : "n/a"],
+      ["Temperature", h.temperature_c != null ? `${h.temperature_c}°C` : "—"],
+      ["Power", h.power || "—"],
+    ];
+    onAdvanced({ title: `${s.name} — details`, rows });
+  }
 
   return (
     <div className="store-item">
@@ -516,13 +570,15 @@ function StorageItem({ a, s, onRename, onDelete }:
           <div>
             <div style={{ fontWeight: 600 }}>{s.name}</div>
             <div className="faint" style={{ fontSize: 11.5 }}>
-              {s.kind === "builtin" ? "Built-in storage" : "External storage"} · store:{s.id.slice(0, 8)}
-              {s.path && <> · <span className="mono">{s.path}</span>{s.mount ? ` on ${s.mount}` : ""}</>}
+              {s.kind === "builtin" ? "Built-in storage" : "External storage"}
             </div>
           </div>
         </div>
         <div className="row" style={{ gap: 6 }}>
           <Pill tone={s.kind === "builtin" ? "info" : "ok"}>{s.kind === "builtin" ? "Built-in" : "External"}</Pill>
+          <button className="btn sm ghost" onClick={showAdvanced} title="Advanced details">
+            <Icon name="gear" size={13} />
+          </button>
           <button className="btn sm ghost" onClick={() => onRename(s)}>Rename</button>
           {s.kind !== "builtin" && <button className="btn sm ghost" onClick={() => onDelete(s)}>Remove</button>}
         </div>
