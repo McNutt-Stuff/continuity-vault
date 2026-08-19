@@ -512,3 +512,23 @@ class EmailConfig(Base):
     region = Column(String, default="us-east-1")
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
+
+class Node(Base):
+    """A platform node in the (multi-node) control/storage fleet. The running
+    instance registers itself as ``is_self`` and reports live health; additional
+    nodes are registered for centralized visibility and management as the
+    platform scales horizontally."""
+
+    __tablename__ = "nodes"
+    id = Column(String, primary_key=True, default=_uuid)
+    name = Column(String, default="node")
+    region = Column(String, default="")
+    role = Column(String, default="control-plane")  # control-plane | storage | worker | edge
+    endpoint = Column(String, default="")            # base URL / address
+    status = Column(String, default="active")        # active | draining | offline | maintenance
+    is_self = Column(Boolean, default=False)         # the running instance
+    version = Column(String, default="")
+    telemetry = Column(JSON, default=dict)           # cpu/mem/disk/storage snapshot
+    last_heartbeat_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now)
+

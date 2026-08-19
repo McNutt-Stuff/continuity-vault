@@ -1,17 +1,17 @@
 import { ReactNode, useEffect, useState } from "react";
 import { api } from "../api";
-import { Card, Pill, Stat, timeAgo } from "../components/ui";
+import { Card, Pill, Stat, bytes, timeAgo } from "../components/ui";
 import { Icon } from "../components/Icon";
-import { promptDialog } from "../components/dialog";
+import { promptDialog, formDialog, confirmDialog, notify } from "../components/dialog";
 
-type Tab = "overview" | "tenants" | "fleet" | "pricing" | "email" | "crypto" | "audit" | "updates";
+type Tab = "overview" | "tenants" | "reports" | "nodes" | "fleet" | "pricing" | "email" | "crypto" | "audit" | "updates";
 
 export default function Admin() {
   const [tab, setTab] = useState<Tab>("overview");
   return (
     <>
       <div className="chips" style={{ marginBottom: 18 }}>
-        {(["overview", "tenants", "fleet", "pricing", "email", "crypto", "audit", "updates"] as Tab[]).map((t) => (
+        {(["overview", "tenants", "reports", "nodes", "fleet", "pricing", "email", "crypto", "audit", "updates"] as Tab[]).map((t) => (
           <span key={t} className={`chip ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
             {t[0].toUpperCase() + t.slice(1)}
           </span>
@@ -19,6 +19,8 @@ export default function Admin() {
       </div>
       {tab === "overview" && <Overview />}
       {tab === "tenants" && <Tenants />}
+      {tab === "reports" && <Reports />}
+      {tab === "nodes" && <Nodes />}
       {tab === "fleet" && <Fleet />}
       {tab === "pricing" && <Pricing />}
       {tab === "email" && <EmailAdmin />}
@@ -38,7 +40,7 @@ function Overview() {
       <div className="grid grid-4">
         <Stat label="Tenants" value={o.tenants} />
         <Stat label="Users" value={o.users} />
-        <Stat label="Appliances" value={o.appliances} />
+        <Stat label="Nodes" value={o.nodes ?? 1} />
         <Stat label="Linked sources" value={o.connectors} />
       </div>
       <div className="grid grid-3" style={{ marginTop: 16 }}>
@@ -60,24 +62,334 @@ function Overview() {
 
 function Tenants() {
   const [rows, setRows] = useState<any[]>([]);
-  useEffect(() => { api.get<any[]>("/admin/tenants").then(setRows).catch(() => {}); }, []);
+  const [sel, setSel] = useState<string | null>(null);
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
+  async function load() { try { setRows(await api.get<any[]>("/admin/tenants")); } catch { /* ignore */ } }
+  useEffect(() => { void load(); }, []);
+
+  async function newTenant() {
+    const r = await formDialog({
+      title: "New tenant", confirmLabel: "Create tenant",
+      fields: [
+        { name: "name", label: "Organization name", required: true },
+        { name: "plan", label: "Plan", defaultValue: "business",
+          options: ["consumer", "family", "business", "enterprise"].map((v) => ({ label: v, value: v })) },
+        { name: "key_ownership_model", label: "Key ownership", defaultValue: "customer-managed",
+          options: [{ label: "Customer-managed", value: "customer-managed" }, { label: "Zero-knowledge", value: "zero-knowledge" }] },
+        { name: "licensed_tb", label: "Licensed data (TB)", defaultValue: "1" },
+        { name: "owner_email", label: "Owner email (optional)" },
+        { name: "owner_name", label: "Owner name (optional)" },
+      ],
+    });
+    if (!r) return;
+    try {
+      await api.post("/admin/tenants", { ...r, licensed_tb: Number(r.licensed_tb) || 0 });
+      flash("Tenant created"); await load();
+    } catch { flash("Could not create tenant"); }
+  }
+
+  if (sel) return <TenantDetail id={sel} onBack={() => { setSel(null); void load(); }} />;
+
   return (
-    <Card>
-      <table className="table">
-        <thead><tr><th>Tenant</th><th>Plan</th><th>Key model</th><th>Users</th><th>Appliances</th><th>Status</th></tr></thead>
-        <tbody>
-          {rows.map((t) => (
-            <tr key={t.id}>
-              <td style={{ fontWeight: 600 }}>{t.name}</td>
-              <td><Pill tone="info">{t.plan}</Pill></td>
-              <td className="faint">{t.key_ownership_model}</td>
-              <td>{t.users}</td><td>{t.appliances}</td>
-              <td><Pill tone="ok">{t.status}</Pill></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </Card>
+    <>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <h3 style={{ margin: 0 }}>Tenants</h3>
+        <button className="btn primary sm" onClick={newTenant}><Icon name="user" size={14} /> New tenant</button>
+      </div>
+      <Card>
+        <table className="table">
+          <thead><tr><th>Tenant</th><th>Plan</th><th>Users</th><th>Appliances</th><th>Sources</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {rows.map((t) => (
+              <tr key={t.id} style={{ cursor: "pointer" }} onClick={() => setSel(t.id)}>
+                <td style={{ fontWeight: 600 }}>{t.name}</td>
+                <td><Pill tone="info">{t.plan}</Pill></td>
+                <td>{t.users}</td><td>{t.appliances}</td><td>{t.sources}</td>
+                <td><Pill tone={t.status === "active" ? "ok" : "warn"}>{t.status}</Pill></td>
+                <td className="faint" style={{ textAlign: "right" }}>Manage →</td>
+              </tr>
+            ))}
+            {rows.length === 0 && <tr><td colSpan={7} className="muted">No tenants.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+}
+
+function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
+  const [t, setT] = useState<any>(null);
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3200); }
+  async function load() { try { setT(await api.get<any>(`/admin/tenants/${id}`)); } catch { /* ignore */ } }
+  useEffect(() => { void load(); }, [id]);
+
+  async function editTenant() {
+    const r = await formDialog({
+      title: "Edit tenant", confirmLabel: "Save",
+      fields: [
+        { name: "name", label: "Name", defaultValue: t.name, required: true },
+        { name: "plan", label: "Plan", defaultValue: t.plan,
+          options: ["consumer", "family", "business", "enterprise"].map((v) => ({ label: v, value: v })) },
+        { name: "status", label: "Status", defaultValue: t.status,
+          options: ["active", "suspended", "trial"].map((v) => ({ label: v, value: v })) },
+        { name: "licensed_tb", label: "Licensed data (TB)", defaultValue: String(((t.licensed_bytes || 0) / (1024 ** 4)).toFixed(2)) },
+      ],
+    });
+    if (!r) return;
+    try { await api.put(`/admin/tenants/${id}`, { ...r, licensed_tb: Number(r.licensed_tb) || 0 }); flash("Saved"); await load(); }
+    catch { flash("Save failed"); }
+  }
+  async function suspend() {
+    if (!await confirmDialog({ title: "Suspend tenant?", message: `Freeze ${t.name} and deactivate all its users. This is reversible.`, danger: true, confirmLabel: "Suspend" })) return;
+    try { await api.del(`/admin/tenants/${id}`); flash("Tenant suspended"); await load(); } catch { flash("Failed"); }
+  }
+
+  async function newUser() {
+    const r = await formDialog({
+      title: "Add user", confirmLabel: "Create user",
+      fields: [
+        { name: "email", label: "Email", required: true },
+        { name: "display_name", label: "Name" },
+        { name: "role", label: "Role", defaultValue: "member",
+          options: ["owner", "security-admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
+      ],
+    });
+    if (!r) return;
+    try { const res = await api.post<any>(`/admin/tenants/${id}/users`, r); flash(res.invite?.dev_code ? `Created · code ${res.invite.dev_code}` : "User created & invited"); await load(); }
+    catch (e) { flash((e as { message?: string }).message || "Could not create user"); }
+  }
+  async function editUser(u: any) {
+    const r = await formDialog({
+      title: `Edit ${u.email}`, confirmLabel: "Save",
+      fields: [
+        { name: "display_name", label: "Name", defaultValue: u.display_name },
+        { name: "role", label: "Role", defaultValue: u.role,
+          options: ["owner", "security-admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
+        { name: "status", label: "Status", defaultValue: u.status,
+          options: ["active", "suspended"].map((v) => ({ label: v, value: v })) },
+      ],
+    });
+    if (!r) return;
+    try { await api.put(`/admin/users/${u.id}`, r); flash("User updated"); await load(); } catch { flash("Update failed"); }
+  }
+  async function resetUser(u: any) {
+    if (!await confirmDialog({ title: "Reset access?", message: `Revoke ${u.email}'s passkeys and email a fresh sign-in code.`, confirmLabel: "Reset" })) return;
+    try { const res = await api.post<any>(`/admin/users/${u.id}/reset`, {}); flash(res.invite?.dev_code ? `Reset · code ${res.invite.dev_code}` : "Access reset & emailed"); await load(); }
+    catch { flash("Reset failed"); }
+  }
+  async function delUser(u: any) {
+    if (!await confirmDialog({ title: "Delete user?", message: `Permanently remove ${u.email}.`, danger: true, confirmLabel: "Delete" })) return;
+    try { await api.del(`/admin/users/${u.id}`); flash("User deleted"); await load(); }
+    catch (e) { flash((e as { message?: string }).message || "Delete failed"); }
+  }
+
+  if (!t) return <Card><div className="muted">Loading tenant…</div></Card>;
+  const licensedTb = ((t.licensed_bytes || 0) / (1024 ** 4)).toFixed(2);
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <button className="btn ghost sm" onClick={onBack}>← Tenants</button>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn sm" onClick={editTenant}>Edit</button>
+          <button className="btn danger sm" onClick={suspend}>Suspend</button>
+        </div>
+      </div>
+      <Card style={{ marginBottom: 16 }}>
+        <div className="spread">
+          <div>
+            <h3 style={{ margin: 0 }}>{t.name}</h3>
+            <div className="faint" style={{ fontSize: 12 }}>{t.plan} · {t.key_ownership_model} · {licensedTb} TB licensed</div>
+          </div>
+          <Pill tone={t.status === "active" ? "ok" : "warn"}>{t.status}</Pill>
+        </div>
+        <div className="grid grid-4" style={{ gap: 12, marginTop: 14 }}>
+          <Mini label="Users" value={t.users} />
+          <Mini label="Appliances" value={t.appliances} />
+          <Mini label="Agents" value={t.agents} />
+          <Mini label="Sources" value={t.sources} />
+          <Mini label="Mappings" value={t.mappings} />
+          <Mini label="Objects" value={(t.objects ?? 0).toLocaleString()} />
+          <Mini label="Recovery points" value={t.recovery_points} />
+          <Mini label="Vaults" value={t.vaults?.length ?? 0} />
+        </div>
+      </Card>
+
+      <Card>
+        <div className="spread" style={{ marginBottom: 10 }}>
+          <h3 style={{ margin: 0 }}>Users</h3>
+          <button className="btn primary sm" onClick={newUser}><Icon name="user" size={14} /> Add user</button>
+        </div>
+        <table className="table">
+          <thead><tr><th>User</th><th>Role</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {(t.users || []).map((u: any) => (
+              <tr key={u.id}>
+                <td><div style={{ fontWeight: 600 }}>{u.display_name || u.email}</div><div className="faint" style={{ fontSize: 11.5 }}>{u.email}{u.is_platform_admin ? " · platform admin" : ""}</div></td>
+                <td><Pill tone="info">{u.role}</Pill></td>
+                <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  <button className="btn ghost sm" onClick={() => editUser(u)}>Edit</button>{" "}
+                  <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
+                  <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
+                </td>
+              </tr>
+            ))}
+            {(t.users || []).length === 0 && <tr><td colSpan={4} className="muted">No users.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+}
+
+function Mini({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div style={{ background: "#0e1524", borderRadius: 8, padding: "10px 12px" }}>
+      <div style={{ fontSize: 20, fontWeight: 700 }}>{value}</div>
+      <div className="faint" style={{ fontSize: 11.5 }}>{label}</div>
+    </div>
+  );
+}
+
+function Reports() {
+  const [d, setD] = useState<any>(null);
+  useEffect(() => { api.get("/admin/reports").then(setD).catch(() => {}); }, []);
+  if (!d) return <Card><div className="muted">Compiling report…</div></Card>;
+  const money = (n: number) => "$" + Math.round(n).toLocaleString();
+  return (
+    <>
+      <div className="grid grid-4" style={{ marginBottom: 16 }}>
+        <Stat label="Tenants" value={d.totals.tenants} />
+        <Stat label="Objects protected" value={(d.totals.objects || 0).toLocaleString()} />
+        <Stat label="Data protected" value={bytes(d.totals.bytes || 0)} />
+        <Stat label="Monthly revenue" value={money(d.totals.monthly_revenue || 0)} />
+      </div>
+      <Card>
+        <h3 style={{ marginTop: 0 }}>Per-tenant usage & billing</h3>
+        <table className="table">
+          <thead><tr><th>Tenant</th><th>Plan</th><th>Users</th><th>Sources</th><th>Objects</th><th>Data</th><th>Recovery pts</th><th>Monthly</th></tr></thead>
+          <tbody>
+            {d.tenants.map((t: any) => (
+              <tr key={t.id}>
+                <td style={{ fontWeight: 600 }}>{t.name}{t.status !== "active" ? <span className="faint"> · {t.status}</span> : ""}</td>
+                <td><Pill tone="info">{t.plan}</Pill></td>
+                <td>{t.users}</td><td>{t.sources + t.agents}</td>
+                <td>{(t.objects || 0).toLocaleString()}</td>
+                <td>{bytes(t.used_bytes || 0)}</td>
+                <td>{t.recovery_points}</td>
+                <td style={{ fontWeight: 600 }}>{money(t.monthly_cost || 0)}</td>
+              </tr>
+            ))}
+            {d.tenants.length === 0 && <tr><td colSpan={8} className="muted">No tenants.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+    </>
+  );
+}
+
+function Nodes() {
+  const [nodes, setNodes] = useState<any[]>([]);
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
+  async function load() { try { setNodes(await api.get<any[]>("/admin/nodes")); } catch { /* ignore */ } }
+  useEffect(() => { void load(); const iv = setInterval(load, 15000); return () => clearInterval(iv); }, []);
+
+  async function registerNode() {
+    const r = await formDialog({
+      title: "Register node", confirmLabel: "Register",
+      fields: [
+        { name: "name", label: "Node name", required: true, placeholder: "us-west-storage-1" },
+        { name: "region", label: "Region", placeholder: "us-west-2" },
+        { name: "role", label: "Role", defaultValue: "control-plane",
+          options: ["control-plane", "storage", "worker", "edge"].map((v) => ({ label: v, value: v })) },
+        { name: "endpoint", label: "Endpoint", placeholder: "https://node.arkive.life" },
+      ],
+    });
+    if (!r) return;
+    try { await api.post("/admin/nodes", r); flash("Node registered"); await load(); } catch { flash("Failed"); }
+  }
+  async function editNode(n: any) {
+    const r = await formDialog({
+      title: `Edit ${n.name}`, confirmLabel: "Save",
+      fields: [
+        { name: "name", label: "Name", defaultValue: n.name },
+        { name: "region", label: "Region", defaultValue: n.region },
+        { name: "role", label: "Role", defaultValue: n.role,
+          options: ["control-plane", "storage", "worker", "edge"].map((v) => ({ label: v, value: v })) },
+        { name: "endpoint", label: "Endpoint", defaultValue: n.endpoint },
+        { name: "status", label: "Status", defaultValue: n.status,
+          options: ["active", "draining", "maintenance", "offline"].map((v) => ({ label: v, value: v })) },
+      ],
+    });
+    if (!r) return;
+    try { await api.put(`/admin/nodes/${n.id}`, r); flash("Node updated"); await load(); } catch { flash("Failed"); }
+  }
+  async function removeNode(n: any) {
+    if (n.is_self) { void notify({ title: "Not allowed", message: "You can't remove the current node.", tone: "warn" }); return; }
+    if (!await confirmDialog({ title: "Remove node?", message: `Remove ${n.name} from the fleet.`, danger: true, confirmLabel: "Remove" })) return;
+    try { await api.del(`/admin/nodes/${n.id}`); flash("Node removed"); await load(); } catch { flash("Failed"); }
+  }
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <h3 style={{ margin: 0 }}>Node fleet</h3>
+        <button className="btn primary sm" onClick={registerNode}><Icon name="server" size={14} /> Register node</button>
+      </div>
+      <div className="grid grid-2">
+        {nodes.map((n) => {
+          const st = n.telemetry?.storage;
+          const mem = n.telemetry?.memory;
+          const pct = (u: any) => u && u.total ? Math.round((u.used / u.total) * 100) : 0;
+          return (
+            <Card key={n.id}>
+              <div className="spread" style={{ marginBottom: 10 }}>
+                <div className="row" style={{ gap: 10 }}>
+                  <div className="result-icon" style={{ width: 34, height: 34, background: "#0e1524", color: n.online ? "#35d0a5" : "#8a94a7" }}>
+                    <Icon name="server" size={18} />
+                  </div>
+                  <div>
+                    <div style={{ fontWeight: 700 }}>{n.name} {n.is_self && <span className="faint" style={{ fontWeight: 400, fontSize: 11 }}>· this node</span>}</div>
+                    <div className="faint" style={{ fontSize: 11.5 }}>{n.role}{n.region ? ` · ${n.region}` : ""}</div>
+                  </div>
+                </div>
+                <div className="row" style={{ gap: 6 }}>
+                  <Pill tone={n.online ? "ok" : "warn"}>{n.online ? "Online" : "Offline"}</Pill>
+                  <Pill tone={n.status === "active" ? "info" : "warn"}>{n.status}</Pill>
+                </div>
+              </div>
+              {st && (
+                <div style={{ marginBottom: 8 }}>
+                  <div className="spread faint" style={{ fontSize: 11.5, marginBottom: 4 }}>
+                    <span>Storage</span><span>{bytes(st.used)} / {bytes(st.total)} ({pct(st)}%)</span>
+                  </div>
+                  <div style={{ height: 6, borderRadius: 999, background: "#0e1524", overflow: "hidden" }}>
+                    <div style={{ width: `${pct(st)}%`, height: "100%", background: pct(st) > 90 ? "var(--danger-c,#f2545b)" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
+                  </div>
+                </div>
+              )}
+              <div className="row" style={{ gap: 14, flexWrap: "wrap", fontSize: 11.5 }} >
+                {mem && <span className="faint">Mem {bytes(mem.used)}/{bytes(mem.total)}</span>}
+                {n.telemetry?.load && <span className="faint">Load {n.telemetry.load.join(" ")}{n.telemetry.cpus ? ` · ${n.telemetry.cpus} vCPU` : ""}</span>}
+                {n.telemetry?.recovery_points != null && <span className="faint">{n.telemetry.recovery_points.toLocaleString()} recovery pts</span>}
+                {n.endpoint && <span className="faint">{n.endpoint}</span>}
+              </div>
+              <div className="row" style={{ gap: 8, marginTop: 12 }}>
+                <button className="btn ghost sm" onClick={() => editNode(n)}>Edit</button>
+                {!n.is_self && <button className="btn danger sm" onClick={() => removeNode(n)}>Remove</button>}
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
   );
 }
 
