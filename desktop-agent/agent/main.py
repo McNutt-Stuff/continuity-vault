@@ -368,6 +368,9 @@ class Agent:
                 self.log.error("collection failed: %s", exc)
                 self._post_command_result("collect", False, {"error": str(exc)})
             finally:
+                # Advance the schedule timer whether or not the run succeeded, so a
+                # failing collect can't re-trigger every heartbeat (endless loop).
+                self._last_collect = time.time()
                 with self._queued_lock:
                     self._queued_sources.discard(source)
                 self._job_queue.task_done()

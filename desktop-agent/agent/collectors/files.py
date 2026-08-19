@@ -168,7 +168,6 @@ def build_index(max_depth: int = _INDEX_MAX_DEPTH, max_entries: int = _INDEX_MAX
         node: dict = {"path": path, "name": Path(path).name or path}
         subdirs: list = []
         files = 0
-        total = 0
         try:
             with os.scandir(path) as it:
                 for e in it:
@@ -178,17 +177,12 @@ def build_index(max_depth: int = _INDEX_MAX_DEPTH, max_entries: int = _INDEX_MAX
                                 continue
                             subdirs.append((e.name, e.path))
                         elif e.is_file(follow_symlinks=False):
-                            files += 1
-                            try:
-                                total += e.stat().st_size
-                            except OSError:
-                                pass
+                            files += 1  # count only — no per-file stat (keeps indexing fast)
                     except OSError:
                         continue
         except OSError as exc:
             node["error"] = str(exc)
         node["files"] = files
-        node["bytes"] = total
         subdirs.sort(key=lambda d: d[0].lower())
         truncated = len(subdirs) > max_entries
         subdirs = subdirs[:max_entries]

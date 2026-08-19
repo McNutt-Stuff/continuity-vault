@@ -116,9 +116,6 @@ def run_due() -> int:
                 continue
             caps = conn.capabilities()
             try:
-                logger.info("scheduled backup due: collection=%s (%s) source=%s "
-                            "destinations=%s interval=%dmin", c.id, c.name,
-                            c.source_type, c.destinations, interval)
                 if caps.requires_agent:
                     # Agent sources are pushed: queue a collect for the bound agent.
                     if _queue_agent_collect(db, c) == 0:
@@ -131,6 +128,9 @@ def run_due() -> int:
                     if not caps.delta and c.backup_interval_minutes is None:
                         continue
                     run_backup(db, c)
+                logger.info("scheduled backup: collection=%s (%s) source=%s "
+                            "destinations=%s interval=%dmin", c.id, c.name,
+                            c.source_type, c.destinations, interval)
                 c.last_backup_run_at = now
                 db.commit()
                 ran += 1

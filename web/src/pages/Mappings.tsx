@@ -658,6 +658,7 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
   const [maxMb, setMaxMb] = useState<number>(Math.round((initial.maxSizeBytes || 100 * 1024 * 1024) / (1024 * 1024)));
   const [loading, setLoading] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
+  const [building, setBuilding] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
 
@@ -671,7 +672,7 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
   }
 
   async function loadIndex() {
-    setLoading(true); setErr("");
+    setLoading(true); setErr(""); setBuilding(false);
     try {
       // Serve the agent's cached index first (usually already present).
       const first = await api.get<{ scan: FsIndex | null }>(`/agents/${agentId}/fs-scan`);
@@ -679,16 +680,19 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
       // Nudge the agent to push its current cache; wait only if we have nothing.
       await api.post(`/agents/${agentId}/fs-scan`, { rebuild: false });
       if (!have) {
-        const deadline = Date.now() + 150000;  // first full-tree build can take a bit
+        const deadline = Date.now() + 180000;  // first full-tree build can take a bit
         while (Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 2500));
           const res = await api.get<{ scan: FsIndex | null }>(`/agents/${agentId}/fs-scan`);
+          // The agent posts a "building" placeholder until the first index is ready.
+          setBuilding(!!(res.scan && !(res.scan.roots?.length)));
           if (applyIndex(res.scan)) { have = true; break; }
         }
-        if (!have) setErr("Waiting for the agent to build its folder index — is it online? It builds on start/update.");
+        if (!have) setErr("The agent hasn't reported a folder index yet. Make sure it's online and updated to the latest build (it indexes on start), then Rescan.");
       }
     } catch (e) { setErr((e as ApiError).message); }
     setLoading(false);
+    setBuilding(false);
   }
 
   useEffect(() => { void loadIndex(); // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -750,7 +754,7 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
           <Icon name="database" size={13} />
           <span style={{ fontSize: 12.5 }}>{node.name}</span>
           {(node.files || 0) > 0 && (
-            <span className="faint" style={{ fontSize: 10.5 }}>· {node.files} files · {bytes(node.bytes || 0)}</span>
+            <span className="faint" style={{ fontSize: 10.5 }}>· {node.files} files{node.bytes ? ` · ${bytes(node.bytes)}` : ""}</span>
           )}
         </div>
         {isExp && (
@@ -788,10 +792,12 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
           {err && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 8 }}>{err}</div>}
           <div style={{ maxHeight: "44vh", overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, padding: 8 }}>
             {loading && roots.length === 0 && (
-              <div className="faint"><span className="spinner-dot" /> loading the agent's folder index…</div>
+              <div className="faint">
+                <span className="spinner-dot" /> {building ? "the agent is building its folder index (first run can take a minute)…" : "loading the agent's folder index…"}
+              </div>
             )}
             {roots.map((r) => renderNode(r, 0))}
-            {!loading && roots.length === 0 && <div className="muted">No folder index yet. Try Rescan — is the agent online?</div>}
+            {!loading && roots.length === 0 && <div className="muted">No folder index yet. Make sure the agent is online and updated, then use Rescan.</div>}
           </div>
           <div className="row" style={{ gap: 12, marginTop: 12, flexWrap: "wrap" }}>
             <label className="stack" style={{ flex: 1, minWidth: 200 }}>
