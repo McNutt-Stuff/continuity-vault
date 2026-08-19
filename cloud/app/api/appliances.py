@@ -18,7 +18,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -170,12 +170,14 @@ def get_appliance(appliance_id: str,
 
 def _stored_data(db: Session, a: Appliance) -> dict:
     """Recovery points physically stored on this appliance, grouped by source."""
-    from ..models import Collection, ConnectorAccount, ApplianceStorage as _AS  # noqa
+    from ..models import Collection, ConnectorAccount, Vault, ApplianceStorage as _AS  # noqa
     receipts = (db.query(SnapshotReceipt)
                 .filter(SnapshotReceipt.appliance_id == a.id)
                 .order_by(SnapshotReceipt.created_at.desc()).all())
     colls = {c.id: c for c in db.query(Collection)
              .filter(Collection.tenant_id == a.tenant_id).all()}
+    vaults = {v.id: v.name for v in db.query(Vault)
+              .filter(Vault.tenant_id == a.tenant_id).all()}
     stores = {f"store:{s.id}": s.name for s in db.query(ApplianceStorage)
               .filter(ApplianceStorage.appliance_id == a.id).all()}
 
@@ -202,10 +204,36 @@ def _stored_data(db: Session, a: Appliance) -> dict:
         "recoverable": bool(r.recoverable),
         "at": r.created_at.isoformat(),
     } for r in receipts[:50]]
+
+    # Summarise by source→vault so the UI shows one polished row per source
+    # (total objects, recovery points, bytes, storage) instead of one per snapshot.
+    summary: dict[str, dict] = {}
+    for r in receipts:
+        c = colls.get(r.collection_id)
+        source = _src(r.collection_id)
+        vault = vaults.get(c.vault_id, "—") if c else "—"
+        source_type = c.source_type if c else "custom"
+        key = f"{source}\u241f{vault}"
+        s = summary.get(key)
+        if s is None:
+            s = {"source": source, "vault": vault, "source_type": source_type,
+                 "recovery_points": 0, "objects": 0, "bytes": 0,
+                 "recoverable": 0, "storage": stores.get(r.destination, "Built-In Storage"),
+                 "last_at": r.created_at.isoformat()}
+            summary[key] = s
+        s["recovery_points"] += 1
+        s["objects"] += r.object_count or 0
+        s["bytes"] += r.total_bytes or 0
+        if r.recoverable:
+            s["recoverable"] += 1
+        if r.created_at.isoformat() > s["last_at"]:
+            s["last_at"] = r.created_at.isoformat()
+
     return {
         "recovery_points": len(receipts),
         "objects": sum(r.object_count for r in receipts),
         "bytes": sum(r.total_bytes for r in receipts),
+        "sources": sorted(summary.values(), key=lambda x: x["bytes"], reverse=True),
         "items": items,
     }
 
@@ -595,12 +623,21 @@ class HeartbeatRequest(BaseModel):
 
 @agent_router.post("/heartbeat")
 def heartbeat(body: HeartbeatRequest,
+              request: Request,
               appliance: Appliance = Depends(_agent_appliance),
               db: Session = Depends(get_db)):
+    # Capture the appliance's public IP as seen by the control plane (behind
+    # Caddy the real client is in X-Forwarded-For) and fold it into telemetry.
+    fwd = request.headers.get("x-forwarded-for", "")
+    public_ip = (fwd.split(",")[0].strip() if fwd
+                 else (request.client.host if request.client else None))
+    tel = dict(body.telemetry or {})
+    if public_ip:
+        tel["public_ip"] = public_ip
     appliance.state = body.state
     appliance.isolation_state = body.isolation_state
     appliance.software_version = body.software_version
-    appliance.telemetry = body.telemetry
+    appliance.telemetry = tel
     appliance.tamper_state = body.tamper_state
     appliance.last_heartbeat_at = _now()
     appliance.last_attestation_at = _now()

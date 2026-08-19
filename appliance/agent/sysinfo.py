@@ -123,6 +123,29 @@ def mount_device(path: str) -> str:
     return ""
 
 
+def net_io() -> dict:
+    """Cumulative bytes sent/received across physical interfaces (since boot).
+
+    Reads /proc/net/dev and skips loopback + virtual bridges/containers so the
+    figure reflects real WAN/LAN traffic."""
+    sent = recv = 0
+    for line in _read("/proc/net/dev").splitlines():
+        if ":" not in line:
+            continue
+        iface, _, rest = line.partition(":")
+        iface = iface.strip()
+        if iface == "lo" or iface.startswith(("veth", "docker", "br-", "virbr")):
+            continue
+        cols = rest.split()
+        if len(cols) >= 9:
+            try:
+                recv += int(cols[0])
+                sent += int(cols[8])
+            except ValueError:
+                pass
+    return {"bytes_sent": sent, "bytes_recv": recv}
+
+
 def smart_status() -> dict:
     """Best-effort SMART health for the primary disk (needs smartmontools)."""
     out = _run(["smartctl", "-H", "/dev/sda"])

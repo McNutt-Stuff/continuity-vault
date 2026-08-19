@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -57,6 +58,7 @@ class Agent:
         self.pending_recovery: dict = {}  # snapshot -> awaiting local approval
         self.log = agent_log.setup_logging(_LOG_FILE)
         self._last_update_note = ""
+        self._last_latency_ms: Optional[int] = None  # heartbeat round-trip
         self._load_registration()
 
     # -- registration / activation ------------------------------------
@@ -113,8 +115,10 @@ class Agent:
             "tamper_state": self.tamper_state,
         }
         async with httpx.AsyncClient(timeout=15) as client:
+            t0 = time.perf_counter()
             r = await client.post(f"{settings.cloud_base_url}/appliance/heartbeat",
                                   json=body, headers=self._headers())
+            self._last_latency_ms = round((time.perf_counter() - t0) * 1000)
             if r.status_code != 200:
                 self.log.warning("heartbeat rejected: %s", r.status_code)
                 return
@@ -177,6 +181,7 @@ class Agent:
         # Physical appliances advertise a fixed raw capacity; VMs report the disk.
         raw_total = 8 * 1024**4 if plat["kind"] == "hardware" else disk["disk_total_bytes"]
         pq = sysinfo.pq_available()
+        net = sysinfo.net_io()
         return {
             # System
             "hostname": sysd["hostname"],
@@ -197,6 +202,11 @@ class Agent:
             # Network
             "local_ip": sysinfo.local_ip(),
             "cloud_url": settings.cloud_base_url,
+            "net_bytes_sent": net["bytes_sent"],
+            "net_bytes_recv": net["bytes_recv"],
+            "channel_encryption": ("TLS 1.3" if settings.cloud_base_url.startswith("https")
+                                   else "insecure (dev)"),
+            "cloud_latency_ms": self._last_latency_ms,
             # Storage / stored data
             "capacity_total_bytes": raw_total,
             "capacity_used_bytes": cap.get("used_bytes", 0),

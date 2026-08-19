@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import { Card, Pill, Stat, bytes, timeAgo } from "../components/ui";
+import { Card, Pill, bytes, timeAgo, serverDate, fmtAbsolute } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, notify, promptDialog } from "../components/dialog";
 import { ApplianceStatePill } from "./Dashboard";
 
@@ -19,15 +20,81 @@ interface StoredItem {
   snapshot_id: string; source: string; storage: string; path?: string;
   object_count: number; total_bytes: number; recoverable: boolean; at: string;
 }
-interface StoredData {
-  recovery_points: number; objects: number; bytes: number; items: StoredItem[];
+interface SourceSummary {
+  source: string; vault: string; source_type: string;
+  recovery_points: number; objects: number; bytes: number;
+  recoverable: number; storage: string; last_at: string;
 }
+interface StoredData {
+  recovery_points: number; objects: number; bytes: number;
+  sources?: SourceSummary[]; items: StoredItem[];
+}
+interface Command { type: string; status: string; sequence: number; created_at: string; }
 interface Appliance {
   id: string; serial: string; model: string; name: string; location_label: string;
   state: string; isolation_state: string; software_version: string;
   attestation_ok: boolean; tamper_state: string;
   last_heartbeat_at: string | null; last_attestation_at: string | null;
-  telemetry: any; stores?: Store[]; stored_data?: StoredData;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  telemetry: any; stores?: Store[]; stored_data?: StoredData; recent_commands?: Command[];
+}
+
+// Online = a heartbeat within the last ~90s (3 missed 30s beats).
+function isOnline(a: Appliance): boolean {
+  if (!a.last_heartbeat_at) return false;
+  return (Date.now() - serverDate(a.last_heartbeat_at).getTime()) / 1000 < 90;
+}
+
+type HealthLevel = "healthy" | "warning" | "critical";
+function healthOf(a: Appliance): { level: HealthLevel; label: string } {
+  if (!a.attestation_ok) return { level: "critical", label: "Attestation failed" };
+  if (a.tamper_state && a.tamper_state !== "normal") return { level: "critical", label: "Tamper detected" };
+  if (a.state === "QUARANTINED") return { level: "critical", label: "Quarantined" };
+  if (!isOnline(a)) return { level: "warning", label: "Offline" };
+  const stores = a.stores ?? [];
+  for (const s of stores) {
+    if (s.capacity_bytes > 0 && s.used_bytes / s.capacity_bytes >= 0.9)
+      return { level: "warning", label: "Storage nearly full" };
+    if (s.health?.drive_health && s.health.drive_health !== "healthy")
+      return { level: "warning", label: "Drive health" };
+  }
+  return { level: "healthy", label: "Healthy" };
+}
+
+const HEALTH_COLOR: Record<HealthLevel, string> = {
+  healthy: "#35d0a5", warning: "#f5a623", critical: "#f2545b",
+};
+
+function StatusDot({ color, pulse }: { color: string; pulse?: boolean }) {
+  return (
+    <span style={{
+      width: 9, height: 9, borderRadius: "50%", background: color, flex: "none",
+      boxShadow: `0 0 0 3px ${color}22`, display: "inline-block",
+      animation: pulse ? "badge-pulse 1.6s ease-in-out infinite" : undefined,
+    }} />
+  );
+}
+
+function OnlinePill({ a }: { a: Appliance }) {
+  const online = isOnline(a);
+  return (
+    <span className="row" style={{ gap: 6, alignItems: "center" }}>
+      <StatusDot color={online ? "#35d0a5" : "#6b7688"} pulse={online} />
+      <span style={{ fontSize: 12, fontWeight: 600, color: online ? "#35d0a5" : "var(--faint,#8892a6)" }}>
+        {online ? "Online" : "Offline"}
+      </span>
+    </span>
+  );
+}
+
+function HealthPill({ a }: { a: Appliance }) {
+  const h = healthOf(a);
+  return (
+    <span className="row" style={{ gap: 6, alignItems: "center" }}>
+      <StatusDot color={HEALTH_COLOR[h.level]} />
+      <span style={{ fontSize: 12, fontWeight: 600, color: HEALTH_COLOR[h.level] }}>{h.label}</span>
+    </span>
+  );
 }
 
 export default function Appliances() {
@@ -161,10 +228,14 @@ export default function Appliances() {
                 </div>
                 <div>
                   <div style={{ fontWeight: 650 }}>{a.name}</div>
-                  <div className="faint mono" style={{ fontSize: 11 }}>{a.serial}</div>
+                  <div className="faint mono" style={{ fontSize: 11 }}>{a.model} · {a.serial}</div>
                 </div>
               </div>
-              <ApplianceStatePill state={a.state} isolation={a.isolation_state} ok={a.attestation_ok} />
+              <StatusDot color={isOnline(a) ? "#35d0a5" : "#6b7688"} pulse={isOnline(a)} />
+            </div>
+            <div className="row" style={{ gap: 12, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)" }}>
+              <OnlinePill a={a} />
+              <HealthPill a={a} />
             </div>
           </div>
         ))}
@@ -215,86 +286,70 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
   return (
     <>
       <Card style={{ marginBottom: 16 }}>
-        <div className="spread" style={{ marginBottom: 14 }}>
-          <div>
-            <div className="row" style={{ gap: 8, alignItems: "center" }}>
-              <h2 style={{ margin: 0 }}>{a.name}</h2>
-              <button className="btn ghost sm" title="Rename appliance" onClick={renameAppliance}>
-                <Icon name="gear" size={13} />
-              </button>
+        <div className="spread" style={{ alignItems: "flex-start", gap: 12 }}>
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 46, height: 46 }}>
+              <Icon name="server" size={22} />
             </div>
-            <div className="faint" style={{ fontSize: 12 }}>{a.model} · v{a.software_version}</div>
+            <div>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <h2 style={{ margin: 0 }}>{a.name}</h2>
+                <button className="btn ghost sm" title="Rename appliance" onClick={renameAppliance}>
+                  <Icon name="gear" size={13} />
+                </button>
+              </div>
+              <div className="faint mono" style={{ fontSize: 11.5 }}>{a.model} · v{a.software_version} · {a.serial}</div>
+            </div>
           </div>
-          <div className="row" style={{ gap: 8 }}>
-            {t.model_kind && (
-              <Pill tone={t.model_kind === "hardware" ? "ok" : "info"}>
-                {t.model_kind === "hardware" ? "Hardware" : "Virtual"}
-              </Pill>
-            )}
-            <ApplianceStatePill state={a.state} isolation={a.isolation_state} ok={a.attestation_ok} />
+          <div className="stack" style={{ alignItems: "flex-end", gap: 8 }}>
+            <div className="row" style={{ gap: 16 }}>
+              <OnlinePill a={a} />
+              <HealthPill a={a} />
+            </div>
+            <div className="row" style={{ gap: 6 }}>
+              {t.model_kind && (
+                <Pill tone={t.model_kind === "hardware" ? "ok" : "info"}>
+                  {t.model_kind === "hardware" ? "Hardware" : "Virtual"}
+                </Pill>
+              )}
+              <ApplianceStatePill state={a.state} isolation={a.isolation_state} ok={a.attestation_ok} />
+            </div>
           </div>
         </div>
-        <div className="grid grid-2">
-          <Info label="Isolation" value={a.isolation_state === "sealed" ? "Sealed (offline)" : "Open"} />
+
+        {/* Controls header bar — signed, sequenced, expiring commands. */}
+        <div className="row" style={{ gap: 8, marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border-soft)", flexWrap: "wrap", alignItems: "center" }}>
+          <button className="btn sm" onClick={() => onCommand(a, "REQUEST_VERIFICATION")}>
+            <Icon name="shield" size={13} /> Verify integrity
+          </button>
+          {a.state === "QUARANTINED"
+            ? <Pill tone="danger">Quarantined</Pill>
+            : <button className="btn sm danger" onClick={() => onCommand(a, "QUARANTINE")}>
+                <Icon name="lock" size={13} /> Quarantine
+              </button>}
+          <span className="faint" style={{ fontSize: 11 }}>Commands are hybrid-signed & sequenced</span>
+          <div style={{ flex: 1 }} />
+          <button className="btn sm ghost danger" onClick={() => onRemove(a)}>
+            <Icon name="logout" size={13} /> Remove
+          </button>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 14 }}>
+          <Info label="Heartbeat" value={timeAgo(a.last_heartbeat_at)} title={fmtAbsolute(a.last_heartbeat_at)} />
           <Info label="Attestation" value={a.attestation_ok ? "Verified" : "Failed"} tone={a.attestation_ok ? "ok" : "danger"} />
           <Info label="Tamper" value={a.tamper_state} tone={a.tamper_state === "normal" ? "ok" : "danger"} />
-          <Info label="Heartbeat" value={timeAgo(a.last_heartbeat_at)} />
+          <Info label="Uptime" value={t.uptime_seconds ? fmtUptime(t.uptime_seconds) : "—"} />
         </div>
       </Card>
 
-      <Card style={{ marginBottom: 16 }}>
-        <div className="spread" style={{ marginBottom: 12 }}>
-          <h3 style={{ margin: 0 }}>Storage</h3>
-          <div className="row" style={{ gap: 10 }}>
-            <span className="faint" style={{ fontSize: 12 }}>{t.snapshots ?? 0} snapshots · {t.objects ?? 0} objects</span>
-            <button className="btn sm" onClick={addStorage}><Icon name="database" size={13} /> Add storage</button>
-          </div>
-        </div>
-        <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>
-          Mappings target a storage here (e.g. "{a.name} · Built-In Storage"), the same way they can
-          target the Arkive cloud or your own S3 bucket. Each storage reports its own capacity & health.
-        </div>
-        {(a.stores ?? []).map((s) => <StorageItem key={s.id} a={a} s={s} onRename={renameStorage} onDelete={deleteStorage} />)}
-        {(a.stores ?? []).length === 0 && <div className="muted">No storage objects yet.</div>}
-      </Card>
+      <StorageCard a={a} onAdd={addStorage} onRename={renameStorage} onDelete={deleteStorage} />
+
+      <StoredDataCard a={a} />
+
+      <NetworkCard a={a} />
 
       <Card style={{ marginBottom: 16 }}>
-        <div className="spread" style={{ marginBottom: 10 }}>
-          <h3 style={{ margin: 0 }}>Stored data</h3>
-          {a.stored_data && (
-            <span className="faint" style={{ fontSize: 12 }}>
-              {a.stored_data.recovery_points} recovery points · {a.stored_data.objects} objects · {bytes(a.stored_data.bytes)}
-            </span>
-          )}
-        </div>
-        {t.data_path && (
-          <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
-            Data location: <span className="mono">{t.data_path}</span>
-            {t.data_mount ? <> on <span className="mono">{t.data_mount}</span></> : null} · client-encrypted (AES-256-GCM), sealed at rest
-          </div>
-        )}
-        {(!a.stored_data || a.stored_data.items.length === 0) && (
-          <div className="muted">No recovery points stored on this appliance yet.</div>
-        )}
-        {a.stored_data && a.stored_data.items.map((it) => (
-          <div key={it.snapshot_id} className="result-row">
-            <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 30, height: 30 }}>
-              <Icon name="clock" size={14} />
-            </div>
-            <div className="flex1">
-              <div style={{ fontWeight: 600 }}>{it.source}</div>
-              <div className="faint" style={{ fontSize: 11.5 }}>
-                {it.storage} · {it.object_count} objects · {bytes(it.total_bytes)} · {timeAgo(it.at)}
-              </div>
-              {it.path && <div className="faint mono" style={{ fontSize: 11, marginTop: 2 }}>{it.path}</div>}
-            </div>
-            <Pill tone={it.recoverable ? "ok" : "warn"}>{it.recoverable ? "recoverable" : "sealing"}</Pill>
-          </div>
-        ))}
-      </Card>
-
-      <Card style={{ marginBottom: 16 }}>
-        <h3 style={{ marginBottom: 12 }}>System & platform</h3>
+        <h3 style={{ marginBottom: 12 }}>System &amp; platform</h3>
         <div className="grid grid-3">
           <Info label="Type" value={t.model_kind === "vm" ? `VM (${t.virtualization || "?"})` : "Hardware"} />
           <Info label="Product" value={t.hardware_product ?? "—"} />
@@ -304,18 +359,7 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
           <Info label="CPUs" value={String(t.cpu_count ?? "—")} />
           <Info label="Load" value={Array.isArray(t.load_avg) ? t.load_avg.join(" ") : "—"} />
           <Info label="Memory" value={t.mem_total_bytes ? `${bytes(t.mem_available_bytes ?? 0)} free / ${bytes(t.mem_total_bytes)}` : "—"} />
-          <Info label="Uptime" value={t.uptime_seconds ? `${Math.floor(t.uptime_seconds / 3600)}h` : "—"} />
-        </div>
-      </Card>
-
-      <Card style={{ marginBottom: 16 }}>
-        <h3 style={{ marginBottom: 12 }}>Network & encryption</h3>
-        <div className="grid grid-2">
-          <Info label="Local IP" value={t.local_ip ?? "—"} />
-          <Info label="Cloud" value={t.cloud_url ?? "—"} />
-          <Info label="Client encryption" value={t.content_alg ?? "AES-256-GCM"} tone="ok" />
-          <Info label="Quantum-safe" value={t.quantum_safe ? "Enabled" : "Classical"} tone={t.quantum_safe ? "ok" : "danger"} />
-          <Info label="Signing" value={t.signing_alg ?? "—"} />
+          <Info label="Uptime" value={t.uptime_seconds ? fmtUptime(t.uptime_seconds) : "—"} />
         </div>
       </Card>
 
@@ -328,35 +372,125 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
           </pre>
         </Card>
       )}
-
-      <Card>
-        <h3 style={{ marginBottom: 12 }}>Management commands</h3>
-        <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>
-          Every command is hybrid-signed (Ed25519 + ML-DSA), sequenced, and expiring. The
-          appliance verifies and enforces local policy before acting.
-        </div>
-        <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
-          <button className="btn sm" onClick={() => onCommand(a, "OPEN_INGEST_WINDOW", { maximumDurationSeconds: 1800 })}>
-            Open ingest window
-          </button>
-          <button className="btn sm" onClick={() => onCommand(a, "REQUEST_VERIFICATION")}>
-            Verify integrity
-          </button>
-          <button className="btn sm" onClick={() => onCommand(a, "SCHEDULE_BACKUP", { window: "02:00" })}>
-            Schedule backup
-          </button>
-          <button className="btn sm danger" onClick={() => onCommand(a, "QUARANTINE")}>
-            Quarantine
-          </button>
-        </div>
-        <div className="spread" style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
-          <span className="faint" style={{ fontSize: 12 }}>Decommission or remove a stale / test unit from the fleet.</span>
-          <button className="btn sm danger" onClick={() => onRemove(a)}>
-            <Icon name="logout" size={13} /> Remove appliance
-          </button>
-        </div>
-      </Card>
     </>
+  );
+}
+
+function fmtUptime(s: number): string {
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function StorageCard({ a, onAdd, onRename, onDelete }: {
+  a: Appliance; onAdd: () => void; onRename: (s: Store) => void; onDelete: (s: Store) => void;
+}) {
+  const stores = a.stores ?? [];
+  const totalCap = stores.reduce((n, s) => n + (s.capacity_bytes || 0), 0);
+  const totalUsed = stores.reduce((n, s) => n + (s.used_bytes || 0), 0);
+  const pct = totalCap ? Math.min(100, (totalUsed / totalCap) * 100) : 0;
+  const barTone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : undefined;
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <h3 style={{ margin: 0 }}>Storage</h3>
+        <button className="btn sm" onClick={onAdd}><Icon name="database" size={13} /> Add storage</button>
+      </div>
+      {totalCap > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div className="spread faint" style={{ fontSize: 12, marginBottom: 6 }}>
+            <span>{bytes(totalUsed)} used of {bytes(totalCap)} across {stores.length} volume{stores.length === 1 ? "" : "s"}</span>
+            <span>{bytes(Math.max(totalCap - totalUsed, 0))} free · {Math.round(pct)}%</span>
+          </div>
+          <div className="progress"><span style={{ width: `${pct}%`, background: barTone }} /></div>
+        </div>
+      )}
+      {stores.map((s) => <StorageItem key={s.id} a={a} s={s} onRename={onRename} onDelete={onDelete} />)}
+      {stores.length === 0 && <div className="muted">No storage volumes reported yet.</div>}
+    </Card>
+  );
+}
+
+function StoredDataCard({ a }: { a: Appliance }) {
+  const t = a.telemetry ?? {};
+  const sd = a.stored_data;
+  const sources = sd?.sources ?? [];
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div className="spread" style={{ marginBottom: 10 }}>
+        <h3 style={{ margin: 0 }}>Stored data</h3>
+        {sd && (
+          <span className="faint" style={{ fontSize: 12 }}>
+            {sd.recovery_points} recovery points · {sd.objects} objects · {bytes(sd.bytes)}
+          </span>
+        )}
+      </div>
+      {t.data_path && (
+        <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>
+          <Icon name="lock" size={12} /> <span className="mono">{t.data_path}</span>
+          {t.data_mount ? <> on <span className="mono">{t.data_mount}</span></> : null} · client-encrypted (AES-256-GCM), sealed at rest
+        </div>
+      )}
+      {sources.length === 0 && <div className="muted">No recovery points stored on this appliance yet.</div>}
+      {sources.map((s, i) => {
+        const brand = brandForSource(s.source_type);
+        return (
+          <div key={i} className="result-row">
+            <div className="result-icon" style={{ background: brand ? "#0e1524" : "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 34, height: 34 }}>
+              {brand ? <BrandIcon name={brand} size={17} /> : <Icon name="database" size={16} />}
+            </div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>{s.source}</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>
+                Vault: {s.vault} · {s.storage} · updated {timeAgo(s.last_at)}
+              </div>
+            </div>
+            <div className="stack" style={{ alignItems: "flex-end", gap: 2 }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>{bytes(s.bytes)}</div>
+              <div className="faint" style={{ fontSize: 11 }}>
+                {s.objects} objects · {s.recovery_points} point{s.recovery_points === 1 ? "" : "s"}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </Card>
+  );
+}
+
+function NetworkCard({ a }: { a: Appliance }) {
+  const t = a.telemetry ?? {};
+  const online = isOnline(a);
+  const lat: number | null = t.cloud_latency_ms ?? null;
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <h3 style={{ marginBottom: 12 }}>Network</h3>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+        <Info label="Local IP" value={t.local_ip || "—"} />
+        <Info label="Public IP" value={t.public_ip || "—"} />
+        <div className="stack">
+          <div className="faint" style={{ fontSize: 11.5 }}>Cloud connectivity</div>
+          <div className="row" style={{ gap: 6, alignItems: "center" }}>
+            <StatusDot color={online ? "#35d0a5" : "#6b7688"} pulse={online} />
+            <span style={{ fontWeight: 600, color: online ? "#35d0a5" : undefined }}>
+              {online ? "Connected" : "Disconnected"}
+            </span>
+          </div>
+        </div>
+        <Info label="Latency" value={lat != null ? `${lat} ms` : "—"} tone={lat != null && lat < 250 ? "ok" : undefined} />
+        <Info label="Channel" value={t.channel_encryption || "TLS 1.3"} tone="ok" />
+        <Info label="Quantum-safe" value={t.quantum_safe ? "Enabled" : "Classical"} tone={t.quantum_safe ? "ok" : "danger"} />
+        <Info label="Data sent" value={t.net_bytes_sent != null ? bytes(t.net_bytes_sent) : "—"} />
+        <Info label="Data received" value={t.net_bytes_recv != null ? bytes(t.net_bytes_recv) : "—"} />
+        <Info label="Signing" value={t.signing_alg ?? "—"} />
+      </div>
+      <div className="faint" style={{ fontSize: 11.5, marginTop: 10 }}>
+        Cloud endpoint: <span className="mono">{t.cloud_url ?? "—"}</span>
+      </div>
+    </Card>
   );
 }
 
@@ -412,9 +546,9 @@ function StorageItem({ a, s, onRename, onDelete }:
   );
 }
 
-function Info({ label, value, tone }: { label: string; value: string; tone?: "ok" | "danger" }) {
+function Info({ label, value, tone, title }: { label: string; value: string; tone?: "ok" | "danger"; title?: string }) {
   return (
-    <div className="stack">
+    <div className="stack" title={title}>
       <div className="faint" style={{ fontSize: 11.5 }}>{label}</div>
       {tone ? <Pill tone={tone}>{value}</Pill> : <div style={{ fontWeight: 600 }}>{value}</div>}
     </div>
