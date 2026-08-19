@@ -448,6 +448,8 @@ class RecoveredItem(Base):
     mime = Column(String, default="application/octet-stream")
     size_bytes = Column(BigInteger, default=0)
     location = Column(String, default="")
+    version = Column(Integer, nullable=True)  # which stored version was recovered
+    version_created_at = Column(DateTime, nullable=True)  # when that version was captured
     requested_by = Column(String, default="")
     created_at = Column(DateTime, default=_now)
     expires_at = Column(DateTime, nullable=False)

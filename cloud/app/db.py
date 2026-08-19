@@ -92,6 +92,8 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE collections ADD COLUMN config JSON",
         "ALTER TABLE desktop_agents ADD COLUMN last_scan JSON",
         "ALTER TABLE desktop_agents ADD COLUMN pending_commands JSON",
+        "ALTER TABLE recovered_items ADD COLUMN version INTEGER",
+        "ALTER TABLE recovered_items ADD COLUMN version_created_at TIMESTAMP",
         "ALTER TABLE search_documents ADD COLUMN content_hash VARCHAR",
         "ALTER TABLE search_documents ADD COLUMN version INTEGER DEFAULT 1",
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",

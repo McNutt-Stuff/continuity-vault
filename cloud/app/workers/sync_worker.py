@@ -267,6 +267,19 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                            ObjectVersion.object_id.in_(oids),
                            ObjectVersion.is_current.is_(True)).all()):
             current_versions[ov.object_id] = ov
+    # Backfill baseline (v1) for objects that were first backed up before version
+    # tracking existed: use their latest existing index row (which points at a real
+    # stored snapshot). Without this, the first change to a legacy object would be
+    # recorded as v1 and show no history.
+    prior_docs: dict = {}
+    missing = [o for o in oids if o not in current_versions]
+    if missing:
+        for d in (db.query(SearchDocument)
+                  .filter(SearchDocument.tenant_id == collection.tenant_id,
+                          SearchDocument.source_type == collection.source_type,
+                          SearchDocument.object_id.in_(missing))
+                  .order_by(SearchDocument.created_at.asc()).all()):
+            prior_docs[d.object_id] = d  # asc → keeps the newest existing row
 
     stored = 0
     deduped = 0
@@ -276,6 +289,18 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         # the content directly (connector plaintext is stable).
         content_hash = src.content_hash or hashlib.sha256(src.content or b"").hexdigest()
         prev = current_versions.get(src.object_id)
+        if prev is None:
+            pd = prior_docs.get(src.object_id)
+            if pd is not None and pd.snapshot_id:
+                prev = ObjectVersion(
+                    tenant_id=collection.tenant_id, source_type=collection.source_type,
+                    object_id=src.object_id, collection_id=collection.id, version=1,
+                    content_hash=pd.content_hash or "", snapshot_id=pd.snapshot_id,
+                    size_bytes=pd.size_bytes or 0, is_current=True,
+                    created_at=pd.created_at,
+                )
+                new_versions.append(prev)
+                current_versions[src.object_id] = prev
         if progress and (idx % 25 == 0):
             progress(idx, len(src_list), f"Processing {idx}/{len(src_list)}…")
         # Unchanged since the last version → de-duplicate (don't re-store or

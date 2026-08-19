@@ -78,6 +78,16 @@ class Agent:
         self._fs_index_file = Path(cfg.data_dir) / "fs_index.json"
         self._rebuild_event = threading.Event()
         self._indexer_started = False
+        # Prior endpoint-files backup state ({path: {size, mtime, hash}}) so each
+        # run only reads + uploads new or changed files (incremental dedup).
+        self._files_state_file = Path(cfg.data_dir) / "files_state.json"
+        # Push-model scheduling: the agent owns the cadence for its sources. The
+        # per-source last-run timestamps are persisted so a restart doesn't
+        # immediately re-collect everything, and the mappings (source + interval +
+        # selection) are pulled from the cloud on each heartbeat.
+        self._mappings: list = []
+        self._collect_state_file = Path(cfg.data_dir) / "collect_state.json"
+        self._last_collect_by_source: dict = self._load_collect_state()
         # Collections run on a background worker so heartbeats keep flowing while
         # a (potentially long) collection is in progress.
         self._job_queue: "queue.Queue[dict]" = queue.Queue()
@@ -213,6 +223,13 @@ class Agent:
         self.cfg.registration_file.write_text(json.dumps(self.reg))
         # Auto-update: pull a new bundle when the cloud advertises a newer version.
         self._maybe_self_update(data.get("latest_version"))
+        # Push-model scheduling: the cloud tells us WHICH sources to collect and
+        # HOW OFTEN (from the Data Map); the agent decides WHEN, based on its own
+        # timers — so nothing fires when we're offline or the data is unreachable.
+        mappings = data.get("mappings")
+        if isinstance(mappings, list):
+            self._mappings = mappings
+        self._run_due_collects()
         command = data.get("command")
         if command:
             self._handle_command(command)
@@ -385,12 +402,57 @@ class Agent:
                 self.log.error("collection failed: %s", exc)
                 self._post_command_result("collect", False, {"error": str(exc)})
             finally:
-                # Advance the schedule timer whether or not the run succeeded, so a
-                # failing collect can't re-trigger every heartbeat (endless loop).
-                self._last_collect = time.time()
+                # Advance the (persisted) per-source schedule timer whether or not
+                # the run succeeded, so a failing collect can't re-trigger every
+                # heartbeat and a restart doesn't immediately re-collect.
+                now = time.time()
+                self._last_collect = now
+                self._last_collect_by_source[source] = now
+                self._save_collect_state()
                 with self._queued_lock:
                     self._queued_sources.discard(source)
                 self._job_queue.task_done()
+
+    def _run_due_collects(self) -> None:
+        """Enqueue a collect for each mapping whose cadence is due. This is the
+        push model: the agent (which knows it's online) drives the schedule from
+        the mapping config it pulled on heartbeat — the cloud never queues these."""
+        now = time.time()
+        for m in self._mappings or []:
+            source = m.get("source_type")
+            if not source:
+                continue
+            interval_min = int(m.get("interval_minutes") or 0)
+            if interval_min <= 0:
+                continue  # manual only / disabled
+            last = float(self._last_collect_by_source.get(source, 0))
+            if now - last < interval_min * 60:
+                continue
+            self._enqueue_collect({"source_type": source,
+                                   "file_config": m.get("file_config") or {}})
+
+    def sync_now(self) -> int:
+        """Manually collect every configured source now (menu-bar 'Sync now')."""
+        n = 0
+        for m in self._mappings or []:
+            if self._enqueue_collect({"source_type": m.get("source_type"),
+                                      "file_config": m.get("file_config") or {}}):
+                n += 1
+        if not n and self._enqueue_collect(None):  # no mappings yet → legacy default
+            n = 1
+        return n
+
+    def _load_collect_state(self) -> dict:
+        try:
+            return json.loads(self._collect_state_file.read_text())
+        except Exception:
+            return {}
+
+    def _save_collect_state(self) -> None:
+        try:
+            self._collect_state_file.write_text(json.dumps(self._last_collect_by_source))
+        except Exception as exc:
+            self.log.warning("could not persist collect state: %s", exc)
 
     # -- collection + push --------------------------------------------
 
@@ -447,13 +509,32 @@ class Agent:
             self._write_status({"last_collect": _now_iso(), "results": [{"collector": "endpoint_files", "objects": 0}]})
             return {"objects": 0, "results": [{"collector": "endpoint_files", "skipped": "no folders selected"}]}
         self.log.info("endpoint_files: scanning %d root(s)", len(roots))
-        objects = files_collector.collect(file_config)
+        known = self._load_files_state()
+        objects, new_state, unchanged = files_collector.collect(file_config, known)
         total = self._push_objects("endpoint_files", objects, destinations) if objects else 0
+        # Only persist the new state once the changed files actually landed, so a
+        # failed push is retried next run rather than silently skipped.
+        if total == len(objects):
+            self._save_files_state(new_state)
         self._last_collect = time.time()
-        self._write_status({"last_collect": _now_iso(),
-                            "results": [{"collector": "endpoint_files", "objects": total}]})
-        self.log.info("endpoint_files: pushed %d files", total)
-        return {"objects": total, "results": [{"collector": "endpoint_files", "objects": total}]}
+        results = [{"collector": "endpoint_files", "objects": total, "unchanged": unchanged}]
+        self._write_status({"last_collect": _now_iso(), "results": results})
+        self.log.info("endpoint_files: pushed %d new/changed file(s), %d unchanged (deduped)",
+                      total, unchanged)
+        return {"objects": total, "unchanged": unchanged, "results": results}
+
+    def _load_files_state(self) -> dict:
+        try:
+            return json.loads(self._files_state_file.read_text())
+        except Exception:
+            return {}
+
+    def _save_files_state(self, state: dict) -> None:
+        try:
+            self._files_state_file.write_text(json.dumps(state))
+        except Exception as exc:
+            self.log.warning("could not persist endpoint_files state: %s", exc)
+
 
     def _collect_onepassword(self) -> dict:
         cfg = self.reg.get("config", {})
@@ -519,10 +600,7 @@ class Agent:
         interval = self.reg.get("heartbeat_interval_seconds", 30)
         while True:
             try:
-                self.heartbeat()
-                schedule_min = self.reg.get("config", {}).get("schedule_minutes", 360)
-                if time.time() - self._last_collect >= schedule_min * 60:
-                    self._enqueue_collect(None)  # non-blocking; runs on the worker
+                self.heartbeat()  # heartbeat pulls mappings + runs due collects
             except Exception as exc:
                 self.log.error("loop error: %s", exc)
                 self._write_status({"error": str(exc)})

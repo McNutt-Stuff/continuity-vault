@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from ..config import get_settings
 from ..connectors import get_connector
 from ..db import SessionLocal
-from ..models import Collection, DesktopAgent
+from ..models import Collection
 from .sync_worker import run_backup
 
 logger = logging.getLogger("cv.scheduler")
@@ -83,23 +83,6 @@ def _is_due(c: Collection, interval_minutes: int, now: datetime) -> bool:
     return (now - last) >= timedelta(minutes=interval_minutes)
 
 
-def _queue_agent_collect(db, c: Collection) -> int:
-    """Queue a collect command to the agent(s) bound to this mapping, carrying the
-    source type + any file selection so the agent knows what to collect."""
-    q = db.query(DesktopAgent).filter(DesktopAgent.tenant_id == c.tenant_id)
-    if c.agent_id:
-        agents = q.filter(DesktopAgent.id == c.agent_id).all()
-    else:
-        agents = [a for a in q.all() if c.source_type in (a.collectors or [])]
-    queued = 0
-    for a in agents:
-        a.enqueue_command({"type": "collect",
-                           "params": {"source_type": c.source_type,
-                                      "file_config": c.config or {}}})
-        queued += 1
-    return queued
-
-
 def run_due() -> int:
     """Run a backup for every mapping whose cadence is due. Returns count run."""
     settings = get_settings()
@@ -117,17 +100,20 @@ def run_due() -> int:
             caps = conn.capabilities()
             try:
                 if caps.requires_agent:
-                    # Agent sources are pushed: queue a collect for the bound agent.
-                    if _queue_agent_collect(db, c) == 0:
-                        continue  # no agent available — retry next tick, don't mark run
-                else:
-                    if not c.connector_account_id:
-                        continue  # nothing to authenticate a pull with
-                    # Delta sources sync incrementally; non-delta sources only run
-                    # on a cadence the admin set explicitly (a full re-snapshot).
-                    if not caps.delta and c.backup_interval_minutes is None:
-                        continue
-                    run_backup(db, c)
+                    # Agent-collected sources are PUSH: the endpoint agent owns the
+                    # cadence (it knows when it's online and can reach the data) and
+                    # runs its own timer from the mapping config it pulls on
+                    # heartbeat. The cloud must NOT queue collects on a schedule —
+                    # that fired blindly at offline/unreachable endpoints and could
+                    # loop. (Manual "Sync now" still queues an explicit one-off.)
+                    continue
+                if not c.connector_account_id:
+                    continue  # nothing to authenticate a pull with
+                # Delta sources sync incrementally; non-delta sources only run
+                # on a cadence the admin set explicitly (a full re-snapshot).
+                if not caps.delta and c.backup_interval_minutes is None:
+                    continue
+                run_backup(db, c)
                 logger.info("scheduled backup: collection=%s (%s) source=%s "
                             "destinations=%s interval=%dmin", c.id, c.name,
                             c.source_type, c.destinations, interval)

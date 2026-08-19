@@ -10,6 +10,7 @@ interface Recovered {
   id: string; object_id: string; title: string; doc_type: string;
   source_type: string; mime: string; size_bytes: number; location: string;
   expires_in_seconds: number; viewed: boolean;
+  version?: number | null; version_created_at?: string | null;
 }
 interface RetrieveResp {
   status: string; message: string; recovered_id?: string; title?: string;
@@ -505,9 +506,16 @@ export default function Search() {
                 <Icon name={brandForSource(it.source_type) ? "database" : "file"} size={14} />
               </div>
               <div className="flex1">
-                <div style={{ fontWeight: 600, fontSize: 13 }}>{it.title}</div>
+                <div style={{ fontWeight: 600, fontSize: 13 }}>
+                  {it.title}
+                  {it.version != null && (
+                    <span className="faint" style={{ fontWeight: 400, fontSize: 11.5 }}> · v{it.version}</span>
+                  )}
+                </div>
                 <div className="faint" style={{ fontSize: 11.5 }}>
-                  {it.location} · {bytes(it.size_bytes)} · <span style={{ color: it.expires_in_seconds < 120 ? "var(--danger-c)" : undefined }}>expires in {fmtCountdown(it.expires_in_seconds)}</span>
+                  {it.location} · {bytes(it.size_bytes)}
+                  {it.version_created_at ? ` · version from ${timeAgo(it.version_created_at)}` : ""}
+                   · <span style={{ color: it.expires_in_seconds < 120 ? "var(--danger-c)" : undefined }}>expires in {fmtCountdown(it.expires_in_seconds)}</span>
                 </div>
               </div>
               <button className="btn sm primary" onClick={() => openViewer(it)}>View</button>

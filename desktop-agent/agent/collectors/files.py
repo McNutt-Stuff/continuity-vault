@@ -224,19 +224,27 @@ def _excluded(fp: Path, excl_ext: set, excl_glob: List[str]) -> bool:
     return any(fnmatch.fnmatch(s, g) for g in excl_glob)
 
 
-def collect(config: dict) -> List[dict]:
+def collect(config: dict, known: dict | None = None) -> tuple[List[dict], dict, int]:
     """Walk the selected roots and return normalized file objects.
 
     ``config`` = {roots:[...], excludeExts:[...], excludeGlobs:[...],
     maxSizeBytes:int, maxFiles:int}. Files over the size cap, in skipped/noise
-    dirs, or matching an exclude are left out."""
+    dirs, or matching an exclude are left out.
+
+    ``known`` is the prior backup state ({path: {size, mtime, hash}}) so this run
+    only reads + uploads new or changed files (incremental dedup) — unchanged
+    files are skipped with a cheap stat, never re-read. Returns
+    ``(objects, new_state, unchanged_count)``."""
     config = config or {}
     roots = config.get("roots") or []
     max_bytes = int(config.get("maxSizeBytes") or _DEFAULT_MAX_BYTES)
     max_files = int(config.get("maxFiles") or _DEFAULT_MAX_FILES)
     excl_ext = {str(e).lower().lstrip(".") for e in (config.get("excludeExts") or [])}
     excl_glob = list(config.get("excludeGlobs") or [])
+    known = known or {}
 
+    new_state: dict = dict(known)  # carry prior knowledge; overlay this run's files
+    unchanged = 0
     objects: List[dict] = []
     for root in roots:
         rp = Path(root)
@@ -257,10 +265,28 @@ def collect(config: dict) -> List[dict]:
                     continue
                 if _excluded(fp, excl_ext, excl_glob):
                     continue
+                path_s = str(fp)
+                prior = known.get(path_s)
+                # Unchanged since the last backup (same size + mtime) → skip the
+                # read and the upload; the prior version at rest still stands.
+                if (prior and prior.get("size") == st.st_size
+                        and abs(float(prior.get("mtime", 0)) - st.st_mtime) < 0.001):
+                    unchanged += 1
+                    continue
                 try:
                     data = fp.read_bytes()
                 except OSError:
                     continue
+                content_hash = hashlib.sha256(data).hexdigest()
+                # Content identical to what we already backed up (e.g. only mtime
+                # touched) → refresh state but don't re-upload.
+                if prior and prior.get("hash") == content_hash:
+                    new_state[path_s] = {"size": st.st_size, "mtime": st.st_mtime,
+                                         "hash": content_hash}
+                    unchanged += 1
+                    continue
+                new_state[path_s] = {"size": st.st_size, "mtime": st.st_mtime,
+                                     "hash": content_hash}
                 oid = "endpoint_files:" + hashlib.sha256(str(fp).encode()).hexdigest()[:24]
                 mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
                 objects.append({
@@ -268,6 +294,7 @@ def collect(config: dict) -> List[dict]:
                     "kind": _kind_for(fn),
                     "title": fn,
                     "content_b64": base64.b64encode(data).decode(),
+                    "content_hash": content_hash,  # stable plaintext hash for the pipeline
                     "preview": str(fp.parent),
                     "meta": {
                         "path": str(fp),
@@ -281,5 +308,6 @@ def collect(config: dict) -> List[dict]:
                     "size_bytes": len(data),
                 })
                 if len(objects) >= max_files:
-                    return objects
-    return objects
+                    return objects, new_state, unchanged
+    return objects, new_state, unchanged
+

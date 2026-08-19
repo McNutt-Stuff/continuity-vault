@@ -421,6 +421,34 @@ class AgentHeartbeat(BaseModel):
     telemetry: dict = {}
 
 
+def _agent_mappings(db: Session, agent: DesktopAgent) -> list[dict]:
+    """The agent-collected sources this agent owns, with the cadence + selection
+    the operator set in the Data Map. Agent sources are PUSH: the agent runs these
+    on its own timer (only when it's online and can reach the data) instead of the
+    cloud queuing collects blindly on a schedule."""
+    default_min = max(1, get_settings().sync_interval_minutes)
+    out: list[dict] = []
+    for c in (db.query(Collection)
+              .filter(Collection.tenant_id == agent.tenant_id).all()):
+        conn = get_connector(c.source_type)
+        if not (conn and conn.capabilities().requires_agent):
+            continue  # cloud-pull sources are scheduled server-side
+        if c.agent_id and c.agent_id != agent.id:
+            continue  # bound to a different agent
+        if not c.agent_id and c.source_type not in (agent.collectors or []):
+            continue  # unbound and this agent can't collect it
+        interval = (default_min if c.backup_interval_minutes is None
+                    else c.backup_interval_minutes)
+        out.append({
+            "collection_id": c.id,
+            "source_type": c.source_type,
+            "interval_minutes": interval,  # 0 = manual only (no auto cadence)
+            "file_config": c.config or {},
+            "destinations": c.destinations or ["cv-cloud"],
+        })
+    return out
+
+
 @agent_router.post("/heartbeat")
 def heartbeat(body: AgentHeartbeat, request: Request,
               agent: DesktopAgent = Depends(_auth_agent),
@@ -445,6 +473,7 @@ def heartbeat(body: AgentHeartbeat, request: Request,
     command = agent.dequeue_command()  # one command per heartbeat (FIFO queue)
     db.commit()
     return {"config": agent.config, "command": command,
+            "mappings": _agent_mappings(db, agent),
             "latest_version": _agent_bundle_version(),
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
 
