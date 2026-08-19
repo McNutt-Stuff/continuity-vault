@@ -61,6 +61,120 @@ def update_pricing(body: PricingUpdate, db: Session = Depends(get_db)):
     return pricing_public(p)
 
 
+# --- Email: configuration, test, and broadcast ------------------------------
+
+def _email_config(db: Session):
+    from ..models import EmailConfig
+    row = db.get(EmailConfig, "default")
+    if row is None:
+        row = EmailConfig(id="default")
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return row
+
+
+def _email_config_view(row) -> dict:
+    return {"provider": row.provider, "enabled": bool(row.enabled),
+            "from_email": row.from_email, "from_name": row.from_name,
+            "reply_to": row.reply_to, "region": row.region}
+
+
+@router.get("/email-config")
+def get_email_config(db: Session = Depends(get_db)):
+    return _email_config_view(_email_config(db))
+
+
+class EmailConfigUpdate(BaseModel):
+    provider: str | None = None
+    enabled: bool | None = None
+    from_email: str | None = None
+    from_name: str | None = None
+    reply_to: str | None = None
+    region: str | None = None
+
+
+@router.put("/email-config")
+def update_email_config(body: EmailConfigUpdate, db: Session = Depends(get_db)):
+    from .. import emailer
+    row = _email_config(db)
+    for k, v in body.dict(exclude_none=True).items():
+        setattr(row, k, v)
+    db.commit()
+    emailer.invalidate_config_cache()
+    return _email_config_view(row)
+
+
+@router.get("/users")
+def list_all_users(db: Session = Depends(get_db)):
+    """Every user across tenants, for choosing broadcast recipients."""
+    tenants = {t.id: t.name for t in db.query(Tenant).all()}
+    return [{
+        "id": u.id, "email": u.email, "display_name": u.display_name,
+        "role": u.role, "status": u.status,
+        "tenant_id": u.tenant_id, "tenant_name": tenants.get(u.tenant_id, ""),
+    } for u in db.query(User).order_by(User.email.asc()).all()]
+
+
+class EmailTest(BaseModel):
+    to: str
+
+
+@router.post("/email-test")
+def send_email_test(body: EmailTest,
+                    principal: security.Principal = Depends(security.require_platform_admin),
+                    db: Session = Depends(get_db)):
+    from .. import emailer
+    html = emailer.render(
+        "Test email from Arkive",
+        emailer.text_to_html("This is a test message confirming your Arkive email "
+                             "delivery is configured correctly.\n\nIf you received this, "
+                             "SES is wired up and ready."),
+        preheader="Arkive email delivery test")
+    channel = emailer.send(body.to.strip(), "Test email from Arkive", html=html,
+                           text="Arkive email delivery test — SES is configured correctly.")
+    audit.record(db, actor=principal.user_id, action="admin.email_test",
+                 detail={"to": body.to, "channel": channel})
+    return {"channel": channel, "delivered": channel in ("ses", "smtp", "log")}
+
+
+class EmailBroadcast(BaseModel):
+    audience: str = "all"          # all | selected
+    user_ids: list[str] = []       # when audience == selected
+    tenant_id: str | None = None   # optional: limit "all" to one tenant
+    subject: str
+    message: str                   # plain text (escaped into the template)
+    cta_label: str | None = None
+    cta_url: str | None = None
+
+
+@router.post("/email-broadcast")
+def email_broadcast(body: EmailBroadcast,
+                    principal: security.Principal = Depends(security.require_platform_admin),
+                    db: Session = Depends(get_db)):
+    from .. import emailer
+    q = db.query(User).filter(User.status == "active")
+    if body.audience == "selected":
+        if not body.user_ids:
+            return {"sent": 0, "failed": 0, "recipients": 0}
+        q = q.filter(User.id.in_(body.user_ids))
+    elif body.tenant_id:
+        q = q.filter(User.tenant_id == body.tenant_id)
+    recipients = [u.email for u in q.all() if u.email]
+
+    cta = ({"label": body.cta_label, "url": body.cta_url}
+           if body.cta_label and body.cta_url else None)
+    html = emailer.render(body.subject, emailer.text_to_html(body.message),
+                          preheader=body.subject, cta=cta)
+    result = emailer.send_bulk(recipients, body.subject, html=html, text=body.message)
+    audit.record(db, actor=principal.user_id, action="admin.email_broadcast",
+                 category="admin", severity="notice",
+                 detail={"audience": body.audience, "recipients": len(recipients),
+                         "sent": result["sent"], "failed": result["failed"],
+                         "subject": body.subject})
+    return {**result, "recipients": len(recipients)}
+
+
 @router.get("/overview")
 def overview(db: Session = Depends(get_db)):
     provider = get_provider()

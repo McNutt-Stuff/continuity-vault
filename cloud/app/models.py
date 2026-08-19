@@ -496,3 +496,19 @@ class PricingConfig(Base):
     data_value_per_type = Column(JSON, default=dict)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
+
+class EmailConfig(Base):
+    """Platform-wide outbound email settings (AWS SES), editable by platform
+    admins. Credentials come from the platform AWS identity (env/IAM) — only the
+    non-secret routing config lives here. Single row (id="default")."""
+
+    __tablename__ = "email_config"
+    id = Column(String, primary_key=True, default="default")
+    provider = Column(String, default="ses")   # ses | smtp | log
+    enabled = Column(Boolean, default=False)
+    from_email = Column(String, default="notifications@arkive.life")
+    from_name = Column(String, default="Arkive")
+    reply_to = Column(String, default="support@arkive.life")
+    region = Column(String, default="us-east-1")
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+

@@ -503,7 +503,9 @@ export default function Search() {
           {recovered.map((it) => (
             <div key={it.id} className="result-row" style={{ padding: "8px 0" }}>
               <div className="result-icon" style={{ width: 30, height: 30, background: "#0e1524" }}>
-                <Icon name={brandForSource(it.source_type) ? "database" : "file"} size={14} />
+                {brandForSource(it.source_type)
+                  ? <BrandIcon name={brandForSource(it.source_type)!} size={16} />
+                  : <Icon name="file" size={14} />}
               </div>
               <div className="flex1">
                 <div style={{ fontWeight: 600, fontSize: 13 }}>

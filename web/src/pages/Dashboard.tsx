@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { Card, Pill, bytes } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { SourceIcon } from "../components/SourceIcon";
 
 interface SourceType { type: string; displayName: string; icon: string; color: string; count: number; }
 interface ObjectBucket { key: string; label: string; icon: string; color: string; count: number; }
@@ -89,8 +90,8 @@ export default function Dashboard() {
             {(ov?.sources.types || []).map((t) => (
               <span key={t.type} title={`${t.displayName} · ${t.count}`}
                     style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px",
-                             borderRadius: 999, fontSize: 11, background: `${t.color}22`, color: t.color, border: `1px solid ${t.color}44` }}>
-                <Icon name={iconName(t.icon)} size={12} /> {t.count}
+                             borderRadius: 999, fontSize: 11, background: "#0e1524", border: "1px solid var(--border-soft)" }}>
+                <SourceIcon type={t.type} fallback={iconName(t.icon)} size={13} /> {t.count}
               </span>
             ))}
             {ov && ov.sources.types.length === 0 && <span className="faint" style={{ fontSize: 12 }}>No sources yet</span>}

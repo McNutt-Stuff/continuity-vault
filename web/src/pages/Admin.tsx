@@ -1,17 +1,17 @@
-import { useEffect, useState } from "react";
+import { ReactNode, useEffect, useState } from "react";
 import { api } from "../api";
 import { Card, Pill, Stat, timeAgo } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { promptDialog } from "../components/dialog";
 
-type Tab = "overview" | "tenants" | "fleet" | "pricing" | "crypto" | "audit" | "updates";
+type Tab = "overview" | "tenants" | "fleet" | "pricing" | "email" | "crypto" | "audit" | "updates";
 
 export default function Admin() {
   const [tab, setTab] = useState<Tab>("overview");
   return (
     <>
       <div className="chips" style={{ marginBottom: 18 }}>
-        {(["overview", "tenants", "fleet", "pricing", "crypto", "audit", "updates"] as Tab[]).map((t) => (
+        {(["overview", "tenants", "fleet", "pricing", "email", "crypto", "audit", "updates"] as Tab[]).map((t) => (
           <span key={t} className={`chip ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
             {t[0].toUpperCase() + t.slice(1)}
           </span>
@@ -21,6 +21,7 @@ export default function Admin() {
       {tab === "tenants" && <Tenants />}
       {tab === "fleet" && <Fleet />}
       {tab === "pricing" && <Pricing />}
+      {tab === "email" && <EmailAdmin />}
       {tab === "crypto" && <Crypto />}
       {tab === "audit" && <Audit />}
       {tab === "updates" && <Updates />}
@@ -323,6 +324,157 @@ function PriceField({ label, value, onChange }: { label: string; value: number; 
     <div className="stack" style={{ gap: 4 }}>
       <label className="faint" style={{ fontSize: 12 }}>{label}</label>
       <input className="input sm" type="number" step="0.01" value={value} onChange={(e) => onChange(e.target.value)} />
+    </div>
+  );
+}
+
+interface EmailCfg {
+  provider: string; enabled: boolean; from_email: string; from_name: string;
+  reply_to: string; region: string;
+}
+interface AdminUser { id: string; email: string; display_name: string; role: string; status: string; tenant_id: string; tenant_name: string; }
+
+function EmailAdmin() {
+  const [cfg, setCfg] = useState<EmailCfg | null>(null);
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [toast, setToast] = useState("");
+  const [testTo, setTestTo] = useState("");
+
+  // Broadcast composer
+  const [audience, setAudience] = useState<"all" | "selected">("all");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [subject, setSubject] = useState("");
+  const [message, setMessage] = useState("");
+  const [ctaLabel, setCtaLabel] = useState("");
+  const [ctaUrl, setCtaUrl] = useState("");
+  const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    api.get<EmailCfg>("/admin/email-config").then(setCfg).catch(() => {});
+    api.get<AdminUser[]>("/admin/users").then(setUsers).catch(() => {});
+  }, []);
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3500); }
+  function setC<K extends keyof EmailCfg>(k: K, v: EmailCfg[K]) { setCfg((c) => c ? { ...c, [k]: v } : c); }
+
+  async function saveCfg() {
+    if (!cfg) return;
+    try { const r = await api.put<EmailCfg>("/admin/email-config", cfg); setCfg(r); flash("Email settings saved"); }
+    catch { flash("Could not save settings"); }
+  }
+  async function sendTest() {
+    if (!testTo.trim()) return;
+    try { const r = await api.post<{ channel: string }>("/admin/email-test", { to: testTo.trim() }); flash(`Test sent via ${r.channel}`); }
+    catch { flash("Test failed"); }
+  }
+  function toggleUser(id: string) {
+    setSelected((cur) => { const n = new Set(cur); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  }
+  const recipientCount = audience === "all" ? users.filter((u) => u.status === "active").length : selected.size;
+  async function broadcast() {
+    if (!subject.trim() || !message.trim() || recipientCount === 0) return;
+    setSending(true);
+    try {
+      const r = await api.post<{ sent: number; failed: number; recipients: number; channel: string }>("/admin/email-broadcast", {
+        audience, user_ids: [...selected], subject, message,
+        cta_label: ctaLabel || undefined, cta_url: ctaUrl || undefined,
+      });
+      flash(`Sent to ${r.sent} of ${r.recipients} (via ${r.channel}${r.failed ? `, ${r.failed} failed` : ""})`);
+      setSubject(""); setMessage(""); setCtaLabel(""); setCtaUrl("");
+    } catch { flash("Broadcast failed"); }
+    setSending(false);
+  }
+
+  if (!cfg) return <Card><div className="muted">Loading email settings…</div></Card>;
+
+  return (
+    <>
+      <Card style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ marginBottom: 12 }}>
+          <h3 style={{ margin: 0 }}>Email delivery (AWS SES)</h3>
+          <Pill tone={cfg.enabled ? "ok" : "warn"}>{cfg.enabled ? "Enabled" : "Disabled"}</Pill>
+        </div>
+        <div className="grid grid-3" style={{ gap: 12 }}>
+          <Field label="Provider">
+            <select className="input sm" value={cfg.provider} onChange={(e) => setC("provider", e.target.value)}>
+              <option value="ses">AWS SES</option>
+              <option value="smtp">SMTP</option>
+              <option value="log">Log only (dev)</option>
+            </select>
+          </Field>
+          <Field label="From name"><input className="input sm" value={cfg.from_name} onChange={(e) => setC("from_name", e.target.value)} /></Field>
+          <Field label="From email"><input className="input sm" value={cfg.from_email} onChange={(e) => setC("from_email", e.target.value)} placeholder="notifications@arkive.life" /></Field>
+          <Field label="Reply-to"><input className="input sm" value={cfg.reply_to} onChange={(e) => setC("reply_to", e.target.value)} placeholder="support@arkive.life" /></Field>
+          <Field label="AWS region"><input className="input sm" value={cfg.region} onChange={(e) => setC("region", e.target.value)} placeholder="us-east-1" /></Field>
+          <Field label="Enabled">
+            <label className="row" style={{ gap: 8, fontSize: 13 }}>
+              <input type="checkbox" checked={cfg.enabled} onChange={(e) => setC("enabled", e.target.checked)} /> Send live emails
+            </label>
+          </Field>
+        </div>
+        <div className="row" style={{ gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+          <button className="btn primary" onClick={saveCfg}>Save settings</button>
+          <input className="input sm" placeholder="you@example.com" value={testTo} onChange={(e) => setTestTo(e.target.value)} style={{ width: 220 }} />
+          <button className="btn" onClick={sendTest}>Send test</button>
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+          Credentials come from the platform AWS identity (IAM role / env) — never stored here.
+          Verify the <b>arkive.life</b> domain in SES and publish SPF, DKIM & DMARC records for deliverability.
+        </div>
+      </Card>
+
+      <Card>
+        <h3 style={{ marginTop: 0 }}>Send a message</h3>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>Email all users or a selected group. Each recipient is sent an individual, branded message.</div>
+        <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+          {(["all", "selected"] as const).map((a) => (
+            <span key={a} className={`chip ${audience === a ? "active" : ""}`} onClick={() => setAudience(a)}>
+              {a === "all" ? "All users" : "Selected users"}
+            </span>
+          ))}
+          <span className="faint" style={{ fontSize: 12, alignSelf: "center" }}>{recipientCount} recipient{recipientCount === 1 ? "" : "s"}</span>
+        </div>
+
+        {audience === "selected" && (
+          <div style={{ maxHeight: 200, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, padding: 8, marginBottom: 12 }}>
+            {users.map((u) => (
+              <label key={u.id} className="row" style={{ gap: 8, padding: "4px 2px", fontSize: 12.5, cursor: "pointer" }}>
+                <input type="checkbox" checked={selected.has(u.id)} onChange={() => toggleUser(u.id)} />
+                <span style={{ fontWeight: 600 }}>{u.display_name || u.email}</span>
+                <span className="faint">{u.email} · {u.tenant_name}</span>
+              </label>
+            ))}
+            {users.length === 0 && <div className="muted">No users.</div>}
+          </div>
+        )}
+
+        <div className="stack" style={{ gap: 10 }}>
+          <Field label="Subject"><input className="input sm" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Subject line" /></Field>
+          <Field label="Message">
+            <textarea className="input" value={message} onChange={(e) => setMessage(e.target.value)} rows={6}
+                      placeholder="Write your message. Blank lines separate paragraphs." style={{ resize: "vertical" }} />
+          </Field>
+          <div className="grid grid-2" style={{ gap: 10 }}>
+            <Field label="Button label (optional)"><input className="input sm" value={ctaLabel} onChange={(e) => setCtaLabel(e.target.value)} placeholder="Open Arkive" /></Field>
+            <Field label="Button link (optional)"><input className="input sm" value={ctaUrl} onChange={(e) => setCtaUrl(e.target.value)} placeholder="https://vault.arkive.life" /></Field>
+          </div>
+        </div>
+        <div className="row" style={{ marginTop: 14 }}>
+          <button className="btn primary" onClick={broadcast} disabled={sending || !subject.trim() || !message.trim() || recipientCount === 0}>
+            {sending ? "Sending…" : `Send to ${recipientCount} recipient${recipientCount === 1 ? "" : "s"}`}
+          </button>
+        </div>
+      </Card>
+
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <label className="faint" style={{ fontSize: 12 }}>{label}</label>
+      {children}
     </div>
   );
 }
