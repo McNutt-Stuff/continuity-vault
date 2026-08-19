@@ -251,7 +251,7 @@ interface PricingCfg {
   cloud_price_per_tb_month: number;
   s3_price_per_tb_month: number;
   azure_price_per_tb_month: number;
-  appliance_tiers: { capacity_tb: number; price: number; model: string }[];
+  appliance_tiers: { capacity_tb: number; monthly: number; setup: number; model: string }[];
   data_value_per_type: Record<string, number>;
 }
 
@@ -283,15 +283,17 @@ function Pricing() {
       </Card>
 
       <Card style={{ marginBottom: 16 }}>
-        <h3 style={{ marginTop: 0 }}>Appliance hardware (one-time)</h3>
+        <h3 style={{ marginTop: 0 }}>Appliance hardware (leased)</h3>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>Monthly lease fee plus a one-time setup fee per appliance.</div>
         <table className="table">
-          <thead><tr><th>Model</th><th>Capacity (TB)</th><th>Price ($)</th></tr></thead>
+          <thead><tr><th>Model</th><th>Capacity (TB)</th><th>Monthly ($)</th><th>Setup ($)</th></tr></thead>
           <tbody>
             {p.appliance_tiers.map((t, i) => (
               <tr key={i}>
                 <td><input className="input sm" value={t.model} onChange={(e) => { const a = [...p.appliance_tiers]; a[i] = { ...t, model: e.target.value }; set("appliance_tiers", a); }} /></td>
                 <td><input className="input sm" type="number" value={t.capacity_tb} onChange={(e) => { const a = [...p.appliance_tiers]; a[i] = { ...t, capacity_tb: num(e.target.value) }; set("appliance_tiers", a); }} style={{ width: 90 }} /></td>
-                <td><input className="input sm" type="number" value={t.price} onChange={(e) => { const a = [...p.appliance_tiers]; a[i] = { ...t, price: num(e.target.value) }; set("appliance_tiers", a); }} style={{ width: 110 }} /></td>
+                <td><input className="input sm" type="number" value={t.monthly} onChange={(e) => { const a = [...p.appliance_tiers]; a[i] = { ...t, monthly: num(e.target.value) }; set("appliance_tiers", a); }} style={{ width: 110 }} /></td>
+                <td><input className="input sm" type="number" value={t.setup} onChange={(e) => { const a = [...p.appliance_tiers]; a[i] = { ...t, setup: num(e.target.value) }; set("appliance_tiers", a); }} style={{ width: 110 }} /></td>
               </tr>
             ))}
           </tbody>

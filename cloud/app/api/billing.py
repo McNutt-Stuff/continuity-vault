@@ -66,11 +66,11 @@ STORAGE_TIERS = [
 ]
 
 _DEFAULT_TIERS = [
-    {"capacity_tb": 1, "price": 499, "model": "CV Edge 1"},
-    {"capacity_tb": 5, "price": 1299, "model": "CV Edge 5"},
-    {"capacity_tb": 10, "price": 1999, "model": "CV Edge 10"},
-    {"capacity_tb": 25, "price": 3999, "model": "CV Edge 25"},
-    {"capacity_tb": 100, "price": 9999, "model": "CV Edge 100"},
+    {"capacity_tb": 1, "monthly": 25, "setup": 99, "model": "CV Edge 1"},
+    {"capacity_tb": 5, "monthly": 59, "setup": 149, "model": "CV Edge 5"},
+    {"capacity_tb": 10, "monthly": 99, "setup": 199, "model": "CV Edge 10"},
+    {"capacity_tb": 25, "monthly": 199, "setup": 299, "model": "CV Edge 25"},
+    {"capacity_tb": 100, "monthly": 499, "setup": 499, "model": "CV Edge 100"},
 ]
 _DEFAULT_VALUE = {"email": 2, "credential": 50, "document": 15, "photo": 5,
                   "media": 8, "file": 3, "contact": 1}
@@ -85,8 +85,9 @@ def get_pricing(db: Session) -> PricingConfig:
         db.add(p)
         db.commit()
         db.refresh(p)
-    # Backfill JSON defaults if an older row left them empty.
-    if not p.appliance_tiers:
+    # Backfill JSON defaults if an older row left them empty, and migrate any
+    # legacy one-time-price tiers to the lease model (monthly + setup).
+    if not p.appliance_tiers or any("monthly" not in t for t in p.appliance_tiers):
         p.appliance_tiers = _DEFAULT_TIERS
     if not p.data_value_per_type:
         p.data_value_per_type = _DEFAULT_VALUE
@@ -155,9 +156,10 @@ def _compute_plan(db: Session, tenant: Tenant) -> dict:
                           "value_total": round(n * each, 2)})
         data_value_total += n * each
 
-    # Appliance selection → one-time hardware cost.
+    # Appliance selection → leased: a monthly fee + a one-time setup fee.
     tiers = {t["capacity_tb"]: t for t in (p.appliance_tiers or _DEFAULT_TIERS)}
-    appliance_one_time = 0.0
+    appliance_setup = 0.0
+    appliance_monthly = 0.0
     appliance_lines = []
     for sel in (tenant.appliance_plan or []):
         cap = sel.get("capacity_tb")
@@ -165,16 +167,19 @@ def _compute_plan(db: Session, tenant: Tenant) -> dict:
         t = tiers.get(cap)
         if not t or qty <= 0:
             continue
-        line = qty * float(t["price"])
-        appliance_one_time += line
-        appliance_lines.append({"capacity_tb": cap, "model": t["model"],
-                                "qty": qty, "unit_price": float(t["price"]),
-                                "total": line})
+        monthly = float(t.get("monthly") or 0)
+        setup = float(t.get("setup") or 0)
+        appliance_monthly += qty * monthly
+        appliance_setup += qty * setup
+        appliance_lines.append({"capacity_tb": cap, "model": t["model"], "qty": qty,
+                                "unit_monthly": monthly, "unit_setup": setup,
+                                "monthly_total": qty * monthly, "setup_total": qty * setup})
 
     protection_monthly = round(licensed_tb * p.protection_price_per_tb_month, 2)
     cloud_storage_monthly = round(used_tb * p.cloud_price_per_tb_month, 2) if "cv-cloud" in options else 0.0
     third_party_monthly = round(used_tb * p.s3_price_per_tb_month, 2) if "customer-cloud" in options else 0.0
-    total_monthly = round(protection_monthly + cloud_storage_monthly, 2)
+    appliance_monthly = round(appliance_monthly, 2)
+    total_monthly = round(protection_monthly + cloud_storage_monthly + appliance_monthly, 2)
     annual_cost = round(total_monthly * 12, 2)
     value_ratio = round(data_value_total / annual_cost, 1) if annual_cost > 0 else None
 
@@ -194,7 +199,8 @@ def _compute_plan(db: Session, tenant: Tenant) -> dict:
             "protection_monthly": protection_monthly,
             "cloud_storage_monthly": cloud_storage_monthly,
             "third_party_estimate_monthly": third_party_monthly,
-            "appliance_one_time": round(appliance_one_time, 2),
+            "appliance_monthly": appliance_monthly,
+            "appliance_setup_one_time": round(appliance_setup, 2),
             "total_monthly": total_monthly,
             "annual_cost": annual_cost,
         },

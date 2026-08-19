@@ -7,7 +7,7 @@ interface Tier {
   id: string; title: string; tagline: string; icon: string; color: string;
   billing: "per-tb" | "device" | "byo"; benefits: string[];
 }
-interface ApplianceTier { capacity_tb: number; price: number; model: string; }
+interface ApplianceTier { capacity_tb: number; monthly: number; setup: number; model: string; }
 interface Pricing {
   currency: string;
   protection_price_per_tb_month: number;
@@ -62,12 +62,13 @@ export default function Onboarding() {
     const protection = licensedTb * pricing.protection_price_per_tb_month;
     const cloud = options.has("cv-cloud") ? usedTb * pricing.cloud_price_per_tb_month : 0;
     const thirdParty = options.has("customer-cloud") ? usedTb * pricing.s3_price_per_tb_month : 0;
-    const hardware = (pricing.appliance_tiers || []).reduce((s, t) => s + (qty[t.capacity_tb] || 0) * t.price, 0);
-    const totalMonthly = protection + cloud;
+    const applianceMonthly = (pricing.appliance_tiers || []).reduce((s, t) => s + (qty[t.capacity_tb] || 0) * t.monthly, 0);
+    const applianceSetup = (pricing.appliance_tiers || []).reduce((s, t) => s + (qty[t.capacity_tb] || 0) * t.setup, 0);
+    const totalMonthly = protection + cloud + applianceMonthly;
     const annual = totalMonthly * 12;
     const dataValue = plan?.data_value_total || 0;
     const ratio = annual > 0 ? dataValue / annual : null;
-    return { protection, cloud, thirdParty, hardware, totalMonthly, annual, dataValue, ratio };
+    return { protection, cloud, thirdParty, applianceMonthly, applianceSetup, totalMonthly, annual, dataValue, ratio };
   }, [pricing, options, licensedTb, qty, usedTb, plan]);
 
   function toggle(id: string) {
@@ -123,7 +124,7 @@ export default function Onboarding() {
                 const priceLabel = t.billing === "per-tb"
                   ? `${money2(pricing.cloud_price_per_tb_month)} / TB · month`
                   : t.billing === "device"
-                    ? `One-time hardware · from ${money(Math.min(...pricing.appliance_tiers.map((a) => a.price)))}`
+                    ? `Leased hardware · from ${money(Math.min(...pricing.appliance_tiers.map((a) => a.monthly)))}/mo + setup`
                     : `You pay your provider · ~${money2(pricing.s3_price_per_tb_month)}/TB (S3) · ~${money2(pricing.azure_price_per_tb_month)}/TB (Azure)`;
                 return (
                   <div key={t.id} onClick={() => toggle(t.id)}
@@ -156,12 +157,12 @@ export default function Onboarding() {
                     {/* Appliance tier picker */}
                     {t.id === "appliance" && on && (
                       <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
-                        <div className="faint" style={{ fontSize: 11.5, marginBottom: 8 }}>Choose your appliances (you can own several)</div>
+                        <div className="faint" style={{ fontSize: 11.5, marginBottom: 8 }}>Lease your appliances (you can run several)</div>
                         <div className="stack" style={{ gap: 6 }}>
                           {pricing.appliance_tiers.map((a) => (
                             <div key={a.capacity_tb} className="row" style={{ gap: 8, alignItems: "center" }}>
                               <div className="flex1" style={{ fontSize: 12.5 }}>
-                                <span style={{ fontWeight: 600 }}>{a.model}</span> <span className="faint">· {a.capacity_tb} TB · {money(a.price)}</span>
+                                <span style={{ fontWeight: 600 }}>{a.model}</span> <span className="faint">· {a.capacity_tb} TB · {money(a.monthly)}/mo + {money(a.setup)} setup</span>
                               </div>
                               <button className="btn ghost sm" onClick={() => bump(a.capacity_tb, -1)}>−</button>
                               <span style={{ minWidth: 20, textAlign: "center", fontWeight: 600 }}>{qty[a.capacity_tb] || 0}</span>
@@ -221,13 +222,16 @@ export default function Onboarding() {
             {options.has("customer-cloud") && (
               <CostRow label="Your cloud (est.)" detail="billed by your provider" value={money2(costs.thirdParty)} muted />
             )}
+            {costs.applianceMonthly > 0 && (
+              <CostRow label="Appliance lease" detail="leased hardware" value={money2(costs.applianceMonthly)} />
+            )}
             <div className="spread" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
               <div style={{ fontWeight: 700 }}>Total</div>
               <div style={{ fontSize: 24, fontWeight: 800 }}>{money2(costs.totalMonthly)}<span className="faint" style={{ fontSize: 13, fontWeight: 500 }}> /mo</span></div>
             </div>
-            {costs.hardware > 0 && (
+            {costs.applianceSetup > 0 && (
               <div className="spread faint" style={{ fontSize: 12, marginTop: 6 }}>
-                <span>+ Hardware (one-time)</span><span style={{ fontWeight: 600 }}>{money(costs.hardware)}</span>
+                <span>+ Setup (one-time)</span><span style={{ fontWeight: 600 }}>{money(costs.applianceSetup)}</span>
               </div>
             )}
             <button className="btn primary" style={{ width: "100%", marginTop: 14 }} onClick={save} disabled={saving || options.size === 0}>
