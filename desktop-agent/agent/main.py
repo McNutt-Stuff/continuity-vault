@@ -157,6 +157,11 @@ class Agent:
             },
             "recent_logs": agent_log.tail(self.cfg.log_file, 50),
             "reported_at": _now_iso(),
+            "fs_index": {
+                "built_at": (self._fs_index or {}).get("built_at"),
+                "folders": (self._fs_index or {}).get("nodes", 0),
+                "building": self._fs_index is None,
+            },
         }
 
     def _write_status(self, extra: dict) -> None:
@@ -182,6 +187,9 @@ class Agent:
     # -- heartbeat + commands -----------------------------------------
 
     def heartbeat(self) -> dict:
+        # Ensure the background folder indexer is running regardless of entry
+        # point (headless run loop or the menu-bar app, which both call this).
+        self._start_indexer()
         tel = self.telemetry()
         self._last_telemetry = tel
         body = {"state": "active", "version": self.cfg.version, "telemetry": tel}
@@ -298,12 +306,14 @@ class Agent:
         if self._indexer_started:
             return
         self._indexer_started = True
+        self.log.info("starting background filesystem indexer")
         threading.Thread(target=self._indexer_loop, name="fs-indexer", daemon=True).start()
 
     def _indexer_loop(self) -> None:
         interval = int(self.reg.get("config", {}).get("index_interval_seconds", 900)) if self.reg else 900
         while True:
             try:
+                self.log.info("building filesystem index…")
                 self._rebuild_index()
             except Exception as exc:
                 self.log.error("index rebuild failed: %s", exc)

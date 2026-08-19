@@ -679,13 +679,13 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
       // Nudge the agent to push its current cache; wait only if we have nothing.
       await api.post(`/agents/${agentId}/fs-scan`, { rebuild: false });
       if (!have) {
-        const deadline = Date.now() + 60000;
+        const deadline = Date.now() + 150000;  // first full-tree build can take a bit
         while (Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 2500));
           const res = await api.get<{ scan: FsIndex | null }>(`/agents/${agentId}/fs-scan`);
           if (applyIndex(res.scan)) { have = true; break; }
         }
-        if (!have) setErr("Waiting for the agent to build its folder index — is it online?");
+        if (!have) setErr("Waiting for the agent to build its folder index — is it online? It builds on start/update.");
       }
     } catch (e) { setErr((e as ApiError).message); }
     setLoading(false);

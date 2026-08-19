@@ -28,17 +28,20 @@ _SKIP_DIRS = {
     "venv", ".gradle", ".m2", "Caches", "CachedData", ".DS_Store",
 }
 # Extra system trees skipped when indexing from the system root so a full-tree
-# index stays fast and relevant (user data lives under Home / Volumes).
+# index stays fast and relevant (user data lives under Home / Volumes, which are
+# indexed as their own roots — skip them here to avoid duplicating the tree).
 _ROOT_SKIP = {
     "System", "private", "dev", "proc", "sys", "usr", "bin", "sbin", "cores",
-    "opt", "var", "Library", "Applications", "lost+found", "run", "boot",
+    "var", "Library", "lost+found", "run", "boot", "etc", "tmp", "net",
+    "Users", "home", "Volumes", "mnt", "media",
 }
 _DEFAULT_MAX_BYTES = 100 * 1024 * 1024   # 100 MiB per file
-# Bounds for the cached folder index so a rebuild is fast and the payload sane.
-_INDEX_MAX_DEPTH = 5
-_INDEX_ROOT_DEPTH = 2      # system root ("/") is only indexed shallowly
-_INDEX_MAX_ENTRIES = 600   # subfolders indexed per directory
-_INDEX_MAX_NODES = 20000   # total folders across the whole index
+# Bounds for the cached folder index. Generous enough to cover an entire real
+# filesystem hierarchy while capping pathological cases so a rebuild stays sane.
+_INDEX_MAX_DEPTH = 24
+_INDEX_ROOT_DEPTH = 24     # the system root ("/") is indexed deep too (minus system trees)
+_INDEX_MAX_ENTRIES = 1500  # subfolders indexed per directory
+_INDEX_MAX_NODES = 80000   # total folders across the whole index
 _DEFAULT_MAX_FILES = 5000                # safety cap per collection run
 
 # Extension -> canonical kind (matches the server taxonomy KINDS).
