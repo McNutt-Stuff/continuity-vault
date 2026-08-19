@@ -93,9 +93,9 @@ def _queue_agent_collect(db, c: Collection) -> int:
         agents = [a for a in q.all() if c.source_type in (a.collectors or [])]
     queued = 0
     for a in agents:
-        a.pending_command = {"type": "collect",
-                             "params": {"source_type": c.source_type,
-                                        "file_config": c.config or {}}}
+        a.enqueue_command({"type": "collect",
+                           "params": {"source_type": c.source_type,
+                                      "file_config": c.config or {}}})
         queued += 1
     return queued
 

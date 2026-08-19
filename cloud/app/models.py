@@ -238,7 +238,8 @@ class DesktopAgent(Base):
     state = Column(String, default="active")  # active | offline | quarantined
     collectors = Column(JSON, default=list)  # e.g. ["onepassword"]
     config = Column(JSON, default=dict)  # destinations, schedule, collector opts
-    pending_command = Column(JSON, nullable=True)  # {type, params}
+    pending_command = Column(JSON, nullable=True)  # legacy single slot (drained first)
+    pending_commands = Column(JSON, default=list)  # FIFO queue of {type, params}
     telemetry = Column(JSON, default=dict)
     last_scan = Column(JSON, nullable=True)  # latest endpoint filesystem scan result
     identity_bundle = Column(JSON, nullable=True)
@@ -246,6 +247,41 @@ class DesktopAgent(Base):
     last_heartbeat_at = Column(DateTime, nullable=True)
     last_collection_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
+
+    def enqueue_command(self, cmd: dict) -> None:
+        """Append a command, collapsing any pending duplicate of the same kind so
+        a slow/offline agent never accumulates a backlog of identical work (and so
+        different sources — e.g. 1Password vs endpoint files — don't overwrite each
+        other the way a single slot did)."""
+        key = _command_key(cmd)
+        q = [c for c in (self.pending_commands or []) if _command_key(c) != key]
+        q.append(cmd)
+        self.pending_commands = q
+
+    def dequeue_command(self) -> dict | None:
+        """Pop the next command (draining the legacy single slot first)."""
+        if self.pending_command:
+            nxt, self.pending_command = self.pending_command, None
+            return nxt
+        q = list(self.pending_commands or [])
+        if not q:
+            return None
+        nxt = q.pop(0)
+        self.pending_commands = q
+        return nxt
+
+    def clear_commands(self) -> None:
+        self.pending_command = None
+        self.pending_commands = []
+
+    @property
+    def has_pending_command(self) -> bool:
+        return bool(self.pending_command) or bool(self.pending_commands)
+
+
+def _command_key(cmd: dict) -> tuple:
+    p = (cmd or {}).get("params") or {}
+    return ((cmd or {}).get("type"), p.get("source_type") or p.get("path") or "")
 
 
 class ApplianceCommand(Base):

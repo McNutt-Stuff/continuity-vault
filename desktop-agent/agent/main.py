@@ -224,7 +224,24 @@ class Agent:
         # Throttle so a failing update doesn't loop every heartbeat.
         if time.time() - self._last_update_attempt < 300:
             return
+        # Persisted guard: if we already tried to reach this exact target recently
+        # but the installed VERSION still hasn't changed, don't keep restarting
+        # (a broken update.sh would otherwise loop restart→update→restart forever).
+        marker = Path(self.cfg.data_dir) / "update_attempt.json"
+        try:
+            prev = json.loads(marker.read_text())
+            if prev.get("target") == latest and time.time() - float(prev.get("at", 0)) < 1800:
+                self.log.warning("skipping self-update to %s: already attempted "
+                                 "recently but VERSION is still %s (update may be "
+                                 "failing — check update.log)", latest, self.cfg.version)
+                return
+        except Exception:
+            pass
         self._last_update_attempt = time.time()
+        try:
+            marker.write_text(json.dumps({"target": latest, "at": time.time()}))
+        except Exception:
+            pass
         self.log.info("new agent version available (%s -> %s); self-updating",
                       self.cfg.version, latest)
         self.self_update()

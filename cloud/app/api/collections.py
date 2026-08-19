@@ -296,9 +296,9 @@ def sync(collection_id: str,
                         if coll.source_type in (a.collectors or [])]
         queued = 0
         for a in targeted:
-            a.pending_command = {"type": "collect",
-                                 "params": {"source_type": coll.source_type,
-                                            "file_config": coll.config or {}}}
+            a.enqueue_command({"type": "collect",
+                               "params": {"source_type": coll.source_type,
+                                          "file_config": coll.config or {}}})
             queued += 1
         coll.last_backup_run_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()

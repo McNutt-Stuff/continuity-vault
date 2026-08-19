@@ -98,13 +98,15 @@ def activity(limit: int = 40,
     in_flight = []
     for a in (db.query(DesktopAgent)
               .filter(DesktopAgent.tenant_id == tenant.id).all()):
-        if a.pending_command:
+        pending = ([a.pending_command] if a.pending_command else []) + list(a.pending_commands or [])
+        for cmd in pending:
+            params = (cmd or {}).get("params") or {}
             in_flight.append({
                 "kind": "agent-collect",
                 "source": a.hostname or a.name,
-                "source_type": "onepassword",
+                "source_type": params.get("source_type") or "onepassword",
                 "status": "queued",
-                "command": (a.pending_command or {}).get("type"),
+                "command": (cmd or {}).get("type"),
             })
 
     # Tracked connector backup/sync jobs (running + recently finished).

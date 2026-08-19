@@ -151,7 +151,7 @@ def command(agent_id: str, body: AgentCommand,
     a = db.get(DesktopAgent, agent_id)
     if not a or a.tenant_id != tenant.id:
         raise HTTPException(404, "agent not found")
-    a.pending_command = {"type": body.type, "params": body.params}
+    a.enqueue_command({"type": body.type, "params": body.params})
     db.commit()
     audit.record(db, actor=principal.user_id, action="agent.command",
                  tenant_id=tenant.id, resource=a.id, detail={"type": body.type})
@@ -199,9 +199,9 @@ def request_fs_scan(agent_id: str, body: FsScanRequest,
     if not a or a.tenant_id != tenant.id:
         raise HTTPException(404, "agent not found")
     request_id = secrets.token_hex(8)
-    a.pending_command = {"type": "scan_fs",
-                         "params": {"path": body.path, "request_id": request_id,
-                                    "rebuild": body.rebuild}}
+    a.enqueue_command({"type": "scan_fs",
+                       "params": {"path": body.path, "request_id": request_id,
+                                  "rebuild": body.rebuild}})
     db.commit()
     return {"request_id": request_id, "queued": True,
             "message": "The agent serves its cached folder index on its next heartbeat."}
@@ -369,7 +369,7 @@ def activate(body: AgentActivate, db: Session = Depends(get_db)):
     for p in prior:
         p.state = "retired"
         p.agent_token_hash = None
-        p.pending_command = None
+        p.clear_commands()
 
     # Provision escrow material BEFORE consuming the code so a transient failure
     # never burns a single-use linking code.
@@ -442,8 +442,7 @@ def heartbeat(body: AgentHeartbeat, request: Request,
         if merged != (agent.collectors or []):
             agent.collectors = merged
     agent.last_heartbeat_at = _now()
-    command = agent.pending_command
-    agent.pending_command = None  # consume
+    command = agent.dequeue_command()  # one command per heartbeat (FIFO queue)
     db.commit()
     return {"config": agent.config, "command": command,
             "latest_version": _agent_bundle_version(),
@@ -456,7 +455,7 @@ def deregister(agent: DesktopAgent = Depends(_auth_agent),
     """Retire this agent (called by the installer before a clean reinstall)."""
     agent.state = "retired"
     agent.agent_token_hash = None
-    agent.pending_command = None
+    agent.clear_commands()
     db.commit()
     audit.record(db, actor=f"agent:{agent.hostname}", action="agent.deregistered",
                  tenant_id=agent.tenant_id, resource=agent.id)
