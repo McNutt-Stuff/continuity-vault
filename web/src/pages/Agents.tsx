@@ -74,7 +74,8 @@ export default function Agents() {
   async function load() {
     const list = await api.get<Agent[]>("/agents");
     setAgents(list);
-    setSelected((d) => (d ? list.find((a) => a.id === d.id) ?? d : (list[0] ?? null)));
+    // Keep the current selection if it still exists; never auto-select on load.
+    setSelected((d) => (d ? list.find((a) => a.id === d.id) ?? null : null));
   }
   function select(a: Agent) { setSelected(a); }
   useEffect(() => {
@@ -120,7 +121,7 @@ export default function Agents() {
 
   return (
     <div className="grid grid-2" style={{ alignItems: "start" }}>
-      <div>
+      <div style={{ minWidth: 0 }}>
         <Card style={{ marginBottom: 16 }}>
           <div className="spread" style={{ marginBottom: 8 }}>
             <h2>Install a desktop agent</h2>
@@ -180,7 +181,7 @@ export default function Agents() {
         {agents.length === 0 && <Card><div className="muted">No desktop agents linked yet.</div></Card>}
       </div>
 
-      <div>
+      <div style={{ minWidth: 0 }}>
         {selected ? (
           <AgentDetail a={selected} onCommand={(type) => command(selected, type)} reload={load} />
         ) : (

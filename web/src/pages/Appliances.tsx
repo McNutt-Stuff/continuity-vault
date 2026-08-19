@@ -168,7 +168,7 @@ export default function Appliances() {
 
   return (
     <div className="grid grid-2" style={{ alignItems: "start" }}>
-      <div>
+      <div style={{ minWidth: 0 }}>
         <Card style={{ marginBottom: 16 }}>
           <div className="spread" style={{ marginBottom: 8 }}>
             <h2>Turnkey activation</h2>
@@ -242,7 +242,7 @@ export default function Appliances() {
         {apps.length === 0 && <Card><div className="muted">No appliances linked yet.</div></Card>}
       </div>
 
-      <div>
+      <div style={{ minWidth: 0 }}>
         {selected ? (
           <ApplianceDetail a={selected} onCommand={command} onRemove={remove} reload={load} />
         ) : (
