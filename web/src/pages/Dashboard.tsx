@@ -16,6 +16,13 @@ interface Overview {
   protection: { key_ownership_model: string; encrypted: boolean };
 }
 interface Tenant { name: string; plan: string; key_ownership_model: string; }
+interface TrendSeries { key: string; label: string; icon: string; color: string; values: number[]; current: number; }
+interface Trends { period: string; points: string[]; series: TrendSeries[]; }
+
+const PERIODS: { id: string; label: string }[] = [
+  { id: "week", label: "1W" }, { id: "month", label: "1M" },
+  { id: "quarter", label: "3M" }, { id: "year", label: "1Y" }, { id: "all", label: "All" },
+];
 
 function fmtDuration(days: number): string {
   if (days >= 365) { const y = days / 365; return `${Number.isInteger(y) ? y : y.toFixed(1)} yr`; }
@@ -35,12 +42,18 @@ export default function Dashboard() {
   const [ov, setOv] = useState<Overview | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [health, setHealth] = useState<{ pq_available?: boolean } | null>(null);
+  const [period, setPeriod] = useState("week");
+  const [trends, setTrends] = useState<Trends | null>(null);
 
   useEffect(() => {
     api.get<Overview>("/overview").then(setOv).catch(() => {});
     api.get<Tenant>("/tenant").then(setTenant).catch(() => {});
     api.get<{ pq_available?: boolean }>("/health").then(setHealth).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    api.get<Trends>(`/overview/trends?period=${period}`).then(setTrends).catch(() => {});
+  }, [period]);
 
   const objTotal = ov?.objects.breakdown.reduce((s, b) => s + b.count, 0) || 0;
 
@@ -84,23 +97,21 @@ export default function Dashboard() {
           </div>
         </Card>
 
-        {/* Objects protected + type mix */}
-        <Card style={{ minHeight: 134 }}>
+        {/* Objects protected — pie bottom-right, text top-left */}
+        <Card style={{ minHeight: 134, position: "relative", overflow: "hidden" }}>
           <div className="faint" style={{ fontSize: 12 }}>Objects protected</div>
           <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1.1, marginTop: 2 }}>{(ov?.objects.total ?? 0).toLocaleString()}</div>
           {objTotal > 0 ? (
             <>
-              <div style={{ display: "flex", height: 8, borderRadius: 999, overflow: "hidden", marginTop: 10, background: "#0e1524" }}>
-                {ov!.objects.breakdown.map((b) => (
-                  <div key={b.key} title={`${b.label}: ${b.count}`} style={{ width: `${(b.count / objTotal) * 100}%`, background: b.color }} />
-                ))}
-              </div>
-              <div className="row" style={{ gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+              <div className="stack" style={{ gap: 3, marginTop: 8, maxWidth: "62%" }}>
                 {ov!.objects.breakdown.slice(0, 3).map((b) => (
-                  <span key={b.key} className="faint" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: 2, background: b.color }} /> {b.label} {b.count}
+                  <span key={b.key} className="faint" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 5 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 2, background: b.color, flexShrink: 0 }} /> {b.label} {b.count.toLocaleString()}
                   </span>
                 ))}
+              </div>
+              <div style={{ position: "absolute", right: 6, bottom: 2 }}>
+                <Donut data={ov!.objects.breakdown} size={96} />
               </div>
             </>
           ) : <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>Nothing captured yet</div>}
@@ -149,27 +160,39 @@ export default function Dashboard() {
         <Card>
           <div className="spread" style={{ marginBottom: 12 }}>
             <h2>What's protected</h2>
-            <a onClick={() => nav("/search")} style={{ cursor: "pointer", fontSize: 13 }}>Explore</a>
+            <div className="row" style={{ gap: 4 }}>
+              {PERIODS.map((p) => (
+                <span key={p.id} onClick={() => setPeriod(p.id)}
+                      style={{ cursor: "pointer", fontSize: 11.5, padding: "2px 8px", borderRadius: 999,
+                               fontWeight: 600, background: period === p.id ? "var(--accent,#4f7cff)" : "#0e1524",
+                               color: period === p.id ? "#fff" : "var(--muted,#8a94a7)" }}>
+                  {p.label}
+                </span>
+              ))}
+            </div>
           </div>
-          {objTotal === 0 && <div className="muted">Run a backup to start protecting your data.</div>}
-          <div className="stack" style={{ gap: 10 }}>
-            {(ov?.objects.breakdown || []).map((b) => (
-              <div key={b.key} className="row" style={{ gap: 10, alignItems: "center" }}>
-                <div className="result-icon" style={{ width: 30, height: 30, background: `${b.color}22`, color: b.color }}>
-                  <Icon name={iconName(b.icon)} size={15} />
+          {(!trends || trends.series.length === 0) && <div className="muted">Run a backup to start protecting your data.</div>}
+          <div className="stack" style={{ gap: 4 }}>
+            {(trends?.series || []).map((s) => (
+              <div key={s.key} className="row" style={{ gap: 10, alignItems: "center", padding: "6px 0" }}>
+                <div className="result-icon" style={{ width: 30, height: 30, background: `${s.color}22`, color: s.color }}>
+                  <Icon name={iconName(s.icon)} size={15} />
                 </div>
-                <div className="flex1">
-                  <div className="spread" style={{ marginBottom: 4 }}>
-                    <span style={{ fontSize: 13, fontWeight: 600 }}>{b.label}</span>
-                    <span className="faint" style={{ fontSize: 12 }}>{b.count.toLocaleString()}</span>
-                  </div>
-                  <div style={{ height: 6, borderRadius: 999, background: "#0e1524", overflow: "hidden" }}>
-                    <div style={{ width: `${(b.count / objTotal) * 100}%`, height: "100%", background: b.color }} />
-                  </div>
+                <div style={{ width: 120 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{s.label}</div>
+                  <div className="faint" style={{ fontSize: 11 }}>{s.current.toLocaleString()} total</div>
+                </div>
+                <div className="flex1" style={{ display: "flex", justifyContent: "flex-end" }}>
+                  <Sparkline values={s.values} color={s.color} />
                 </div>
               </div>
             ))}
           </div>
+          {trends && trends.series.length > 0 && (
+            <div className="faint" style={{ fontSize: 11, marginTop: 8, textAlign: "right" }}>
+              cumulative objects over the last {PERIODS.find((p) => p.id === period)?.label === "All" ? "period" : PERIODS.find((p) => p.id === period)?.label}
+            </div>
+          )}
         </Card>
 
         <Card>
@@ -214,6 +237,52 @@ function Fact({ icon, label, value }: { icon: string; label: string; value: Reac
         <div style={{ fontSize: 13.5, fontWeight: 600 }}>{value}</div>
       </div>
     </div>
+  );
+}
+
+// Donut/pie of the object-type mix. Segments drawn as dasharray arcs on a ring.
+function Donut({ data, size = 96 }: { data: { count: number; color: string; label: string }[]; size?: number }) {
+  const total = data.reduce((s, d) => s + d.count, 0) || 1;
+  const stroke = Math.round(size * 0.2);
+  const r = (size - stroke) / 2;
+  const cx = size / 2, cy = size / 2;
+  const circ = 2 * Math.PI * r;
+  let acc = 0;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke="#0e1524" strokeWidth={stroke} />
+      <g transform={`rotate(-90 ${cx} ${cy})`}>
+        {data.map((d, i) => {
+          const len = (d.count / total) * circ;
+          const el = (
+            <circle key={i} cx={cx} cy={cy} r={r} fill="none" stroke={d.color} strokeWidth={stroke}
+                    strokeDasharray={`${len} ${circ - len}`} strokeDashoffset={-acc}>
+              <title>{`${d.label}: ${d.count}`}</title>
+            </circle>
+          );
+          acc += len;
+          return el;
+        })}
+      </g>
+    </svg>
+  );
+}
+
+// Minimal area sparkline for a cumulative series.
+function Sparkline({ values, color, width = 120, height = 30 }: { values: number[]; color: string; width?: number; height?: number }) {
+  const vals = values.length >= 2 ? values : [...values, ...values, 0].slice(0, 2);
+  const max = Math.max(...vals, 1);
+  const min = Math.min(...vals, 0);
+  const range = max - min || 1;
+  const x = (i: number) => (i / (vals.length - 1)) * (width - 2) + 1;
+  const y = (v: number) => height - 2 - ((v - min) / range) * (height - 4);
+  const line = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const area = `${x(0).toFixed(1)},${height} ${line} ${x(vals.length - 1).toFixed(1)},${height}`;
+  return (
+    <svg width={width} height={height} style={{ display: "block" }}>
+      <polygon points={area} fill={color} opacity={0.12} />
+      <polyline points={line} fill="none" stroke={color} strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
   );
 }
 

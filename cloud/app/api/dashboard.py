@@ -9,6 +9,8 @@ request instead of half a dozen.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -162,7 +164,7 @@ def overview(tenant: Tenant = Depends(security.get_tenant),
                      "immutability_days": 365, "rpo_minutes": 60}
 
     return {
-        "sources": {"count": len(accounts) + len(agents), "types": source_types},
+        "sources": {"count": sum(type_counts.values()), "types": source_types},
         "objects": {"total": object_total, "breakdown": object_breakdown},
         "data": {"protected_bytes": protected_bytes, "licensed_bytes": licensed,
                  "percent": percent},
@@ -172,4 +174,69 @@ def overview(tenant: Tenant = Depends(security.get_tenant),
             "key_ownership_model": tenant.key_ownership_model,
             "encrypted": True,
         },
+    }
+
+
+# period -> (number of buckets, size of each bucket). "all" is handled dynamically.
+_PERIODS = {
+    "week": (7, timedelta(days=1)),
+    "month": (30, timedelta(days=1)),
+    "quarter": (13, timedelta(weeks=1)),
+    "year": (12, timedelta(days=30)),
+}
+
+
+def _bucket_edges(period: str, now: datetime, earliest: datetime) -> list[datetime]:
+    """End-of-bucket cutoff datetimes spanning the requested period, oldest→newest."""
+    if period == "all":
+        span = (now - earliest) or timedelta(days=1)
+        step = span / 12
+        return [earliest + step * (i + 1) for i in range(12)]
+    n, step = _PERIODS.get(period, _PERIODS["week"])
+    start = now - step * (n - 1)
+    return [start + step * i for i in range(n)]
+
+
+@router.get("/trends")
+def trends(period: str = "week", tenant: Tenant = Depends(security.get_tenant),
+           db: Session = Depends(get_db)):
+    """Cumulative count of protected objects over time, per object type, so the
+    dashboard can draw a growth trend line per category over a rolling window."""
+    docs = (db.query(SearchDocument.source_type, SearchDocument.object_id,
+                     SearchDocument.doc_type, SearchDocument.created_at)
+            .filter(SearchDocument.tenant_id == tenant.id)
+            .order_by(SearchDocument.created_at.asc()).all())
+    # First time each logical object was protected + its bucket.
+    first: dict[tuple, tuple] = {}
+    earliest = None
+    for st, oid, doc_type, created in docs:
+        key = (st, oid)
+        if key in first or created is None:
+            continue
+        first[key] = (created, _bucket_for(doc_type)["key"])
+        earliest = created if earliest is None else min(earliest, created)
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if earliest is None:
+        earliest = now - timedelta(days=7)
+    edges = _bucket_edges(period if period in _PERIODS or period == "all" else "week", now, earliest)
+
+    counts: dict[str, list[int]] = {}
+    for created, bk in first.values():
+        row = counts.setdefault(bk, [0] * len(edges))
+        for i, edge in enumerate(edges):
+            if created <= edge:
+                row[i] += 1  # cumulative — present at/after first ingest
+    series = []
+    for b in _OBJECT_BUCKETS:
+        vals = counts.get(b["key"])
+        if not vals or vals[-1] == 0:
+            continue
+        series.append({"key": b["key"], "label": b["label"], "icon": b["icon"],
+                       "color": b["color"], "values": vals, "current": vals[-1]})
+    series.sort(key=lambda s: -s["current"])
+    return {
+        "period": period,
+        "points": [e.isoformat() for e in edges],
+        "series": series,
     }
