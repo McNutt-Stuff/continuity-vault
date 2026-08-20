@@ -102,6 +102,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE email_config ADD COLUMN aws_secret_encrypted VARCHAR",
         "ALTER TABLE nodes ADD COLUMN storage_service_id VARCHAR",
         "ALTER TABLE nodes ADD COLUMN email_service_id VARCHAR",
+        "ALTER TABLE nodes ADD COLUMN cloud JSON",
         "ALTER TABLE search_documents ADD COLUMN content_hash VARCHAR",
         "ALTER TABLE search_documents ADD COLUMN version INTEGER DEFAULT 1",
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Arkive fleet node heartbeat every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Unit=cv-node-heartbeat.service
+
+[Install]
+WantedBy=timers.target

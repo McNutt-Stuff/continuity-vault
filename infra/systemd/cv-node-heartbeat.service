@@ -1,0 +1,14 @@
+[Unit]
+Description=Arkive fleet node heartbeat (reports health + receives blueprint)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=cvault
+Group=cvault
+EnvironmentFile=/etc/continuity-vault.env
+WorkingDirectory=/opt/continuity-vault/cloud
+ReadWritePaths=/etc/arkive
+ExecStart=/opt/continuity-vault/.venv/bin/python -m app.heartbeat
+NoNewPrivileges=true

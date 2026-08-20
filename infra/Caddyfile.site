@@ -1,0 +1,23 @@
+# Public Web Node — serves the Arkive marketing site.
+# Caddy provisions and renews Let's Encrypt certs automatically (quantum-safe TLS
+# with the same modern cipher suites as the rest of the platform). Static SPA;
+# no control-plane API is exposed on this node.
+
+{{SITE_DOMAIN}} {
+	encode zstd gzip
+
+	root * {{SITE_WEBROOT}}
+	try_files {path} /index.html
+	file_server
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; connect-src 'self'"
+	}
+
+	# Redirect the bare apex to www (optional — adjust to your DNS).
+	# redir https://www.{{SITE_DOMAIN}}{uri}
+}

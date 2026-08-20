@@ -21,6 +21,7 @@ from .api import (
     recovery,
     restore,
     search,
+    site,
     snapshots,
     tenant,
     updates,
@@ -36,7 +37,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if settings.environment == "development" else [settings.rp_origin],
+    allow_origins=(["*"] if settings.environment == "development"
+                   else [settings.rp_origin, "https://arkive.life", "https://www.arkive.life"]),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -61,6 +63,8 @@ app.include_router(activity.router, prefix=API)
 app.include_router(recovery.router, prefix=API)
 app.include_router(photos.router, prefix=API)
 app.include_router(photos.actions_router, prefix=API)
+app.include_router(site.public_router, prefix=API)
+app.include_router(site.admin_router, prefix=API)
 app.include_router(updates.router, prefix=API)
 app.include_router(updates.public_router, prefix=API)
 

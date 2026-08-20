@@ -33,6 +33,7 @@ from ..models import (
     ConnectorAccount,
     DesktopAgent,
     Node,
+    NodeBlueprint,
     PricingConfig,
     SearchDocument,
     ServiceObject,
@@ -640,14 +641,23 @@ def _self_health(db: Session) -> dict:
 
 
 def _ensure_self_node(db: Session) -> Node:
+    s = get_settings()
     n = db.query(Node).filter(Node.is_self.is_(True)).first()
     if n is None:
-        s = get_settings()
-        n = Node(name=s.domain, role="control-plane", endpoint=s.api_base_url,
-                 is_self=True, status="active")
+        n = Node(name=s.node_name or s.domain, role=s.node_role or "control-plane",
+                 endpoint=s.api_base_url, is_self=True, status="active")
         db.add(n)
         db.commit()
         db.refresh(n)
+    # Detect (and cache) which cloud/region/instance this node runs on.
+    if not n.cloud:
+        try:
+            from .. import cloud_detect
+            n.cloud = cloud_detect.detect()
+            if n.cloud.get("region") and not n.region:
+                n.region = n.cloud["region"]
+        except Exception:
+            pass
     n.last_heartbeat_at = _now()
     db.commit()
     return n
@@ -671,6 +681,7 @@ def _node_view(db: Session, n: Node) -> dict:
         "id": n.id, "name": n.name, "region": n.region, "role": n.role,
         "endpoint": n.endpoint, "status": n.status, "is_self": bool(n.is_self),
         "version": n.version, "online": online, "telemetry": tel,
+        "cloud": n.cloud or {},
         "storage_service_id": n.storage_service_id,
         "email_service_id": n.email_service_id,
         "storage_service": _svc_name(n.storage_service_id),
@@ -755,6 +766,62 @@ def delete_node(nid: str,
     audit.record(db, actor=principal.user_id, action="admin.node_removed",
                  category="admin", severity="warning", detail={"name": n.name})
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Node blueprints — the role-specific config/version pushed to fleet nodes.    #
+# --------------------------------------------------------------------------- #
+
+NODE_ROLES = ["control-plane", "customer-tenant", "public-web"]
+
+
+def _blueprint_view(bp: NodeBlueprint) -> dict:
+    return {"role": bp.role, "target_version": bp.target_version or "",
+            "config": bp.config or {}, "settings": bp.settings or {},
+            "updated_at": bp.updated_at.isoformat() if bp.updated_at else None}
+
+
+@router.get("/node-blueprints")
+def list_blueprints(db: Session = Depends(get_db)):
+    existing = {b.role: b for b in db.query(NodeBlueprint).all()}
+    out = []
+    for role in NODE_ROLES:
+        bp = existing.get(role)
+        if bp is None:
+            out.append({"role": role, "target_version": "", "config": {},
+                        "settings": {}, "updated_at": None})
+        else:
+            out.append(_blueprint_view(bp))
+    return out
+
+
+class BlueprintUpdate(BaseModel):
+    target_version: str | None = None
+    config: dict | None = None
+    settings: dict | None = None
+
+
+@router.put("/node-blueprints/{role}")
+def update_blueprint(role: str, body: BlueprintUpdate,
+                     principal: security.Principal = Depends(security.require_platform_admin),
+                     db: Session = Depends(get_db)):
+    if role not in NODE_ROLES:
+        raise HTTPException(400, "unknown role")
+    bp = db.get(NodeBlueprint, role)
+    if bp is None:
+        bp = NodeBlueprint(role=role)
+        db.add(bp)
+    if body.target_version is not None:
+        bp.target_version = body.target_version.strip()
+    if body.config is not None:
+        bp.config = body.config
+    if body.settings is not None:
+        bp.settings = body.settings
+    db.commit()
+    db.refresh(bp)
+    audit.record(db, actor=principal.user_id, action="admin.blueprint_updated",
+                 category="admin", detail={"role": role})
+    return _blueprint_view(bp)
 
 
 # =========================================================================== #

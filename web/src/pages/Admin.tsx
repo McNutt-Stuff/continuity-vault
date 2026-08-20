@@ -16,6 +16,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "sources", label: "Sources", icon: "link", group: "Integrations" },
   { key: "service-objects", label: "Service objects", icon: "mail", group: "Integrations" },
   { key: "pricing", label: "Pricing", icon: "database", group: "Integrations" },
+  { key: "website", label: "Website", icon: "grid", group: "Integrations" },
   { key: "nodes", label: "Nodes", icon: "server", group: "Infrastructure" },
   { key: "storage-usage", label: "Storage usage", icon: "database", group: "Infrastructure" },
   { key: "fleet", label: "Appliance fleet", icon: "server", group: "Infrastructure" },
@@ -39,6 +40,7 @@ export default function Admin() {
       {s === "service-objects" && <><ServiceObjectsAdmin /><EmailAdmin /></>}
       {s === "fleet" && <Fleet />}
       {s === "pricing" && <Pricing />}
+      {s === "website" && <WebsiteCMS />}
       {s === "crypto" && <Crypto />}
       {s === "audit" && <Audit />}
       {s === "updates" && <Updates />}
@@ -324,6 +326,7 @@ function Nodes() {
   const [nodes, setNodes] = useState<any[]>([]);
   const [svcs, setSvcs] = useState<ServiceObj[]>([]);
   const [toast, setToast] = useState("");
+  const [installCmd, setInstallCmd] = useState("");
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
   async function load() {
     try { setNodes(await api.get<any[]>("/admin/nodes")); } catch { /* ignore */ }
@@ -338,7 +341,7 @@ function Nodes() {
         { name: "name", label: "Node name", required: true, placeholder: "us-west-storage-1" },
         { name: "region", label: "Region", placeholder: "us-west-2" },
         { name: "role", label: "Role", defaultValue: "control-plane",
-          options: ["control-plane", "storage", "worker", "edge"].map((v) => ({ label: v, value: v })) },
+          options: ["control-plane", "customer-tenant", "public-web", "storage", "worker", "edge"].map((v) => ({ label: v, value: v })) },
         { name: "endpoint", label: "Endpoint", placeholder: "https://node.arkive.life" },
       ],
     });
@@ -352,7 +355,7 @@ function Nodes() {
         { name: "name", label: "Name", defaultValue: n.name },
         { name: "region", label: "Region", defaultValue: n.region },
         { name: "role", label: "Role", defaultValue: n.role,
-          options: ["control-plane", "storage", "worker", "edge"].map((v) => ({ label: v, value: v })) },
+          options: ["control-plane", "customer-tenant", "public-web", "storage", "worker", "edge"].map((v) => ({ label: v, value: v })) },
         { name: "endpoint", label: "Endpoint", defaultValue: n.endpoint },
         { name: "status", label: "Status", defaultValue: n.status,
           options: ["active", "draining", "maintenance", "offline"].map((v) => ({ label: v, value: v })) },
@@ -370,6 +373,28 @@ function Nodes() {
     try { await api.del(`/admin/nodes/${n.id}`); flash("Node removed"); await load(); } catch { flash("Failed"); }
   }
 
+  async function newInstaller() {
+    const r = await formDialog({
+      title: "Install a node", confirmLabel: "Generate command",
+      message: "Generates a one-line command for a clean Ubuntu host. It installs only the selected role's components and links back to this control plane automatically (URL + fleet secret baked in).",
+      fields: [
+        { name: "role", label: "Node role", defaultValue: "public-web",
+          options: [
+            { label: "public-web — marketing website", value: "public-web" },
+            { label: "customer-tenant — tenant app + portal", value: "customer-tenant" },
+            { label: "control-plane — full stack", value: "control-plane" },
+          ] },
+        { name: "domain", label: "Public domain", placeholder: "arkive.life" },
+      ],
+    });
+    if (!r) return;
+    try {
+      const res = await api.post<{ command: string }>("/admin/nodes/installer", { role: r.role, domain: r.domain });
+      setInstallCmd(res.command);
+      flash("Install command generated");
+    } catch { flash("Failed"); }
+  }
+
   const storageSvcs = svcs.filter((x) => x.category === "storage");
   const emailSvcs = svcs.filter((x) => x.category === "email");
 
@@ -377,8 +402,25 @@ function Nodes() {
     <>
       <div className="spread" style={{ marginBottom: 12 }}>
         <h3 style={{ margin: 0 }}>Node fleet</h3>
-        <button className="btn primary sm" onClick={registerNode}><Icon name="server" size={14} /> Register node</button>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn sm" onClick={newInstaller}><Icon name="logout" size={14} /> Install a node</button>
+          <button className="btn primary sm" onClick={registerNode}><Icon name="server" size={14} /> Register node</button>
+        </div>
       </div>
+      {installCmd && (
+        <Card style={{ marginBottom: 12, background: "var(--bg-elev)" }}>
+          <div className="spread" style={{ marginBottom: 6 }}>
+            <div className="faint" style={{ fontSize: 12 }}>One-line install (run as sudo on a clean Ubuntu host)</div>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn sm" onClick={() => { void navigator.clipboard.writeText(installCmd); flash("Command copied"); }}>
+                <Icon name="link" size={13} /> Copy
+              </button>
+              <button className="btn ghost sm" onClick={() => setInstallCmd("")}>Dismiss</button>
+            </div>
+          </div>
+          <pre className="mono" style={{ fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0 }}>{installCmd}</pre>
+        </Card>
+      )}
       <div className="grid grid-2">
         {nodes.map((n) => {
           const st = n.telemetry?.storage;
@@ -401,6 +443,13 @@ function Nodes() {
                   <Pill tone={n.status === "active" ? "info" : "warn"}>{n.status}</Pill>
                 </div>
               </div>
+              {n.cloud?.provider && n.cloud.provider !== "unknown" && (
+                <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                  <Pill tone="info"><Icon name="database" size={11} /> {String(n.cloud.provider).toUpperCase()}{n.cloud.region ? ` · ${n.cloud.region}` : ""}</Pill>
+                  {n.cloud.instance_type && <span className="faint" style={{ fontSize: 11.5 }}>{n.cloud.instance_type}</span>}
+                  {n.version && <span className="faint" style={{ fontSize: 11.5 }}>v{n.version}</span>}
+                </div>
+              )}
               {st && (
                 <div style={{ marginBottom: 8 }}>
                   <div className="spread faint" style={{ fontSize: 11.5, marginBottom: 4 }}>
@@ -454,8 +503,208 @@ function Nodes() {
           );
         })}
       </div>
+      <NodeBlueprints flash={flash} />
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
+  );
+}
+
+function NodeBlueprints({ flash }: { flash: (m: string) => void }) {
+  const [rows, setRows] = useState<any[]>([]);
+  async function load() {
+    try { setRows(await api.get<any[]>("/admin/node-blueprints")); } catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function edit(bp: any) {
+    const r = await formDialog({
+      title: `Blueprint · ${bp.role}`, confirmLabel: "Save",
+      message: "Pushed to every node with this role on heartbeat. Config and settings are JSON.",
+      fields: [
+        { name: "target_version", label: "Target version", defaultValue: bp.target_version, placeholder: "e.g. 0.4.1 or main" },
+        { name: "config", label: "Config (JSON)", type: "textarea", defaultValue: JSON.stringify(bp.config || {}, null, 2) },
+        { name: "settings", label: "Settings (JSON)", type: "textarea", defaultValue: JSON.stringify(bp.settings || {}, null, 2) },
+      ],
+    });
+    if (!r) return;
+    let config: any, settings: any;
+    try { config = r.config ? JSON.parse(r.config) : {}; settings = r.settings ? JSON.parse(r.settings) : {}; }
+    catch { void notify({ title: "Invalid JSON", message: "Config and settings must be valid JSON.", tone: "warn" }); return; }
+    try {
+      await api.put(`/admin/node-blueprints/${bp.role}`, { target_version: r.target_version, config, settings });
+      flash("Blueprint saved"); await load();
+    } catch { flash("Failed"); }
+  }
+
+  return (
+    <>
+      <div className="spread" style={{ margin: "22px 0 12px" }}>
+        <h3 style={{ margin: 0 }}>Role blueprints</h3>
+        <span className="faint" style={{ fontSize: 12 }}>Central config &amp; update target per node role</span>
+      </div>
+      <div className="grid grid-3">
+        {rows.map((bp) => (
+          <Card key={bp.role}>
+            <div className="spread" style={{ marginBottom: 8 }}>
+              <div style={{ fontWeight: 700 }}>{bp.role}</div>
+              <Pill tone={bp.target_version ? "info" : "warn"}>{bp.target_version ? `v${bp.target_version}` : "no target"}</Pill>
+            </div>
+            <div className="faint" style={{ fontSize: 11.5, marginBottom: 10 }}>
+              {Object.keys(bp.config || {}).length} config · {Object.keys(bp.settings || {}).length} settings
+              {bp.updated_at ? ` · updated ${timeAgo(bp.updated_at)}` : ""}
+            </div>
+            <button className="btn ghost sm" onClick={() => edit(bp)}>Edit blueprint</button>
+          </Card>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function WebsiteCMS() {
+  const [content, setContent] = useState<any>(null);
+  const [defaults, setDefaults] = useState<any>({});
+  const [published, setPublished] = useState(true);
+  const [raw, setRaw] = useState("");
+  const [rawMode, setRawMode] = useState(false);
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
+
+  async function load() {
+    try {
+      const r = await api.get<any>("/admin/site");
+      setContent(r.content || r.defaults || {});
+      setDefaults(r.defaults || {});
+      setPublished(!!r.published);
+      setRaw(JSON.stringify(r.content || r.defaults || {}, null, 2));
+    } catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); }, []);
+
+  function setPath(path: string[], value: any) {
+    setContent((prev: any) => {
+      const next = JSON.parse(JSON.stringify(prev || {}));
+      let o = next;
+      for (let i = 0; i < path.length - 1; i++) { o[path[i]] = o[path[i]] ?? {}; o = o[path[i]]; }
+      o[path[path.length - 1]] = value;
+      return next;
+    });
+  }
+
+  async function save() {
+    let body: any = content;
+    if (rawMode) {
+      try { body = JSON.parse(raw); } catch { void notify({ title: "Invalid JSON", message: "Fix the JSON before saving.", tone: "warn" }); return; }
+    }
+    try {
+      await api.put("/admin/site", { content: body, published });
+      if (rawMode) setContent(body);
+      flash("Website content published");
+    } catch { flash("Failed to save"); }
+  }
+
+  async function resetDefaults() {
+    if (!await confirmDialog({ title: "Reset to defaults?", message: "Replace all website content with the built-in defaults.", tone: "danger", confirmLabel: "Reset" })) return;
+    setContent(JSON.parse(JSON.stringify(defaults)));
+    setRaw(JSON.stringify(defaults, null, 2));
+    flash("Reset — remember to publish");
+  }
+
+  if (!content) return <Card><div className="muted">Loading…</div></Card>;
+  const hero = content.hero || {};
+  const contact = content.contact || {};
+  const plans: any[] = content.pricing?.plans || [];
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <div>
+          <h3 style={{ margin: 0 }}>Public website</h3>
+          <span className="faint" style={{ fontSize: 12 }}>Edit the marketing site content served by the Public Web Node.</span>
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn ghost sm" onClick={() => setRawMode((v) => !v)}>{rawMode ? "Guided editor" : "Raw JSON"}</button>
+          <button className="btn ghost sm" onClick={resetDefaults}>Reset</button>
+          <button className="btn primary sm" onClick={save}><Icon name="check" size={14} /> Publish</button>
+        </div>
+      </div>
+
+      <Card style={{ marginBottom: 12 }}>
+        <label className="row" style={{ gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={published} onChange={(e) => setPublished(e.target.checked)} />
+          <span>Published — the public site is live and serving this content.</span>
+        </label>
+      </Card>
+
+      {rawMode ? (
+        <Card>
+          <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>Full content document (JSON). Advanced.</div>
+          <textarea className="input" value={raw} onChange={(e) => setRaw(e.target.value)}
+                    style={{ minHeight: 460, fontFamily: "ui-monospace, monospace", fontSize: 12.5 }} />
+        </Card>
+      ) : (
+        <>
+          <Card style={{ marginBottom: 12 }}>
+            <div style={{ fontWeight: 700, marginBottom: 10 }}>Brand</div>
+            <div className="grid grid-2" style={{ gap: 10 }}>
+              <Field label="Brand name" value={content.brand || ""} onChange={(v) => setPath(["brand"], v)} />
+              <Field label="Tagline" value={content.tagline || ""} onChange={(v) => setPath(["tagline"], v)} />
+            </div>
+          </Card>
+
+          <Card style={{ marginBottom: 12 }}>
+            <div style={{ fontWeight: 700, marginBottom: 10 }}>Hero</div>
+            <div className="stack" style={{ gap: 10 }}>
+              <Field label="Eyebrow" value={hero.eyebrow || ""} onChange={(v) => setPath(["hero", "eyebrow"], v)} />
+              <Field label="Headline" value={hero.h1 || ""} onChange={(v) => setPath(["hero", "h1"], v)} />
+              <Field label="Lead paragraph" area value={hero.lead || ""} onChange={(v) => setPath(["hero", "lead"], v)} />
+              <div className="grid grid-2" style={{ gap: 10 }}>
+                <Field label="Primary button" value={hero.ctaPrimary || ""} onChange={(v) => setPath(["hero", "ctaPrimary"], v)} />
+                <Field label="Secondary button" value={hero.ctaSecondary || ""} onChange={(v) => setPath(["hero", "ctaSecondary"], v)} />
+              </div>
+            </div>
+          </Card>
+
+          <Card style={{ marginBottom: 12 }}>
+            <div style={{ fontWeight: 700, marginBottom: 10 }}>Pricing plans</div>
+            <div className="grid grid-3">
+              {plans.map((p, i) => (
+                <div key={i} className="stack" style={{ gap: 8, padding: 12, border: "1px solid var(--border-soft)", borderRadius: 12 }}>
+                  <Field label="Name" value={p.name || ""} onChange={(v) => setPath(["pricing", "plans", i, "name"], v)} />
+                  <div className="grid grid-2" style={{ gap: 8 }}>
+                    <Field label="Price" value={p.price || ""} onChange={(v) => setPath(["pricing", "plans", i, "price"], v)} />
+                    <Field label="Per" value={p.per || ""} onChange={(v) => setPath(["pricing", "plans", i, "per"], v)} />
+                  </div>
+                  <Field label="Blurb" area value={p.blurb || ""} onChange={(v) => setPath(["pricing", "plans", i, "blurb"], v)} />
+                  <Field label="Button" value={p.cta || ""} onChange={(v) => setPath(["pricing", "plans", i, "cta"], v)} />
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          <Card>
+            <div style={{ fontWeight: 700, marginBottom: 10 }}>Contact</div>
+            <div className="grid grid-3" style={{ gap: 10 }}>
+              <Field label="General email" value={contact.email || ""} onChange={(v) => setPath(["contact", "email"], v)} />
+              <Field label="Sales email" value={contact.sales || ""} onChange={(v) => setPath(["contact", "sales"], v)} />
+              <Field label="Support email" value={contact.support || ""} onChange={(v) => setPath(["contact", "support"], v)} />
+            </div>
+          </Card>
+        </>
+      )}
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+}
+
+function Field({ label, value, onChange, area }: { label: string; value: string; onChange: (v: string) => void; area?: boolean }) {
+  return (
+    <label className="stack" style={{ gap: 4 }}>
+      <span className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em" }}>{label}</span>
+      {area
+        ? <textarea className="input" value={value} onChange={(e) => onChange(e.target.value)} style={{ minHeight: 72 }} />
+        : <input className="input" value={value} onChange={(e) => onChange(e.target.value)} />}
+    </label>
   );
 }
 

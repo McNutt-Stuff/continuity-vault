@@ -529,18 +529,44 @@ class Node(Base):
     id = Column(String, primary_key=True, default=_uuid)
     name = Column(String, default="node")
     region = Column(String, default="")
-    role = Column(String, default="control-plane")  # control-plane | storage | worker | edge
+    role = Column(String, default="control-plane")  # control-plane | customer-tenant | public-web | storage | worker | edge
     endpoint = Column(String, default="")            # base URL / address
     status = Column(String, default="active")        # active | draining | offline | maintenance
     is_self = Column(Boolean, default=False)         # the running instance
     version = Column(String, default="")
     telemetry = Column(JSON, default=dict)           # cpu/mem/disk/storage snapshot
+    cloud = Column(JSON, default=dict)               # detected provider/region/instance (IMDS)
     # Which platform service objects this node uses (one of each). The running
     # node's selections drive where cloud objects are stored and how mail sends.
     storage_service_id = Column(String, nullable=True)  # ServiceObject (storage-*)
     email_service_id = Column(String, nullable=True)    # ServiceObject (email-*)
     last_heartbeat_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
+
+
+class NodeBlueprint(Base):
+    """Per-role configuration + update target managed by platform admins. Nodes
+    heartbeat to the control plane and receive their role's blueprint so config,
+    settings, and the target software version are centrally controlled."""
+
+    __tablename__ = "node_blueprints"
+    role = Column(String, primary_key=True)  # control-plane | customer-tenant | public-web | ...
+    target_version = Column(String, default="")
+    config = Column(JSON, default=dict)      # role-specific config the node applies
+    settings = Column(JSON, default=dict)    # feature flags / general settings
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class SiteContent(Base):
+    """Editable content for the public marketing website (Public Web Node),
+    managed via the Control Plane admin CMS. Single row (id="default"); the
+    public site fetches it and falls back to bundled defaults."""
+
+    __tablename__ = "site_content"
+    id = Column(String, primary_key=True, default="default")
+    content = Column(JSON, default=dict)  # structured page/section content
+    published = Column(Boolean, default=True)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
 class ConfigObject(Base):

@@ -20,9 +20,10 @@ interface PromptOpts {
 export interface FormField {
   name: string; label: string; defaultValue?: string;
   placeholder?: string; password?: boolean; required?: boolean;
+  type?: "textarea";
   options?: { label: string; value: string }[];
 }
-interface FormOpts { title?: string; message?: string; fields: FormField[]; confirmLabel?: string; }
+interface FormOpts { title?: string; message?: string; description?: string; fields: FormField[]; confirmLabel?: string; }
 
 type Kind = "notify" | "confirm" | "prompt" | "form";
 interface ActiveDialog {
@@ -148,6 +149,14 @@ export function DialogHost() {
                     >
                       {f.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
+                  ) : f.type === "textarea" ? (
+                    <textarea
+                      className="input"
+                      placeholder={f.placeholder}
+                      value={form[f.name] ?? ""}
+                      onChange={(e) => setForm((cur) => ({ ...cur, [f.name]: e.target.value }))}
+                      style={{ minHeight: 120, fontFamily: "ui-monospace, monospace", fontSize: 12.5 }}
+                    />
                   ) : (
                     <input
                       ref={i === 0 ? firstInput : undefined}

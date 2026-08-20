@@ -86,7 +86,17 @@ ensure_executable
 
 run_installer() {
   if [[ "$COMPONENT" == "cloud" ]]; then
+    # Preserve this node's role across updates so only its components redeploy.
+    # Priority: explicit env > persisted marker > env file. If none is known
+    # (a first-time install) leave it unset so the installer prompts for it.
+    local role="${CV_NODE_ROLE:-}"
+    if [[ -z "$role" && -f /etc/arkive/role ]]; then role="$(cat /etc/arkive/role)"; fi
+    if [[ -z "$role" && -f /etc/continuity-vault.env ]]; then
+      role="$(sed -n 's/^CV_NODE_ROLE=//p' /etc/continuity-vault.env | head -1)"
+    fi
+    [[ -n "$role" ]] && echo "==> Node role: ${role}"
     REPO_SRC="$CV_SRC_DIR" CV_DOMAIN="${CV_DOMAIN:-vault.arkive.life}" \
+      ${role:+CV_NODE_ROLE="$role"} \
       bash "$CV_SRC_DIR/installers/cloud-install.sh"
   else
     REPO_SRC="$CV_SRC_DIR" CV_CLOUD_URL="${CV_CLOUD_URL:-https://vault.arkive.life/api}" \

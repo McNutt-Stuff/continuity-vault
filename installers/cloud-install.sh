@@ -25,6 +25,86 @@ REPO_SRC="${REPO_SRC:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 CV_USER="cvault"
 export DEBIAN_FRONTEND=noninteractive
 
+# --- node role --------------------------------------------------------------
+# Which node role this host runs. Only the components for that role are deployed:
+#   control-plane   full stack: control plane API, workers, web admin, CMS
+#   customer-tenant data-plane control plane app + web portal; heartbeats to CP
+#   public-web      marketing website only (no API/DB); heartbeats to CP
+# Non-control-plane roles register with the control plane using a shared secret.
+# Values are resolved (in order): explicit env > persisted config > interactive
+# prompt > default. Prompting happens in prompt_config() during the run.
+_persisted() {  # read a KEY from the env file, empty if absent
+  [[ -f /etc/continuity-vault.env ]] || return 0
+  sed -n "s/^$1=//p" /etc/continuity-vault.env | head -1
+}
+CV_NODE_ROLE="${CV_NODE_ROLE:-$( [[ -f /etc/arkive/role ]] && cat /etc/arkive/role || _persisted CV_NODE_ROLE)}"
+CV_NODE_NAME="${CV_NODE_NAME:-$(_persisted CV_NODE_NAME)}"
+CV_NODE_SECRET="${CV_NODE_SECRET:-$(_persisted CV_NODE_SECRET)}"
+CV_CONTROL_PLANE_URL="${CV_CONTROL_PLANE_URL:-$(_persisted CV_CONTROL_PLANE_URL)}"
+# Domain default only applies to a first control-plane install; prompt_config
+# refines it for other roles.
+[[ -n "$(_persisted CV_DOMAIN)" && "$CV_DOMAIN" == "vault.arkive.life" ]] && CV_DOMAIN="$(_persisted CV_DOMAIN)"
+
+# Roles that run the Python control-plane application (API + web portal).
+_runs_app() { [[ "$CV_NODE_ROLE" != "public-web" ]]; }
+
+# Interactively fill in any missing node settings. Reads from the terminal
+# (/dev/tty) so it works even when the installer is piped via curl | bash.
+# Skipped entirely for non-interactive runs (no TTY) — those use env/defaults.
+prompt_config() {
+  local have_tty=0
+  [[ -e /dev/tty ]] && have_tty=1
+  local first_install=1
+  [[ -f /etc/arkive/role || -f /etc/continuity-vault.env ]] && first_install=0
+
+  if [[ -z "$CV_NODE_ROLE" ]]; then
+    if [[ "$have_tty" == "1" ]]; then
+      printf "\n  %sSelect the node role to install:%s\n" "$BOLD" "$RESET" >/dev/tty
+      printf "    1) control-plane   %s(full stack: API, workers, admin, CMS)%s\n" "$DIM" "$RESET" >/dev/tty
+      printf "    2) customer-tenant %s(tenant app + portal; reports to control plane)%s\n" "$DIM" "$RESET" >/dev/tty
+      printf "    3) public-web      %s(marketing website only; reports to control plane)%s\n" "$DIM" "$RESET" >/dev/tty
+      local choice=""
+      read -rp "  Role [1-3] (default 1): " choice </dev/tty || true
+      case "$choice" in
+        2|customer-tenant) CV_NODE_ROLE="customer-tenant" ;;
+        3|public-web)      CV_NODE_ROLE="public-web" ;;
+        *)                 CV_NODE_ROLE="control-plane" ;;
+      esac
+    else
+      CV_NODE_ROLE="control-plane"
+    fi
+  fi
+
+  case "$CV_NODE_ROLE" in
+    control-plane|customer-tenant|public-web) ;;
+    *) echo "Unknown CV_NODE_ROLE='$CV_NODE_ROLE' (control-plane|customer-tenant|public-web)"; exit 1 ;;
+  esac
+
+  # Prompt for the domain on a first interactive install.
+  if [[ "$have_tty" == "1" && "$first_install" == "1" ]]; then
+    local d=""
+    read -rp "  Public domain for this node [${CV_DOMAIN}]: " d </dev/tty || true
+    [[ -n "$d" ]] && CV_DOMAIN="$d"
+  fi
+
+  # Non-control-plane nodes need the control plane URL + shared secret.
+  if [[ "$CV_NODE_ROLE" != "control-plane" ]]; then
+    if [[ -z "$CV_CONTROL_PLANE_URL" && "$have_tty" == "1" ]]; then
+      local u=""
+      read -rp "  Control plane base URL [https://vault.arkive.life]: " u </dev/tty || true
+      CV_CONTROL_PLANE_URL="${u:-https://vault.arkive.life}"
+    fi
+    if [[ -z "$CV_NODE_SECRET" && "$have_tty" == "1" ]]; then
+      local s=""
+      read -rsp "  Fleet node secret (CV_NODE_SECRET): " s </dev/tty || true
+      echo >/dev/tty
+      CV_NODE_SECRET="$s"
+    fi
+  fi
+  CV_NODE_NAME="${CV_NODE_NAME:-$CV_DOMAIN}"
+  CV_ADMIN_EMAIL="admin@${CV_DOMAIN#*.}"
+}
+
 # Keep the DB password stable across runs so the role and the app config never
 # drift: prefer an explicit override, then the value already in the env file,
 # else generate a fresh one.
@@ -116,6 +196,13 @@ build_web() {
   npm run build
 }
 
+# Marketing website (public-web node). Builds site/ into site/dist.
+build_site() {
+  cd "$INSTALL_DIR/site"
+  npm install --no-audit --no-fund
+  npm run build
+}
+
 validate_app() {
   # Import the app in a throwaway environment so import/route errors surface
   # here with a full traceback, before the service is started.
@@ -150,6 +237,12 @@ CV_OBJECT_STORE=${DATA_DIR}/object_store
 CV_FLEET_SIGNER=${DATA_DIR}/fleet_signer.json
 CV_SEED_DEMO_DATA=true
 CV_ALLOW_SIGNUP=true
+# Node role & fleet membership. Non-control-plane nodes heartbeat to the CP.
+CV_NODE_ROLE=${CV_NODE_ROLE}
+CV_NODE_NAME=${CV_NODE_NAME}
+CV_NODE_SECRET=${CV_NODE_SECRET}
+CV_CONTROL_PLANE_URL=${CV_CONTROL_PLANE_URL}
+CV_SITE_CONTENT_PATH=${INSTALL_DIR}/site/dist/site.json
 # Email delivery for sign-in / verification codes. Without SMTP, codes are
 # written to the service log (journalctl -u cv-cloud). Uncomment to enable:
 # CV_SMTP_HOST=smtp.example.com
@@ -172,6 +265,18 @@ EOF
     sed -i "s#^CV_DATABASE_URL=.*#CV_DATABASE_URL=postgresql+psycopg://cvault:${DB_PASSWORD}@localhost/continuity#" \
       /etc/continuity-vault.env
   fi
+  # Keep node-role membership in sync on every run (upsert each key).
+  local k v
+  for kv in "CV_NODE_ROLE=${CV_NODE_ROLE}" "CV_NODE_NAME=${CV_NODE_NAME}" \
+            "CV_NODE_SECRET=${CV_NODE_SECRET}" "CV_CONTROL_PLANE_URL=${CV_CONTROL_PLANE_URL}" \
+            "CV_SITE_CONTENT_PATH=${INSTALL_DIR}/site/dist/site.json"; do
+    k="${kv%%=*}"; v="${kv#*=}"
+    if grep -q "^${k}=" /etc/continuity-vault.env; then
+      sed -i "s#^${k}=.*#${k}=${v}#" /etc/continuity-vault.env
+    else
+      echo "${k}=${v}" >> /etc/continuity-vault.env
+    fi
+  done
   chown "$CV_USER":"$CV_USER" /etc/continuity-vault.env
   chmod 600 /etc/continuity-vault.env
   chown -R "$CV_USER":"$CV_USER" "$INSTALL_DIR" "$DATA_DIR"
@@ -188,6 +293,31 @@ configure_caddy() {
   sed "s/{{DOMAIN}}/${CV_DOMAIN}/g; s#{{WEBROOT}}#${INSTALL_DIR}/web/dist#g" \
     "$INSTALL_DIR/infra/Caddyfile" > /etc/caddy/Caddyfile
   systemctl reload caddy 2>/dev/null || systemctl restart caddy
+}
+
+# TLS reverse proxy for a public-web node: serves the static marketing site,
+# no /api proxy.
+configure_caddy_site() {
+  sed "s/{{SITE_DOMAIN}}/${CV_DOMAIN}/g; s#{{SITE_WEBROOT}}#${INSTALL_DIR}/site/dist#g" \
+    "$INSTALL_DIR/infra/Caddyfile.site" > /etc/caddy/Caddyfile
+  systemctl reload caddy 2>/dev/null || systemctl restart caddy
+}
+
+# Record the node role + a version marker the updater/heartbeat consume.
+write_node_marker() {
+  mkdir -p /etc/arkive
+  echo "$CV_NODE_ROLE" > /etc/arkive/role
+  git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null > /etc/arkive/version || true
+  chown -R "$CV_USER":"$CV_USER" /etc/arkive 2>/dev/null || true
+}
+
+# Install the fleet heartbeat timer on non-control-plane nodes so they report
+# health to the control plane and receive their role blueprint.
+install_heartbeat() {
+  cp "$INSTALL_DIR/infra/systemd/cv-node-heartbeat.service" /etc/systemd/system/
+  cp "$INSTALL_DIR/infra/systemd/cv-node-heartbeat.timer" /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable --now cv-node-heartbeat.timer
 }
 
 health_check() {
@@ -210,13 +340,36 @@ health_check() {
 
 init_installer "Arkive Cloud" "$DATA_DIR/install-state"
 require_root
+prompt_config
 note "Domain: ${CV_DOMAIN}"
+note "Node role: ${CV_NODE_ROLE}"
 
 step "Installing system packages"          install_os_deps
 step "Installing Node.js 20"               install_node
 step "Installing Caddy (Let's Encrypt)"    install_caddy
 step "Creating service user & directories" create_user_dirs
 step_always "Copying application files"    sync_code
+
+if [[ "$CV_NODE_ROLE" == "public-web" ]]; then
+  # Public Web Node — marketing site only, no API/DB. A minimal Python venv is
+  # installed solely to run the fleet heartbeat.
+  step_if_changed "Installing Python (heartbeat)" \
+    "$INSTALL_DIR/cloud/requirements.txt $INSTALL_DIR/shared $INSTALL_DIR/.venv/pyvenv.cfg" \
+    install_python
+  step_if_changed "Building marketing website" \
+    "$INSTALL_DIR/site/src $INSTALL_DIR/site/package.json $INSTALL_DIR/site/index.html $INSTALL_DIR/site/vite.config.ts $INSTALL_DIR/site/dist/index.html" \
+    build_site
+  step_always "Writing configuration"        write_env
+  step_always "Recording node marker"        write_node_marker
+  step_always "Configuring TLS reverse proxy" configure_caddy_site
+  step_always "Installing fleet heartbeat"   install_heartbeat
+  finish
+  printf "  Website: %shttps://%s%s\n" "$BOLD" "$CV_DOMAIN" "$RESET"
+  printf "  Role:    public-web (reports to %s)\n\n" "${CV_CONTROL_PLANE_URL:-<control plane>}"
+  return 0 2>/dev/null || exit 0
+fi
+
+# control-plane and customer-tenant both run the Python application stack.
 step_always "Configuring PostgreSQL database" setup_database
 step_if_changed "Installing Python control plane" \
   "$INSTALL_DIR/cloud/requirements.txt $INSTALL_DIR/shared $INSTALL_DIR/.venv/pyvenv.cfg" \
@@ -229,11 +382,16 @@ step_if_changed "Building web portal" \
   build_web
 step_always "Validating application"       validate_app
 step_always "Writing configuration"        write_env
+step_always "Recording node marker"        write_node_marker
 step_always "Starting control-plane service" install_service
 step_always "Configuring TLS reverse proxy" configure_caddy
 step_always "Verifying service health"     health_check
+if [[ "$CV_NODE_ROLE" == "customer-tenant" ]]; then
+  step_always "Installing fleet heartbeat"   install_heartbeat
+fi
 
 finish
 printf "  Portal:  %shttps://%s%s\n" "$BOLD" "$CV_DOMAIN" "$RESET"
 printf "  API:     https://%s/api/health\n" "$CV_DOMAIN"
+printf "  Role:    %s\n" "$CV_NODE_ROLE"
 printf "  Sign in: owner@northwind.example (demo seed data enabled)\n\n"

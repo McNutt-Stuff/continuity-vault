@@ -87,6 +87,15 @@ class Settings(BaseSettings):
 
     seed_demo_data: bool = True
 
+    # Multi-node fleet. Non-control-plane nodes (customer-tenant, public-web)
+    # heartbeat to the control plane using a shared node secret and receive their
+    # role blueprint (config + target version). Set on every node.
+    node_role: str = "control-plane"      # control-plane | customer-tenant | public-web
+    node_name: str = ""                    # defaults to the domain
+    node_secret: str | None = None         # shared secret for node heartbeat auth
+    control_plane_url: str | None = None   # base URL of the control plane (for non-CP nodes)
+    site_content_path: str = ""            # public-web: where to mirror CMS content (site.json)
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
