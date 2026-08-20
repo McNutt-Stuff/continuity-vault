@@ -10,7 +10,7 @@ interface ObjectBucket { key: string; label: string; icon: string; color: string
 interface StorageDest { id: string; label: string; kind: string; icon: string; }
 interface Overview {
   sources: { count: number; types: SourceType[] };
-  objects: { total: number; breakdown: ObjectBucket[] };
+  objects: { total: number; breakdown: ObjectBucket[]; by_source: ObjectBucket[] };
   data: { protected_bytes: number; licensed_bytes: number; percent: number | null };
   storage: {
     vault_count: number; destinations: StorageDest[];
@@ -97,21 +97,21 @@ export default function Dashboard() {
           </div>
         </Card>
 
-        {/* Objects protected — pie bottom-right, text top-left */}
+        {/* Objects protected — pie by source type, text top-left */}
         <Card style={{ minHeight: 134, position: "relative", overflow: "hidden" }}>
           <div className="faint" style={{ fontSize: 12 }}>Objects protected</div>
           <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1.1, marginTop: 2 }}>{(ov?.objects.total ?? 0).toLocaleString()}</div>
           {objTotal > 0 ? (
             <>
               <div className="stack" style={{ gap: 3, marginTop: 8, maxWidth: "62%" }}>
-                {ov!.objects.breakdown.slice(0, 3).map((b) => (
+                {ov!.objects.by_source.slice(0, 3).map((b) => (
                   <span key={b.key} className="faint" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 5 }}>
                     <span style={{ width: 8, height: 8, borderRadius: 2, background: b.color, flexShrink: 0 }} /> {b.label} {b.count.toLocaleString()}
                   </span>
                 ))}
               </div>
               <div style={{ position: "absolute", right: 6, bottom: 2 }}>
-                <Donut data={ov!.objects.breakdown} size={96} />
+                <Donut data={ov!.objects.by_source} size={96} />
               </div>
             </>
           ) : <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>Nothing captured yet</div>}

@@ -49,7 +49,7 @@ _OBJECT_BUCKETS: list[dict] = [
      "types": {"event"}},    {"key": "file", "label": "Files & archives", "icon": "database", "color": "#7a5cff",
      "types": {"file", "archive"}},
     {"key": "contact", "label": "Contacts", "icon": "user", "color": "#c56cf0",
-     "types": {"contact"}},
+     "types": {"contact", "person", "organization", "group"}},
 ]
 _ICON_MAP = {"folder": "file", "gear": "database"}  # connector icon → available UI icon
 
@@ -117,6 +117,7 @@ def overview(tenant: Tenant = Depends(security.get_tenant),
             .order_by(SearchDocument.created_at.desc()).all())
     seen: set[tuple] = set()
     bucket_counts: dict[str, int] = {}
+    source_obj_counts: dict[str, int] = {}
     protected_bytes = 0
     object_total = 0
     for d in docs:
@@ -128,11 +129,19 @@ def overview(tenant: Tenant = Depends(security.get_tenant),
         protected_bytes += int(d.size_bytes or 0)
         bucket_counts[_bucket_for(d.doc_type)["key"]] = \
             bucket_counts.get(_bucket_for(d.doc_type)["key"], 0) + 1
+        source_obj_counts[d.source_type] = source_obj_counts.get(d.source_type, 0) + 1
     object_breakdown = [
         {"key": b["key"], "label": b["label"], "icon": b["icon"], "color": b["color"],
          "count": bucket_counts.get(b["key"], 0)}
         for b in _OBJECT_BUCKETS if bucket_counts.get(b["key"], 0) > 0
     ]
+    # Objects grouped by source type (Gmail, iCloud, 1Password…), combining
+    # multiple accounts of the same type — powers the overview pie chart.
+    object_by_source = []
+    for st, n in sorted(source_obj_counts.items(), key=lambda kv: -kv[1]):
+        m = _source_meta(st)
+        object_by_source.append({"key": st, "label": m["displayName"],
+                                 "icon": m["icon"], "color": m["color"], "count": n})
 
     # --- Data protected vs licensed allowance --------------------------------
     licensed = int(tenant.licensed_bytes or 0)
@@ -172,7 +181,8 @@ def overview(tenant: Tenant = Depends(security.get_tenant),
 
     return {
         "sources": {"count": sum(type_counts.values()), "types": source_types},
-        "objects": {"total": object_total, "breakdown": object_breakdown},
+        "objects": {"total": object_total, "breakdown": object_breakdown,
+                    "by_source": object_by_source},
         "data": {"protected_bytes": protected_bytes, "licensed_bytes": licensed,
                  "percent": percent},
         "storage": {"vault_count": len(vaults), "destinations": destinations,
