@@ -531,6 +531,10 @@ class Node(Base):
     is_self = Column(Boolean, default=False)         # the running instance
     version = Column(String, default="")
     telemetry = Column(JSON, default=dict)           # cpu/mem/disk/storage snapshot
+    # Which platform service objects this node uses (one of each). The running
+    # node's selections drive where cloud objects are stored and how mail sends.
+    storage_service_id = Column(String, nullable=True)  # ServiceObject (storage-*)
+    email_service_id = Column(String, nullable=True)    # ServiceObject (email-*)
     last_heartbeat_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 
@@ -557,5 +561,25 @@ class SourceConfig(Base):
     connector_type = Column(String, primary_key=True)
     enabled = Column(Boolean, default=True)
     config_object_id = Column(String, nullable=True)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class ServiceObject(Base):
+    """A named platform service instance configured on the Service Objects admin
+    page: a storage backend (Amazon S3 / Azure Blob) or an email sender (SES).
+
+    Credentials come from a linked ``ConfigObject``; non-secret routing (bucket,
+    region, container, from address, storage tier…) lives in ``settings``. Each
+    Node selects one storage service and one email service; the running node's
+    selections determine where cloud objects are stored and how mail is sent."""
+
+    __tablename__ = "service_objects"
+    id = Column(String, primary_key=True, default=_uuid)
+    name = Column(String, nullable=False)
+    kind = Column(String, nullable=False)  # email-ses | storage-s3 | storage-azure
+    enabled = Column(Boolean, default=True)
+    config_object_id = Column(String, nullable=True)  # linked credentials
+    settings = Column(JSON, default=dict)             # non-secret routing
+    created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 

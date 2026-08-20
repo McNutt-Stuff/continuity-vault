@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from cv_crypto.profiles import PROFILE_REGISTRY
 from cv_crypto.provider import get_provider
 
-from .. import audit, authcodes, credstore, keybroker, platform_config, security
+from .. import audit, authcodes, credstore, keybroker, platform_config, security, services
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
@@ -35,6 +35,7 @@ from ..models import (
     Node,
     PricingConfig,
     SearchDocument,
+    ServiceObject,
     SnapshotReceipt,
     SoftwareRelease,
     SourceConfig,
@@ -645,10 +646,21 @@ def _node_view(db: Session, n: Node) -> dict:
         tel = n.telemetry or {}
         online = bool(n.last_heartbeat_at and
                       (_now() - n.last_heartbeat_at).total_seconds() < 90)
+
+    def _svc_name(sid):
+        if not sid:
+            return None
+        s = db.get(ServiceObject, sid)
+        return s.name if s else None
+
     return {
         "id": n.id, "name": n.name, "region": n.region, "role": n.role,
         "endpoint": n.endpoint, "status": n.status, "is_self": bool(n.is_self),
         "version": n.version, "online": online, "telemetry": tel,
+        "storage_service_id": n.storage_service_id,
+        "email_service_id": n.email_service_id,
+        "storage_service": _svc_name(n.storage_service_id),
+        "email_service": _svc_name(n.email_service_id),
         "last_heartbeat_at": n.last_heartbeat_at.isoformat() if n.last_heartbeat_at else None,
     }
 
@@ -688,6 +700,8 @@ class NodeUpdate(BaseModel):
     role: str | None = None
     endpoint: str | None = None
     status: str | None = None
+    storage_service_id: str | None = None
+    email_service_id: str | None = None
 
 
 @router.put("/nodes/{nid}")
@@ -699,7 +713,15 @@ def update_node(nid: str, body: NodeUpdate,
         raise HTTPException(404, "node not found")
     for k, val in body.dict(exclude_none=True).items():
         setattr(n, k, val.strip() if isinstance(val, str) else val)
+    # Empty string on a service selector clears it (use env/global fallback).
+    if not n.storage_service_id:
+        n.storage_service_id = None
+    if not n.email_service_id:
+        n.email_service_id = None
     db.commit()
+    services.invalidate()
+    from .. import emailer
+    emailer.invalidate_config_cache()
     audit.record(db, actor=principal.user_id, action="admin.node_updated",
                  category="admin", detail={"name": n.name})
     return _node_view(db, n)
@@ -889,3 +911,175 @@ def update_source(ctype: str, body: SourceUpdate,
     audit.record(db, actor=principal.user_id, action="admin.source_updated",
                  category="admin", detail={"source": ctype, "enabled": sc.enabled})
     return {"ok": True, "enabled": sc.enabled, "config_object_id": sc.config_object_id}
+
+
+# =========================================================================== #
+# Service objects (storage + email backends, selectable per node)             #
+# =========================================================================== #
+
+# kind -> {label, category, credential_keys (live in the linked ConfigObject),
+# settings (non-secret routing on the service object), required (for the status
+# pill)}. Storage tiers default to low-cost online tiers so restore stays instant.
+_SERVICE_KINDS: dict = {
+    "storage-s3": {
+        "label": "Amazon S3 storage",
+        "category": "storage",
+        "credential_keys": ["aws_access_key_id", "aws_secret_access_key"],
+        "settings": ["bucket", "region", "storage_class", "endpoint_url"],
+        "setting_defaults": {"region": "us-east-1", "storage_class": "INTELLIGENT_TIERING"},
+        "required": ["bucket"],
+    },
+    "storage-azure": {
+        "label": "Azure Blob storage",
+        "category": "storage",
+        "credential_keys": ["connection_string", "account_name", "account_key"],
+        "settings": ["container", "access_tier", "account_url"],
+        "setting_defaults": {"access_tier": "Cool"},
+        "required": ["container"],
+    },
+    "email-ses": {
+        "label": "Amazon SES email",
+        "category": "email",
+        "credential_keys": ["aws_access_key_id", "aws_secret_access_key"],
+        "settings": ["from_email", "from_name", "reply_to", "region"],
+        "setting_defaults": {"region": "us-east-1"},
+        "required": ["from_email"],
+    },
+}
+
+
+@router.get("/service-object-kinds")
+def list_service_object_kinds():
+    return [{"kind": k, **v} for k, v in _SERVICE_KINDS.items()]
+
+
+def _service_merged(db: Session, svc: ServiceObject) -> dict:
+    vals = _decrypt_values(db.get(ConfigObject, svc.config_object_id)) if svc.config_object_id else {}
+    return {**vals, **(svc.settings or {})}
+
+
+def _service_view(db: Session, svc: ServiceObject) -> dict:
+    spec = _SERVICE_KINDS.get(svc.kind, {})
+    merged = _service_merged(db, svc)
+    required = spec.get("required", [])
+    configured = all(merged.get(k) for k in required)
+    return {
+        "id": svc.id, "name": svc.name, "kind": svc.kind,
+        "kind_label": spec.get("label", svc.kind),
+        "category": spec.get("category", "storage" if svc.kind.startswith("storage-") else "email"),
+        "enabled": bool(svc.enabled),
+        "config_object_id": svc.config_object_id,
+        "settings": svc.settings or {},
+        "setting_keys": spec.get("settings", []),
+        "credential_keys": spec.get("credential_keys", []),
+        "configured": configured,
+        "updated_at": svc.updated_at.isoformat() if svc.updated_at else None,
+    }
+
+
+@router.get("/service-objects")
+def list_service_objects(db: Session = Depends(get_db)):
+    return [_service_view(db, s) for s in
+            db.query(ServiceObject).order_by(ServiceObject.name.asc()).all()]
+
+
+class ServiceObjectBody(BaseModel):
+    name: str
+    kind: str
+    enabled: bool = True
+    config_object_id: str | None = None
+    settings: dict = {}
+
+
+@router.post("/service-objects")
+def create_service_object(body: ServiceObjectBody,
+                          principal: security.Principal = Depends(security.require_platform_admin),
+                          db: Session = Depends(get_db)):
+    if body.kind not in _SERVICE_KINDS:
+        raise HTTPException(400, "unknown service kind")
+    svc = ServiceObject(name=body.name.strip() or "Service", kind=body.kind,
+                        enabled=body.enabled, config_object_id=body.config_object_id or None,
+                        settings=body.settings or {})
+    db.add(svc)
+    db.commit()
+    db.refresh(svc)
+    services.invalidate()
+    audit.record(db, actor=principal.user_id, action="admin.service_object_created",
+                 category="admin", detail={"name": svc.name, "kind": svc.kind})
+    return _service_view(db, svc)
+
+
+class ServiceObjectUpdate(BaseModel):
+    name: str | None = None
+    enabled: bool | None = None
+    config_object_id: str | None = None
+    settings: dict | None = None
+
+
+@router.put("/service-objects/{sid}")
+def update_service_object(sid: str, body: ServiceObjectUpdate,
+                          principal: security.Principal = Depends(security.require_platform_admin),
+                          db: Session = Depends(get_db)):
+    from .. import emailer
+    svc = db.get(ServiceObject, sid)
+    if not svc:
+        raise HTTPException(404, "service object not found")
+    if body.name is not None:
+        svc.name = body.name.strip()
+    if body.enabled is not None:
+        svc.enabled = body.enabled
+    if body.config_object_id is not None:
+        svc.config_object_id = body.config_object_id or None
+    if body.settings is not None:
+        svc.settings = body.settings
+    db.commit()
+    services.invalidate()
+    emailer.invalidate_config_cache()
+    audit.record(db, actor=principal.user_id, action="admin.service_object_updated",
+                 category="admin", detail={"name": svc.name, "kind": svc.kind})
+    return _service_view(db, svc)
+
+
+@router.delete("/service-objects/{sid}")
+def delete_service_object(sid: str,
+                          principal: security.Principal = Depends(security.require_platform_admin),
+                          db: Session = Depends(get_db)):
+    svc = db.get(ServiceObject, sid)
+    if not svc:
+        raise HTTPException(404, "service object not found")
+    # Unlink from any node that selected it, so the node falls back to defaults.
+    for n in db.query(Node).all():
+        if n.storage_service_id == sid:
+            n.storage_service_id = None
+        if n.email_service_id == sid:
+            n.email_service_id = None
+    db.delete(svc)
+    db.commit()
+    services.invalidate()
+    audit.record(db, actor=principal.user_id, action="admin.service_object_deleted",
+                 category="admin", severity="warning", detail={"name": svc.name})
+    return {"ok": True}
+
+
+@router.post("/service-objects/{sid}/test")
+def test_service_object(sid: str,
+                        principal: security.Principal = Depends(security.require_platform_admin),
+                        db: Session = Depends(get_db)):
+    svc = db.get(ServiceObject, sid)
+    if not svc:
+        raise HTTPException(404, "service object not found")
+    cfg = _service_merged(db, svc)
+    if svc.kind.startswith("storage-"):
+        from ..storage import destination_from_service
+        try:
+            dest = destination_from_service(svc.kind, cfg)
+            if dest is None:
+                return {"ok": False, "error": "missing required settings (bucket/container)"}
+            probe = f"healthcheck/{secrets.token_hex(8)}"
+            dest.put_object("_platform", probe, b"arkive-storage-check", immutable=False)
+            data = dest.get_object("_platform", probe)
+            ok = data == b"arkive-storage-check"
+            return {"ok": ok, "error": None if ok else "readback mismatch"}
+        except Exception as exc:  # surface the backend error to the admin
+            return {"ok": False, "error": str(exc)}
+    return {"ok": False, "error": "test not supported for this service kind"}

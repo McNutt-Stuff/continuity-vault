@@ -83,10 +83,27 @@ def _config() -> dict:
         for k in ("from_email", "from_name", "reply_to", "region"):
             if ov.get(k):
                 cfg[k] = ov[k]
-        if ov.get("aws_access_key_id"):
-            cfg["aws_access_key_id"] = ov["aws_access_key_id"]
-        if ov.get("aws_secret_access_key"):
-            cfg["aws_secret"] = ov["aws_secret_access_key"]
+        # AWS creds must be taken as a matched pair from the SAME layer — an access
+        # key from one place + a secret from another → SignatureDoesNotMatch.
+        if ov.get("aws_access_key_id") and ov.get("aws_secret_access_key"):
+            cfg["aws_access_key_id"] = ov["aws_access_key_id"].strip()
+            cfg["aws_secret"] = ov["aws_secret_access_key"].strip()
+    except Exception:
+        pass
+    # The email service object selected on the running node wins over all of the
+    # above, so mail routing scales per-node (kind "email-ses").
+    try:
+        from .services import self_email_service
+        svc = self_email_service()
+        if svc and svc.get("kind") == "email-ses":
+            ov = svc.get("config") or {}
+            for k in ("provider", "from_email", "from_name", "reply_to", "region"):
+                if ov.get(k):
+                    cfg[k] = ov[k]
+            if ov.get("aws_access_key_id") and ov.get("aws_secret_access_key"):
+                cfg["aws_access_key_id"] = ov["aws_access_key_id"].strip()
+                cfg["aws_secret"] = ov["aws_secret_access_key"].strip()
+            cfg["enabled"] = True
     except Exception:
         pass
     _cfg_cache, _cfg_at = cfg, time.time()
@@ -173,8 +190,8 @@ def text_to_html(text: str) -> str:
 def _send_ses(cfg: dict, to: str, subject: str, html: str, text: str) -> None:
     import boto3  # lazy so dev without boto3 still runs
     kwargs = {"region_name": cfg["region"]}
-    key = cfg.get("aws_access_key_id") or settings.aws_access_key_id
-    secret = cfg.get("aws_secret") or settings.aws_secret_access_key
+    key = (cfg.get("aws_access_key_id") or settings.aws_access_key_id or "").strip()
+    secret = (cfg.get("aws_secret") or settings.aws_secret_access_key or "").strip()
     if key and secret:
         kwargs["aws_access_key_id"] = key
         kwargs["aws_secret_access_key"] = secret

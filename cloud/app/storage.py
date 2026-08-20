@@ -18,6 +18,7 @@ backend supports it.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -26,6 +27,7 @@ from typing import Dict, List, Optional
 from .config import get_settings
 
 settings = get_settings()
+log = logging.getLogger("arkive.storage")
 
 
 class ProtectionDestination(ABC):
@@ -77,10 +79,14 @@ class LocalFsDestination(ProtectionDestination):
 
 class _S3Base(ProtectionDestination):
     def __init__(self, bucket: str, region: str, endpoint_url: Optional[str] = None,
-                 access_key: Optional[str] = None, secret_key: Optional[str] = None) -> None:
+                 access_key: Optional[str] = None, secret_key: Optional[str] = None,
+                 storage_class: Optional[str] = None) -> None:
         import boto3  # imported lazily so dev runs without boto3
 
         self.bucket = bucket
+        # Low-cost tier for cloud archival copies (e.g. INTELLIGENT_TIERING,
+        # STANDARD_IA). Left unset for MinIO / local S3-compatible dev.
+        self.storage_class = storage_class
         self._s3 = boto3.client(
             "s3",
             region_name=region,
@@ -105,6 +111,8 @@ class _S3Base(ProtectionDestination):
     def put_object(self, tenant_prefix, key, data, immutable=True) -> str:
         full = f"{tenant_prefix}/{key}"
         args = {"Bucket": self.bucket, "Key": full, "Body": data}
+        if self.storage_class:
+            args["StorageClass"] = self.storage_class
         if immutable:
             # Object-lock governance retention (spec 3.1: object-lock enabled).
             args["ObjectLockMode"] = "GOVERNANCE"
@@ -134,12 +142,126 @@ class CustomerS3Destination(_S3Base):
     name = "customer-s3"
 
 
+class AzureBlobDestination(ProtectionDestination):
+    """Arkive Cloud storage backed by Azure Blob (low-cost Cool/Cold tiers).
+    Objects are written already-encrypted, mirroring the S3 destinations."""
+
+    name = "cv-cloud"
+
+    def __init__(self, container: str, connection_string: Optional[str] = None,
+                 account_url: Optional[str] = None, account_name: Optional[str] = None,
+                 account_key: Optional[str] = None, access_tier: str = "Cool") -> None:
+        from azure.storage.blob import BlobServiceClient  # lazy import
+
+        self.container = container
+        self.access_tier = access_tier or "Cool"
+        if connection_string:
+            self._svc = BlobServiceClient.from_connection_string(connection_string)
+        elif account_url and account_key:
+            self._svc = BlobServiceClient(account_url=account_url, credential=account_key)
+        elif account_name and account_key:
+            url = f"https://{account_name}.blob.core.windows.net"
+            self._svc = BlobServiceClient(account_url=url, credential=account_key)
+        else:
+            raise ValueError("azure storage requires a connection string or account name + key")
+        try:
+            self._svc.create_container(container)
+        except Exception:
+            pass  # container already exists
+
+    def _blob(self, tenant_prefix: str, key: str):
+        return self._svc.get_blob_client(self.container, f"{tenant_prefix}/{key}")
+
+    def _tier(self):
+        try:
+            from azure.storage.blob import StandardBlobTier
+            return getattr(StandardBlobTier, (self.access_tier or "Cool").upper(), None)
+        except Exception:
+            return None
+
+    def put_object(self, tenant_prefix, key, data, immutable=True) -> str:
+        blob = self._blob(tenant_prefix, key)
+        kwargs = {"overwrite": True}
+        tier = self._tier()
+        if tier is not None:
+            kwargs["standard_blob_tier"] = tier
+        blob.upload_blob(data, **kwargs)
+        return f"azure://{self.container}/{tenant_prefix}/{key}"
+
+    def get_object(self, tenant_prefix, key) -> bytes:
+        return self._blob(tenant_prefix, key).download_blob().readall()
+
+    def put_manifest(self, tenant_prefix, snapshot_id, manifest) -> str:
+        return self.put_object(
+            tenant_prefix, f"manifests/{snapshot_id}.json",
+            json.dumps(manifest).encode(), immutable=True,
+        )
+
+
+def destination_from_service(kind: str, cfg: dict) -> Optional[ProtectionDestination]:
+    """Build a storage destination from a ServiceObject's merged config (linked
+    ConfigObject credentials + non-secret settings). Returns None if the kind is
+    unknown or required routing is missing."""
+    if kind == "storage-s3":
+        bucket = cfg.get("bucket")
+        if not bucket:
+            return None
+        return CVCloudDestination(
+            bucket=bucket,
+            region=cfg.get("region") or "us-east-1",
+            endpoint_url=cfg.get("endpoint_url") or None,
+            access_key=cfg.get("aws_access_key_id") or None,
+            secret_key=cfg.get("aws_secret_access_key") or None,
+            storage_class=cfg.get("storage_class") or "INTELLIGENT_TIERING",
+        )
+    if kind == "storage-azure":
+        container = cfg.get("container")
+        if not container:
+            return None
+        return AzureBlobDestination(
+            container=container,
+            connection_string=cfg.get("connection_string") or None,
+            account_url=cfg.get("account_url") or None,
+            account_name=cfg.get("account_name") or None,
+            account_key=cfg.get("account_key") or None,
+            access_tier=cfg.get("access_tier") or "Cool",
+        )
+    return None
+
+
+def _cv_cloud_from_service() -> Optional[ProtectionDestination]:
+    """Resolve the Arkive Cloud destination from the running node's selected
+    storage service object, if any."""
+    try:
+        from .services import self_storage_service
+        svc = self_storage_service()
+        if not svc:
+            return None
+        return destination_from_service(svc.get("kind", ""), svc.get("config") or {})
+    except Exception:
+        log.exception("failed to build cloud storage from node service object")
+        return None
+
+
 def build_destination(kind: str) -> ProtectionDestination:
-    """Factory honoring configuration; falls back to local FS for the prototype
-    when no S3 credentials are configured."""
-    if kind in ("cv-cloud", "customer-s3") and settings.aws_access_key_id:
-        cls = CVCloudDestination if kind == "cv-cloud" else CustomerS3Destination
-        return cls(
+    """Factory honoring configuration. Arkive Cloud (``cv-cloud``) resolves to the
+    storage service object selected on the running node (Amazon S3 / Azure Blob);
+    falls back to env-configured S3, then local FS for the prototype."""
+    if kind == "cv-cloud":
+        dest = _cv_cloud_from_service()
+        if dest is not None:
+            return dest
+        if settings.aws_access_key_id:
+            return CVCloudDestination(
+                bucket=settings.s3_bucket,
+                region=settings.s3_region,
+                endpoint_url=settings.s3_endpoint_url,
+                access_key=settings.aws_access_key_id,
+                secret_key=settings.aws_secret_access_key,
+            )
+        return LocalFsDestination()
+    if kind == "customer-s3" and settings.aws_access_key_id:
+        return CustomerS3Destination(
             bucket=settings.s3_bucket,
             region=settings.s3_region,
             endpoint_url=settings.s3_endpoint_url,

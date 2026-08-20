@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from typing import Dict, Optional
 from .config import get_settings
 
 settings = get_settings()
+log = logging.getLogger("arkive.auth")
 
 _RESEND_INTERVAL = 20
 _MAX_ATTEMPTS = 5
@@ -56,6 +58,9 @@ def issue_code(email: str, purpose: str) -> str:
         expires_at=now + settings.email_code_ttl_seconds,
         last_sent=now,
     )
+    # Always emit the code to the service log so sign-in is possible/diagnosable
+    # even when live email delivery is misconfigured (journalctl -u cv-cloud).
+    log.warning("sign-in code for %s (%s): %s", email, purpose, code)
     return code
 
 

@@ -34,7 +34,7 @@ export default function Admin() {
       {s === "nodes" && <Nodes />}
       {s === "config-objects" && <ConfigObjectsAdmin />}
       {s === "sources" && <SourcesAdmin />}
-      {s === "service-objects" && <EmailAdmin />}
+      {s === "service-objects" && <><ServiceObjectsAdmin /><EmailAdmin /></>}
       {s === "fleet" && <Fleet />}
       {s === "pricing" && <Pricing />}
       {s === "crypto" && <Crypto />}
@@ -318,9 +318,13 @@ function Reports() {
 
 function Nodes() {
   const [nodes, setNodes] = useState<any[]>([]);
+  const [svcs, setSvcs] = useState<ServiceObj[]>([]);
   const [toast, setToast] = useState("");
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
-  async function load() { try { setNodes(await api.get<any[]>("/admin/nodes")); } catch { /* ignore */ } }
+  async function load() {
+    try { setNodes(await api.get<any[]>("/admin/nodes")); } catch { /* ignore */ }
+    try { setSvcs(await api.get<ServiceObj[]>("/admin/service-objects")); } catch { /* ignore */ }
+  }
   useEffect(() => { void load(); const iv = setInterval(load, 15000); return () => clearInterval(iv); }, []);
 
   async function registerNode() {
@@ -338,6 +342,8 @@ function Nodes() {
     try { await api.post("/admin/nodes", r); flash("Node registered"); await load(); } catch { flash("Failed"); }
   }
   async function editNode(n: any) {
+    const storage = svcs.filter((x) => x.category === "storage");
+    const email = svcs.filter((x) => x.category === "email");
     const r = await formDialog({
       title: `Edit ${n.name}`, confirmLabel: "Save",
       fields: [
@@ -348,6 +354,10 @@ function Nodes() {
         { name: "endpoint", label: "Endpoint", defaultValue: n.endpoint },
         { name: "status", label: "Status", defaultValue: n.status,
           options: ["active", "draining", "maintenance", "offline"].map((v) => ({ label: v, value: v })) },
+        { name: "storage_service_id", label: "Storage service", defaultValue: n.storage_service_id || "",
+          options: [{ label: "— default (env / local) —", value: "" }, ...storage.map((x) => ({ label: `${x.name}${x.configured ? "" : " (incomplete)"}`, value: x.id }))] },
+        { name: "email_service_id", label: "Email service", defaultValue: n.email_service_id || "",
+          options: [{ label: "— default —", value: "" }, ...email.map((x) => ({ label: `${x.name}${x.configured ? "" : " (incomplete)"}`, value: x.id }))] },
       ],
     });
     if (!r) return;
@@ -402,6 +412,14 @@ function Nodes() {
                 {n.telemetry?.load && <span className="faint">Load {n.telemetry.load.join(" ")}{n.telemetry.cpus ? ` · ${n.telemetry.cpus} vCPU` : ""}</span>}
                 {n.telemetry?.recovery_points != null && <span className="faint">{n.telemetry.recovery_points.toLocaleString()} recovery pts</span>}
                 {n.endpoint && <span className="faint">{n.endpoint}</span>}
+              </div>
+              <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                <Pill tone={n.storage_service ? "info" : "warn"}>
+                  <Icon name="database" size={11} /> {n.storage_service || "Storage: default"}
+                </Pill>
+                <Pill tone={n.email_service ? "info" : "warn"}>
+                  <Icon name="mail" size={11} /> {n.email_service || "Email: default"}
+                </Pill>
               </div>
               <div className="row" style={{ gap: 8, marginTop: 12 }}>
                 <button className="btn ghost sm" onClick={() => editNode(n)}>Edit</button>
@@ -735,7 +753,7 @@ function EmailAdmin() {
     <>
       <Card style={{ marginBottom: 16 }}>
         <div className="spread" style={{ marginBottom: 12 }}>
-          <h3 style={{ margin: 0 }}>Email delivery (AWS SES)</h3>
+          <h3 style={{ margin: 0 }}>Default email service (AWS SES)</h3>
           <Pill tone={cfg.enabled ? "ok" : "warn"}>{cfg.enabled ? "Enabled" : "Disabled"}</Pill>
         </div>
         <div className="grid grid-3" style={{ gap: 12 }}>
@@ -834,6 +852,8 @@ interface ConfigKey { secret: boolean; set: boolean; value: string }
 interface ConfigObj { id: string; name: string; kind: string; keys: Record<string, ConfigKey>; updated_at?: string }
 interface SourceSlot { type: string; label: string; kind: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean }
 interface DraftRow { key: string; value: string; secret: boolean; set: boolean }
+interface ServiceKind { kind: string; label: string; category: string; credential_keys: string[]; settings: string[]; setting_defaults?: Record<string, string>; required: string[] }
+interface ServiceObj { id: string; name: string; kind: string; kind_label: string; category: string; enabled: boolean; config_object_id: string | null; settings: Record<string, string>; setting_keys: string[]; credential_keys: string[]; configured: boolean; updated_at?: string }
 
 function ConfigObjectsAdmin() {
   const [objects, setObjects] = useState<ConfigObj[]>([]);
@@ -987,5 +1007,163 @@ function SourcesAdmin() {
       </Card>
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
+  );
+}
+
+const STORAGE_CLASS_OPTS = ["INTELLIGENT_TIERING", "STANDARD_IA", "ONEZONE_IA", "STANDARD", "GLACIER_IR"];
+const ACCESS_TIER_OPTS = ["Hot", "Cool", "Cold"];
+
+function prettyKey(k: string) {
+  return k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+interface ServiceDraft { id?: string; name: string; kind: string; enabled: boolean; config_object_id: string; settings: Record<string, string> }
+
+function ServiceObjectsAdmin() {
+  const [items, setItems] = useState<ServiceObj[]>([]);
+  const [kinds, setKinds] = useState<ServiceKind[]>([]);
+  const [objects, setObjects] = useState<ConfigObj[]>([]);
+  const [toast, setToast] = useState("");
+  const [draft, setDraft] = useState<ServiceDraft | null>(null);
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3200); }
+
+  async function load() {
+    try { setItems(await api.get<ServiceObj[]>("/admin/service-objects")); } catch { /* ignore */ }
+    try { setKinds(await api.get<ServiceKind[]>("/admin/service-object-kinds")); } catch { /* ignore */ }
+    try { setObjects(await api.get<ConfigObj[]>("/admin/config-objects")); } catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); }, []);
+
+  function specFor(kind: string) { return kinds.find((k) => k.kind === kind); }
+  function newDraft(kind: string) {
+    const spec = specFor(kind);
+    setDraft({ name: "", kind, enabled: true, config_object_id: "", settings: { ...(spec?.setting_defaults || {}) } });
+  }
+  function editDraft(o: ServiceObj) {
+    setDraft({ id: o.id, name: o.name, kind: o.kind, enabled: o.enabled, config_object_id: o.config_object_id || "", settings: { ...(o.settings || {}) } });
+  }
+  async function saveDraft() {
+    if (!draft) return;
+    const payload = { name: draft.name || "Service", enabled: draft.enabled, config_object_id: draft.config_object_id || null, settings: draft.settings };
+    try {
+      if (draft.id) await api.put(`/admin/service-objects/${draft.id}`, payload);
+      else await api.post("/admin/service-objects", { ...payload, kind: draft.kind });
+      setDraft(null); flash("Service saved"); await load();
+    } catch { flash("Could not save"); }
+  }
+  async function delObject(o: ServiceObj) {
+    if (!await confirmDialog({ title: "Delete service object?", message: `Delete "${o.name}". Any node using it falls back to defaults.`, tone: "danger", confirmLabel: "Delete" })) return;
+    try { await api.del(`/admin/service-objects/${o.id}`); flash("Deleted"); await load(); } catch { flash("Delete failed"); }
+  }
+  async function testObject(o: ServiceObj) {
+    flash("Testing…");
+    try {
+      const r = await api.post<{ ok: boolean; error?: string | null }>(`/admin/service-objects/${o.id}/test`, {});
+      flash(r.ok ? "Storage reachable — write/read OK" : `Test failed: ${r.error || "unknown error"}`);
+    } catch { flash("Test failed"); }
+  }
+
+  const storage = items.filter((i) => i.category === "storage");
+  const email = items.filter((i) => i.category === "email");
+  const draftSpec = draft ? specFor(draft.kind) : undefined;
+  const settingOptions = (key: string): string[] | null =>
+    key === "storage_class" ? STORAGE_CLASS_OPTS : key === "access_tier" ? ACCESS_TIER_OPTS : null;
+
+  return (
+    <>
+      <Card style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ marginBottom: 10 }}>
+          <div>
+            <h3 style={{ margin: 0 }}>Service objects</h3>
+            <div className="muted" style={{ fontSize: 12.5 }}>Storage &amp; email backends for Arkive Cloud. Credentials come from a linked configuration object; assign a service to a node under Nodes.</div>
+          </div>
+          <div className="row" style={{ gap: 6 }}>
+            {kinds.map((k) => <button key={k.kind} className="btn sm" onClick={() => newDraft(k.kind)}>+ {k.label}</button>)}
+          </div>
+        </div>
+
+        {draft && (
+          <div style={{ border: "1px solid var(--border-soft)", borderRadius: 10, padding: 14, marginBottom: 12, background: "var(--inset)" }}>
+            <div className="row" style={{ gap: 8, marginBottom: 10 }}>
+              <Pill tone="info">{draftSpec?.label || draft.kind}</Pill>
+              <label className="row" style={{ gap: 6, fontSize: 12.5, marginLeft: "auto" }}>
+                <input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} /> Enabled
+              </label>
+            </div>
+            <div className="grid grid-2" style={{ gap: 12, marginBottom: 10 }}>
+              <Field label="Name"><input className="input sm" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. Arkive US-East S3" /></Field>
+              <Field label={`Configuration object (${(draftSpec?.credential_keys || []).join(", ")})`}>
+                <select className="input sm" value={draft.config_object_id} onChange={(e) => setDraft({ ...draft, config_object_id: e.target.value })}>
+                  <option value="">— none —</option>
+                  {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div className="grid grid-2" style={{ gap: 12 }}>
+              {(draftSpec?.settings || []).map((key) => {
+                const opts = settingOptions(key);
+                return (
+                  <Field key={key} label={prettyKey(key)}>
+                    {opts ? (
+                      <select className="input sm" value={draft.settings[key] || ""} onChange={(e) => setDraft({ ...draft, settings: { ...draft.settings, [key]: e.target.value } })}>
+                        {opts.map((o) => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    ) : (
+                      <input className="input sm" value={draft.settings[key] || ""}
+                             onChange={(e) => setDraft({ ...draft, settings: { ...draft.settings, [key]: e.target.value } })}
+                             placeholder={draftSpec?.required?.includes(key) ? "required" : "optional"} />
+                    )}
+                  </Field>
+                );
+              })}
+            </div>
+            <div className="row" style={{ gap: 8, marginTop: 12 }}>
+              <button className="btn primary sm" onClick={saveDraft}>Save</button>
+              <button className="btn ghost sm" onClick={() => setDraft(null)}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        <ServiceTable title="Storage services" rows={storage} onEdit={editDraft} onDelete={delObject} onTest={testObject} testable />
+        <div style={{ height: 14 }} />
+        <ServiceTable title="Email services" rows={email} onEdit={editDraft} onDelete={delObject} onTest={testObject} />
+        <div className="muted" style={{ fontSize: 12, marginTop: 12 }}>
+          Storage services back Arkive Cloud: mappings routed to <b>cv-cloud</b> store and restore through
+          the storage service selected on the running node. S3 defaults to Intelligent-Tiering and Azure to the
+          Cool tier for low cost while keeping restore instant.
+        </div>
+      </Card>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+}
+
+function ServiceTable({ title, rows, onEdit, onDelete, onTest, testable }: {
+  title: string; rows: ServiceObj[]; onEdit: (o: ServiceObj) => void; onDelete: (o: ServiceObj) => void; onTest: (o: ServiceObj) => void; testable?: boolean;
+}) {
+  return (
+    <div>
+      <div className="faint" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 6px" }}>{title}</div>
+      <table className="table">
+        <thead><tr><th>Name</th><th>Backend</th><th>Routing</th><th>Enabled</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          {rows.map((o) => (
+            <tr key={o.id}>
+              <td style={{ fontWeight: 600 }}>{o.name}</td>
+              <td><Pill tone="info">{o.kind_label}</Pill></td>
+              <td className="faint" style={{ fontSize: 11.5 }}>{o.setting_keys.map((k) => o.settings[k] ? `${k}=${o.settings[k]}` : null).filter(Boolean).join(" · ") || "—"}</td>
+              <td>{o.enabled ? <Pill tone="ok">on</Pill> : <Pill tone="warn">off</Pill>}</td>
+              <td><Pill tone={o.configured ? "ok" : "warn"}>{o.configured ? "Configured" : "Incomplete"}</Pill></td>
+              <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                {testable && <><button className="btn ghost sm" onClick={() => onTest(o)}>Test</button>{" "}</>}
+                <button className="btn ghost sm" onClick={() => onEdit(o)}>Edit</button>{" "}
+                <button className="btn danger sm" onClick={() => onDelete(o)}>Delete</button>
+              </td>
+            </tr>
+          ))}
+          {rows.length === 0 && <tr><td colSpan={6} className="muted">None configured.</td></tr>}
+        </tbody>
+      </table>
+    </div>
   );
 }
