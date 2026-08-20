@@ -330,7 +330,7 @@ class Agent:
         can expand the tree lazily beyond the pre-built index's bounds."""
         ok, err = True, None
         try:
-            s = files_collector.scan(path, max_entries=5000)
+            s = files_collector.scan(path, max_entries=800)
             children = [{"path": d["path"], "name": d["name"], "files": 0,
                          "children": [], "hasMore": bool(d.get("hasChildren"))}
                         for d in s.get("dirs", [])]

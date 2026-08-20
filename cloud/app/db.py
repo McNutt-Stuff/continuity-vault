@@ -115,6 +115,11 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE appliance_storages ALTER COLUMN used_bytes TYPE BIGINT",
         "ALTER TABLE snapshot_receipts ALTER COLUMN total_bytes TYPE BIGINT",
         "ALTER TABLE search_documents ALTER COLUMN size_bytes TYPE BIGINT",
+        # One-time: clear any oversized agent folder-index blobs (older agents
+        # built multi-million-node trees) so reading them can't OOM the process.
+        # Done in SQL so the giant JSON is never loaded into Python.
+        "UPDATE desktop_agents SET last_scan = NULL, fs_expansions = NULL "
+        "WHERE last_scan IS NOT NULL AND length(CAST(last_scan AS TEXT)) > 4000000",
     ]
     for statement in statements:
         try:

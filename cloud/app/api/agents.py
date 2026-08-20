@@ -663,7 +663,20 @@ def fs_scan_result(body: FsScanResultBody, agent: DesktopAgent = Depends(_auth_a
     scan["at"] = _now().isoformat()
     if body.error:
         scan["error"] = body.error
+    # Guard: never persist a giant tree (older agents could send millions of
+    # nodes) — reading it back would balloon memory. Cap by node count/size; the
+    # portal lazy-loads deeper folders on demand instead.
+    try:
+        import json as _json
+        too_big = (int(scan.get("nodes") or 0) > 30000
+                   or len(_json.dumps(scan)) > 6_000_000)
+    except Exception:
+        too_big = False
+    if too_big:
+        scan = {"roots": [], "nodes": 0, "at": scan["at"], "too_large": True,
+                "request_id": body.request_id, "ok": True}
     agent.last_scan = scan
+    agent.fs_expansions = {}  # stale once a fresh index lands
     db.commit()
     return {"ok": True}
 
@@ -685,8 +698,8 @@ def fs_expand_result(body: FsExpandResultBody, agent: DesktopAgent = Depends(_au
                        "error": body.error, "result": body.result,
                        "at": _now().isoformat()}
     # Cap growth: keep the most recent expansions only.
-    if len(exps) > 400:
-        for k in sorted(exps, key=lambda k: exps[k].get("at", ""))[:len(exps) - 400]:
+    if len(exps) > 60:
+        for k in sorted(exps, key=lambda k: exps[k].get("at", ""))[:len(exps) - 60]:
             exps.pop(k, None)
     agent.fs_expansions = exps
     db.commit()

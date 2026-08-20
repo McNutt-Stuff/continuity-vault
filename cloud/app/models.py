@@ -24,7 +24,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import deferred, relationship
 
 from .db import Base
 
@@ -245,8 +245,11 @@ class DesktopAgent(Base):
     pending_command = Column(JSON, nullable=True)  # legacy single slot (drained first)
     pending_commands = Column(JSON, default=list)  # FIFO queue of {type, params}
     telemetry = Column(JSON, default=dict)
-    last_scan = Column(JSON, nullable=True)  # latest endpoint filesystem scan result
-    fs_expansions = Column(JSON, default=dict)  # lazy per-folder expansions {path: {...}}
+    # Large blobs (the whole folder tree + cached expansions) — DEFERRED so routine
+    # queries (agents list, activity, collections) don't pull megabytes per agent
+    # into memory; only the folder-picker endpoints that read them pay the cost.
+    last_scan = deferred(Column(JSON, nullable=True))  # latest endpoint filesystem scan result
+    fs_expansions = deferred(Column(JSON, default=dict))  # lazy per-folder expansions {path: {...}}
     identity_bundle = Column(JSON, nullable=True)
     agent_token_hash = Column(String, nullable=True, index=True)  # sha256 of bearer token
     last_heartbeat_at = Column(DateTime, nullable=True)

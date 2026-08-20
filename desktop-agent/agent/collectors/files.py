@@ -36,12 +36,13 @@ _ROOT_SKIP = {
     "Users", "home", "Volumes", "mnt", "media",
 }
 _DEFAULT_MAX_BYTES = 100 * 1024 * 1024   # 100 MiB per file
-# Bounds for the cached folder index. Generous enough to cover an entire real
-# filesystem hierarchy while capping pathological cases so a rebuild stays sane.
-_INDEX_MAX_DEPTH = 24
-_INDEX_ROOT_DEPTH = 24     # the system root ("/") is indexed deep too (minus system trees)
-_INDEX_MAX_ENTRIES = 1500  # subfolders indexed per directory
-_INDEX_MAX_NODES = 5000000   # total folders across the whole index
+# Bounds for the cached folder index. Kept SMALL — the portal lazy-loads deeper
+# folders on demand (fs-expand), so the up-front tree only needs to be shallow.
+# A huge index would bloat the agent record's JSON blob and balloon cloud memory.
+_INDEX_MAX_DEPTH = 5
+_INDEX_ROOT_DEPTH = 5      # the system root ("/") is indexed shallow (minus system trees)
+_INDEX_MAX_ENTRIES = 300   # subfolders indexed per directory (rest via lazy expand)
+_INDEX_MAX_NODES = 8000    # total folders across the whole up-front index
 _DEFAULT_MAX_FILES = 5000                # safety cap per collection run
 
 # Extension -> canonical kind (matches the server taxonomy KINDS).
