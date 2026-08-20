@@ -503,9 +503,19 @@ def heartbeat(body: AgentHeartbeat, request: Request,
         if merged != (agent.collectors or []):
             agent.collectors = merged
     agent.last_heartbeat_at = _now()
-    command = agent.dequeue_command()  # one command per heartbeat (FIFO queue)
+    # Drain several commands per heartbeat so interactive work (folder expansion)
+    # isn't throttled to one per cycle. `command` (singular) stays for older agents.
+    commands = []
+    for _ in range(25):
+        c = agent.dequeue_command()
+        if not c:
+            break
+        commands.append(c)
     db.commit()
-    return {"config": agent.config, "command": command,
+    return {"config": agent.config,
+            "command": commands[0] if commands else None,
+            "commands": commands,
+            "pending_more": agent.has_pending_command,
             "mappings": _agent_mappings(db, agent),
             "latest_version": _agent_bundle_version(),
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}

@@ -755,12 +755,9 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
     const path = node.path;
     const willExpand = !expanded.has(path);
     setExpanded((cur) => { const n = new Set(cur); n.has(path) ? n.delete(path) : n.add(path); return n; });
-    // Lazily fetch children the pre-built index didn't include (truncated or
-    // depth-limited folders), so the operator can drill into anything.
-    if (willExpand) {
-      const hasKids = (node.children && node.children.length) || (lazyKids[path]?.length);
-      if (!hasKids && node.hasMore) void loadChildren(path);
-    }
+    // Lazily fetch children the pre-built index didn't fully include (truncated
+    // or depth-limited folders), so the operator can drill into anything.
+    if (willExpand && node.hasMore) void loadChildren(path);
   }
   async function loadChildren(path: string) {
     if (lazyKids[path] || loadingPaths.has(path)) return;
@@ -801,7 +798,8 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
   function renderNode(node: FsNode, depth: number) {
     const isSel = selected.has(node.path);
     const isExp = expanded.has(node.path);
-    const kids = (node.children && node.children.length) ? node.children : (lazyKids[node.path] || []);
+    // Prefer a freshly loaded child list (replaces a truncated indexed set).
+    const kids = lazyKids[node.path] ?? (node.children || []);
     const isLoading = loadingPaths.has(node.path);
     const canExpand = kids.length > 0 || node.hasMore;
     return (

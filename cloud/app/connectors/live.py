@@ -631,10 +631,54 @@ def fetch_google_calendar(access_token: str,
                     break
 
 
+def fetch_google_photos(access_token: str,
+                        content_cap: int = _DEFAULT_CAP,
+                        options: Optional[dict] = None) -> Iterable[SourceObject]:
+    """Back up the Google Photos library (photos + videos) via the Library API.
+
+    Each media item's bytes are downloaded from its ``baseUrl`` (``=d`` original
+    for photos, ``=dv`` for videos), honoring the per-object content cap."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = "https://photoslibrary.googleapis.com/v1/mediaItems"
+    with httpx.Client(timeout=60) as c:
+        token: Optional[str] = None
+        while True:
+            params = {"pageSize": 100}
+            if token:
+                params["pageToken"] = token
+            r = c.get(url, headers=headers, params=params)
+            if r.status_code >= 400:
+                logger.warning("Google Photos API %s: %s (enable the Photos Library API "
+                               "and grant photoslibrary.readonly)", r.status_code, r.text[:300])
+                return
+            body = r.json()
+            for m in body.get("mediaItems", []):
+                mime = m.get("mimeType", "")
+                is_video = mime.startswith("video/")
+                base_url = m.get("baseUrl", "")
+                dl = f"{base_url}={'dv' if is_video else 'd'}" if base_url else ""
+                data, backed = _download(dl, content_cap) if dl else (b"", False)
+                meta = m.get("mediaMetadata") or {}
+                yield SourceObject(
+                    object_id=f"google_photos:{m.get('id')}",
+                    doc_type="video" if is_video else "photo",
+                    category="photo", title=m.get("filename") or "Photo",
+                    content=data,
+                    preview=f"{mime} · {meta.get('width', '')}x{meta.get('height', '')}".strip(" ·"),
+                    meta={"filename": m.get("filename"), "mime": mime,
+                          "kind": "video" if is_video else "photo",
+                          "created": meta.get("creationTime"),
+                          "content_backed_up": backed},
+                    labels=["Google Photos"],
+                    size_bytes=len(data) or 0)
+            token = body.get("nextPageToken")
+            if not token:
+                break
+
+
 # --------------------------------------------------------------------------- #
 # Social: Reddit, Facebook, Instagram                                         #
 # --------------------------------------------------------------------------- #
-
 def _want(options: Optional[dict], category: str) -> bool:
     """True when a content category is selected (empty selection = include all)."""
     inc = (options or {}).get("includeCategories") or []

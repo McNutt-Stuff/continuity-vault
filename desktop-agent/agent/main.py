@@ -230,9 +230,22 @@ class Agent:
         if isinstance(mappings, list):
             self._mappings = mappings
         self._run_due_collects()
-        command = data.get("command")
-        if command:
-            self._handle_command(command)
+        # Handle every command the cloud drained this cycle (new agents), falling
+        # back to the single `command` field for older payloads.
+        commands = data.get("commands")
+        handled = 0
+        if isinstance(commands, list) and commands:
+            for c in commands:
+                self._handle_command(c)
+            handled = len(commands)
+        else:
+            command = data.get("command")
+            if command:
+                self._handle_command(command)
+                handled = 1
+        # Poll again quickly when we did command work or more is queued, so
+        # interactive folder browsing isn't throttled to one folder per cycle.
+        self._fast_poll = handled > 0 or bool(data.get("pending_more"))
         return data
 
     def _maybe_self_update(self, latest: Optional[str]) -> None:
@@ -624,13 +637,15 @@ class Agent:
         self._start_indexer()  # background folder-index builder
         self._start_worker()   # background collection worker
         interval = self.reg.get("heartbeat_interval_seconds", 30)
+        idle = min(int(interval or 30), 15)  # cap idle poll so first command lands sooner
         while True:
             try:
                 self.heartbeat()  # heartbeat pulls mappings + runs due collects
             except Exception as exc:
                 self.log.error("loop error: %s", exc)
                 self._write_status({"error": str(exc)})
-            time.sleep(interval)
+                self._fast_poll = False
+            time.sleep(2 if getattr(self, "_fast_poll", False) else idle)
 
 
 def main(argv=None) -> None:

@@ -12,6 +12,8 @@ interface CatalogItem {
   authType: string;
   icon: string;
   color: string;
+  family: string;
+  category: string;
   docTypes: string[];
   mode: "oauth" | "token";
   configured: boolean;
@@ -36,6 +38,8 @@ export default function Connectors() {
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [setup, setSetup] = useState<CatalogItem | null>(null);
   const [toast, setToast] = useState("");
+  const [query, setQuery] = useState("");
+  const [groupBy, setGroupBy] = useState<"category" | "family">("category");
 
   async function load() {
     setCatalog(await api.get<CatalogItem[]>("/connectors/catalog"));
@@ -215,38 +219,86 @@ export default function Connectors() {
     }
   }
 
+  // Group the catalog by functional type or provider family so the page stays
+  // organized as more sources are added.
+  const TYPE_ORDER = ["Email", "Files & Storage", "Photos", "Social", "Contacts", "Calendar", "Passwords", "Other"];
+  const filtered = catalog.filter((c) => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return c.displayName.toLowerCase().includes(q) || (c.family || "").toLowerCase().includes(q)
+      || (c.category || "").toLowerCase().includes(q) || c.type.includes(q);
+  });
+  const groups = new Map<string, CatalogItem[]>();
+  for (const c of filtered) {
+    const key = (groupBy === "family" ? c.family : c.category) || "Other";
+    const arr = groups.get(key);
+    if (arr) arr.push(c); else groups.set(key, [c]);
+  }
+  const groupKeys = [...groups.keys()].sort((a, b) => {
+    if (groupBy === "category") {
+      const ia = TYPE_ORDER.indexOf(a), ib = TYPE_ORDER.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+    }
+    return a.localeCompare(b);
+  });
+
   return (
     <>
       <Card style={{ marginBottom: 16 }}>
-        <h2 style={{ marginBottom: 4 }}>Connect a source</h2>
-        <div className="muted" style={{ marginBottom: 16, fontSize: 13 }}>
-          You authorize each service through its own consent screen. Data is encrypted before
-          it leaves the connector environment. Tokens are stored encrypted at rest.
+        <div className="spread" style={{ marginBottom: 4, alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <h2 style={{ marginBottom: 4 }}>Connect a source</h2>
+            <div className="muted" style={{ fontSize: 13, maxWidth: 520 }}>
+              You authorize each service through its own consent screen. Data is encrypted before
+              it leaves the connector environment. Tokens are stored encrypted at rest.
+            </div>
+          </div>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <input className="input sm" placeholder="Search sources…" value={query}
+                   onChange={(e) => setQuery(e.target.value)} style={{ width: 180 }} />
+            {(["category", "family"] as const).map((g) => (
+              <button key={g} className={`btn sm ${groupBy === g ? "primary" : "ghost"}`}
+                      onClick={() => setGroupBy(g)}>
+                {g === "category" ? "By type" : "By family"}
+              </button>
+            ))}
+          </div>
         </div>
-        <div className="grid grid-3">
-          {catalog.map((c) => (
-            <div key={c.type} className="dest-card" onClick={() => connect(c)}>
-              <div className="spread" style={{ marginBottom: 10 }}>
-                <div className="row">
-                  <div className="result-icon" style={{ background: brandForSource(c.type) ? "var(--inset)" : c.color, width: 34, height: 34 }}>
-                    {brandForSource(c.type)
-                      ? <BrandIcon name={brandForSource(c.type)!} size={19} />
-                      : <Icon name={c.icon as IconName} size={17} />}
-                  </div>
-                  <div>
-                    <div style={{ fontWeight: 650 }}>{c.displayName}</div>
-                    <div className="faint" style={{ fontSize: 11.5 }}>{c.mode === "oauth" ? "OAuth" : "Token"}</div>
-                  </div>
-                </div>
-                {c.requiresAgent
-                  ? <Pill tone="info">Desktop agent</Pill>
-                  : c.mode === "oauth" && !c.configured
-                  ? <Pill tone="warn">Needs setup</Pill>
-                  : <Pill tone="ok">Ready</Pill>}
+        <div className="stack" style={{ gap: 18, marginTop: 14 }}>
+          {groupKeys.map((gk) => (
+            <div key={gk}>
+              <div className="row" style={{ gap: 8, marginBottom: 10, alignItems: "center" }}>
+                <div className="nav-section" style={{ padding: 0 }}>{gk}</div>
+                <span className="faint" style={{ fontSize: 11 }}>{groups.get(gk)!.length}</span>
               </div>
-              <div className="faint" style={{ fontSize: 12 }}>{c.docTypes.join(" · ")}</div>
+              <div className="grid grid-3">
+                {groups.get(gk)!.map((c) => (
+                  <div key={c.type} className="dest-card" onClick={() => connect(c)}>
+                    <div className="spread" style={{ marginBottom: 10 }}>
+                      <div className="row">
+                        <div className="result-icon" style={{ background: brandForSource(c.type) ? "var(--inset)" : c.color, width: 34, height: 34 }}>
+                          {brandForSource(c.type)
+                            ? <BrandIcon name={brandForSource(c.type)!} size={19} />
+                            : <Icon name={c.icon as IconName} size={17} />}
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 650 }}>{c.displayName}</div>
+                          <div className="faint" style={{ fontSize: 11.5 }}>{groupBy === "category" ? c.family : c.category}</div>
+                        </div>
+                      </div>
+                      {c.requiresAgent
+                        ? <Pill tone="info">Desktop agent</Pill>
+                        : c.mode === "oauth" && !c.configured
+                        ? <Pill tone="warn">Needs setup</Pill>
+                        : <Pill tone="ok">Ready</Pill>}
+                    </div>
+                    <div className="faint" style={{ fontSize: 12 }}>{c.docTypes.join(" · ")}</div>
+                  </div>
+                ))}
+              </div>
             </div>
           ))}
+          {groupKeys.length === 0 && <div className="muted">No sources match “{query}”.</div>}
         </div>
       </Card>
 

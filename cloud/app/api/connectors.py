@@ -70,6 +70,31 @@ def _setup_instructions(connector_type: str) -> list[str]:
     return []
 
 
+# Source families (who provides the account) and functional types, used to group
+# the Sources page into sections as the catalog grows.
+_SOURCE_FAMILY = {
+    "gmail": "Google", "google_contacts": "Google", "google_calendar": "Google",
+    "google_photos": "Google",
+    "outlook": "Microsoft", "onedrive": "Microsoft",
+    "icloud": "Apple",
+    "dropbox": "Dropbox",
+    "onepassword": "1Password",
+    "reddit": "Reddit", "facebook": "Meta", "instagram": "Meta",
+    "endpoint_files": "Device", "custom": "Custom",
+}
+_SOURCE_TYPE = {
+    "gmail": "Email", "outlook": "Email",
+    "onedrive": "Files & Storage", "dropbox": "Files & Storage",
+    "icloud": "Files & Storage", "endpoint_files": "Files & Storage",
+    "google_photos": "Photos",
+    "google_contacts": "Contacts",
+    "google_calendar": "Calendar",
+    "onepassword": "Passwords",
+    "reddit": "Social", "facebook": "Social", "instagram": "Social",
+    "custom": "Other",
+}
+
+
 @router.get("/catalog")
 def catalog(tenant: Tenant = Depends(security.get_tenant)):
     from .. import platform_config
@@ -88,6 +113,8 @@ def catalog(tenant: Tenant = Depends(security.get_tenant)):
             "authType": spec.auth_type,
             "icon": spec.icon,
             "color": spec.color,
+            "family": _SOURCE_FAMILY.get(ctype, "Other"),
+            "category": _SOURCE_TYPE.get(ctype, "Other"),
             "docTypes": spec.doc_types,
             "mode": mode,
             "configured": oauth.is_configured(ctype),
@@ -210,6 +237,28 @@ def list_accounts(tenant: Tenant = Depends(security.get_tenant),
              "scopes": a.scopes} for a in accounts]
 
 
+class AccountRename(BaseModel):
+    account_label: str
+
+
+@router.put("/accounts/{account_id}")
+def rename_account(account_id: str, body: AccountRename,
+                   principal: security.Principal = Depends(security.get_principal),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    account = db.get(ConnectorAccount, account_id)
+    if not account or account.tenant_id != tenant.id:
+        raise HTTPException(404, "account not found")
+    label = (body.account_label or "").strip()
+    if not label:
+        raise HTTPException(400, "name required")
+    account.account_label = label
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="connector.renamed",
+                 tenant_id=tenant.id, resource=account_id, detail={"label": label})
+    return {"id": account.id, "account_label": account.account_label}
+
+
 @router.delete("/accounts/{account_id}")
 def unlink(account_id: str,
            principal: security.Principal = Depends(security.require_security_admin),
@@ -239,7 +288,7 @@ def _fetch_account_label(connector_type: str, tokens: dict) -> str | None:
                 r = client.get("https://gmail.googleapis.com/gmail/v1/users/me/profile",
                                headers=headers)
                 return r.json().get("emailAddress")
-            if connector_type in ("google_contacts", "google_calendar"):
+            if connector_type in ("google_contacts", "google_calendar", "google_photos"):
                 r = client.get("https://www.googleapis.com/oauth2/v3/userinfo",
                                headers=headers)
                 return r.json().get("email")

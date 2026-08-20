@@ -465,6 +465,44 @@ class GoogleCalendarConnector(Connector):
 
 
 @register_connector
+class GooglePhotosConnector(Connector):
+    connector_type = "google_photos"
+    display_name = "Google Photos"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            supports_pagination=True,
+            searchable_fields=["filename", "mime", "kind"],
+            facet_fields=["kind"],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="oauth2",
+            authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+            token_url="https://oauth2.googleapis.com/token",
+            scopes=["https://www.googleapis.com/auth/photoslibrary.readonly"],
+            icon="image", color="#fbbc05", doc_types=["photo", "video"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_google_photos(config["access_token"], _content_cap())
+            return
+        for i, (name, kind) in enumerate([("IMG_2043.jpg", "photo"),
+                                          ("Birthday.mp4", "video")]):
+            yield SourceObject(
+                object_id=_oid(self.connector_type, account_label, i),
+                doc_type=kind, category="photo", title=name,
+                content=f"[google photos {name}]".encode(),
+                preview=f"{kind} · Google Photos",
+                meta={"filename": name, "kind": kind}, labels=["Google Photos"],
+                modified_at=_dt(i))
+
+
+@register_connector
 class RedditConnector(Connector):
     connector_type = "reddit"
     display_name = "Reddit"
