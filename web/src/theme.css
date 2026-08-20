@@ -14,6 +14,15 @@
   --warn: #f5a623;
   --danger-c: #f2545b;
   --ok: #35d0a5;
+  /* Mode-specific surfaces (flip in light mode). --inset = the small dark inset
+     background used inline for icon chips / bars / bars. */
+  --inset: #0e1524;
+  --body-glow: #16203a;
+  --sidebar-a: #0e1421;
+  --sidebar-b: #0b0f17;
+  --topbar-bg: rgba(11, 15, 23, .82);
+  --code-bg: rgba(0, 0, 0, .28);
+  --hover: rgba(255, 255, 255, .02);
   --radius: 12px;
   --radius-sm: 8px;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
@@ -21,12 +30,33 @@
   --mono: "SFMono-Regular", ui-monospace, "JetBrains Mono", monospace;
 }
 
+[data-theme="light"] {
+  --bg: #f4f6fb;
+  --bg-elev: #ffffff;
+  --bg-elev-2: #eef1f7;
+  --panel: #ffffff;
+  --border: #d5dcea;
+  --border-soft: #e6eaf2;
+  --text: #16203a;
+  --text-dim: #55617a;
+  --text-faint: #8a94a7;
+  --brand-2: #3a67e6;
+  --inset: #eef1f7;
+  --body-glow: #e8eefb;
+  --sidebar-a: #ffffff;
+  --sidebar-b: #f4f6fb;
+  --topbar-bg: rgba(255, 255, 255, .82);
+  --code-bg: rgba(11, 17, 32, .05);
+  --hover: rgba(11, 17, 32, .03);
+  --shadow: 0 8px 30px rgba(11, 17, 32, 0.08);
+}
+
 * { box-sizing: border-box; }
 
 html, body, #root { height: 100%; margin: 0; }
 
 body {
-  background: radial-gradient(1200px 800px at 80% -10%, #16203a 0%, var(--bg) 55%);
+  background: radial-gradient(1200px 800px at 80% -10%, var(--body-glow) 0%, var(--bg) 55%);
   color: var(--text);
   font-family: var(--font);
   font-size: 14px;
@@ -47,7 +77,7 @@ h3 { font-size: 15px; }
 /* Layout */
 .app-shell { display: grid; grid-template-columns: 244px 1fr; height: 100vh; }
 .sidebar {
-  background: linear-gradient(180deg, #0e1421, #0b0f17);
+  background: linear-gradient(180deg, var(--sidebar-a), var(--sidebar-b));
   border-right: 1px solid var(--border-soft);
   padding: 20px 14px; display: flex; flex-direction: column; gap: 6px;
 }
@@ -73,7 +103,7 @@ h3 { font-size: 15px; }
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
   padding: 16px 28px; border-bottom: 1px solid var(--border-soft);
-  position: sticky; top: 0; background: rgba(11,15,23,.82); backdrop-filter: blur(10px); z-index: 5;
+  position: sticky; top: 0; background: var(--topbar-bg); backdrop-filter: blur(10px); z-index: 5;
 }
 .content { padding: 26px 28px 60px; max-width: 1180px; }
 
@@ -198,14 +228,14 @@ h3 { font-size: 15px; }
   border: 1px solid rgba(245,166,35,.35); background: rgba(245,166,35,.07); border-radius: 10px; }
 .log-pane { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; line-height: 1.5;
   white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto; margin: 0;
-  padding: 12px; background: rgba(0,0,0,.28); border: 1px solid var(--border-soft); border-radius: 10px; }
+  padding: 12px; background: var(--code-bg); border: 1px solid var(--border-soft); border-radius: 10px; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
 
 /* Source tag shown on each search result */
 .src-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px;
   font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid;
-  background: rgba(255,255,255,.02); white-space: nowrap; }
+  background: var(--hover); white-space: nowrap; }
 
 /* Compact unified-search filter toolbar */
 .filter-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 10px; }
@@ -264,7 +294,7 @@ h3 { font-size: 15px; }
 .audit-row.warn { box-shadow: inset 3px 0 0 #f5a623; }
 .audit-row.crit { box-shadow: inset 3px 0 0 var(--danger-c); }
 .audit-main { display: flex; align-items: center; gap: 12px; padding: 11px 6px; cursor: pointer; }
-.audit-main:hover { background: rgba(255,255,255,.02); }
+.audit-main:hover { background: var(--hover); }
 .audit-sev { display: inline-flex; align-items: center; justify-content: center;
   width: 30px; height: 30px; border-radius: 8px; flex: none;
   color: var(--text-dim); background: var(--bg-elev-2); }

@@ -142,7 +142,7 @@ export default function Agents() {
           </div>
           {code && (
             <>
-              <div className="card" style={{ marginTop: 14, textAlign: "center", background: "#0e1421" }}>
+              <div className="card" style={{ marginTop: 14, textAlign: "center", background: "var(--bg-elev)" }}>
                 <div className="faint" style={{ fontSize: 12 }}>Agent linking code (valid 15 min)</div>
                 <div className="mono" style={{ fontSize: 26, letterSpacing: 2, margin: "8px 0" }}>{code}</div>
               </div>

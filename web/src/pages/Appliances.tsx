@@ -187,13 +187,13 @@ export default function Appliances() {
             just a linking code to enter on a pre-installed appliance console.
           </div>
           {code && (
-            <div className="card" style={{ marginTop: 14, textAlign: "center", background: "#0e1421" }}>
+            <div className="card" style={{ marginTop: 14, textAlign: "center", background: "var(--bg-elev)" }}>
               <div className="faint" style={{ fontSize: 12 }}>Linking code (valid 15 min)</div>
               <div className="mono" style={{ fontSize: 26, letterSpacing: 2, margin: "8px 0" }}>{code}</div>
             </div>
           )}
           {installCmd && (
-            <div className="card" style={{ marginTop: 14, background: "#0e1421" }}>
+            <div className="card" style={{ marginTop: 14, background: "var(--bg-elev)" }}>
               <div className="spread" style={{ marginBottom: 6 }}>
                 <div className="faint" style={{ fontSize: 12 }}>One-line install (run as sudo on Ubuntu)</div>
                 <button
@@ -512,7 +512,7 @@ function StoredDataCard({ a }: { a: Appliance }) {
         const brand = brandForSource(s.source_type);
         return (
           <div key={i} className="result-row">
-            <div className="result-icon" style={{ background: brand ? "#0e1524" : "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 34, height: 34 }}>
+            <div className="result-icon" style={{ background: brand ? "var(--inset)" : "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 34, height: 34 }}>
               {brand ? <BrandIcon name={brand} size={17} /> : <Icon name="database" size={16} />}
             </div>
             <div className="flex1">

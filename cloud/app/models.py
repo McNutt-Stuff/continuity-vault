@@ -534,3 +534,28 @@ class Node(Base):
     last_heartbeat_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 
+
+class ConfigObject(Base):
+    """A named, encrypted key-value credential/config bundle managed by platform
+    admins (OAuth client id/secret, API keys, SES creds…). Linked to platform
+    sources via SourceConfig. Values are stored encrypted (credstore, 'platform')."""
+
+    __tablename__ = "config_objects"
+    id = Column(String, primary_key=True, default=_uuid)
+    name = Column(String, nullable=False)
+    kind = Column(String, default="generic")  # oauth | api-key | ses | generic
+    encrypted_values = Column(Text, default="")
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class SourceConfig(Base):
+    """Per-integration platform setting: whether a source is enabled and which
+    ConfigObject supplies its credentials (one row per connector type / 'ses')."""
+
+    __tablename__ = "source_configs"
+    connector_type = Column(String, primary_key=True)
+    enabled = Column(Boolean, default=True)
+    config_object_id = Column(String, nullable=True)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+

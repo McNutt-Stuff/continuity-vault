@@ -76,6 +76,19 @@ def _config() -> dict:
                 }
     except Exception as exc:  # DB not ready (e.g. first boot) — use fallback
         log.debug("email config load failed, using fallback: %s", exc)
+    # Admin Config Object linked to the "ses" source overrides credentials/routing.
+    try:
+        from .platform_config import source_values
+        ov = source_values("ses")
+        for k in ("from_email", "from_name", "reply_to", "region"):
+            if ov.get(k):
+                cfg[k] = ov[k]
+        if ov.get("aws_access_key_id"):
+            cfg["aws_access_key_id"] = ov["aws_access_key_id"]
+        if ov.get("aws_secret_access_key"):
+            cfg["aws_secret"] = ov["aws_secret_access_key"]
+    except Exception:
+        pass
     _cfg_cache, _cfg_at = cfg, time.time()
     return cfg
 

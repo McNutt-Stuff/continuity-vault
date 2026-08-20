@@ -364,7 +364,7 @@ export default function Mappings() {
           const editing = editId === m.id;
           return (
             <div key={m.id} className="result-row" style={{ alignItems: "flex-start" }}>
-              <div className="result-icon" style={{ background: brand ? "#0e1524" : "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
+              <div className="result-icon" style={{ background: brand ? "var(--inset)" : "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
                 {brand ? <BrandIcon name={brand} size={18} /> : <Icon name="database" size={17} />}
               </div>
               <div className="flex1">

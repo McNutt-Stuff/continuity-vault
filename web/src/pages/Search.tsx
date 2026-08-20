@@ -502,7 +502,7 @@ export default function Search() {
           </div>
           {recovered.map((it) => (
             <div key={it.id} className="result-row" style={{ padding: "8px 0" }}>
-              <div className="result-icon" style={{ width: 30, height: 30, background: "#0e1524" }}>
+              <div className="result-icon" style={{ width: 30, height: 30, background: "var(--inset)" }}>
                 {brandForSource(it.source_type)
                   ? <BrandIcon name={brandForSource(it.source_type)!} size={16} />
                   : <Icon name="file" size={14} />}
@@ -629,11 +629,11 @@ export default function Search() {
       )}
 
       {data?.results.map((r) => {
-        const sm = SOURCE_META[r.source_type] ?? { color: "#1a2234", icon: "database" as IconName, label: r.source_type };
+        const sm = SOURCE_META[r.source_type] ?? { color: "var(--bg-elev-2)", icon: "database" as IconName, label: r.source_type };
         const brand = brandForSource(r.source_type);
         return (
           <div key={`${r.source_type}:${r.object_id}`} className="result-row">
-            <div className="result-icon" style={{ background: brand ? "#0e1524" : sm.color }}>
+            <div className="result-icon" style={{ background: brand ? "var(--inset)" : sm.color }}>
               {brand ? <BrandIcon name={brand} size={20} /> : <Icon name={sm.icon} size={18} />}
             </div>
             <div className="flex1">
@@ -827,7 +827,7 @@ export default function Search() {
               </div>
               {(versionsFor.versions || []).map((v) => (
                 <div key={v.version} className="result-row" style={{ padding: "8px 0" }}>
-                  <div className="result-icon" style={{ width: 30, height: 30, background: "#0e1524" }}>
+                  <div className="result-icon" style={{ width: 30, height: 30, background: "var(--inset)" }}>
                     <Icon name="clock" size={14} />
                   </div>
                   <div className="flex1">

@@ -22,13 +22,14 @@ from sqlalchemy.orm import Session
 from cv_crypto.profiles import PROFILE_REGISTRY
 from cv_crypto.provider import get_provider
 
-from .. import audit, authcodes, keybroker, security
+from .. import audit, authcodes, credstore, keybroker, platform_config, security
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
     Appliance,
     AuditEvent,
     Collection,
+    ConfigObject,
     ConnectorAccount,
     DesktopAgent,
     Node,
@@ -36,6 +37,7 @@ from ..models import (
     SearchDocument,
     SnapshotReceipt,
     SoftwareRelease,
+    SourceConfig,
     Tenant,
     UpdateJob,
     User,
@@ -717,3 +719,173 @@ def delete_node(nid: str,
     audit.record(db, actor=principal.user_id, action="admin.node_removed",
                  category="admin", severity="warning", detail={"name": n.name})
     return {"ok": True}
+
+
+# =========================================================================== #
+# Configuration objects + source integrations                                 #
+# =========================================================================== #
+
+_SECRET_HINTS = ("secret", "password", "token", "private")
+
+
+def _is_secret(key: str) -> bool:
+    k = key.lower()
+    return any(h in k for h in _SECRET_HINTS)
+
+
+def _decrypt_values(obj) -> dict:
+    if not obj or not obj.encrypted_values:
+        return {}
+    try:
+        return credstore.decrypt("platform", obj.encrypted_values)
+    except Exception:
+        return {}
+
+
+def _config_object_view(obj) -> dict:
+    """Values with secret-looking keys masked (never return the secret itself)."""
+    keys = {}
+    for k, v in _decrypt_values(obj).items():
+        secret = _is_secret(k)
+        keys[k] = {"secret": secret, "set": bool(v), "value": "" if secret else v}
+    return {"id": obj.id, "name": obj.name, "kind": obj.kind, "keys": keys,
+            "updated_at": obj.updated_at.isoformat() if obj.updated_at else None}
+
+
+@router.get("/config-objects")
+def list_config_objects(db: Session = Depends(get_db)):
+    return [_config_object_view(o) for o in
+            db.query(ConfigObject).order_by(ConfigObject.name.asc()).all()]
+
+
+class ConfigObjectBody(BaseModel):
+    name: str
+    kind: str = "generic"
+    values: dict = {}
+
+
+@router.post("/config-objects")
+def create_config_object(body: ConfigObjectBody,
+                         principal: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    obj = ConfigObject(name=body.name.strip() or "Config", kind=body.kind,
+                       encrypted_values=credstore.encrypt("platform", body.values or {}))
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    platform_config.invalidate()
+    audit.record(db, actor=principal.user_id, action="admin.config_object_created",
+                 category="admin", detail={"name": obj.name, "kind": obj.kind})
+    return _config_object_view(obj)
+
+
+class ConfigObjectUpdate(BaseModel):
+    name: str | None = None
+    kind: str | None = None
+    values: dict | None = None  # merged; blank secret values preserve the existing
+
+
+@router.put("/config-objects/{oid}")
+def update_config_object(oid: str, body: ConfigObjectUpdate,
+                         principal: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    from .. import emailer
+    obj = db.get(ConfigObject, oid)
+    if not obj:
+        raise HTTPException(404, "config object not found")
+    if body.name is not None:
+        obj.name = body.name.strip()
+    if body.kind is not None:
+        obj.kind = body.kind
+    if body.values is not None:
+        cur = _decrypt_values(obj)
+        for k, v in body.values.items():
+            if _is_secret(k) and (v is None or v == ""):
+                continue  # keep existing secret when left blank
+            cur[k] = v
+        obj.encrypted_values = credstore.encrypt("platform", cur)
+    db.commit()
+    platform_config.invalidate()
+    emailer.invalidate_config_cache()
+    audit.record(db, actor=principal.user_id, action="admin.config_object_updated",
+                 category="admin", detail={"name": obj.name})
+    return _config_object_view(obj)
+
+
+@router.delete("/config-objects/{oid}")
+def delete_config_object(oid: str,
+                         principal: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    obj = db.get(ConfigObject, oid)
+    if not obj:
+        raise HTTPException(404, "config object not found")
+    for sc in db.query(SourceConfig).filter(SourceConfig.config_object_id == oid).all():
+        sc.config_object_id = None
+    db.delete(obj)
+    db.commit()
+    platform_config.invalidate()
+    audit.record(db, actor=principal.user_id, action="admin.config_object_deleted",
+                 category="admin", severity="warning", detail={"name": obj.name})
+    return {"ok": True}
+
+
+def _source_slots() -> list[dict]:
+    """Every platform integration that can link to a Config Object."""
+    from ..connectors import get_connector, oauth
+    slots: list[dict] = []
+    for ct in sorted(oauth.OAUTH_TYPES):
+        conn = get_connector(ct)
+        label = conn.oauth_spec().display_name if conn else ct
+        slots.append({"type": ct, "label": label, "kind": "oauth",
+                      "keys": ["client_id", "client_secret"],
+                      "required": ["client_id", "client_secret"]})
+    slots.append({"type": "ses", "label": "Amazon SES (email delivery)", "kind": "ses",
+                  "keys": ["aws_access_key_id", "aws_secret_access_key", "region", "from_email"],
+                  "required": ["aws_access_key_id", "aws_secret_access_key"]})
+    return slots
+
+
+@router.get("/sources")
+def list_sources(db: Session = Depends(get_db)):
+    rows = {sc.connector_type: sc for sc in db.query(SourceConfig).all()}
+    out = []
+    for slot in _source_slots():
+        sc = rows.get(slot["type"])
+        vals = _decrypt_values(db.get(ConfigObject, sc.config_object_id)) if (sc and sc.config_object_id) else {}
+        out.append({
+            "type": slot["type"], "label": slot["label"], "kind": slot["kind"],
+            "keys": slot["keys"],
+            "enabled": True if sc is None else bool(sc.enabled),
+            "config_object_id": sc.config_object_id if sc else None,
+            "configured": all(vals.get(k) for k in slot["required"]),
+        })
+    return out
+
+
+class SourceUpdate(BaseModel):
+    enabled: bool | None = None
+    config_object_id: str | None = None
+
+
+@router.put("/sources/{ctype}")
+def update_source(ctype: str, body: SourceUpdate,
+                  principal: security.Principal = Depends(security.require_platform_admin),
+                  db: Session = Depends(get_db)):
+    from .. import emailer
+    valid = {s["type"] for s in _source_slots()}
+    if ctype not in valid:
+        raise HTTPException(404, "unknown source")
+    sc = db.get(SourceConfig, ctype)
+    if sc is None:
+        sc = SourceConfig(connector_type=ctype)
+        db.add(sc)
+    if body.enabled is not None:
+        sc.enabled = body.enabled
+    if body.config_object_id is not None:
+        sc.config_object_id = body.config_object_id or None
+    db.commit()
+    platform_config.invalidate()
+    emailer.invalidate_config_cache()
+    audit.record(db, actor=principal.user_id, action="admin.source_updated",
+                 category="admin", detail={"source": ctype, "enabled": sc.enabled})
+    return {"ok": True, "enabled": sc.enabled, "config_object_id": sc.config_object_id}

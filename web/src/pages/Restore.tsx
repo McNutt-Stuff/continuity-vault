@@ -57,7 +57,7 @@ export default function RestorePage() {
         </div>
         {snaps.map((s) => (
           <div key={s.id} className="result-row">
-            <div className="result-icon" style={{ background: "#1a2234" }}><Icon name="restore" size={17} /></div>
+            <div className="result-icon" style={{ background: "var(--bg-elev-2)" }}><Icon name="restore" size={17} /></div>
             <div className="flex1">
               <div className="mono">{s.snapshot_id.slice(0, 14)}…</div>
               <div className="faint" style={{ fontSize: 12 }}>{s.object_count} objects · {s.destination}</div>

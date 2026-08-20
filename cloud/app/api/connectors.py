@@ -72,12 +72,16 @@ def _setup_instructions(connector_type: str) -> list[str]:
 
 @router.get("/catalog")
 def catalog(tenant: Tenant = Depends(security.get_tenant)):
+    from .. import platform_config
     out = []
     for c in ALL_CONNECTORS:
         spec = c.oauth_spec()
         caps = c.capabilities()
         ctype = spec.connector_type
         mode = "oauth" if oauth.is_oauth(ctype) else "token"
+        # Platform admins can disable an OAuth source for all tenants.
+        if oauth.is_oauth(ctype) and not platform_config.source_enabled(ctype):
+            continue
         out.append({
             "type": ctype,
             "displayName": spec.display_name,
@@ -235,6 +239,10 @@ def _fetch_account_label(connector_type: str, tokens: dict) -> str | None:
                 r = client.get("https://gmail.googleapis.com/gmail/v1/users/me/profile",
                                headers=headers)
                 return r.json().get("emailAddress")
+            if connector_type in ("google_contacts", "google_calendar"):
+                r = client.get("https://www.googleapis.com/oauth2/v3/userinfo",
+                               headers=headers)
+                return r.json().get("email")
             if connector_type in ("outlook", "onedrive"):
                 r = client.get("https://graph.microsoft.com/v1.0/me", headers=headers)
                 d = r.json()
@@ -243,6 +251,21 @@ def _fetch_account_label(connector_type: str, tokens: dict) -> str | None:
                 r = client.post("https://api.dropboxapi.com/2/users/get_current_account",
                                 headers=headers)
                 return r.json().get("email")
+            if connector_type == "reddit":
+                r = client.get("https://oauth.reddit.com/api/v1/me",
+                               headers={**headers, "User-Agent": "web:life.arkive:v1 (Arkive backup)"})
+                name = r.json().get("name")
+                return f"u/{name}" if name else None
+            if connector_type == "facebook":
+                r = client.get("https://graph.facebook.com/v19.0/me",
+                               params={"fields": "name,email", "access_token": at})
+                d = r.json()
+                return d.get("email") or d.get("name")
+            if connector_type == "instagram":
+                r = client.get("https://graph.instagram.com/me",
+                               params={"fields": "username", "access_token": at})
+                name = r.json().get("username")
+                return f"@{name}" if name else None
     except Exception:
         return None
     return None

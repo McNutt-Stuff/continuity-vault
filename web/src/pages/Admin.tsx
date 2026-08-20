@@ -4,14 +4,14 @@ import { Card, Pill, Stat, bytes, timeAgo } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { promptDialog, formDialog, confirmDialog, notify } from "../components/dialog";
 
-type Tab = "overview" | "tenants" | "reports" | "nodes" | "fleet" | "pricing" | "email" | "crypto" | "audit" | "updates";
+type Tab = "overview" | "tenants" | "reports" | "nodes" | "fleet" | "pricing" | "config" | "email" | "crypto" | "audit" | "updates";
 
 export default function Admin() {
   const [tab, setTab] = useState<Tab>("overview");
   return (
     <>
       <div className="chips" style={{ marginBottom: 18 }}>
-        {(["overview", "tenants", "reports", "nodes", "fleet", "pricing", "email", "crypto", "audit", "updates"] as Tab[]).map((t) => (
+        {(["overview", "tenants", "reports", "nodes", "fleet", "pricing", "config", "email", "crypto", "audit", "updates"] as Tab[]).map((t) => (
           <span key={t} className={`chip ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
             {t[0].toUpperCase() + t.slice(1)}
           </span>
@@ -23,6 +23,7 @@ export default function Admin() {
       {tab === "nodes" && <Nodes />}
       {tab === "fleet" && <Fleet />}
       {tab === "pricing" && <Pricing />}
+      {tab === "config" && <ConfigAdmin />}
       {tab === "email" && <EmailAdmin />}
       {tab === "crypto" && <Crypto />}
       {tab === "audit" && <Audit />}
@@ -259,7 +260,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
 
 function Mini({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div style={{ background: "#0e1524", borderRadius: 8, padding: "10px 12px" }}>
+    <div style={{ background: "var(--inset)", borderRadius: 8, padding: "10px 12px" }}>
       <div style={{ fontSize: 20, fontWeight: 700 }}>{value}</div>
       <div className="faint" style={{ fontSize: 11.5 }}>{label}</div>
     </div>
@@ -361,7 +362,7 @@ function Nodes() {
             <Card key={n.id}>
               <div className="spread" style={{ marginBottom: 10 }}>
                 <div className="row" style={{ gap: 10 }}>
-                  <div className="result-icon" style={{ width: 34, height: 34, background: "#0e1524", color: n.online ? "#35d0a5" : "#8a94a7" }}>
+                  <div className="result-icon" style={{ width: 34, height: 34, background: "var(--inset)", color: n.online ? "#35d0a5" : "#8a94a7" }}>
                     <Icon name="server" size={18} />
                   </div>
                   <div>
@@ -379,7 +380,7 @@ function Nodes() {
                   <div className="spread faint" style={{ fontSize: 11.5, marginBottom: 4 }}>
                     <span>Storage</span><span>{bytes(st.used)} / {bytes(st.total)} ({pct(st)}%)</span>
                   </div>
-                  <div style={{ height: 6, borderRadius: 999, background: "#0e1524", overflow: "hidden" }}>
+                  <div style={{ height: 6, borderRadius: 999, background: "var(--inset)", overflow: "hidden" }}>
                     <div style={{ width: `${pct(st)}%`, height: "100%", background: pct(st) > 90 ? "var(--danger-c,#f2545b)" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
                   </div>
                 </div>
@@ -814,5 +815,149 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
       <label className="faint" style={{ fontSize: 12 }}>{label}</label>
       {children}
     </div>
+  );
+}
+
+interface ConfigKey { secret: boolean; set: boolean; value: string }
+interface ConfigObj { id: string; name: string; kind: string; keys: Record<string, ConfigKey>; updated_at?: string }
+interface SourceSlot { type: string; label: string; kind: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean }
+interface DraftRow { key: string; value: string; secret: boolean; set: boolean }
+
+function ConfigAdmin() {
+  const [objects, setObjects] = useState<ConfigObj[]>([]);
+  const [sources, setSources] = useState<SourceSlot[]>([]);
+  const [toast, setToast] = useState("");
+  const [draft, setDraft] = useState<{ id?: string; name: string; kind: string; rows: DraftRow[] } | null>(null);
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
+
+  async function load() {
+    try { setObjects(await api.get<ConfigObj[]>("/admin/config-objects")); } catch { /* ignore */ }
+    try { setSources(await api.get<SourceSlot[]>("/admin/sources")); } catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); }, []);
+
+  function newDraft(kind = "oauth") {
+    const preset: Record<string, string[]> = {
+      oauth: ["client_id", "client_secret"],
+      ses: ["aws_access_key_id", "aws_secret_access_key", "region", "from_email"],
+      "api-key": ["api_key"],
+      generic: [""],
+    };
+    setDraft({ name: "", kind, rows: (preset[kind] || [""]).map((k) => ({ key: k, value: "", secret: /secret|password|token|private/i.test(k), set: false })) });
+  }
+  function editDraft(o: ConfigObj) {
+    setDraft({
+      id: o.id, name: o.name, kind: o.kind,
+      rows: Object.entries(o.keys).map(([k, v]) => ({ key: k, value: v.value, secret: v.secret, set: v.set })),
+    });
+  }
+  async function saveDraft() {
+    if (!draft) return;
+    const values: Record<string, string> = {};
+    for (const r of draft.rows) {
+      if (!r.key.trim()) continue;
+      // Blank secret rows are omitted so the backend preserves the stored value.
+      if (r.secret && !r.value) continue;
+      values[r.key.trim()] = r.value;
+    }
+    try {
+      if (draft.id) await api.put(`/admin/config-objects/${draft.id}`, { name: draft.name, kind: draft.kind, values });
+      else await api.post("/admin/config-objects", { name: draft.name || "Config", kind: draft.kind, values });
+      setDraft(null); flash("Configuration saved"); await load();
+    } catch { flash("Could not save"); }
+  }
+  async function delObject(o: ConfigObj) {
+    if (!await confirmDialog({ title: "Delete config object?", message: `Delete "${o.name}". Any linked sources will be unlinked.`, tone: "danger", confirmLabel: "Delete" })) return;
+    try { await api.del(`/admin/config-objects/${o.id}`); flash("Deleted"); await load(); } catch { flash("Delete failed"); }
+  }
+  async function setSource(s: SourceSlot, patch: { enabled?: boolean; config_object_id?: string | null }) {
+    try { await api.put(`/admin/sources/${s.type}`, patch); await load(); } catch { flash("Update failed"); }
+  }
+
+  return (
+    <>
+      <Card style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ marginBottom: 10 }}>
+          <div>
+            <h3 style={{ margin: 0 }}>Configuration objects</h3>
+            <div className="muted" style={{ fontSize: 12.5 }}>Encrypted key-value credentials (OAuth keys, API keys, SES) linked to sources below.</div>
+          </div>
+          <div className="row" style={{ gap: 6 }}>
+            <button className="btn sm" onClick={() => newDraft("oauth")}>+ OAuth</button>
+            <button className="btn sm" onClick={() => newDraft("ses")}>+ SES</button>
+            <button className="btn sm" onClick={() => newDraft("generic")}>+ Generic</button>
+          </div>
+        </div>
+
+        {draft && (
+          <div style={{ border: "1px solid var(--border-soft)", borderRadius: 10, padding: 14, marginBottom: 12, background: "var(--inset)" }}>
+            <div className="grid grid-2" style={{ gap: 12, marginBottom: 10 }}>
+              <Field label="Name"><input className="input sm" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. Google OAuth" /></Field>
+              <Field label="Kind"><input className="input sm" value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value })} /></Field>
+            </div>
+            <div className="stack" style={{ gap: 6 }}>
+              {draft.rows.map((r, i) => (
+                <div key={i} className="row" style={{ gap: 8 }}>
+                  <input className="input sm" style={{ width: 200 }} value={r.key} placeholder="key"
+                         onChange={(e) => { const rows = [...draft.rows]; rows[i] = { ...r, key: e.target.value, secret: /secret|password|token|private/i.test(e.target.value) }; setDraft({ ...draft, rows }); }} />
+                  <input className="input sm flex1" type={r.secret ? "password" : "text"}
+                         value={r.value} placeholder={r.secret && r.set ? "•••••• leave blank to keep" : "value"}
+                         onChange={(e) => { const rows = [...draft.rows]; rows[i] = { ...r, value: e.target.value }; setDraft({ ...draft, rows }); }} />
+                  <button className="btn ghost sm" onClick={() => setDraft({ ...draft, rows: draft.rows.filter((_, j) => j !== i) })}>✕</button>
+                </div>
+              ))}
+              <button className="btn ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setDraft({ ...draft, rows: [...draft.rows, { key: "", value: "", secret: false, set: false }] })}>+ Add key</button>
+            </div>
+            <div className="row" style={{ gap: 8, marginTop: 12 }}>
+              <button className="btn primary sm" onClick={saveDraft}>Save</button>
+              <button className="btn ghost sm" onClick={() => setDraft(null)}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        <table className="table">
+          <thead><tr><th>Name</th><th>Kind</th><th>Keys</th><th></th></tr></thead>
+          <tbody>
+            {objects.map((o) => (
+              <tr key={o.id}>
+                <td style={{ fontWeight: 600 }}>{o.name}</td>
+                <td><Pill tone="info">{o.kind}</Pill></td>
+                <td className="faint" style={{ fontSize: 12 }}>{Object.entries(o.keys).map(([k, v]) => `${k}${v.secret ? (v.set ? " ✓" : " –") : ""}`).join(", ")}</td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  <button className="btn ghost sm" onClick={() => editDraft(o)}>Edit</button>{" "}
+                  <button className="btn danger sm" onClick={() => delObject(o)}>Delete</button>
+                </td>
+              </tr>
+            ))}
+            {objects.length === 0 && <tr><td colSpan={4} className="muted">No configuration objects yet.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+
+      <Card>
+        <h3 style={{ marginTop: 0 }}>Sources</h3>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>Enable each integration and link the configuration object that supplies its credentials.</div>
+        <table className="table">
+          <thead><tr><th>Source</th><th>Required keys</th><th>Enabled</th><th>Configuration</th><th>Status</th></tr></thead>
+          <tbody>
+            {sources.map((s) => (
+              <tr key={s.type}>
+                <td><div style={{ fontWeight: 600 }}>{s.label}</div><div className="faint" style={{ fontSize: 11 }}>{s.type} · {s.kind}</div></td>
+                <td className="faint" style={{ fontSize: 11.5 }}>{s.keys.join(", ")}</td>
+                <td><input type="checkbox" checked={s.enabled} onChange={(e) => setSource(s, { enabled: e.target.checked })} /></td>
+                <td>
+                  <select className="input sm" value={s.config_object_id || ""} onChange={(e) => setSource(s, { config_object_id: e.target.value })}>
+                    <option value="">— none —</option>
+                    {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                  </select>
+                </td>
+                <td><Pill tone={s.configured ? "ok" : "warn"}>{s.configured ? "Configured" : "Not set"}</Pill></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
   );
 }

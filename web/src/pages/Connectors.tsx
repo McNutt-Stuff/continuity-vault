@@ -228,7 +228,7 @@ export default function Connectors() {
             <div key={c.type} className="dest-card" onClick={() => connect(c)}>
               <div className="spread" style={{ marginBottom: 10 }}>
                 <div className="row">
-                  <div className="result-icon" style={{ background: brandForSource(c.type) ? "#0e1524" : c.color, width: 34, height: 34 }}>
+                  <div className="result-icon" style={{ background: brandForSource(c.type) ? "var(--inset)" : c.color, width: 34, height: 34 }}>
                     {brandForSource(c.type)
                       ? <BrandIcon name={brandForSource(c.type)!} size={19} />
                       : <Icon name={c.icon as IconName} size={17} />}
@@ -285,7 +285,7 @@ export default function Connectors() {
           const c = catalog.find((x) => x.type === a.connector_type);
           return (
             <div key={a.id} className="result-row">
-              <div className="result-icon" style={{ background: brandForSource(a.connector_type) ? "#0e1524" : (c?.color ?? "#1a2234") }}>
+              <div className="result-icon" style={{ background: brandForSource(a.connector_type) ? "var(--inset)" : (c?.color ?? "var(--bg-elev-2)") }}>
                 {brandForSource(a.connector_type)
                   ? <BrandIcon name={brandForSource(a.connector_type)!} size={18} />
                   : <Icon name={(c?.icon as IconName) ?? "database"} size={17} />}

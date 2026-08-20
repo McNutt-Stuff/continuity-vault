@@ -77,7 +77,7 @@ export default function ActivityPage() {
             const pct = j.total > 0 ? Math.min(100, (j.processed / j.total) * 100) : 0;
             return (
               <div key={j.id} className="result-row" style={{ alignItems: "flex-start" }}>
-                <div className="result-icon" style={{ background: brandForSource(j.source_type || "") ? "#0e1524" : "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
+                <div className="result-icon" style={{ background: brandForSource(j.source_type || "") ? "var(--inset)" : "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
                   <SourceGlyph type={j.source_type} size={18} />
                 </div>
                 <div className="flex1">
@@ -96,7 +96,7 @@ export default function ActivityPage() {
           })}
           {data.in_flight.map((e, i) => (
             <div key={i} className="result-row">
-              <div className="result-icon" style={{ background: "#0e1524" }}>
+              <div className="result-icon" style={{ background: "var(--inset)" }}>
                 <SourceGlyph type={e.source_type} size={18} />
               </div>
               <div className="flex1">
@@ -120,7 +120,7 @@ export default function ActivityPage() {
         {events.length === 0 && <div className="muted">No ingestion activity yet. Trigger a sync from the Data Map.</div>}
         {events.map((e, i) => (
           <div key={i} className="result-row">
-            <div className="result-icon" style={{ background: brandForSource(e.source_type || "") ? "#0e1524" : "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
+            <div className="result-icon" style={{ background: brandForSource(e.source_type || "") ? "var(--inset)" : "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
               <SourceGlyph type={e.source_type} size={18} />
             </div>
             <div className="flex1">

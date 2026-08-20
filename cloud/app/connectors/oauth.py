@@ -88,7 +88,8 @@ def _providers() -> Dict[str, ProviderSpec]:
             connector_type="google_contacts",
             authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
             token_url="https://oauth2.googleapis.com/token",
-            scopes=["https://www.googleapis.com/auth/contacts.readonly"],
+            scopes=["openid", "https://www.googleapis.com/auth/userinfo.email",
+                    "https://www.googleapis.com/auth/contacts.readonly"],
             client_id=s.google_client_id,
             client_secret=s.google_client_secret,
             extra_auth_params={"access_type": "offline", "prompt": "consent"},
@@ -97,7 +98,8 @@ def _providers() -> Dict[str, ProviderSpec]:
             connector_type="google_calendar",
             authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
             token_url="https://oauth2.googleapis.com/token",
-            scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+            scopes=["openid", "https://www.googleapis.com/auth/userinfo.email",
+                    "https://www.googleapis.com/auth/calendar.readonly"],
             client_id=s.google_client_id,
             client_secret=s.google_client_secret,
             extra_auth_params={"access_type": "offline", "prompt": "consent"},
@@ -140,7 +142,19 @@ TOKEN_TYPES = {"onepassword", "icloud"}
 
 
 def get_spec(connector_type: str) -> Optional[ProviderSpec]:
-    return _providers().get(connector_type)
+    spec = _providers().get(connector_type)
+    if spec:
+        # Admin-managed Config Objects override env client id/secret when set.
+        try:
+            from ..platform_config import source_values
+            ov = source_values(connector_type)
+            if ov.get("client_id"):
+                spec.client_id = ov["client_id"]
+            if ov.get("client_secret"):
+                spec.client_secret = ov["client_secret"]
+        except Exception:
+            pass
+    return spec
 
 
 def is_oauth(connector_type: str) -> bool:

@@ -261,7 +261,7 @@ export default function Onboarding() {
             {costs.ratio != null && costs.ratio > 0 && (
               <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
                 <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                  <div className="result-icon" style={{ width: 32, height: 32, background: "#0e1524", color: "#35d0a5" }}>
+                  <div className="result-icon" style={{ width: 32, height: 32, background: "var(--inset)", color: "#35d0a5" }}>
                     <Icon name="check" size={16} />
                   </div>
                   <div style={{ fontSize: 12.5 }}>

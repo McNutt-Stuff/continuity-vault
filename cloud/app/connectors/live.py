@@ -565,7 +565,11 @@ def fetch_google_contacts(access_token: str,
             if token:
                 params["pageToken"] = token
             r = c.get(url, headers=headers, params=params)
-            r.raise_for_status()
+            if r.status_code >= 400:
+                logger.warning("Google People API %s: %s (enable the People API in the "
+                               "Google Cloud project and grant contacts.readonly)",
+                               r.status_code, r.text[:300])
+                return
             body = r.json()
             for p in body.get("connections", []):
                 name = ((p.get("names") or [{}])[0]).get("displayName") or "Contact"
@@ -591,7 +595,11 @@ def fetch_google_calendar(access_token: str,
     base = "https://www.googleapis.com/calendar/v3"
     with httpx.Client(timeout=60) as c:
         cals = c.get(f"{base}/users/me/calendarList", headers=headers)
-        cals.raise_for_status()
+        if cals.status_code >= 400:
+            logger.warning("Google Calendar API %s: %s (enable the Calendar API in the "
+                           "Google Cloud project and grant calendar.readonly)",
+                           cals.status_code, cals.text[:300])
+            return
         for cal in cals.json().get("items", []):
             cal_id = cal.get("id")
             cal_name = cal.get("summary", "Calendar")

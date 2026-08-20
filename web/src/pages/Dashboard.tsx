@@ -90,7 +90,7 @@ export default function Dashboard() {
             {(ov?.sources.types || []).map((t) => (
               <span key={t.type} title={`${t.displayName} · ${t.count}`}
                     style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px",
-                             borderRadius: 999, fontSize: 11, background: "#0e1524", border: "1px solid var(--border-soft)" }}>
+                             borderRadius: 999, fontSize: 11, background: "var(--inset)", border: "1px solid var(--border-soft)" }}>
                 <SourceIcon type={t.type} fallback={iconName(t.icon)} size={13} /> {t.count}
               </span>
             ))}
@@ -124,7 +124,7 @@ export default function Dashboard() {
           <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1.1, marginTop: 2 }}>{bytes(ov?.data.protected_bytes ?? 0)}</div>
           {ov && ov.data.licensed_bytes > 0 ? (
             <>
-              <div style={{ height: 8, borderRadius: 999, marginTop: 12, background: "#0e1524", overflow: "hidden" }}>
+              <div style={{ height: 8, borderRadius: 999, marginTop: 12, background: "var(--inset)", overflow: "hidden" }}>
                 <div style={{ width: `${Math.min(100, ov.data.percent ?? 0)}%`, height: "100%",
                               background: (ov.data.percent ?? 0) > 90 ? "var(--danger-c,#f2545b)" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
               </div>
@@ -148,7 +148,7 @@ export default function Dashboard() {
             {(ov?.storage.destinations || []).map((d) => (
               <span key={d.id} title={d.label}
                     style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px", borderRadius: 8,
-                             fontSize: 11, background: "#0e1524", border: "1px solid var(--border-soft)" }}>
+                             fontSize: 11, background: "var(--inset)", border: "1px solid var(--border-soft)" }}>
                 <Icon name={iconName(d.icon)} size={12} /> {d.label}
               </span>
             ))}
@@ -165,7 +165,7 @@ export default function Dashboard() {
               {PERIODS.map((p) => (
                 <span key={p.id} onClick={() => setPeriod(p.id)}
                       style={{ cursor: "pointer", fontSize: 11.5, padding: "2px 8px", borderRadius: 999,
-                               fontWeight: 600, background: period === p.id ? "var(--accent,#4f7cff)" : "#0e1524",
+                               fontWeight: 600, background: period === p.id ? "var(--accent,#4f7cff)" : "var(--inset)",
                                color: period === p.id ? "#fff" : "var(--muted,#8a94a7)" }}>
                   {p.label}
                 </span>
@@ -230,7 +230,7 @@ export default function Dashboard() {
 function Fact({ icon, label, value }: { icon: string; label: string; value: ReactNode }) {
   return (
     <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
-      <div className="result-icon" style={{ width: 28, height: 28, background: "#0e1524" }}>
+      <div className="result-icon" style={{ width: 28, height: 28, background: "var(--inset)" }}>
         <Icon name={iconName(icon)} size={14} />
       </div>
       <div>
@@ -251,7 +251,7 @@ function Donut({ data, size = 96 }: { data: { count: number; color: string; labe
   let acc = 0;
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-      <circle cx={cx} cy={cy} r={r} fill="none" stroke="#0e1524" strokeWidth={stroke} />
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke="var(--inset)" strokeWidth={stroke} />
       <g transform={`rotate(-90 ${cx} ${cy})`}>
         {data.map((d, i) => {
           const len = (d.count / total) * circ;

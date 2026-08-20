@@ -24,7 +24,9 @@ type IconName =
   | "alert"
   | "activity"
   | "bell"
-  | "calendar";
+  | "calendar"
+  | "sun"
+  | "moon";
 
 const paths: Record<IconName, ReactNode> = {
   shield: <path d="M12 2l7 3v6c0 4.5-3 8-7 11-4-3-7-6.5-7-11V5l7-3z" />,
@@ -146,6 +148,13 @@ const paths: Record<IconName, ReactNode> = {
       <path d="M13.7 21a2 2 0 01-3.4 0" />
     </>
   ),
+  sun: (
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </>
+  ),
+  moon: <path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />,
 };
 
 export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {

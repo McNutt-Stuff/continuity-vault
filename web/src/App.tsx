@@ -2,6 +2,7 @@ import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "reac
 import { useEffect, useState } from "react";
 import { useAuth } from "./auth";
 import { Icon, IconName } from "./components/Icon";
+import { getTheme, applyTheme, Theme } from "./theme";
 import { Pill } from "./components/ui";
 import { DialogHost, notify } from "./components/dialog";
 import { api } from "./api";
@@ -139,6 +140,7 @@ function TopBar() {
     <div className="topbar">
       <h1>{title}</h1>
       <div className="row" style={{ gap: 14 }}>
+        <ThemeToggle />
         <AlertBell />
         {me?.passkey_verified ? (
           <Pill tone="ok">
@@ -163,6 +165,17 @@ function TopBar() {
         </button>
       </div>
     </div>
+  );
+}
+
+function ThemeToggle() {
+  const [t, setT] = useState<Theme>(getTheme());
+  function flip() { const n: Theme = t === "dark" ? "light" : "dark"; applyTheme(n); setT(n); }
+  return (
+    <button className="btn ghost sm" onClick={flip}
+            title={t === "dark" ? "Switch to light mode" : "Switch to dark mode"}>
+      <Icon name={t === "dark" ? "sun" : "moon"} size={15} />
+    </button>
   );
 }
 
