@@ -200,9 +200,14 @@ def send(to: str, subject: str, *, html: str, text: str = "") -> str:
     except Exception as exc:  # never raise into request paths — log and degrade
         log.error("email send failed (%s -> %s): %s", provider, to, exc)
         return "error"
-    # Log mode (no live provider): put the whole body on ONE line so sign-in
-    # codes stay readable/greppable in the service logs (journalctl -u cv-cloud).
-    log.warning("EMAIL (provider=log) -> %s | %s | %s", to, subject, " ".join(text.split()))
+    # Log mode (no live provider): emit the subject plus each body line as its
+    # own short, tagged record so sign-in codes are always readable/greppable in
+    # the service logs (journalctl -u cv-cloud), regardless of line-length limits.
+    log.warning("EMAIL (provider=log) -> %s | %s", to, subject)
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            log.warning("EMAIL body> %s", line)
     return "log"
 
 

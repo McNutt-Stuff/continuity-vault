@@ -143,7 +143,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
     catch { flash("Save failed"); }
   }
   async function suspend() {
-    if (!await confirmDialog({ title: "Suspend tenant?", message: `Freeze ${t.name} and deactivate all its users. This is reversible.`, danger: true, confirmLabel: "Suspend" })) return;
+    if (!await confirmDialog({ title: "Suspend tenant?", message: `Freeze ${t.name} and deactivate all its users. This is reversible.`, tone: "danger", confirmLabel: "Suspend" })) return;
     try { await api.del(`/admin/tenants/${id}`); flash("Tenant suspended"); await load(); } catch { flash("Failed"); }
   }
 
@@ -181,7 +181,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
     catch { flash("Reset failed"); }
   }
   async function delUser(u: any) {
-    if (!await confirmDialog({ title: "Delete user?", message: `Permanently remove ${u.email}.`, danger: true, confirmLabel: "Delete" })) return;
+    if (!await confirmDialog({ title: "Delete user?", message: `Permanently remove ${u.email}.`, tone: "danger", confirmLabel: "Delete" })) return;
     try { await api.del(`/admin/users/${u.id}`); flash("User deleted"); await load(); }
     catch (e) { flash((e as { message?: string }).message || "Delete failed"); }
   }
@@ -332,7 +332,7 @@ function Nodes() {
   }
   async function removeNode(n: any) {
     if (n.is_self) { void notify({ title: "Not allowed", message: "You can't remove the current node.", tone: "warn" }); return; }
-    if (!await confirmDialog({ title: "Remove node?", message: `Remove ${n.name} from the fleet.`, danger: true, confirmLabel: "Remove" })) return;
+    if (!await confirmDialog({ title: "Remove node?", message: `Remove ${n.name} from the fleet.`, tone: "danger", confirmLabel: "Remove" })) return;
     try { await api.del(`/admin/nodes/${n.id}`); flash("Node removed"); await load(); } catch { flash("Failed"); }
   }
 
