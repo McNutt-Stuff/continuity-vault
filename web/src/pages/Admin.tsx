@@ -581,7 +581,7 @@ function WebsiteCMS() {
   }
   useEffect(() => { void load(); }, []);
 
-  function setPath(path: string[], value: any) {
+  function setPath(path: (string | number)[], value: any) {
     setContent((prev: any) => {
       const next = JSON.parse(JSON.stringify(prev || {}));
       let o = next;
