@@ -296,8 +296,8 @@ def _tenant_view(db: Session, t: Tenant, detail: bool = False) -> dict:
         **_tenant_counts(db, t.id),
     }
     if detail:
-        v["users"] = [_user_view(u) for u in
-                      db.query(User).filter(User.tenant_id == t.id).order_by(User.email.asc()).all()]
+        v["members"] = [_user_view(u) for u in
+                        db.query(User).filter(User.tenant_id == t.id).order_by(User.email.asc()).all()]
         v["vaults"] = [{"id": vv.id, "name": vv.name,
                         "key_ownership_model": vv.key_ownership_model}
                        for vv in db.query(Vault).filter(Vault.tenant_id == t.id).all()]

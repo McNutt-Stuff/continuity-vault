@@ -236,7 +236,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
         <table className="table">
           <thead><tr><th>User</th><th>Role</th><th>Status</th><th></th></tr></thead>
           <tbody>
-            {(t.users || []).map((u: any) => (
+            {(t.members || []).map((u: any) => (
               <tr key={u.id}>
                 <td><div style={{ fontWeight: 600 }}>{u.display_name || u.email}</div><div className="faint" style={{ fontSize: 11.5 }}>{u.email}{u.is_platform_admin ? " · platform admin" : ""}</div></td>
                 <td><Pill tone="info">{u.role}</Pill></td>
@@ -248,7 +248,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
                 </td>
               </tr>
             ))}
-            {(t.users || []).length === 0 && <tr><td colSpan={4} className="muted">No users.</td></tr>}
+            {(t.members || []).length === 0 && <tr><td colSpan={4} className="muted">No users.</td></tr>}
           </tbody>
         </table>
       </Card>
