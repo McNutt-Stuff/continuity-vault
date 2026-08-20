@@ -140,30 +140,33 @@ export const pricing = {
 
 export const storageOptions = {
   h1: "Where your data lives — your choice.",
-  lead: "Protect your data in the Arkive cloud, on hardware you own, in your own cloud account — or any combination. Every plan supports all three.",
+  lead: "Protect your data in the Arkive cloud, on secure hardware on-site, in your own cloud account — or any combination. Every plan supports all three.",
   options: [
     {
+      id: "cloud",
       ico: "☁️", h: "Arkive Cloud", tag: "Fully-managed · multi-region",
       p: "A zero-setup, fully-managed vault with post-quantum encryption at rest and managed multi-region redundancy.",
-      points: ["Protected in minutes — nothing to run", "Customer-managed keys; Arkive can't decrypt", "Multi-region redundancy & managed failover", "Simple per-TB pricing"],
+      points: ["Protected in minutes — nothing to run", "Customer-managed keys; Arkive can't decrypt", "Multi-region redundancy & managed failover", "Simple, predictable per-TB pricing"],
     },
     {
-      ico: "🔒", h: "Arkive Secure Appliance", tag: "Offline hardware you own",
+      id: "appliance",
+      ico: "🔒", h: "Arkive Secure Appliance", tag: "Secure on-premise hardware",
       p: "A physical, air-gapped copy that lives on-site under your control — recoverable even during an internet outage.",
-      points: ["Tamper-evident, HSM-sealed storage", "Full local recovery, offline", "Physically isolated from network attacks", "One-time hardware cost, no monthly storage fee"],
+      points: ["Tamper-evident, HSM-sealed storage", "Full local recovery, offline", "Physically isolated from network attacks", "Leased hardware — low monthly + one-time setup"],
     },
     {
+      id: "byo",
       ico: "🌐", h: "Bring your own storage", tag: "AWS · Azure · Google Cloud",
       p: "Keep data in your own cloud account with popular providers. Independent of Arkive; you pay your provider directly.",
-      points: ["Your bucket, your account, your control", "Works with AWS S3, Azure Blob & Google Cloud", "Customer-managed or private-by-design keys", "Transparent third-party cost estimates"],
+      points: ["Your bucket, your account, your control", "Works with AWS S3, Azure Blob & Google Cloud", "Customer-managed or private-by-design keys", "Estimated cost — billed by your provider, not us"],
     },
   ],
 };
 
 export const hardware = {
   h1: "Arkive Secure Appliance",
-  lead: "An offline, tamper-evident vault you keep on-site — a physically isolated copy no network attack can reach. Available with every plan.",
-  image: "/appliance.png",
+  lead: "A secure, on-premise vault you keep on-site — a physically isolated, tamper-evident copy no network attack can reach. Available with every plan.",
+  image: "/Appliance.png",
   points: [
     "Multi-bay, hot-swappable secure storage",
     "HSM-sealed, tamper-evident enclosure",

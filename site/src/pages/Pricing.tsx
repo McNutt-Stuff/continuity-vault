@@ -6,8 +6,18 @@ import { platformPricing, planById, startingMonthly, money } from "../pricing";
 
 export default function Pricing() {
   const cloud = platformPricing.cloud_price_per_tb_month;
-  const rates = platformPricing.license_plans.map((p) => p.price_per_tb_month);
-  const minRate = rates.length ? Math.min(...rates) : 0;
+  const appMonthlyMin = platformPricing.appliance_tiers.length
+    ? Math.min(...platformPricing.appliance_tiers.map((t) => t.monthly)) : 0;
+  const byoRates = [platformPricing.azure_price_per_tb_month, platformPricing.s3_price_per_tb_month];
+  const byoLow = Math.min(...byoRates);
+  const byoHigh = Math.max(...byoRates);
+
+  function optionPrice(id: string) {
+    if (id === "cloud") return { top: `${money(cloud)}`, unit: "/TB · month", sub: "Starting price · Arkive Cloud storage" };
+    if (id === "appliance") return { top: `from ${money(appMonthlyMin)}`, unit: "/month", sub: "Leased hardware + one-time setup" };
+    if (id === "byo") return { top: `est. ${money(byoLow)}–${money(byoHigh)}`, unit: "/TB · month", sub: "Estimated — paid directly to your provider" };
+    return null;
+  }
 
   return (
     <>
@@ -42,48 +52,35 @@ export default function Pricing() {
           })}
         </div>
 
-        {/* Pricing basics — per-TB, Arkive Cloud, appliance */}
-        <div className="grid grid-3" style={{ marginTop: 28 }}>
-          <div className="card" style={{ textAlign: "center" }}>
-            <div className="ico" style={{ margin: "0 auto 8px" }}>📦</div>
-            <h3 style={{ marginBottom: 4 }}>Per additional TB</h3>
-            <div style={{ fontSize: 22, fontWeight: 800 }}>from {money(minRate)}<small className="faint" style={{ fontSize: 13, fontWeight: 500 }}>/TB · mo</small></div>
-            <p style={{ margin: "6px 0 0", fontSize: 13 }}>Rate varies by plan — protect exactly what you need.</p>
-          </div>
-          <div className="card" style={{ textAlign: "center" }}>
-            <div className="ico" style={{ margin: "0 auto 8px" }}>☁️</div>
-            <h3 style={{ marginBottom: 4 }}>Arkive Cloud storage</h3>
-            <div style={{ fontSize: 22, fontWeight: 800 }}>{money(cloud)}<small className="faint" style={{ fontSize: 13, fontWeight: 500 }}>/TB · mo</small></div>
-            <p style={{ margin: "6px 0 0", fontSize: 13 }}>Fully-managed, multi-region, post-quantum encrypted.</p>
-          </div>
-          <div className="card" style={{ textAlign: "center" }}>
-            <div className="ico" style={{ margin: "0 auto 8px" }}>🔒</div>
-            <h3 style={{ marginBottom: 4 }}>Offline appliance</h3>
-            <div style={{ fontSize: 22, fontWeight: 800 }}>Every plan</div>
-            <p style={{ margin: "6px 0 0", fontSize: 13 }}>All plans support the offline secure hardware appliance.</p>
-          </div>
-        </div>
-
         <p className="lead" style={{ textAlign: "center", margin: "28px auto 0", fontSize: 14 }}>{pricing.note}</p>
       </Section>
 
-      {/* Where your data lives — 3 storage options */}
+      {/* Where your data lives — 3 storage options, priced from admin config */}
       <Section className="tight">
         <SectionHead eyebrow="Storage options" title={storageOptions.h1} lead={storageOptions.lead} />
         <div className="grid grid-3" style={{ marginTop: 36 }}>
-          {storageOptions.options.map((o) => (
-            <div className="card" key={o.h}>
-              <div className="ico">{o.ico}</div>
-              <div className="eyebrow" style={{ marginBottom: 6 }}><span className="dot" /> {o.tag}</div>
-              <h3>{o.h}</h3>
-              <p style={{ fontSize: 14 }}>{o.p}</p>
-              <ul style={{ listStyle: "none", padding: 0, margin: "10px 0 0" }}>
-                {o.points.map((pt) => (
-                  <li key={pt} style={{ fontSize: 13.5, padding: "3px 0" }}><span className="tick">✓</span> {pt}</li>
-                ))}
-              </ul>
-            </div>
-          ))}
+          {storageOptions.options.map((o) => {
+            const price = optionPrice(o.id);
+            return (
+              <div className="card" key={o.h}>
+                <div className="ico">{o.ico}</div>
+                <div className="eyebrow" style={{ marginBottom: 6 }}><span className="dot" /> {o.tag}</div>
+                <h3>{o.h}</h3>
+                {price && (
+                  <div style={{ margin: "8px 0 10px", paddingBottom: 12, borderBottom: "1px solid var(--border)" }}>
+                    <div style={{ fontSize: 22, fontWeight: 800 }}>{price.top}<small className="faint" style={{ fontSize: 12.5, fontWeight: 500 }}> {price.unit}</small></div>
+                    <div className="faint" style={{ fontSize: 12 }}>{price.sub}</div>
+                  </div>
+                )}
+                <p style={{ fontSize: 14 }}>{o.p}</p>
+                <ul style={{ listStyle: "none", padding: 0, margin: "10px 0 0" }}>
+                  {o.points.map((pt) => (
+                    <li key={pt} style={{ fontSize: 13.5, padding: "3px 0" }}><span className="tick">✓</span> {pt}</li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
         </div>
       </Section>
 
