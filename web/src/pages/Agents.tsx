@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
-import { Card, Pill, timeAgo, serverDate, fmtAbsolute } from "../components/ui";
+import { Card, Pill, timeAgo, serverDate, fmtAbsolute, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { BrandIcon } from "../components/BrandIcon";
 import { notify } from "../components/dialog";
@@ -70,12 +70,17 @@ export default function Agents() {
   const [code, setCode] = useState<string | null>(null);
   const [toast, setToast] = useState("");
   const [selected, setSelected] = useState<Agent | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   async function load() {
-    const list = await api.get<Agent[]>("/agents");
-    setAgents(list);
-    // Keep the current selection if it still exists; never auto-select on load.
-    setSelected((d) => (d ? list.find((a) => a.id === d.id) ?? null : null));
+    try {
+      const list = await api.get<Agent[]>("/agents");
+      setAgents(list);
+      // Keep the current selection if it still exists; never auto-select on load.
+      setSelected((d) => (d ? list.find((a) => a.id === d.id) ?? null : null));
+    } finally {
+      setLoaded(true);
+    }
   }
   function select(a: Agent) { setSelected(a); }
   useEffect(() => {
@@ -118,6 +123,8 @@ export default function Agents() {
     await api.post(`/agents/${a.id}/command`, { type, params: {} });
     flash(`${type} queued for ${a.name}`);
   }
+
+  if (!loaded && agents.length === 0) return <Loading label="Loading agents…" />;
 
   return (
     <div className="grid grid-2" style={{ alignItems: "start" }}>

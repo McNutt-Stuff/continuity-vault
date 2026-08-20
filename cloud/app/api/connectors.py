@@ -15,7 +15,7 @@ from ..config import get_settings
 from ..connectors import ALL_CONNECTORS, get_connector
 from ..connectors import oauth
 from ..db import get_db
-from ..models import ConnectorAccount, Tenant
+from ..models import Collection, ConnectorAccount, Tenant
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 settings = get_settings()
@@ -267,6 +267,16 @@ def unlink(account_id: str,
     account = db.get(ConnectorAccount, account_id)
     if not account or account.tenant_id != tenant.id:
         raise HTTPException(404, "account not found")
+    # A source can't be unlinked while a Data Map mapping still routes it (the
+    # mapping's snapshots/index reference it) — tell the user what to remove first.
+    mappings = (db.query(Collection)
+                .filter(Collection.connector_account_id == account_id).all())
+    if mappings:
+        names = ", ".join(f'“{m.name}”' for m in mappings[:3])
+        more = f" and {len(mappings) - 3} more" if len(mappings) > 3 else ""
+        raise HTTPException(409,
+            f"This source still has {len(mappings)} data mapping(s) ({names}{more}). "
+            f"Remove the mapping(s) in the Data Map first, then unlink the source.")
     db.delete(account)
     db.commit()
     audit.record(db, actor=principal.user_id, action="connector.unlinked",

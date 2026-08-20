@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
-import { Card, Pill, timeAgo } from "../components/ui";
+import { Card, Pill, timeAgo, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, formDialog, notify } from "../components/dialog";
@@ -42,13 +42,18 @@ export default function Connectors() {
   const [query, setQuery] = useState("");
   const [groupBy, setGroupBy] = useState<"category" | "family">("category");
   const [photoPicker, setPhotoPicker] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   async function load() {
-    setCatalog(await api.get<CatalogItem[]>("/connectors/catalog"));
-    setAccounts(await api.get<Account[]>("/connectors/accounts"));
-    setAgents(await api.get<Agent[]>("/agents").catch(() => [] as Agent[]));
-    const t = await api.get<{ vaults: Vault[] }>("/tenant");
-    setVaults(t.vaults);
+    try {
+      setCatalog(await api.get<CatalogItem[]>("/connectors/catalog"));
+      setAccounts(await api.get<Account[]>("/connectors/accounts"));
+      setAgents(await api.get<Agent[]>("/agents").catch(() => [] as Agent[]));
+      const t = await api.get<{ vaults: Vault[] }>("/tenant");
+      setVaults(t.vaults);
+    } finally {
+      setLoaded(true);
+    }
   }
 
   useEffect(() => {
@@ -243,6 +248,8 @@ export default function Connectors() {
     }
     return a.localeCompare(b);
   });
+
+  if (!loaded && catalog.length === 0) return <Loading label="Loading sources…" />;
 
   return (
     <>

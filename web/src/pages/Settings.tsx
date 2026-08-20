@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
-import { Card, Pill } from "../components/ui";
+import { Card, Pill, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { getTheme, applyTheme, Theme } from "../theme";
 
@@ -12,8 +12,9 @@ export default function Settings() {
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [toast, setToast] = useState("");
   const [theme, setThemeState] = useState<Theme>(getTheme());
+  const [loaded, setLoaded] = useState(false);
 
-  useEffect(() => { api.get<Tenant>("/tenant").then(setTenant).catch(() => {}); }, []);
+  useEffect(() => { api.get<Tenant>("/tenant").then(setTenant).catch(() => {}).finally(() => setLoaded(true)); }, []);
 
   function pickTheme(t: Theme) { applyTheme(t); setThemeState(t); }
 
@@ -23,6 +24,8 @@ export default function Settings() {
     setToast("Passkey enrolled");
     setTimeout(() => setToast(""), 2500);
   }
+
+  if (!loaded && !tenant) return <Loading label="Loading settings…" />;
 
   return (
     <>

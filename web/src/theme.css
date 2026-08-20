@@ -259,6 +259,14 @@ h3 { font-size: 15px; }
 .spinner-dot { width: 9px; height: 9px; border-radius: 50%; flex: none;
   background: var(--brand); box-shadow: 0 0 0 0 rgba(79,124,255,.5);
   animation: pulse-dot 1.4s ease-out infinite; }
+/* Circular spinner + standard loading state */
+.spinner { width: 18px; height: 18px; flex: none; border-radius: 50%;
+  border: 2px solid var(--border-soft); border-top-color: var(--brand);
+  animation: spin 0.7s linear infinite; }
+.spinner.lg { width: 26px; height: 26px; border-width: 3px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-state { display: flex; align-items: center; justify-content: center;
+  gap: 10px; padding: 34px 16px; font-size: 13px; }
 @keyframes pulse-dot {
   0% { box-shadow: 0 0 0 0 rgba(79,124,255,.5); }
   70% { box-shadow: 0 0 0 7px rgba(79,124,255,0); }

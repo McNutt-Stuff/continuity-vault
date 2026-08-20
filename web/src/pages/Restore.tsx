@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
-import { Card, Pill, timeAgo } from "../components/ui";
+import { Card, Pill, timeAgo, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { notify } from "../components/dialog";
 
@@ -16,10 +16,15 @@ export default function RestorePage() {
   const [snaps, setSnaps] = useState<Snapshot[]>([]);
   const [restores, setRestores] = useState<Restore[]>([]);
   const [toast, setToast] = useState("");
+  const [loaded, setLoaded] = useState(false);
 
   async function load() {
-    setSnaps((await api.get<Snapshot[]>("/snapshots")).filter((s) => s.recoverable));
-    setRestores(await api.get<Restore[]>("/restore"));
+    try {
+      setSnaps((await api.get<Snapshot[]>("/snapshots")).filter((s) => s.recoverable));
+      setRestores(await api.get<Restore[]>("/restore"));
+    } finally {
+      setLoaded(true);
+    }
   }
   useEffect(() => { void load(); }, []);
 
@@ -46,6 +51,8 @@ export default function RestorePage() {
     } catch (e) { await notify({ title: "Restore action failed", message: (e as ApiError).message, tone: "danger" }); }
     setTimeout(() => setToast(""), 3500);
   }
+
+  if (!loaded && snaps.length === 0 && restores.length === 0) return <Loading label="Loading recovery…" />;
 
   return (
     <div className="grid grid-2" style={{ alignItems: "start" }}>

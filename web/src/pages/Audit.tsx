@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { api } from "../api";
-import { Card, Pill, timeAgo } from "../components/ui";
+import { Card, Pill, timeAgo, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { humanizeAction, prettyKey, formatValue } from "../components/format";
 
@@ -33,6 +33,7 @@ export default function Audit() {
   const [actor, setActor] = useState("");
   const [abnormal, setAbnormal] = useState(false);
   const [open, setOpen] = useState<number | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   // Deep-link support: /audit?abnormal=1 or ?severity=critical from the alert bell.
   useEffect(() => {
@@ -46,12 +47,15 @@ export default function Audit() {
     if (category) p.set("category", category);
     if (severity) p.set("severity", severity);
     if (actor) p.set("actor", actor);
-    setData(await api.get<AuditResp>(`/audit?${p.toString()}`));
+    try { setData(await api.get<AuditResp>(`/audit?${p.toString()}`)); }
+    finally { setLoaded(true); }
   }
   useEffect(() => { void load(); }, [category, severity]);
 
   const rows = (data?.events ?? []).filter((e) =>
     !abnormal || e.severity === "warning" || e.severity === "critical");
+
+  if (!loaded && !data) return <Loading label="Loading audit log…" />;
 
   return (
     <>

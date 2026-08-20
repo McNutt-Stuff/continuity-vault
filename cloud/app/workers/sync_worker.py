@@ -226,6 +226,11 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
     if collection.config:
         config = {**config, **collection.config}
     caps = connector.capabilities()
+    # Media-heavy sources (Facebook/Instagram photos, etc.) stream: ingest in
+    # bounded batches so a large library can't materialize into memory and OOM.
+    if caps.streaming:
+        return _run_backup_streaming(db, collection, account, connector, config,
+                                     destinations, caps, label, progress)
     # Incremental: pass the stored cursor; the connector returns a new cursor to
     # persist (full first backup, then deltas since the last sync).
     result = connector.fetch(label, cursor=(account.sync_cursor if account else None),
@@ -259,6 +264,61 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
             account.sync_cursor = result.cursor
         db.commit()
     return receipt
+
+
+def _run_backup_streaming(db: Session, collection: Collection,
+                          account: Optional[ConnectorAccount], connector, config: dict,
+                          destinations: List[str], caps, label: str,
+                          progress: Optional[Callable[[int, int, str], None]]
+                          ) -> SnapshotReceipt:
+    """Pull a media-heavy source lazily and ingest in bounded batches so memory
+    stays flat regardless of library size (each batch = one recovery point)."""
+    batch_bytes_cap = 64 * 1024 * 1024  # flush a batch at ~64 MiB of content
+    batch_count_cap = 50
+    batch: List = []
+    batch_bytes = 0
+    total = 0
+    last_receipt: Optional[SnapshotReceipt] = None
+    if progress:
+        progress(0, 0, f"Fetching from {label}…")
+
+    def flush():
+        nonlocal batch, batch_bytes, last_receipt
+        if not batch:
+            return
+        last_receipt = ingest_objects(db, collection, batch, destinations,
+                                      searchable_fields=caps.searchable_fields,
+                                      facet_fields=caps.facet_fields, actor="sync-worker")
+        batch = []
+        batch_bytes = 0
+
+    for obj in connector.fetch_objects(label, config=config):
+        batch.append(obj)
+        batch_bytes += len(getattr(obj, "content", b"") or b"")
+        total += 1
+        if len(batch) >= batch_count_cap or batch_bytes >= batch_bytes_cap:
+            flush()
+            if progress:
+                progress(total, total, f"Encrypted & stored {total} items…")
+    flush()
+
+    if total == 0:
+        prior = (db.query(SnapshotReceipt)
+                 .filter(SnapshotReceipt.collection_id == collection.id)
+                 .order_by(SnapshotReceipt.created_at.desc()).first())
+        if prior is not None:
+            if account:
+                account.last_sync_at = datetime.now(timezone.utc)
+                db.commit()
+            return prior
+    if last_receipt is None:  # first run with nothing pulled — establish a baseline
+        last_receipt = ingest_objects(db, collection, [], destinations,
+                                      searchable_fields=caps.searchable_fields,
+                                      facet_fields=caps.facet_fields, actor="sync-worker")
+    if account:
+        account.last_sync_at = datetime.now(timezone.utc)
+        db.commit()
+    return last_receipt
 
 
 def ingest_objects(db: Session, collection: Collection, source_objects,

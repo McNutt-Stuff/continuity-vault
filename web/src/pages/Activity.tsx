@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Card, Pill, Stat, bytes, serverDate } from "../components/ui";
+import { Card, Pill, Stat, bytes, serverDate, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 
@@ -46,9 +46,10 @@ function SourceGlyph({ type, size = 16 }: { type?: string; size?: number }) {
 
 export default function ActivityPage() {
   const [data, setData] = useState<Activity | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   async function load() {
-    try { setData(await api.get<Activity>("/activity?limit=80")); } catch { /* ignore */ }
+    try { setData(await api.get<Activity>("/activity?limit=80")); } catch { /* ignore */ } finally { setLoaded(true); }
   }
   useEffect(() => {
     void load();
@@ -59,6 +60,8 @@ export default function ActivityPage() {
   const events = data?.events ?? [];
   const bytesTotal = events.reduce((s, e) => s + (e.total_bytes ?? 0), 0);
   const objectsTotal = events.reduce((s, e) => s + (e.object_count ?? 0), 0);
+
+  if (!loaded && !data) return <Loading label="Loading activity…" />;
 
   return (
     <>

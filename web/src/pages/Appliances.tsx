@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import { Card, Pill, bytes, timeAgo, serverDate, fmtAbsolute } from "../components/ui";
+import { Card, Pill, bytes, timeAgo, serverDate, fmtAbsolute, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, notify, promptDialog } from "../components/dialog";
@@ -103,14 +103,19 @@ export default function Appliances() {
   const [code, setCode] = useState<string | null>(null);
   const [installCmd, setInstallCmd] = useState<string | null>(null);
   const [toast, setToast] = useState("");
+  const [loaded, setLoaded] = useState(false);
 
   async function load() {
-    const list = await api.get<Appliance[]>("/appliances");
-    setApps(list);
-    // Refresh the open appliance's full detail (stores, capacity, stored data).
-    if (selected) {
-      try { setSelected(await api.get<Appliance>(`/appliances/${selected.id}`)); }
-      catch { setSelected(list.find((a) => a.id === selected.id) ?? null); }
+    try {
+      const list = await api.get<Appliance[]>("/appliances");
+      setApps(list);
+      // Refresh the open appliance's full detail (stores, capacity, stored data).
+      if (selected) {
+        try { setSelected(await api.get<Appliance>(`/appliances/${selected.id}`)); }
+        catch { setSelected(list.find((a) => a.id === selected.id) ?? null); }
+      }
+    } finally {
+      setLoaded(true);
     }
   }
   useEffect(() => {
@@ -165,6 +170,8 @@ export default function Appliances() {
       await notify({ title: "Couldn't remove appliance", message: (e as ApiError).message, tone: "danger" });
     }
   }
+
+  if (!loaded && apps.length === 0) return <Loading label="Loading appliances…" />;
 
   return (
     <div className="grid grid-2" style={{ alignItems: "start" }}>

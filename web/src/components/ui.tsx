@@ -24,6 +24,17 @@ export function Pill({ tone = "info", children }: { tone?: Tone; children: React
   );
 }
 
+// Standard loading state for pages/cards that fetch data on mount.
+export function Loading({ label = "Loading…", card = true }: { label?: string; card?: boolean }) {
+  const body = (
+    <div className="loading-state">
+      <span className="spinner" />
+      <span className="muted">{label}</span>
+    </div>
+  );
+  return card ? <Card>{body}</Card> : body;
+}
+
 export function bytes(n: number): string {
   if (!n) return "0 B";
   const u = ["B", "KB", "MB", "GB", "TB", "PB"];

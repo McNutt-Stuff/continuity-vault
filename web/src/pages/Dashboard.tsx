@@ -1,7 +1,7 @@
 import { ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
-import { Card, Pill, bytes } from "../components/ui";
+import { Card, Pill, bytes, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
 import { PhotoPickerModal } from "../components/PhotoPicker";
@@ -51,6 +51,7 @@ export default function Dashboard() {
   const [trends, setTrends] = useState<Trends | null>(null);
   const [actions, setActions] = useState<PendingAction[]>([]);
   const [pickerAccount, setPickerAccount] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   function reloadActions() { api.get<PendingAction[]>("/actions").then(setActions).catch(() => {}); }
   async function dismissAction(id: string) {
@@ -59,7 +60,7 @@ export default function Dashboard() {
   }
 
   useEffect(() => {
-    api.get<Overview>("/overview").then(setOv).catch(() => {});
+    api.get<Overview>("/overview").then(setOv).catch(() => {}).finally(() => setLoaded(true));
     api.get<Tenant>("/tenant").then(setTenant).catch(() => {});
     api.get<{ pq_available?: boolean }>("/health").then(setHealth).catch(() => {});
     reloadActions();
@@ -70,6 +71,8 @@ export default function Dashboard() {
   }, [period]);
 
   const objTotal = ov?.objects.breakdown.reduce((s, b) => s + b.count, 0) || 0;
+
+  if (!loaded && !ov) return <Loading label="Loading your dashboard…" />;
 
   return (
     <>

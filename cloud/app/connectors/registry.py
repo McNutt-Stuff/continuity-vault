@@ -505,6 +505,7 @@ class RedditConnector(Connector):
 
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
+            streaming=True,
             searchable_fields=["subreddit", "kind"],
             facet_fields=["subreddit", "kind"],
             filter_categories=[
@@ -550,6 +551,7 @@ class FacebookConnector(Connector):
 
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
+            streaming=True,
             searchable_fields=["kind"],
             facet_fields=["kind"],
             filter_categories=[
@@ -590,6 +592,7 @@ class InstagramConnector(Connector):
 
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
+            streaming=True,
             searchable_fields=["media_type", "kind"],
             facet_fields=["media_type"],
             filter_categories=[{"id": "media", "label": "Photos & videos"}],
