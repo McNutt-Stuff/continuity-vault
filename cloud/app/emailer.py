@@ -200,7 +200,9 @@ def send(to: str, subject: str, *, html: str, text: str = "") -> str:
     except Exception as exc:  # never raise into request paths — log and degrade
         log.error("email send failed (%s -> %s): %s", provider, to, exc)
         return "error"
-    log.warning("EMAIL (provider=log) -> %s | %s", to, subject)
+    # Log mode (no live provider): include the body so sign-in codes remain
+    # readable from the service logs (journalctl -u cv-cloud).
+    log.warning("EMAIL (provider=log) -> %s | %s\n%s", to, subject, text)
     return "log"
 
 
