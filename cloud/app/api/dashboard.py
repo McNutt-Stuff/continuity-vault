@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .. import security
@@ -22,8 +23,8 @@ from ..models import (
     Collection,
     ConnectorAccount,
     DesktopAgent,
-    ProtectionPolicy,
     SearchDocument,
+    SnapshotReceipt,
     Tenant,
     Vault,
 )
@@ -149,29 +150,34 @@ def overview(tenant: Tenant = Depends(security.get_tenant),
         dest_ids = ["cv-cloud"]
     destinations = [_storage_meta(d, stores) for d in dest_ids]
 
-    # --- Retention / protection posture --------------------------------------
-    policies = db.query(ProtectionPolicy).filter(
-        ProtectionPolicy.tenant_id == tenant.id).all()
-    if policies:
-        retention = {
-            "cloud_days": max(p.cloud_retention_days for p in policies),
-            "appliance_days": max(p.appliance_retention_days for p in policies),
-            "immutability_days": max(p.immutability_days for p in policies),
-            "rpo_minutes": min(p.rpo_minutes for p in policies),
-        }
-    else:
-        # No policy configured — mirror the ProtectionPolicy column defaults
-        # (SQLAlchemy column defaults only apply on insert, not on a bare instance).
-        retention = {"cloud_days": 365, "appliance_days": 3650,
-                     "immutability_days": 365, "rpo_minutes": 60}
+    # --- Data stored at each location + how far back the history reaches ------
+    # Bytes actually written (cumulative across recovery points), grouped into
+    # the three places data can live. Customer cloud is shown only when used.
+    usage = {"cloud": 0, "appliance": 0, "customer": 0}
+    for r in db.query(SnapshotReceipt).filter(
+            SnapshotReceipt.tenant_id == tenant.id).all():
+        b = int(r.total_bytes or 0)
+        dest = r.destination or ""
+        if dest == "customer-s3":
+            usage["customer"] += b
+        elif dest == "cv-cloud":
+            usage["cloud"] += b
+        else:  # store:<id> / appliance / appliance:<id>
+            usage["appliance"] += b
+    # Oldest protected item by the CONTENT's own timestamp (file/email date),
+    # not when we ingested it.
+    oldest = (db.query(func.min(SearchDocument.modified_at))
+              .filter(SearchDocument.tenant_id == tenant.id,
+                      SearchDocument.modified_at.isnot(None)).scalar())
 
     return {
         "sources": {"count": sum(type_counts.values()), "types": source_types},
         "objects": {"total": object_total, "breakdown": object_breakdown},
         "data": {"protected_bytes": protected_bytes, "licensed_bytes": licensed,
                  "percent": percent},
-        "storage": {"vault_count": len(vaults), "destinations": destinations},
-        "retention": retention,
+        "storage": {"vault_count": len(vaults), "destinations": destinations,
+                    "usage": usage,
+                    "oldest_content_at": oldest.isoformat() if oldest else None},
         "protection": {
             "key_ownership_model": tenant.key_ownership_model,
             "encrypted": True,

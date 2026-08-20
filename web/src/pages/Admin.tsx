@@ -289,15 +289,16 @@ function Reports() {
   return (
     <>
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        <Stat label="Tenants" value={d.totals.tenants} />
-        <Stat label="Objects protected" value={(d.totals.objects || 0).toLocaleString()} />
+        <Stat label="Cloud storage (we pay)" value={bytes(d.totals.cloud_bytes || 0)}
+              hint={`≈ ${money(d.totals.cloud_cost_monthly || 0)}/mo provider cost`} />
         <Stat label="Data protected" value={bytes(d.totals.bytes || 0)} />
         <Stat label="Monthly revenue" value={money(d.totals.monthly_revenue || 0)} />
+        <Stat label="Tenants" value={d.totals.tenants} />
       </div>
       <Card>
         <h3 style={{ marginTop: 0 }}>Per-tenant usage & billing</h3>
         <table className="table">
-          <thead><tr><th>Tenant</th><th>Plan</th><th>Users</th><th>Sources</th><th>Objects</th><th>Data</th><th>Recovery pts</th><th>Monthly</th></tr></thead>
+          <thead><tr><th>Tenant</th><th>Plan</th><th>Users</th><th>Sources</th><th>Objects</th><th>Data</th><th>Cloud stored</th><th>Recovery pts</th><th>Monthly</th></tr></thead>
           <tbody>
             {d.tenants.map((t: any) => (
               <tr key={t.id}>
@@ -306,11 +307,12 @@ function Reports() {
                 <td>{t.users}</td><td>{t.sources + t.agents}</td>
                 <td>{(t.objects || 0).toLocaleString()}</td>
                 <td>{bytes(t.used_bytes || 0)}</td>
+                <td style={{ fontWeight: 600 }}>{bytes(t.cloud_bytes || 0)}</td>
                 <td>{t.recovery_points}</td>
                 <td style={{ fontWeight: 600 }}>{money(t.monthly_cost || 0)}</td>
               </tr>
             ))}
-            {d.tenants.length === 0 && <tr><td colSpan={8} className="muted">No tenants.</td></tr>}
+            {d.tenants.length === 0 && <tr><td colSpan={9} className="muted">No tenants.</td></tr>}
           </tbody>
         </table>
       </Card>

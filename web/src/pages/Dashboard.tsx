@@ -12,8 +12,11 @@ interface Overview {
   sources: { count: number; types: SourceType[] };
   objects: { total: number; breakdown: ObjectBucket[] };
   data: { protected_bytes: number; licensed_bytes: number; percent: number | null };
-  storage: { vault_count: number; destinations: StorageDest[] };
-  retention: { cloud_days: number; appliance_days: number; immutability_days: number; rpo_minutes: number };
+  storage: {
+    vault_count: number; destinations: StorageDest[];
+    usage: { cloud: number; appliance: number; customer: number };
+    oldest_content_at: string | null;
+  };
   protection: { key_ownership_model: string; encrypted: boolean };
 }
 interface Tenant { name: string; plan: string; key_ownership_model: string; }
@@ -25,15 +28,11 @@ const PERIODS: { id: string; label: string }[] = [
   { id: "quarter", label: "3M" }, { id: "year", label: "1Y" }, { id: "all", label: "All" },
 ];
 
-function fmtDuration(days: number): string {
-  if (days >= 365) { const y = days / 365; return `${Number.isInteger(y) ? y : y.toFixed(1)} yr`; }
-  if (days >= 30) return `${Math.round(days / 30)} mo`;
-  return `${days} d`;
-}
-function fmtRpo(min: number): string {
-  if (min >= 1440) return `${Math.round(min / 1440)}d`;
-  if (min >= 60) return `${Math.round(min / 60)}h`;
-  return `${min}m`;
+function fmtOldest(iso: string | null): string {
+  if (!iso) return "No data yet";
+  const d = new Date(iso.endsWith("Z") ? iso : `${iso}Z`);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 const ICONS = ["mail", "key", "cloud", "file", "database", "image", "activity", "user", "server", "shield", "lock", "clock", "grid", "link"];
 const iconName = (n: string) => (ICONS.includes(n) ? n : "database") as never;
@@ -198,17 +197,20 @@ export default function Dashboard() {
 
         <Card>
           <div className="spread" style={{ marginBottom: 12 }}>
-            <h2>Protection & retention</h2>
+            <h2>Protection &amp; storage</h2>
             <a onClick={() => nav("/mappings")} style={{ cursor: "pointer", fontSize: 13 }}>Manage</a>
           </div>
           <div className="grid grid-2" style={{ gap: 12 }}>
-            <Fact icon="cloud" label="Cloud retention" value={ov ? fmtDuration(ov.retention.cloud_days) : "—"} />
-            <Fact icon="server" label="Appliance retention" value={ov ? fmtDuration(ov.retention.appliance_days) : "—"} />
-            <Fact icon="lock" label="Immutability (WORM)" value={ov ? fmtDuration(ov.retention.immutability_days) : "—"} />
-            <Fact icon="clock" label="Recovery point" value={ov ? `every ${fmtRpo(ov.retention.rpo_minutes)}` : "—"} />
+            <Fact icon="cloud" label="Arkive Cloud" value={ov ? bytes(ov.storage.usage.cloud) : "—"} />
+            <Fact icon="server" label="Secure hardware" value={ov ? bytes(ov.storage.usage.appliance) : "—"} />
+            {ov && ov.storage.usage.customer > 0 && (
+              <Fact icon="cloud" label="Your cloud storage" value={bytes(ov.storage.usage.customer)} />
+            )}
+            <Fact icon="clock" label="History reaches back to" value={ov ? fmtOldest(ov.storage.oldest_content_at) : "—"} />
             <Fact icon="shield" label="Encryption" value={health?.pq_available ? "Hybrid post-quantum" : "Hybrid (dev)"} />
             <Fact icon="key" label="Key ownership" value={ov?.protection.key_ownership_model ?? tenant?.key_ownership_model ?? "—"} />
           </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>Recovery points are retained indefinitely — your history isn't pruned.</div>
           {ov && ov.storage.destinations.length > 0 && (
             <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
               <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>Stored across</div>

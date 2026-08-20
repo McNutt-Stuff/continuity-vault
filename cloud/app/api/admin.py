@@ -551,9 +551,17 @@ def reports(db: Session = Depends(get_db)):
     """Usage + billing rollup across every tenant."""
     from .billing import _usage, get_pricing
     pricing = get_pricing(db)
+    # Actual bytes stored in Arkive Cloud (cv-cloud) per tenant — the footprint
+    # we pay the storage provider for (distinct from logical protected bytes).
+    cloud_by_tenant = dict(
+        db.query(SnapshotReceipt.tenant_id,
+                 func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0))
+        .filter(SnapshotReceipt.destination == "cv-cloud")
+        .group_by(SnapshotReceipt.tenant_id).all()
+    )
     rows = []
     totals = {"tenants": 0, "users": 0, "objects": 0, "bytes": 0,
-              "recovery_points": 0, "monthly_revenue": 0.0}
+              "recovery_points": 0, "monthly_revenue": 0.0, "cloud_bytes": 0}
     for t in db.query(Tenant).all():
         objects, used_bytes, _ = _usage(db, t.id)
         counts = _tenant_counts(db, t.id)
@@ -564,11 +572,13 @@ def reports(db: Session = Depends(get_db)):
         if "cv-cloud" in options:
             monthly += used_tb * pricing.cloud_price_per_tb_month
         monthly = round(monthly, 2)
+        cloud_bytes = int(cloud_by_tenant.get(t.id, 0) or 0)
         rows.append({
             "id": t.id, "name": t.name, "plan": t.plan, "status": t.status,
             "users": counts["users"], "appliances": counts["appliances"],
             "agents": counts["agents"], "sources": counts["sources"],
             "objects": objects, "used_bytes": used_bytes,
+            "cloud_bytes": cloud_bytes,
             "licensed_bytes": int(t.licensed_bytes or 0),
             "recovery_points": counts["recovery_points"],
             "monthly_cost": monthly, "options": options,
@@ -577,9 +587,13 @@ def reports(db: Session = Depends(get_db)):
         totals["users"] += counts["users"]
         totals["objects"] += objects
         totals["bytes"] += used_bytes
+        totals["cloud_bytes"] += cloud_bytes
         totals["recovery_points"] += counts["recovery_points"]
         totals["monthly_revenue"] += monthly
     totals["monthly_revenue"] = round(totals["monthly_revenue"], 2)
+    # Estimated provider cost of the cloud footprint (AWS S3 Standard estimate).
+    totals["cloud_cost_monthly"] = round(
+        (totals["cloud_bytes"] / _TB) * pricing.s3_price_per_tb_month, 2)
     rows.sort(key=lambda r: -r["monthly_cost"])
     return {"currency": pricing.currency, "tenants": rows, "totals": totals}
 
