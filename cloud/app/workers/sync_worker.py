@@ -165,6 +165,37 @@ def crawl_has_more(db: Session, collection: Collection) -> bool:
     return bool(isinstance(cur, dict) and cur.get("has_more"))
 
 
+def access_token_for_account(db: Session, account: ConnectorAccount) -> Optional[str]:
+    """Decrypt an account's OAuth credentials, refreshing an expired access token.
+    Returns a usable access token (or None). Used by interactive flows (Picker)."""
+    import time
+    if not account or not account.encrypted_credentials:
+        return None
+    try:
+        creds = credstore.decrypt(account.tenant_id, account.encrypted_credentials)
+    except Exception:
+        return None
+    if (creds.get("access_token") and creds.get("expires_at", 0) < time.time()
+            and creds.get("refresh_token")):
+        try:
+            creds.update(oauth.refresh_tokens(account.connector_type, creds["refresh_token"]))
+            account.encrypted_credentials = credstore.encrypt(account.tenant_id, creds)
+            account.auth_status = "linked"
+            db.commit()
+        except Exception:
+            account.auth_status = "needs-reauth"
+            db.commit()
+    return creds.get("access_token")
+
+
+def existing_object_ids(db: Session, collection_id: str) -> set:
+    """Object ids already backed up for a collection — used to skip re-importing
+    items the user re-selects in a picker session."""
+    rows = (db.query(SearchDocument.object_id)
+            .filter(SearchDocument.collection_id == collection_id).distinct().all())
+    return {r[0] for r in rows}
+
+
 def run_backup(db: Session, collection: Collection, destinations: Optional[List[str]] = None,
                progress: Optional[Callable[[int, int, str], None]] = None
                ) -> SnapshotReceipt:

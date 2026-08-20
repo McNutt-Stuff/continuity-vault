@@ -17,6 +17,7 @@ from .api import (
     collections,
     connectors,
     dashboard,
+    photos,
     recovery,
     restore,
     search,
@@ -58,6 +59,8 @@ app.include_router(agents.agent_router, prefix=API)
 app.include_router(admin.router, prefix=API)
 app.include_router(activity.router, prefix=API)
 app.include_router(recovery.router, prefix=API)
+app.include_router(photos.router, prefix=API)
+app.include_router(photos.actions_router, prefix=API)
 app.include_router(updates.router, prefix=API)
 app.include_router(updates.public_router, prefix=API)
 

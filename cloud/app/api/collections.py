@@ -193,6 +193,10 @@ def _collection_view(db: Session, c: Collection) -> dict:
         # runs in resumable chunks (Google Photos, etc.).
         "supports_since": bool(conn and conn.capabilities().historical),
         "since_date": (c.config or {}).get("sinceDate") or "",
+        # Picker sources are imported interactively (user picks items each session);
+        # a reminder nudges them on a cadence.
+        "is_picker": bool(conn and conn.capabilities().picker),
+        "reminder_days": int((c.config or {}).get("reminderDays") or 3),
     }
 
 

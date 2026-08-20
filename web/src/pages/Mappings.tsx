@@ -32,6 +32,7 @@ interface Mapping {
   backup_interval_minutes: number | null; default_interval_minutes: number;
   last_backup_run_at: string | null;
   supports_since?: boolean; since_date?: string;
+  is_picker?: boolean; reminder_days?: number;
   config?: FileConfig;
 }
 interface ActivityEvent {
@@ -74,6 +75,7 @@ export default function Mappings() {
   const [editGmailSpamTrash, setEditGmailSpamTrash] = useState<boolean>(false);
   const [editCategories, setEditCategories] = useState<string[]>([]);
   const [editSince, setEditSince] = useState<string>("");
+  const [editReminder, setEditReminder] = useState<number>(3);
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   // Endpoint-files folder picker: which mapping/agent it's configuring.
   const [picker, setPicker] = useState<{ agentId: string; mappingId: string; initial: FileConfig } | null>(null);
@@ -214,6 +216,7 @@ export default function Mappings() {
     setEditGmailSpamTrash(!!m.config?.includeSpamTrash);
     setEditCategories([...(m.config?.includeCategories || [])]);
     setEditSince(m.since_date || "");
+    setEditReminder(m.reminder_days ?? 3);
   }
 
   function toggleEditDest(id: string) {
@@ -244,6 +247,9 @@ export default function Mappings() {
       }
       if (m.supports_since) {
         body.config = { ...(m.config || {}), ...(body.config || {}), sinceDate: editSince || "" };
+      }
+      if (m.is_picker) {
+        body.config = { ...(m.config || {}), ...(body.config || {}), reminderDays: editReminder };
       }
       await api.put(`/collections/${m.id}`, body);
       setEditId(null);
@@ -550,6 +556,26 @@ export default function Mappings() {
                             {editSince
                               ? `Only items dated ${editSince} and newer are captured.`
                               : "Everything is crawled in the background (can take hours for large libraries)."}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {m.is_picker && (
+                      <div className="stack" style={{ gap: 6 }}>
+                        <span className="faint" style={{ fontSize: 11.5 }}>
+                          Remind me to add new photos every
+                        </span>
+                        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <select style={{ padding: "5px 8px", borderRadius: 6 }} value={editReminder}
+                                  onChange={(e) => setEditReminder(Number(e.target.value))}>
+                            {[0, 1, 3, 7, 14, 30].map((d) => (
+                              <option key={d} value={d}>{d === 0 ? "Never" : `${d} day${d === 1 ? "" : "s"}`}</option>
+                            ))}
+                          </select>
+                          <span className="faint" style={{ fontSize: 11 }}>
+                            {editReminder === 0
+                              ? "No reminders — back up photos manually from Sources."
+                              : "You'll get an ‘Add new photos’ task on your dashboard on this cadence."}
                           </span>
                         </div>
                       </div>

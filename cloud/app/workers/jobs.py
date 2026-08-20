@@ -15,8 +15,14 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
-from ..models import Collection, SyncJob
-from .sync_worker import crawl_has_more, run_backup
+from ..models import Collection, ConnectorAccount, SyncJob
+from .sync_worker import (
+    access_token_for_account,
+    crawl_has_more,
+    existing_object_ids,
+    ingest_objects,
+    run_backup,
+)
 
 logger = logging.getLogger("cv.jobs")
 
@@ -87,6 +93,92 @@ def _run(job_id: str, destinations: Optional[List[str]]) -> None:
             job.message = "Completed"
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI
             logger.exception("backup job %s failed", job_id)
+            job.status = "failed"
+            job.error = str(exc)[:400]
+            job.message = "Failed"
+        job.finished_at = _now()
+        db.commit()
+
+
+def start_picker_import_job(db: Session, tenant_id: str, collection_id: str,
+                            session_id: str) -> SyncJob:
+    """Import the media a user selected in a Google Photos picker session, in the
+    background (must finish within the session's validity window)."""
+    job = SyncJob(tenant_id=tenant_id, collection_id=collection_id, kind="import",
+                  status="queued", message="Queued")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    threading.Thread(target=_run_picker_import, args=(job.id, session_id),
+                     name=f"cv-pick-{job.id[:8]}", daemon=True).start()
+    return job
+
+
+def _run_picker_import(job_id: str, session_id: str) -> None:
+    from ..config import get_settings
+    from ..connectors import get_connector, live
+
+    with SessionLocal() as db:
+        job = db.get(SyncJob, job_id)
+        if not job:
+            return
+        job.status = "running"
+        job.started_at = _now()
+        job.message = "Reading your selection…"
+        db.commit()
+
+        collection = db.get(Collection, job.collection_id)
+        account = (db.get(ConnectorAccount, collection.connector_account_id)
+                   if collection and collection.connector_account_id else None)
+        token = access_token_for_account(db, account) if account else None
+        if not collection or not token:
+            job.status = "failed"
+            job.error = "source not linked or token unavailable"
+            job.finished_at = _now()
+            db.commit()
+            return
+
+        caps = get_connector("google_photos").capabilities()
+        cap_bytes = get_settings().content_max_bytes
+        dests = collection.destinations or ["cv-cloud"]
+        known = existing_object_ids(db, collection.id)
+        batch: List = []
+        seen = imported = 0
+
+        def flush():
+            nonlocal batch
+            if not batch:
+                return
+            ingest_objects(db, collection, batch, dests,
+                           searchable_fields=caps.searchable_fields,
+                           facet_fields=caps.facet_fields, actor="picker-import")
+            for o in batch:
+                known.add(o.object_id)
+            batch = []
+
+        try:
+            for item in live.iter_picker_media(token, session_id):
+                seen += 1
+                oid = f"google_photos:{item.get('id')}"
+                if oid in known:  # already backed up in a prior session — skip
+                    continue
+                batch.append(live.picker_item_to_object(item, cap_bytes, token))
+                imported += 1
+                if len(batch) >= 50:
+                    flush()
+                    job.processed = imported
+                    job.message = f"Imported {imported} new item(s)…"
+                    db.commit()
+            flush()
+            account.last_sync_at = _now()
+            live.delete_picker_session(token, session_id)
+            job.processed = imported
+            job.total = imported
+            job.status = "done"
+            job.message = (f"Imported {imported} new item(s)"
+                           if imported else f"Nothing new ({seen} already backed up)")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("picker import %s failed", job_id)
             job.status = "failed"
             job.error = str(exc)[:400]
             job.message = "Failed"

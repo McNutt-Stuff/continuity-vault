@@ -5,6 +5,7 @@ import { Card, Pill, timeAgo } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, formDialog, notify } from "../components/dialog";
+import { PhotoPickerModal } from "../components/PhotoPicker";
 
 interface CatalogItem {
   type: string;
@@ -40,6 +41,7 @@ export default function Connectors() {
   const [toast, setToast] = useState("");
   const [query, setQuery] = useState("");
   const [groupBy, setGroupBy] = useState<"category" | "family">("category");
+  const [photoPicker, setPhotoPicker] = useState<string | null>(null);
 
   async function load() {
     setCatalog(await api.get<CatalogItem[]>("/connectors/catalog"));
@@ -349,7 +351,9 @@ export default function Connectors() {
                 </div>
               </div>
               <Pill tone={a.auth_status === "linked" ? "ok" : "warn"}>{a.auth_status}</Pill>
-              <button className="btn sm primary" onClick={() => backup(a)}>Back up now</button>
+              {a.connector_type === "google_photos"
+                ? <button className="btn sm primary" onClick={() => setPhotoPicker(a.id)}>Add photos</button>
+                : <button className="btn sm primary" onClick={() => backup(a)}>Back up now</button>}
               <button className="btn sm ghost" onClick={() => unlink(a)}>Unlink</button>
             </div>
           );
@@ -357,6 +361,10 @@ export default function Connectors() {
       </Card>
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+      {photoPicker && (
+        <PhotoPickerModal accountId={photoPicker} onClose={() => setPhotoPicker(null)}
+                          onStarted={() => flash("Photo import started — see Activity")} />
+      )}
     </>
   );
 }

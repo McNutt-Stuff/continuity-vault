@@ -565,6 +565,25 @@ class SourceConfig(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+class PendingAction(Base):
+    """A task surfaced to the customer that needs a manual step — e.g. pick new
+    Google Photos to back up (the Picker API requires a human selection). Created
+    on a cadence by the scheduler; auto-resolved or dismissed when handled."""
+
+    __tablename__ = "pending_actions"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    kind = Column(String, default="photos_pick")
+    collection_id = Column(String, nullable=True, index=True)
+    source_type = Column(String, default="")
+    title = Column(String, default="")
+    message = Column(String, default="")
+    status = Column(String, default="open")  # open | done | dismissed
+    due_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
 class ServiceObject(Base):
     """A named platform service instance configured on the Service Objects admin
     page: a storage backend (Amazon S3 / Azure Blob) or an email sender (SES).

@@ -470,11 +470,11 @@ class GooglePhotosConnector(Connector):
     display_name = "Google Photos"
 
     def capabilities(self) -> ConnectorCapabilities:
+        # Picker-based import: Google no longer allows unattended full-library
+        # reads, so the user picks items/albums each session and Arkive imports
+        # only what's new (deduped). Not auto-scheduled (picker, delta=False).
         return ConnectorCapabilities(
-            incremental=True,
-            supports_pagination=True,
-            delta=True,
-            historical=True,  # big library — resumable chunked crawl + since-date window
+            picker=True,
             searchable_fields=["filename", "mime", "kind"],
             facet_fields=["kind"],
         )
@@ -485,30 +485,17 @@ class GooglePhotosConnector(Connector):
             auth_type="oauth2",
             authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
             token_url="https://oauth2.googleapis.com/token",
-            scopes=["https://www.googleapis.com/auth/photoslibrary.readonly"],
+            scopes=["https://www.googleapis.com/auth/photospicker.mediaitems.readonly"],
             icon="image", color="#fbbc05", doc_types=["photo", "video"],
         )
 
     def fetch(self, account_label, cursor=None, config=None) -> FetchResult:
-        config = config or {}
-        if config.get("access_token"):
-            objs, new_cursor = live.fetch_google_photos(
-                config["access_token"], cursor=cursor, config=config,
-                content_cap=_content_cap())
-            return FetchResult(objects=objs, cursor=new_cursor,
-                               has_more=bool((new_cursor or {}).get("has_more")))
-        return FetchResult(objects=list(self.fetch_objects(account_label, config=config)))
+        # Import happens through the interactive picker flow, not an automatic
+        # pull — a scheduled/manual run is a no-op.
+        return FetchResult(objects=[], cursor=cursor, has_more=False)
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
-        for i, (name, kind) in enumerate([("IMG_2043.jpg", "photo"),
-                                          ("Birthday.mp4", "video")]):
-            yield SourceObject(
-                object_id=_oid(self.connector_type, account_label, i),
-                doc_type=kind, category="photo", title=name,
-                content=f"[google photos {name}]".encode(),
-                preview=f"{kind} · Google Photos",
-                meta={"filename": name, "kind": kind}, labels=["Google Photos"],
-                modified_at=_dt(i))
+        return iter(())
 
 
 @register_connector

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from ..config import get_settings
 from ..connectors import get_connector
 from ..db import SessionLocal
-from ..models import Collection
+from ..models import Collection, ConnectorAccount, PendingAction
 from .sync_worker import run_backup
 
 logger = logging.getLogger("cv.scheduler")
@@ -83,6 +83,34 @@ def _is_due(c: Collection, interval_minutes: int, now: datetime) -> bool:
     return (now - last) >= timedelta(minutes=interval_minutes)
 
 
+def _maybe_photo_reminder(db, collection, now: datetime) -> None:
+    """Create a 'pick new photos' task when a picker source is overdue and no
+    open action already exists (cadence from config.reminderDays, default 3)."""
+    if not collection.connector_account_id:
+        return
+    days = int((collection.config or {}).get("reminderDays") or 3)
+    if days <= 0:
+        return  # reminders disabled for this mapping
+    acct = db.get(ConnectorAccount, collection.connector_account_id)
+    last = acct.last_sync_at if acct else None
+    if last is not None and last.tzinfo is not None:
+        last = last.replace(tzinfo=None)
+    if last is not None and (now - last) < timedelta(days=days):
+        return
+    open_exists = (db.query(PendingAction)
+                   .filter(PendingAction.collection_id == collection.id,
+                           PendingAction.status == "open").first())
+    if open_exists:
+        return
+    db.add(PendingAction(
+        tenant_id=collection.tenant_id, kind="photos_pick",
+        collection_id=collection.id, source_type=collection.source_type,
+        title="Add new Google Photos",
+        message="Pick recent photos or albums to back up. Items already saved are skipped automatically.",
+        due_at=now))
+    db.commit()
+
+
 def run_due() -> int:
     """Run a backup for every mapping whose cadence is due. Returns count run."""
     settings = get_settings()
@@ -91,13 +119,22 @@ def run_due() -> int:
     ran = 0
     with SessionLocal() as db:
         for c in db.query(Collection).all():
-            interval = _effective_interval(c, default_minutes)
-            if not _is_due(c, interval, now):
-                continue
             conn = get_connector(c.source_type)
             if conn is None:
                 continue
             caps = conn.capabilities()
+            # Picker sources (Google Photos) can't auto-pull — instead remind the
+            # user on a cadence to pick new items.
+            if caps.picker:
+                try:
+                    _maybe_photo_reminder(db, c, now)
+                except Exception as exc:  # noqa: BLE001
+                    db.rollback()
+                    logger.warning("photo reminder failed for %s: %s", c.id, exc)
+                continue
+            interval = _effective_interval(c, default_minutes)
+            if not _is_due(c, interval, now):
+                continue
             try:
                 if caps.requires_agent:
                     # Agent-collected sources are PUSH: the endpoint agent owns the

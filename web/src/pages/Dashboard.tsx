@@ -4,6 +4,7 @@ import { api } from "../api";
 import { Card, Pill, bytes } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
+import { PhotoPickerModal } from "../components/PhotoPicker";
 
 interface SourceType { type: string; displayName: string; icon: string; color: string; count: number; }
 interface ObjectBucket { key: string; label: string; icon: string; color: string; count: number; }
@@ -20,6 +21,10 @@ interface Overview {
   protection: { key_ownership_model: string; encrypted: boolean };
 }
 interface Tenant { name: string; plan: string; key_ownership_model: string; }
+interface PendingAction {
+  id: string; kind: string; title: string; message: string;
+  source_type: string; collection_id?: string | null; account_id?: string | null;
+}
 interface TrendSeries { key: string; label: string; icon: string; color: string; values: number[]; current: number; }
 interface Trends { period: string; points: string[]; series: TrendSeries[]; }
 
@@ -44,11 +49,20 @@ export default function Dashboard() {
   const [health, setHealth] = useState<{ pq_available?: boolean } | null>(null);
   const [period, setPeriod] = useState("week");
   const [trends, setTrends] = useState<Trends | null>(null);
+  const [actions, setActions] = useState<PendingAction[]>([]);
+  const [pickerAccount, setPickerAccount] = useState<string | null>(null);
+
+  function reloadActions() { api.get<PendingAction[]>("/actions").then(setActions).catch(() => {}); }
+  async function dismissAction(id: string) {
+    try { await api.post(`/actions/${id}/dismiss`, {}); } catch { /* ignore */ }
+    reloadActions();
+  }
 
   useEffect(() => {
     api.get<Overview>("/overview").then(setOv).catch(() => {});
     api.get<Tenant>("/tenant").then(setTenant).catch(() => {});
     api.get<{ pq_available?: boolean }>("/health").then(setHealth).catch(() => {});
+    reloadActions();
   }, []);
 
   useEffect(() => {
@@ -78,6 +92,32 @@ export default function Dashboard() {
           </button>
         </div>
       </div>
+
+      {actions.length > 0 && (
+        <Card style={{ marginBottom: 16, borderColor: "var(--accent,#4f7cff)" }}>
+          <div className="row" style={{ gap: 8, marginBottom: 4 }}>
+            <Icon name="bell" size={16} />
+            <h2 style={{ margin: 0, fontSize: 16 }}>Actions needed</h2>
+          </div>
+          <div className="stack" style={{ gap: 0 }}>
+            {actions.map((a) => (
+              <div key={a.id} className="row" style={{ gap: 10, alignItems: "center", padding: "10px 0", borderTop: "1px solid var(--border-soft)" }}>
+                <div className="result-icon" style={{ width: 30, height: 30, background: "var(--inset)" }}>
+                  {a.source_type ? <SourceIcon type={a.source_type} fallback="image" size={16} /> : <Icon name="bell" size={15} />}
+                </div>
+                <div className="flex1">
+                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>{a.title}</div>
+                  <div className="faint" style={{ fontSize: 12 }}>{a.message}</div>
+                </div>
+                {a.kind === "photos_pick" && a.account_id && (
+                  <button className="btn primary sm" onClick={() => setPickerAccount(a.account_id!)}>Add photos</button>
+                )}
+                <button className="btn ghost sm" onClick={() => dismissAction(a.id)}>Dismiss</button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {/* --- Top row: four headline cards --------------------------------- */}
       <div className="grid grid-4">
@@ -225,6 +265,10 @@ export default function Dashboard() {
           )}
         </Card>
       </div>
+      {pickerAccount && (
+        <PhotoPickerModal accountId={pickerAccount} onClose={() => setPickerAccount(null)}
+                          onStarted={reloadActions} />
+      )}
     </>
   );
 }

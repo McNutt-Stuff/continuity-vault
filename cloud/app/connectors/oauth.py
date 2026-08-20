@@ -109,7 +109,7 @@ def _providers() -> Dict[str, ProviderSpec]:
             authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
             token_url="https://oauth2.googleapis.com/token",
             scopes=["openid", "https://www.googleapis.com/auth/userinfo.email",
-                    "https://www.googleapis.com/auth/photoslibrary.readonly"],
+                    "https://www.googleapis.com/auth/photospicker.mediaitems.readonly"],
             client_id=s.google_client_id,
             client_secret=s.google_client_secret,
             extra_auth_params={"access_type": "offline", "prompt": "consent"},
