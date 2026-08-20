@@ -300,12 +300,38 @@ class Agent:
     def _report_fs_scan(self, params: dict) -> None:
         """Serve the folder tree from the cached index (fast) and, if asked,
         signal a background rebuild. Never scans inline so the heartbeat can't
-        block on a slow filesystem walk."""
+        block on a slow filesystem walk. A specific ``path`` means a lazy
+        expansion request — scan just that folder's immediate children."""
         request_id = params.get("request_id", "")
+        path = (params.get("path") or "").strip()
+        if path:
+            self._report_fs_expand(path, request_id)
+            return
         if params.get("rebuild"):
             self._rebuild_event.set()
         index = self._current_index()
         self._post_fs_index(index, request_id=request_id)
+
+    def _report_fs_expand(self, path: str, request_id: str) -> None:
+        """Scan one folder's immediate children on demand (fast) so the portal
+        can expand the tree lazily beyond the pre-built index's bounds."""
+        ok, err = True, None
+        try:
+            s = files_collector.scan(path, max_entries=5000)
+            children = [{"path": d["path"], "name": d["name"], "files": 0,
+                         "children": [], "hasMore": bool(d.get("hasChildren"))}
+                        for d in s.get("dirs", [])]
+            result = {"path": path, "children": children,
+                      "files": s.get("files", 0), "bytes": s.get("bytes", 0)}
+        except Exception as exc:
+            result, ok, err = {"path": path, "children": []}, False, str(exc)
+        try:
+            httpx.post(f"{self.cfg.cloud_base_url}/agent/fs-expand-result", json={
+                "request_id": request_id, "path": path, "ok": ok, "error": err,
+                "result": result,
+            }, headers=self._headers(), timeout=30)
+        except Exception as exc:
+            self.log.error("fs-expand report failed: %s", exc)
 
     def _post_fs_index(self, index: dict, request_id: str = "auto-index",
                        ok: bool = True, err: Optional[str] = None) -> None:

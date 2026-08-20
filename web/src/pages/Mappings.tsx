@@ -686,6 +686,8 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
 }) {
   const [index, setIndex] = useState<FsIndex | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [lazyKids, setLazyKids] = useState<Record<string, FsNode[]>>({});
+  const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set(initial.roots || []));
   const [excl, setExcl] = useState<string>((initial.excludeExts || []).join(", "));
   const [maxMb, setMaxMb] = useState<number>(Math.round((initial.maxSizeBytes || 100 * 1024 * 1024) / (1024 * 1024)));
@@ -749,8 +751,34 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
     setRebuilding(false);
   }
 
-  function toggleExpand(path: string) {
+  function toggleExpand(node: FsNode) {
+    const path = node.path;
+    const willExpand = !expanded.has(path);
     setExpanded((cur) => { const n = new Set(cur); n.has(path) ? n.delete(path) : n.add(path); return n; });
+    // Lazily fetch children the pre-built index didn't include (truncated or
+    // depth-limited folders), so the operator can drill into anything.
+    if (willExpand) {
+      const hasKids = (node.children && node.children.length) || (lazyKids[path]?.length);
+      if (!hasKids && node.hasMore) void loadChildren(path);
+    }
+  }
+  async function loadChildren(path: string) {
+    if (lazyKids[path] || loadingPaths.has(path)) return;
+    setLoadingPaths((s) => new Set(s).add(path));
+    try {
+      const { request_id } = await api.post<{ request_id: string }>(`/agents/${agentId}/fs-expand`, { path });
+      const deadline = Date.now() + 60000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const { expansion } = await api.get<{ expansion: { request_id: string; ok: boolean; result?: { children?: FsNode[] } } | null }>(
+          `/agents/${agentId}/fs-expand?path=${encodeURIComponent(path)}`);
+        if (expansion && expansion.request_id === request_id) {
+          setLazyKids((m) => ({ ...m, [path]: expansion.ok ? (expansion.result?.children || []) : [] }));
+          break;
+        }
+      }
+    } catch { /* leave unexpanded on failure */ }
+    setLoadingPaths((s) => { const n = new Set(s); n.delete(path); return n; });
   }
   function toggleSelect(path: string) {
     setSelected((cur) => { const n = new Set(cur); n.has(path) ? n.delete(path) : n.add(path); return n; });
@@ -773,13 +801,14 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
   function renderNode(node: FsNode, depth: number) {
     const isSel = selected.has(node.path);
     const isExp = expanded.has(node.path);
-    const kids = node.children || [];
+    const kids = (node.children && node.children.length) ? node.children : (lazyKids[node.path] || []);
+    const isLoading = loadingPaths.has(node.path);
     const canExpand = kids.length > 0 || node.hasMore;
     return (
       <div key={node.path}>
         <div className="row" style={{ gap: 6, alignItems: "center", padding: "3px 0", paddingLeft: depth * 16 }}>
           {canExpand ? (
-            <button className="btn ghost sm" style={{ padding: "0 4px", minWidth: 18 }} onClick={() => toggleExpand(node.path)}>
+            <button className="btn ghost sm" style={{ padding: "0 4px", minWidth: 18 }} onClick={() => toggleExpand(node)}>
               {isExp ? "▾" : "▸"}
             </button>
           ) : <span style={{ width: 18 }} />}
@@ -793,9 +822,14 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
         {isExp && (
           <div>
             {kids.map((c) => renderNode(c, depth + 1))}
-            {kids.length === 0 && node.hasMore && (
+            {kids.length === 0 && isLoading && (
               <div className="faint" style={{ paddingLeft: (depth + 1) * 16 + 24, fontSize: 11 }}>
-                deeper folders not indexed — selecting this folder still backs them up
+                <span className="spinner-dot" /> loading subfolders…
+              </div>
+            )}
+            {kids.length === 0 && !isLoading && node.hasMore && (
+              <div className="faint" style={{ paddingLeft: (depth + 1) * 16 + 24, fontSize: 11 }}>
+                no more subfolders — selecting this folder still backs up everything beneath it
               </div>
             )}
             {kids.length === 0 && !node.hasMore && (node.files || 0) === 0 && (

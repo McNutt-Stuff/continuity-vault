@@ -216,6 +216,39 @@ def get_fs_scan(agent_id: str, tenant: Tenant = Depends(security.get_tenant),
     return {"scan": a.last_scan}
 
 
+class FsExpandRequest(BaseModel):
+    path: str
+
+
+@fleet_router.post("/{agent_id}/fs-expand")
+def request_fs_expand(agent_id: str, body: FsExpandRequest,
+                      principal: security.Principal = Depends(security.get_principal),
+                      tenant: Tenant = Depends(security.get_tenant),
+                      db: Session = Depends(get_db)):
+    """Ask the agent to scan one folder's immediate children on demand, so the
+    portal can expand the tree lazily (no giant up-front index)."""
+    a = db.get(DesktopAgent, agent_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "agent not found")
+    if not (body.path or "").strip():
+        raise HTTPException(400, "path required")
+    request_id = secrets.token_hex(8)
+    a.enqueue_command({"type": "scan_fs",
+                       "params": {"path": body.path, "request_id": request_id}})
+    db.commit()
+    return {"request_id": request_id, "queued": True}
+
+
+@fleet_router.get("/{agent_id}/fs-expand")
+def get_fs_expand(agent_id: str, path: str = "",
+                  tenant: Tenant = Depends(security.get_tenant),
+                  db: Session = Depends(get_db)):
+    a = db.get(DesktopAgent, agent_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "agent not found")
+    return {"expansion": (a.fs_expansions or {}).get(path)}
+
+
 def _agent_view(a: DesktopAgent) -> dict:
     return {
         "id": a.id, "name": a.name, "platform": a.platform, "hostname": a.hostname,
@@ -621,5 +654,30 @@ def fs_scan_result(body: FsScanResultBody, agent: DesktopAgent = Depends(_auth_a
     if body.error:
         scan["error"] = body.error
     agent.last_scan = scan
+    db.commit()
+    return {"ok": True}
+
+
+class FsExpandResultBody(BaseModel):
+    request_id: str = ""
+    path: str = ""
+    ok: bool = True
+    error: str | None = None
+    result: dict = {}
+
+
+@agent_router.post("/fs-expand-result")
+def fs_expand_result(body: FsExpandResultBody, agent: DesktopAgent = Depends(_auth_agent),
+                     db: Session = Depends(get_db)):
+    """Store one folder's on-demand children so the portal can expand it lazily."""
+    exps = dict(agent.fs_expansions or {})
+    exps[body.path] = {"request_id": body.request_id, "ok": body.ok,
+                       "error": body.error, "result": body.result,
+                       "at": _now().isoformat()}
+    # Cap growth: keep the most recent expansions only.
+    if len(exps) > 400:
+        for k in sorted(exps, key=lambda k: exps[k].get("at", ""))[:len(exps) - 400]:
+            exps.pop(k, None)
+    agent.fs_expansions = exps
     db.commit()
     return {"ok": True}

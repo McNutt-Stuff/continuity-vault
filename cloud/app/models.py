@@ -246,6 +246,7 @@ class DesktopAgent(Base):
     pending_commands = Column(JSON, default=list)  # FIFO queue of {type, params}
     telemetry = Column(JSON, default=dict)
     last_scan = Column(JSON, nullable=True)  # latest endpoint filesystem scan result
+    fs_expansions = Column(JSON, default=dict)  # lazy per-folder expansions {path: {...}}
     identity_bundle = Column(JSON, nullable=True)
     agent_token_hash = Column(String, nullable=True, index=True)  # sha256 of bearer token
     last_heartbeat_at = Column(DateTime, nullable=True)

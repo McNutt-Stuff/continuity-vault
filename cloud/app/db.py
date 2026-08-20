@@ -91,6 +91,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE collections ADD COLUMN last_backup_run_at TIMESTAMP",
         "ALTER TABLE collections ADD COLUMN config JSON",
         "ALTER TABLE desktop_agents ADD COLUMN last_scan JSON",
+        "ALTER TABLE desktop_agents ADD COLUMN fs_expansions JSON",
         "ALTER TABLE desktop_agents ADD COLUMN pending_commands JSON",
         "ALTER TABLE recovered_items ADD COLUMN version INTEGER",
         "ALTER TABLE recovered_items ADD COLUMN version_created_at TIMESTAMP",
