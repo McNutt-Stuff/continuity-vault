@@ -58,7 +58,9 @@ prompt_config() {
   [[ -f /etc/arkive/role || -f /etc/continuity-vault.env ]] && first_install=0
 
   if [[ -z "$CV_NODE_ROLE" ]]; then
-    if [[ "$have_tty" == "1" ]]; then
+    # Only ask on a genuine first install. An existing install whose role marker
+    # simply predates this feature is a control-plane node — never re-prompt it.
+    if [[ "$have_tty" == "1" && "$first_install" == "1" ]]; then
       printf "\n  %sSelect the node role to install:%s\n" "$BOLD" "$RESET" >/dev/tty
       printf "    1) control-plane   %s(full stack: API, workers, admin, CMS)%s\n" "$DIM" "$RESET" >/dev/tty
       printf "    2) customer-tenant %s(tenant app + portal; reports to control plane)%s\n" "$DIM" "$RESET" >/dev/tty
