@@ -80,6 +80,7 @@ h3 { font-size: 15px; }
   background: linear-gradient(180deg, var(--sidebar-a), var(--sidebar-b));
   border-right: 1px solid var(--border-soft);
   padding: 20px 14px; display: flex; flex-direction: column; gap: 6px;
+  overflow-y: auto;
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 18px; }
 .brand-logo {

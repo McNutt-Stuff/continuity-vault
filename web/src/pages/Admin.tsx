@@ -1,33 +1,45 @@
 import { ReactNode, useEffect, useState } from "react";
+import { useParams } from "react-router-dom";
 import { api } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo } from "../components/ui";
-import { Icon } from "../components/Icon";
+import { Icon, IconName } from "../components/Icon";
 import { promptDialog, formDialog, confirmDialog, notify } from "../components/dialog";
 
-type Tab = "overview" | "tenants" | "reports" | "nodes" | "fleet" | "pricing" | "config" | "email" | "crypto" | "audit" | "updates";
+export interface AdminSection { key: string; label: string; icon: IconName; group: string; }
+
+// Left-nav sections for the admin console (M365-style, grouped).
+export const ADMIN_SECTIONS: AdminSection[] = [
+  { key: "overview", label: "Overview", icon: "grid", group: "" },
+  { key: "tenants", label: "Tenants", icon: "user", group: "Customers" },
+  { key: "reports", label: "Reports", icon: "activity", group: "Customers" },
+  { key: "config-objects", label: "Configuration objects", icon: "key", group: "Integrations" },
+  { key: "sources", label: "Sources", icon: "link", group: "Integrations" },
+  { key: "service-objects", label: "Service objects", icon: "mail", group: "Integrations" },
+  { key: "pricing", label: "Pricing", icon: "database", group: "Integrations" },
+  { key: "nodes", label: "Nodes", icon: "server", group: "Infrastructure" },
+  { key: "fleet", label: "Appliance fleet", icon: "server", group: "Infrastructure" },
+  { key: "crypto", label: "Crypto", icon: "lock", group: "Infrastructure" },
+  { key: "updates", label: "Updates", icon: "clock", group: "Infrastructure" },
+  { key: "audit", label: "Audit log", icon: "shield", group: "Infrastructure" },
+];
 
 export default function Admin() {
-  const [tab, setTab] = useState<Tab>("overview");
+  const { section } = useParams();
+  const s = section || "overview";
   return (
     <>
-      <div className="chips" style={{ marginBottom: 18 }}>
-        {(["overview", "tenants", "reports", "nodes", "fleet", "pricing", "config", "email", "crypto", "audit", "updates"] as Tab[]).map((t) => (
-          <span key={t} className={`chip ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
-            {t[0].toUpperCase() + t.slice(1)}
-          </span>
-        ))}
-      </div>
-      {tab === "overview" && <Overview />}
-      {tab === "tenants" && <Tenants />}
-      {tab === "reports" && <Reports />}
-      {tab === "nodes" && <Nodes />}
-      {tab === "fleet" && <Fleet />}
-      {tab === "pricing" && <Pricing />}
-      {tab === "config" && <ConfigAdmin />}
-      {tab === "email" && <EmailAdmin />}
-      {tab === "crypto" && <Crypto />}
-      {tab === "audit" && <Audit />}
-      {tab === "updates" && <Updates />}
+      {s === "overview" && <Overview />}
+      {s === "tenants" && <Tenants />}
+      {s === "reports" && <Reports />}
+      {s === "nodes" && <Nodes />}
+      {s === "config-objects" && <ConfigObjectsAdmin />}
+      {s === "sources" && <SourcesAdmin />}
+      {s === "service-objects" && <EmailAdmin />}
+      {s === "fleet" && <Fleet />}
+      {s === "pricing" && <Pricing />}
+      {s === "crypto" && <Crypto />}
+      {s === "audit" && <Audit />}
+      {s === "updates" && <Updates />}
     </>
   );
 }
@@ -823,16 +835,14 @@ interface ConfigObj { id: string; name: string; kind: string; keys: Record<strin
 interface SourceSlot { type: string; label: string; kind: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean }
 interface DraftRow { key: string; value: string; secret: boolean; set: boolean }
 
-function ConfigAdmin() {
+function ConfigObjectsAdmin() {
   const [objects, setObjects] = useState<ConfigObj[]>([]);
-  const [sources, setSources] = useState<SourceSlot[]>([]);
   const [toast, setToast] = useState("");
   const [draft, setDraft] = useState<{ id?: string; name: string; kind: string; rows: DraftRow[] } | null>(null);
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
 
   async function load() {
     try { setObjects(await api.get<ConfigObj[]>("/admin/config-objects")); } catch { /* ignore */ }
-    try { setSources(await api.get<SourceSlot[]>("/admin/sources")); } catch { /* ignore */ }
   }
   useEffect(() => { void load(); }, []);
 
@@ -856,8 +866,7 @@ function ConfigAdmin() {
     const values: Record<string, string> = {};
     for (const r of draft.rows) {
       if (!r.key.trim()) continue;
-      // Blank secret rows are omitted so the backend preserves the stored value.
-      if (r.secret && !r.value) continue;
+      if (r.secret && !r.value) continue;  // blank secret preserves stored value
       values[r.key.trim()] = r.value;
     }
     try {
@@ -870,17 +879,14 @@ function ConfigAdmin() {
     if (!await confirmDialog({ title: "Delete config object?", message: `Delete "${o.name}". Any linked sources will be unlinked.`, tone: "danger", confirmLabel: "Delete" })) return;
     try { await api.del(`/admin/config-objects/${o.id}`); flash("Deleted"); await load(); } catch { flash("Delete failed"); }
   }
-  async function setSource(s: SourceSlot, patch: { enabled?: boolean; config_object_id?: string | null }) {
-    try { await api.put(`/admin/sources/${s.type}`, patch); await load(); } catch { flash("Update failed"); }
-  }
 
   return (
     <>
-      <Card style={{ marginBottom: 16 }}>
+      <Card>
         <div className="spread" style={{ marginBottom: 10 }}>
           <div>
             <h3 style={{ margin: 0 }}>Configuration objects</h3>
-            <div className="muted" style={{ fontSize: 12.5 }}>Encrypted key-value credentials (OAuth keys, API keys, SES) linked to sources below.</div>
+            <div className="muted" style={{ fontSize: 12.5 }}>Encrypted key-value credentials (OAuth keys, API keys, SES) — link them to sources.</div>
           </div>
           <div className="row" style={{ gap: 6 }}>
             <button className="btn sm" onClick={() => newDraft("oauth")}>+ OAuth</button>
@@ -933,7 +939,29 @@ function ConfigAdmin() {
           </tbody>
         </table>
       </Card>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+}
 
+function SourcesAdmin() {
+  const [sources, setSources] = useState<SourceSlot[]>([]);
+  const [objects, setObjects] = useState<ConfigObj[]>([]);
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
+
+  async function load() {
+    try { setSources(await api.get<SourceSlot[]>("/admin/sources")); } catch { /* ignore */ }
+    try { setObjects(await api.get<ConfigObj[]>("/admin/config-objects")); } catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function setSource(s: SourceSlot, patch: { enabled?: boolean; config_object_id?: string | null }) {
+    try { await api.put(`/admin/sources/${s.type}`, patch); await load(); } catch { flash("Update failed"); }
+  }
+
+  return (
+    <>
       <Card>
         <h3 style={{ marginTop: 0 }}>Sources</h3>
         <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>Enable each integration and link the configuration object that supplies its credentials.</div>

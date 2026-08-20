@@ -1,5 +1,5 @@
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useAuth } from "./auth";
 import { Icon, IconName } from "./components/Icon";
 import { getTheme, applyTheme, Theme } from "./theme";
@@ -15,7 +15,7 @@ import Appliances from "./pages/Appliances";
 import Snapshots from "./pages/Snapshots";
 import Restore from "./pages/Restore";
 import Onboarding from "./pages/Onboarding";
-import Admin from "./pages/Admin";
+import Admin, { ADMIN_SECTIONS } from "./pages/Admin";
 import Agents from "./pages/Agents";
 import Audit from "./pages/Audit";
 import ActivityPage from "./pages/Activity";
@@ -72,7 +72,8 @@ export default function App() {
             <Route path="/restore" element={<Restore />} />
             <Route path="/audit" element={<Audit />} />
             <Route path="/settings" element={<Settings />} />
-            {me.is_platform_admin && <Route path="/admin" element={<Admin />} />}
+            {me.is_platform_admin && <Route path="/admin" element={<Navigate to="/admin/overview" replace />} />}
+            {me.is_platform_admin && <Route path="/admin/:section" element={<Admin />} />}
             <Route path="*" element={<Navigate to="/" />} />
           </Routes>
         </div>
@@ -83,6 +84,8 @@ export default function App() {
 
 function Sidebar() {
   const { me } = useAuth();
+  const loc = useLocation();
+  const inAdmin = loc.pathname.startsWith("/admin");
   const [options, setOptions] = useState<string[] | null>(null);
   useEffect(() => {
     api.get<{ protection_options?: string[] }>("/tenant")
@@ -98,28 +101,52 @@ function Sidebar() {
       <div className="brand">
         <div className="brand-logo">A</div>
         <div>
-          <div className="brand-name">Arkive</div>
+          <div className="brand-name">{inAdmin ? "Admin center" : "Arkive"}</div>
           <div className="faint" style={{ fontSize: 11 }}>vault.arkive.life</div>
         </div>
       </div>
-      {nav.map((n) => (
-        <NavLink
-          key={n.to}
-          to={n.to}
-          end={n.to === "/"}
-          className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
-        >
-          <Icon name={n.icon} />
-          {n.label}
-        </NavLink>
-      ))}
-      {me?.is_platform_admin && (
+
+      {inAdmin ? (
         <>
-          <div className="nav-section">Platform</div>
-          <NavLink to="/admin" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-            <Icon name="shield" />
-            Admin Console
+          {/* Admin console nav replaces the personal app nav (M365-style). */}
+          <NavLink to="/" className="nav-item">
+            <Icon name="logout" /> Back to Arkive
           </NavLink>
+          {ADMIN_SECTIONS.map((s, i) => (
+            <Fragment key={s.key}>
+              {s.group && ADMIN_SECTIONS[i - 1]?.group !== s.group && (
+                <div className="nav-section">{s.group}</div>
+              )}
+              <NavLink to={`/admin/${s.key}`}
+                       className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
+                <Icon name={s.icon} />
+                {s.label}
+              </NavLink>
+            </Fragment>
+          ))}
+        </>
+      ) : (
+        <>
+          {nav.map((n) => (
+            <NavLink
+              key={n.to}
+              to={n.to}
+              end={n.to === "/"}
+              className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
+            >
+              <Icon name={n.icon} />
+              {n.label}
+            </NavLink>
+          ))}
+          {me?.is_platform_admin && (
+            <>
+              <div className="nav-section">Platform</div>
+              <NavLink to="/admin/overview" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
+                <Icon name="shield" />
+                Admin Console
+              </NavLink>
+            </>
+          )}
         </>
       )}
       <div style={{ flex: 1 }} />
@@ -133,9 +160,11 @@ function Sidebar() {
 function TopBar() {
   const { me, stepUp, logout } = useAuth();
   const loc = useLocation();
-  const title =
-    NAV.find((n) => n.to === loc.pathname)?.label ??
-    (loc.pathname === "/admin" ? "Admin Console" : loc.pathname === "/onboarding" ? "Onboarding" : "Arkive");
+  const adminKey = loc.pathname.startsWith("/admin/") ? loc.pathname.split("/")[2] : null;
+  const title = adminKey
+    ? (ADMIN_SECTIONS.find((s) => s.key === adminKey)?.label ?? "Admin center")
+    : (NAV.find((n) => n.to === loc.pathname)?.label ??
+      (loc.pathname === "/onboarding" ? "Protection Setup" : "Arkive"));
   return (
     <div className="topbar">
       <h1>{title}</h1>
