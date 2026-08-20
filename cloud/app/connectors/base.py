@@ -95,6 +95,10 @@ class ConnectorCapabilities:
     searchable_fields: List[str] = field(default_factory=list)
     # Metadata keys exposed as filter facets in the UI.
     facet_fields: List[str] = field(default_factory=list)
+    # Content categories the operator can include/exclude in the Data Map
+    # (e.g. iCloud: photos/files/contacts). Each = {"id","label"}. The chosen ids
+    # arrive as config["includeCategories"]; empty selection = include everything.
+    filter_categories: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass

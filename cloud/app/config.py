@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     microsoft_tenant: str = "common"
     dropbox_client_id: str | None = None
     dropbox_client_secret: str | None = None
+    # Google Contacts/Calendar reuse the Google client above. Social sources:
+    reddit_client_id: str | None = None
+    reddit_client_secret: str | None = None
+    facebook_client_id: str | None = None
+    facebook_client_secret: str | None = None
+    instagram_client_id: str | None = None
+    instagram_client_secret: str | None = None
 
     seed_demo_data: bool = True
 

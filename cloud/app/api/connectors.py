@@ -93,6 +93,7 @@ def catalog(tenant: Tenant = Depends(security.get_tenant)):
                 "incremental": caps.incremental,
                 "searchableFields": caps.searchable_fields,
                 "facetFields": caps.facet_fields,
+                "filterCategories": caps.filter_categories,
             },
         })
     return out

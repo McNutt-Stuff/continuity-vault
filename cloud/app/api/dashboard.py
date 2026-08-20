@@ -42,8 +42,10 @@ _OBJECT_BUCKETS: list[dict] = [
     {"key": "photo", "label": "Photos & images", "icon": "image", "color": "#35d0a5",
      "types": {"image", "photo"}},
     {"key": "media", "label": "Audio & video", "icon": "activity", "color": "#f5a623",
-     "types": {"video", "audio"}},
-    {"key": "file", "label": "Files & archives", "icon": "database", "color": "#7a5cff",
+     "types": {"video", "audio"}},    {"key": "message", "label": "Messages & posts", "icon": "mail", "color": "#c56cf0",
+     "types": {"message", "post", "comment"}},
+    {"key": "event", "label": "Calendar events", "icon": "calendar", "color": "#00b8d9",
+     "types": {"event"}},    {"key": "file", "label": "Files & archives", "icon": "database", "color": "#7a5cff",
      "types": {"file", "archive"}},
     {"key": "contact", "label": "Contacts", "icon": "user", "color": "#c56cf0",
      "types": {"contact"}},
@@ -56,7 +58,7 @@ def _bucket_for(doc_type: str) -> dict:
     for b in _OBJECT_BUCKETS:
         if dt in b["types"]:
             return b
-    return _OBJECT_BUCKETS[5]  # default: files & archives
+    return next(b for b in _OBJECT_BUCKETS if b["key"] == "file")  # default
 
 
 def _source_meta(source_type: str) -> dict:

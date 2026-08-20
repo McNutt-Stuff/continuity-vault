@@ -38,6 +38,10 @@ class ProviderSpec:
     client_secret: Optional[str]
     # Extra params appended to the authorize request (provider-specific).
     extra_auth_params: Dict[str, str]
+    # Reddit requires HTTP Basic auth (id:secret) + a descriptive User-Agent on
+    # the token endpoint instead of client creds in the body.
+    basic_auth: bool = False
+    user_agent: Optional[str] = None
 
 
 def _providers() -> Dict[str, ProviderSpec]:
@@ -79,6 +83,53 @@ def _providers() -> Dict[str, ProviderSpec]:
             client_id=s.dropbox_client_id,
             client_secret=s.dropbox_client_secret,
             extra_auth_params={"token_access_type": "offline"},
+        ),
+        "google_contacts": ProviderSpec(
+            connector_type="google_contacts",
+            authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+            token_url="https://oauth2.googleapis.com/token",
+            scopes=["https://www.googleapis.com/auth/contacts.readonly"],
+            client_id=s.google_client_id,
+            client_secret=s.google_client_secret,
+            extra_auth_params={"access_type": "offline", "prompt": "consent"},
+        ),
+        "google_calendar": ProviderSpec(
+            connector_type="google_calendar",
+            authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+            token_url="https://oauth2.googleapis.com/token",
+            scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+            client_id=s.google_client_id,
+            client_secret=s.google_client_secret,
+            extra_auth_params={"access_type": "offline", "prompt": "consent"},
+        ),
+        "reddit": ProviderSpec(
+            connector_type="reddit",
+            authorize_url="https://www.reddit.com/api/v1/authorize",
+            token_url="https://www.reddit.com/api/v1/access_token",
+            scopes=["identity", "history", "read", "privatemessages"],
+            client_id=s.reddit_client_id,
+            client_secret=s.reddit_client_secret,
+            extra_auth_params={"duration": "permanent"},
+            basic_auth=True,
+            user_agent="web:life.arkive:v1 (Arkive backup)",
+        ),
+        "facebook": ProviderSpec(
+            connector_type="facebook",
+            authorize_url="https://www.facebook.com/v19.0/dialog/oauth",
+            token_url="https://graph.facebook.com/v19.0/oauth/access_token",
+            scopes=["public_profile", "user_posts", "user_photos"],
+            client_id=s.facebook_client_id,
+            client_secret=s.facebook_client_secret,
+            extra_auth_params={},
+        ),
+        "instagram": ProviderSpec(
+            connector_type="instagram",
+            authorize_url="https://api.instagram.com/oauth/authorize",
+            token_url="https://api.instagram.com/oauth/access_token",
+            scopes=["user_profile", "user_media"],
+            client_id=s.instagram_client_id,
+            client_secret=s.instagram_client_secret,
+            extra_auth_params={},
         ),
     }
 
@@ -143,12 +194,18 @@ def exchange_code(connector_type: str, code: str) -> dict:
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": redirect_uri(),
-        "client_id": spec.client_id,
-        "client_secret": spec.client_secret,
     }
+    headers = {"Accept": "application/json"}
+    if spec.user_agent:
+        headers["User-Agent"] = spec.user_agent
+    auth = None
+    if spec.basic_auth:
+        auth = (spec.client_id or "", spec.client_secret or "")
+    else:
+        data["client_id"] = spec.client_id
+        data["client_secret"] = spec.client_secret
     with httpx.Client(timeout=30) as client:
-        r = client.post(spec.token_url, data=data,
-                        headers={"Accept": "application/json"})
+        r = client.post(spec.token_url, data=data, headers=headers, auth=auth)
         if r.status_code >= 400:
             raise RuntimeError(
                 f"{connector_type} token exchange failed ({r.status_code}): {r.text}")
@@ -160,15 +217,18 @@ def refresh_tokens(connector_type: str, refresh_token: str) -> dict:
     spec = get_spec(connector_type)
     if not spec:
         raise ValueError(f"unknown OAuth provider {connector_type}")
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": spec.client_id,
-        "client_secret": spec.client_secret,
-    }
+    data = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+    headers = {"Accept": "application/json"}
+    if spec.user_agent:
+        headers["User-Agent"] = spec.user_agent
+    auth = None
+    if spec.basic_auth:
+        auth = (spec.client_id or "", spec.client_secret or "")
+    else:
+        data["client_id"] = spec.client_id
+        data["client_secret"] = spec.client_secret
     with httpx.Client(timeout=30) as client:
-        r = client.post(spec.token_url, data=data,
-                        headers={"Accept": "application/json"})
+        r = client.post(spec.token_url, data=data, headers=headers, auth=auth)
         r.raise_for_status()
         tok = r.json()
     normalized = _normalize(tok, spec)

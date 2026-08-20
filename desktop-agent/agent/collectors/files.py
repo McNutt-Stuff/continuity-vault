@@ -41,7 +41,7 @@ _DEFAULT_MAX_BYTES = 100 * 1024 * 1024   # 100 MiB per file
 _INDEX_MAX_DEPTH = 24
 _INDEX_ROOT_DEPTH = 24     # the system root ("/") is indexed deep too (minus system trees)
 _INDEX_MAX_ENTRIES = 1500  # subfolders indexed per directory
-_INDEX_MAX_NODES = 80000   # total folders across the whole index
+_INDEX_MAX_NODES = 250000   # total folders across the whole index
 _DEFAULT_MAX_FILES = 5000                # safety cap per collection run
 
 # Extension -> canonical kind (matches the server taxonomy KINDS).

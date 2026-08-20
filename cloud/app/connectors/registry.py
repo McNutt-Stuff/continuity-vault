@@ -344,8 +344,13 @@ class ICloudConnector(Connector):
 
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
-            searchable_fields=["album", "kind"],
-            facet_fields=["album"],
+            searchable_fields=["album", "kind", "path"],
+            facet_fields=["kind", "album"],
+            filter_categories=[
+                {"id": "photos", "label": "Photos & videos"},
+                {"id": "files", "label": "iCloud Drive files"},
+                {"id": "contacts", "label": "Contacts"},
+            ],
         )
 
     def oauth_spec(self) -> OAuthSpec:
@@ -358,18 +363,20 @@ class ICloudConnector(Connector):
             scopes=["photos.read", "drive.read", "contacts.read"],
             icon="cloud",
             color="#3693f3",
-            doc_types=["photo", "file", "contact"],
+            doc_types=["photo", "video", "image", "file", "person"],
         )
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}
         if config.get("token"):
-            yield from live.fetch_icloud(config.get("username", ""), config["token"], _content_cap())
+            yield from live.fetch_icloud(
+                config.get("username", ""), config["token"], _content_cap(),
+                options={"includeCategories": config.get("includeCategories")})
             return
         items = [
-            ("IMG_4821.HEIC", "photo", 3_800_000, "Recents"),
-            ("Contacts Export.vcf", "contact", 42_000, "Contacts"),
-            ("Notes — Passwords Hint.txt", "file", 1_200, "Notes"),
+            ("IMG_4821.HEIC", "image", 3_800_000, "Photos"),
+            ("Contacts Export.vcf", "person", 42_000, "Contacts"),
+            ("Notes — Passwords Hint.txt", "file", 1_200, "iCloud Drive"),
         ]
         for i, (name, dtype, size, album) in enumerate(items):
             yield SourceObject(
@@ -383,6 +390,201 @@ class ICloudConnector(Connector):
                 size_bytes=size,
                 modified_at=_dt(i),
             )
+
+
+@register_connector
+class GoogleContactsConnector(Connector):
+    connector_type = "google_contacts"
+    display_name = "Google Contacts"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            searchable_fields=["emails", "phones", "org"],
+            facet_fields=["org"],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="oauth2",
+            authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+            token_url="https://oauth2.googleapis.com/token",
+            scopes=["https://www.googleapis.com/auth/contacts.readonly"],
+            icon="user", color="#4285f4", doc_types=["person"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_google_contacts(config["access_token"], _content_cap())
+            return
+        for i, (name, email) in enumerate([("Sarah Chen", "sarah@family.net"),
+                                           ("Dr. Alvarez", "office@clinic.com")]):
+            yield SourceObject(
+                object_id=_oid(self.connector_type, account_label, i),
+                doc_type="person", category="contact", title=name,
+                content=json.dumps({"name": name, "email": email}).encode(),
+                preview=email, meta={"emails": [email], "kind": "contact"},
+                labels=["Contacts"], modified_at=_dt(i))
+
+
+@register_connector
+class GoogleCalendarConnector(Connector):
+    connector_type = "google_calendar"
+    display_name = "Google Calendar"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            searchable_fields=["calendar", "location", "organizer"],
+            facet_fields=["calendar"],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="oauth2",
+            authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+            token_url="https://oauth2.googleapis.com/token",
+            scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+            icon="calendar", color="#4285f4", doc_types=["event"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_google_calendar(config["access_token"], _content_cap())
+            return
+        for i, (title, when) in enumerate([("Board meeting", "2026-01-14T14:00"),
+                                          ("Family dinner", "2026-01-20T18:30")]):
+            yield SourceObject(
+                object_id=_oid(self.connector_type, account_label, i),
+                doc_type="event", category="calendar", title=title,
+                content=json.dumps({"summary": title, "start": when}).encode(),
+                preview=when, meta={"calendar": "Primary", "start": when, "kind": "event"},
+                labels=["Primary"], modified_at=_dt(i))
+
+
+@register_connector
+class RedditConnector(Connector):
+    connector_type = "reddit"
+    display_name = "Reddit"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            searchable_fields=["subreddit", "kind"],
+            facet_fields=["subreddit", "kind"],
+            filter_categories=[
+                {"id": "posts", "label": "Posts"},
+                {"id": "comments", "label": "Comments"},
+                {"id": "saved", "label": "Saved"},
+                {"id": "messages", "label": "Private messages"},
+            ],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="oauth2",
+            authorize_url="https://www.reddit.com/api/v1/authorize",
+            token_url="https://www.reddit.com/api/v1/access_token",
+            scopes=["identity", "history", "read", "privatemessages"],
+            icon="activity", color="#ff4500",
+            doc_types=["post", "comment", "message"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_reddit(
+                config["access_token"], _content_cap(),
+                options={"includeCategories": config.get("includeCategories")})
+            return
+        for i, (title, sub) in enumerate([("Ask me anything about backups", "selfhosted"),
+                                         ("My homelab tour", "homelab")]):
+            yield SourceObject(
+                object_id=_oid(self.connector_type, account_label, i),
+                doc_type="post", category="social", title=title,
+                content=json.dumps({"title": title, "subreddit": sub}).encode(),
+                preview=f"r/{sub}", meta={"subreddit": sub, "kind": "post"},
+                labels=["Posts", f"r/{sub}"], modified_at=_dt(i))
+
+
+@register_connector
+class FacebookConnector(Connector):
+    connector_type = "facebook"
+    display_name = "Facebook"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            searchable_fields=["kind"],
+            facet_fields=["kind"],
+            filter_categories=[
+                {"id": "posts", "label": "Posts"},
+                {"id": "photos", "label": "Photos"},
+            ],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="oauth2",
+            authorize_url="https://www.facebook.com/v19.0/dialog/oauth",
+            token_url="https://graph.facebook.com/v19.0/oauth/access_token",
+            scopes=["public_profile", "user_posts", "user_photos"],
+            icon="user", color="#1877f2", doc_types=["post", "image"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_facebook(
+                config["access_token"], _content_cap(),
+                options={"includeCategories": config.get("includeCategories")})
+            return
+        for i, msg in enumerate(["Great trip to the coast!", "Happy birthday to my sister"]):
+            yield SourceObject(
+                object_id=_oid(self.connector_type, account_label, i),
+                doc_type="post", category="social", title=msg[:60],
+                content=json.dumps({"message": msg}).encode(), preview=msg,
+                meta={"kind": "post"}, labels=["Posts"], modified_at=_dt(i))
+
+
+@register_connector
+class InstagramConnector(Connector):
+    connector_type = "instagram"
+    display_name = "Instagram"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            searchable_fields=["media_type", "kind"],
+            facet_fields=["media_type"],
+            filter_categories=[{"id": "media", "label": "Photos & videos"}],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="oauth2",
+            authorize_url="https://api.instagram.com/oauth/authorize",
+            token_url="https://api.instagram.com/oauth/access_token",
+            scopes=["user_profile", "user_media"],
+            icon="image", color="#e4405f", doc_types=["image", "video"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_instagram(
+                config["access_token"], _content_cap(),
+                options={"includeCategories": config.get("includeCategories")})
+            return
+        for i, cap in enumerate(["Sunset at the lake", "New puppy"]):
+            yield SourceObject(
+                object_id=_oid(self.connector_type, account_label, i),
+                doc_type="image", category="image", title=cap,
+                content=json.dumps({"caption": cap}).encode(), preview=cap,
+                meta={"media_type": "IMAGE", "kind": "image"},
+                labels=["Instagram"], modified_at=_dt(i))
 
 
 @register_connector

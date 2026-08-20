@@ -331,9 +331,18 @@ def fetch_dropbox(access_token: str, limit: int = 1000,
 
 
 def fetch_icloud(username: str, password: str,
-                 content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
-    """Best-effort iCloud pull via pyicloud: Contacts (vCard-ish JSON) and Drive
-    files (bytes, capped). Interactive-2FA accounts can't be synced headlessly."""
+                 content_cap: int = _DEFAULT_CAP,
+                 options: Optional[dict] = None) -> Iterable[SourceObject]:
+    """Best-effort iCloud pull via pyicloud: Photos, Drive files, and Contacts.
+    ``options.includeCategories`` (photos/files/contacts) filters what's captured.
+    Interactive-2FA accounts can't be synced headlessly. Messages aren't exposed
+    by any iCloud API and can't be captured."""
+    options = options or {}
+
+    def want(cat: str) -> bool:
+        inc = options.get("includeCategories") or []
+        return not inc or cat in inc
+
     try:
         from pyicloud import PyiCloudService  # optional dependency
     except Exception:
@@ -348,49 +357,77 @@ def fetch_icloud(username: str, password: str,
         logger.info("iCloud account requires interactive 2FA; cannot sync headlessly")
         return
 
-    # Contacts
-    try:
-        for person in (api.contacts.all() or []):
-            cid = person.get("contactId") or person.get("phones", [{}])[0].get("field", "")
-            name = " ".join(filter(None, [person.get("firstName"), person.get("lastName")])) or "Contact"
-            content = json.dumps(person).encode()
-            content, backed = _capped(content, content_cap)
-            yield SourceObject(
-                object_id=f"icloud:contact:{cid}",
-                doc_type="person", category="contact", title=name,
-                content=content, preview=name,
-                meta={"kind": "contact", "content_backed_up": backed},
-                labels=["Contacts"],
-            )
-    except Exception as exc:
-        logger.info("iCloud contacts unavailable: %s", exc)
-
-    # Drive files
-    try:
-        drive = api.drive
-        for name in drive.dir():
-            node = drive[name]
-            if getattr(node, "type", "") == "file":
-                size = int(getattr(node, "size", 0) or 0)
+    # Photos
+    if want("photos"):
+        try:
+            for photo in api.photos.all:
+                name = getattr(photo, "filename", None) or f"photo-{getattr(photo, 'id', '')}"
+                size = int(getattr(photo, "size", 0) or 0)
                 raw = b""
-                if size <= content_cap:
+                if 0 < size <= content_cap:
                     try:
-                        with node.open(stream=True) as resp:
-                            raw = resp.raw.read(content_cap + 1)
+                        resp = photo.download()
+                        raw = resp.raw.read(content_cap + 1) if resp else b""
                     except Exception:
                         raw = b""
-                _cat, _kind = classify_file(name)
                 content, backed = _capped(raw, content_cap) if raw else (
                     json.dumps({"_arkive": "no_content", "bytes": size}).encode(), False)
+                kind = "video" if str(name).lower().endswith((".mov", ".mp4")) else "image"
                 yield SourceObject(
-                    object_id=f"icloud:drive:{name}",
-                    doc_type=_kind, category=_cat, title=name,
-                    content=content, preview=f"{size // 1000} KB",
-                    meta={"path": f"/{name}", "content_backed_up": backed},
-                    labels=["iCloud Drive"], size_bytes=size or None,  # type: ignore
+                    object_id=f"icloud:photo:{getattr(photo, 'id', name)}",
+                    doc_type=kind, category=kind if kind == "video" else "image",
+                    title=name, content=content, preview=f"{size // 1000} KB",
+                    meta={"album": "Photos", "kind": kind, "content_backed_up": backed},
+                    labels=["Photos"], size_bytes=size or None)  # type: ignore
+        except Exception as exc:
+            logger.info("iCloud Photos unavailable: %s", exc)
+
+    # Contacts
+    if want("contacts"):
+        try:
+            for person in (api.contacts.all() or []):
+                cid = person.get("contactId") or person.get("phones", [{}])[0].get("field", "")
+                name = " ".join(filter(None, [person.get("firstName"), person.get("lastName")])) or "Contact"
+                content = json.dumps(person).encode()
+                content, backed = _capped(content, content_cap)
+                yield SourceObject(
+                    object_id=f"icloud:contact:{cid}",
+                    doc_type="person", category="contact", title=name,
+                    content=content, preview=name,
+                    meta={"album": "Contacts", "kind": "contact", "content_backed_up": backed},
+                    labels=["Contacts"],
                 )
-    except Exception as exc:
-        logger.info("iCloud Drive unavailable: %s", exc)
+        except Exception as exc:
+            logger.info("iCloud contacts unavailable: %s", exc)
+
+    # Drive files
+    if want("files"):
+        try:
+            drive = api.drive
+            for name in drive.dir():
+                node = drive[name]
+                if getattr(node, "type", "") == "file":
+                    size = int(getattr(node, "size", 0) or 0)
+                    raw = b""
+                    if size <= content_cap:
+                        try:
+                            with node.open(stream=True) as resp:
+                                raw = resp.raw.read(content_cap + 1)
+                        except Exception:
+                            raw = b""
+                    _cat, _kind = classify_file(name)
+                    content, backed = _capped(raw, content_cap) if raw else (
+                        json.dumps({"_arkive": "no_content", "bytes": size}).encode(), False)
+                    yield SourceObject(
+                        object_id=f"icloud:drive:{name}",
+                        doc_type=_kind, category=_cat, title=name,
+                        content=content, preview=f"{size // 1000} KB",
+                        meta={"path": f"/{name}", "album": "iCloud Drive",
+                              "kind": _kind, "content_backed_up": backed},
+                        labels=["iCloud Drive"], size_bytes=size or None,  # type: ignore
+                    )
+        except Exception as exc:
+            logger.info("iCloud Drive unavailable: %s", exc)
 
 
 def _status(object_id: str, title: str, preview: str, label: str) -> SourceObject:
@@ -498,4 +535,234 @@ def fetch_icloud(creds: dict) -> Iterable[SourceObject]:
                 meta={"path": f"/{name}"}, labels=["iCloud Drive"])
     except Exception:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Google Contacts + Calendar (People / Calendar API)                          #
+# --------------------------------------------------------------------------- #
+
+def _download(url: str, cap: int, headers: Optional[dict] = None) -> Tuple[bytes, bool]:
+    """Download a media URL, honoring the per-object cap. Returns (content, backed)."""
+    try:
+        with httpx.Client(timeout=60, follow_redirects=True) as c:
+            r = c.get(url, headers=headers or {})
+            if r.status_code >= 400:
+                return json.dumps({"_arkive": "no_content"}).encode(), False
+            return _capped(r.content, cap)
+    except Exception:
+        return json.dumps({"_arkive": "no_content"}).encode(), False
+
+
+def fetch_google_contacts(access_token: str,
+                          content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
+    headers = {"Authorization": f"Bearer {access_token}"}
+    fields = "names,emailAddresses,phoneNumbers,organizations,addresses,birthdays,biographies"
+    url = "https://people.googleapis.com/v1/people/me/connections"
+    with httpx.Client(timeout=60) as c:
+        token: Optional[str] = None
+        while True:
+            params = {"personFields": fields, "pageSize": 1000}
+            if token:
+                params["pageToken"] = token
+            r = c.get(url, headers=headers, params=params)
+            r.raise_for_status()
+            body = r.json()
+            for p in body.get("connections", []):
+                name = ((p.get("names") or [{}])[0]).get("displayName") or "Contact"
+                emails = [e.get("value") for e in (p.get("emailAddresses") or []) if e.get("value")]
+                phones = [ph.get("value") for ph in (p.get("phoneNumbers") or []) if ph.get("value")]
+                org = ((p.get("organizations") or [{}])[0]).get("name", "")
+                rid = (p.get("resourceName") or name).split("/")[-1]
+                yield SourceObject(
+                    object_id=f"google_contacts:{rid}",
+                    doc_type="person", category="contact", title=name,
+                    content=json.dumps(p).encode(),
+                    preview=", ".join(emails + phones)[:140] or org,
+                    meta={"emails": emails, "phones": phones, "org": org, "kind": "contact"},
+                    labels=["Contacts"])
+            token = body.get("nextPageToken")
+            if not token:
+                break
+
+
+def fetch_google_calendar(access_token: str,
+                          content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
+    headers = {"Authorization": f"Bearer {access_token}"}
+    base = "https://www.googleapis.com/calendar/v3"
+    with httpx.Client(timeout=60) as c:
+        cals = c.get(f"{base}/users/me/calendarList", headers=headers)
+        cals.raise_for_status()
+        for cal in cals.json().get("items", []):
+            cal_id = cal.get("id")
+            cal_name = cal.get("summary", "Calendar")
+            token: Optional[str] = None
+            while True:
+                params = {"singleEvents": "true", "maxResults": 2500, "orderBy": "startTime"}
+                if token:
+                    params["pageToken"] = token
+                r = c.get(f"{base}/calendars/{cal_id}/events", headers=headers, params=params)
+                if r.status_code >= 400:
+                    break
+                body = r.json()
+                for ev in body.get("items", []):
+                    start = (ev.get("start") or {})
+                    when = start.get("dateTime") or start.get("date") or ""
+                    summary = ev.get("summary") or "(no title)"
+                    yield SourceObject(
+                        object_id=f"google_calendar:{ev.get('id')}",
+                        doc_type="event", category="calendar", title=summary,
+                        content=json.dumps(ev).encode(),
+                        preview=f"{when} · {ev.get('location', '')}".strip(" ·"),
+                        meta={"calendar": cal_name, "start": when,
+                              "location": ev.get("location"),
+                              "organizer": (ev.get("organizer") or {}).get("email"),
+                              "kind": "event"},
+                        labels=[cal_name])
+                token = body.get("nextPageToken")
+                if not token:
+                    break
+
+
+# --------------------------------------------------------------------------- #
+# Social: Reddit, Facebook, Instagram                                         #
+# --------------------------------------------------------------------------- #
+
+def _want(options: Optional[dict], category: str) -> bool:
+    """True when a content category is selected (empty selection = include all)."""
+    inc = (options or {}).get("includeCategories") or []
+    return not inc or category in inc
+
+
+def fetch_reddit(access_token: str, content_cap: int = _DEFAULT_CAP,
+                 options: Optional[dict] = None) -> Iterable[SourceObject]:
+    ua = "web:life.arkive:v1 (Arkive backup)"
+    headers = {"Authorization": f"Bearer {access_token}", "User-Agent": ua}
+    base = "https://oauth.reddit.com"
+    with httpx.Client(timeout=60) as c:
+        me = c.get(f"{base}/api/v1/me", headers=headers)
+        if me.status_code >= 400:
+            return
+        user = me.json().get("name", "")
+
+        def _listing(path: str, kind: str, label: str):
+            after = None
+            while True:
+                params = {"limit": 100}
+                if after:
+                    params["after"] = after
+                r = c.get(f"{base}{path}", headers=headers, params=params)
+                if r.status_code >= 400:
+                    break
+                data = r.json().get("data", {})
+                for child in data.get("children", []):
+                    d = child.get("data", {})
+                    title = d.get("title") or (d.get("body") or "")[:80] or "(reddit)"
+                    yield SourceObject(
+                        object_id=f"reddit:{d.get('name') or d.get('id')}",
+                        doc_type=kind, category="social", title=title,
+                        content=json.dumps(d).encode(),
+                        preview=(d.get("selftext") or d.get("body") or d.get("url") or "")[:200],
+                        meta={"subreddit": d.get("subreddit"), "score": d.get("score"),
+                              "permalink": d.get("permalink"), "kind": kind},
+                        labels=[label] + ([f"r/{d.get('subreddit')}"] if d.get("subreddit") else []))
+                after = data.get("after")
+                if not after:
+                    break
+
+        if _want(options, "posts"):
+            yield from _listing(f"/user/{user}/submitted", "post", "Posts")
+        if _want(options, "comments"):
+            yield from _listing(f"/user/{user}/comments", "comment", "Comments")
+        if _want(options, "saved"):
+            yield from _listing(f"/user/{user}/saved", "post", "Saved")
+        if _want(options, "messages"):
+            r = c.get(f"{base}/message/inbox", headers=headers, params={"limit": 100})
+            if r.status_code < 400:
+                for child in r.json().get("data", {}).get("children", []):
+                    d = child.get("data", {})
+                    yield SourceObject(
+                        object_id=f"reddit:msg:{d.get('name') or d.get('id')}",
+                        doc_type="message", category="message",
+                        title=d.get("subject") or "(message)",
+                        content=json.dumps(d).encode(),
+                        preview=(d.get("body") or "")[:200],
+                        meta={"from": d.get("author"), "kind": "message"},
+                        labels=["Messages"])
+
+
+def fetch_facebook(access_token: str, content_cap: int = _DEFAULT_CAP,
+                   options: Optional[dict] = None) -> Iterable[SourceObject]:
+    base = "https://graph.facebook.com/v19.0"
+    with httpx.Client(timeout=60) as c:
+        def _page(path: str, params: dict):
+            url: Optional[str] = f"{base}{path}"
+            p: Optional[dict] = {**params, "access_token": access_token, "limit": 100}
+            while url:
+                r = c.get(url, params=p)
+                if r.status_code >= 400:
+                    return
+                body = r.json()
+                for item in body.get("data", []):
+                    yield item
+                url = (body.get("paging") or {}).get("next")
+                p = None  # 'next' is a full URL
+
+        if _want(options, "posts"):
+            for post in _page("/me/posts", {"fields": "id,message,created_time,permalink_url,full_picture"}):
+                msg = post.get("message") or "(post)"
+                yield SourceObject(
+                    object_id=f"facebook:{post.get('id')}",
+                    doc_type="post", category="social", title=msg[:80],
+                    content=json.dumps(post).encode(), preview=msg[:200],
+                    meta={"created": post.get("created_time"),
+                          "permalink": post.get("permalink_url"), "kind": "post"},
+                    labels=["Posts"])
+        if _want(options, "photos"):
+            for photo in _page("/me/photos", {"type": "uploaded",
+                                              "fields": "id,name,created_time,images,link"}):
+                images = photo.get("images") or []
+                src = images[0].get("source") if images else None
+                content, backed = _download(src, content_cap) if src else (
+                    json.dumps(photo).encode(), False)
+                yield SourceObject(
+                    object_id=f"facebook:photo:{photo.get('id')}",
+                    doc_type="image", category="image",
+                    title=(photo.get("name") or "Photo")[:80],
+                    content=content, preview=photo.get("link") or "photo",
+                    meta={"created": photo.get("created_time"), "link": photo.get("link"),
+                          "kind": "image", "content_backed_up": backed},
+                    labels=["Photos"])
+
+
+def fetch_instagram(access_token: str, content_cap: int = _DEFAULT_CAP,
+                    options: Optional[dict] = None) -> Iterable[SourceObject]:
+    base = "https://graph.instagram.com"
+    fields = "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp"
+    with httpx.Client(timeout=60) as c:
+        url: Optional[str] = f"{base}/me/media"
+        params: Optional[dict] = {"fields": fields, "access_token": access_token, "limit": 100}
+        while url:
+            r = c.get(url, params=params)
+            if r.status_code >= 400:
+                return
+            body = r.json()
+            for m in body.get("data", []):
+                mtype = (m.get("media_type") or "IMAGE").upper()
+                kind = "video" if mtype == "VIDEO" else "image"
+                if not _want(options, "media"):
+                    continue
+                media_url = m.get("media_url") or m.get("thumbnail_url")
+                content, backed = _download(media_url, content_cap) if media_url else (
+                    json.dumps(m).encode(), False)
+                yield SourceObject(
+                    object_id=f"instagram:{m.get('id')}",
+                    doc_type=kind, category=kind if kind == "video" else "image",
+                    title=(m.get("caption") or "Instagram media")[:80],
+                    content=content, preview=m.get("permalink") or "",
+                    meta={"created": m.get("timestamp"), "permalink": m.get("permalink"),
+                          "media_type": mtype, "kind": kind, "content_backed_up": backed},
+                    labels=["Instagram"])
+            url = (body.get("paging") or {}).get("next")
+            params = None
+
 

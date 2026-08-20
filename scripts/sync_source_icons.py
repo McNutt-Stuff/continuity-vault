@@ -55,6 +55,11 @@ SOURCE_ICONS: dict[str, dict] = {
     "slack":      {"file": "Slack icon 2019.svg", "search": "Slack logo"},
     "notion":     {"file": "Notion-logo.svg", "search": "Notion app logo"},
     "github":     {"file": "Octicons-mark-github.svg", "search": "GitHub mark"},
+    "reddit":     {"file": "Reddit Logo Icon.svg", "search": "Reddit logo icon"},
+    "facebook":   {"file": "Facebook Logo (2019).svg", "search": "Facebook f logo"},
+    "instagram":  {"file": "Instagram icon.svg", "search": "Instagram logo icon"},
+    "google_calendar": {"file": "Google Calendar icon (2020).svg", "search": "Google Calendar icon"},
+    "google_contacts": {"file": "Google Contacts icon.svg", "search": "Google Contacts icon"},
 }
 
 

@@ -15,6 +15,11 @@ interface StorageTarget {
 interface FileConfig {
   roots?: string[]; excludeExts?: string[]; maxSizeBytes?: number;
   excludeFolders?: string[]; includeSpamTrash?: boolean;
+  includeCategories?: string[];
+}
+interface CatalogItem {
+  type: string;
+  capabilities?: { filterCategories?: { id: string; label: string }[] };
 }
 interface Mapping {
   id: string; name: string; source_type: string; source_display: string;
@@ -66,6 +71,8 @@ export default function Mappings() {
   // Gmail: which folders to skip + whether to include Spam/Trash.
   const [editGmailExclude, setEditGmailExclude] = useState<string[]>([]);
   const [editGmailSpamTrash, setEditGmailSpamTrash] = useState<boolean>(false);
+  const [editCategories, setEditCategories] = useState<string[]>([]);
+  const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   // Endpoint-files folder picker: which mapping/agent it's configuring.
   const [picker, setPicker] = useState<{ agentId: string; mappingId: string; initial: FileConfig } | null>(null);
   const [activity, setActivity] = useState<Activity | null>(null);
@@ -88,6 +95,7 @@ export default function Mappings() {
     setMappings(coll);
     setTargets(tgts);
     if (!vaultId && tenant.vaults[0]) setVaultId(tenant.vaults[0].id);
+    try { setCatalog(await api.get<CatalogItem[]>("/connectors/catalog")); } catch { /* ignore */ }
     try { setActivity(await api.get<Activity>("/activity")); } catch { /* ignore */ }
   }
   useEffect(() => {
@@ -202,6 +210,7 @@ export default function Mappings() {
     setEditInterval(m.backup_interval_minutes == null ? -1 : m.backup_interval_minutes);
     setEditGmailExclude([...(m.config?.excludeFolders || [])]);
     setEditGmailSpamTrash(!!m.config?.includeSpamTrash);
+    setEditCategories([...(m.config?.includeCategories || [])]);
   }
 
   function toggleEditDest(id: string) {
@@ -210,6 +219,10 @@ export default function Mappings() {
 
   function toggleEditField(id: string) {
     setEditFields((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]);
+  }
+
+  function filterCatsFor(sourceType: string): { id: string; label: string }[] {
+    return catalog.find((c) => c.type === sourceType)?.capabilities?.filterCategories || [];
   }
 
   async function saveRouting(m: Mapping) {
@@ -222,6 +235,9 @@ export default function Mappings() {
       };
       if (m.source_type === "gmail") {
         body.config = { ...(m.config || {}), excludeFolders: editGmailExclude, includeSpamTrash: editGmailSpamTrash };
+      }
+      if (filterCatsFor(m.source_type).length > 0) {
+        body.config = { ...(m.config || {}), ...(body.config || {}), includeCategories: editCategories };
       }
       await api.put(`/collections/${m.id}`, body);
       setEditId(null);
@@ -546,6 +562,23 @@ export default function Mappings() {
                             {(m.config?.roots?.length || 0)} folder(s) selected
                             {m.config?.excludeExts?.length ? ` · excluding ${m.config.excludeExts.join(", ")}` : ""}
                           </span>
+                        </div>
+                      </div>
+                    )}
+                    {filterCatsFor(m.source_type).length > 0 && (
+                      <div className="stack" style={{ gap: 6 }}>
+                        <span className="faint" style={{ fontSize: 11.5 }}>What to back up (all if none selected)</span>
+                        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                          {filterCatsFor(m.source_type).map((f) => (
+                            <span
+                              key={f.id}
+                              className={`chip ${editCategories.includes(f.id) ? "active" : ""}`}
+                              onClick={() => setEditCategories((cur) =>
+                                cur.includes(f.id) ? cur.filter((x) => x !== f.id) : [...cur, f.id])}
+                            >
+                              {editCategories.includes(f.id) && <Icon name="check" size={12} />} {f.label}
+                            </span>
+                          ))}
                         </div>
                       </div>
                     )}
