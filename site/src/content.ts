@@ -107,32 +107,70 @@ export const security = {
 
 export const pricing = {
   h1: "Simple pricing for serious protection.",
-  lead: "Start protecting what matters in minutes. Scale to unlimited history and offline hardware when you're ready.",
-  note: "Prices shown are indicative. Storage and appliance options are configurable — talk to us for enterprise and regulated needs.",
+  lead: "Pay for what you protect, per TB · month. Every plan includes unlimited version history and supports the offline secure hardware appliance.",
+  note: "\"Starting at\" prices reflect each plan's minimum. You then pay the plan's per-TB rate for the data you protect. Prices are configurable — talk to us for enterprise and regulated needs.",
   plans: [
     {
       name: "Personal",
+      planId: "consumer",
       price: "$9", per: "/month",
       blurb: "For individuals protecting their digital life.",
       cta: "Start free trial",
-      features: ["Up to 1 TB protected", "All personal sources", "Unlimited version history", "Private-by-design encryption", "Unified search & recovery"],
+      features: ["All personal sources", "Unlimited version history", "Private-by-design encryption", "Unified search & recovery", "Offline appliance supported"],
     },
     {
       name: "Family / Pro",
+      planId: "family",
       price: "$24", per: "/month",
       featured: true,
       blurb: "For families and power users who want it all.",
       cta: "Start free trial",
-      features: ["Up to 5 TB protected", "Everything in Personal", "Multiple users & shared vaults", "Priority recovery", "Legacy & recovery planning"],
+      features: ["Everything in Personal", "Multiple users & shared vaults", "Priority recovery", "Legacy & recovery planning", "Offline appliance supported"],
     },
     {
       name: "Business",
+      planId: "business",
       price: "Custom", per: "",
       blurb: "For teams and regulated organizations.",
       cta: "Talk to sales",
-      features: ["Unlimited data & retention", "Customer-managed keys", "Approvals, quorum & policy", "Offline appliance option", "Compliance & audit support"],
+      features: ["Customer-managed keys", "Approvals, quorum & policy", "Compliance & audit support", "Volume discounts", "Offline appliance supported"],
     },
   ],
+};
+
+export const storageOptions = {
+  h1: "Where your data lives — your choice.",
+  lead: "Protect your data in the Arkive cloud, on hardware you own, in your own cloud account — or any combination. Every plan supports all three.",
+  options: [
+    {
+      ico: "☁️", h: "Arkive Cloud", tag: "Fully-managed · multi-region",
+      p: "A zero-setup, fully-managed vault with post-quantum encryption at rest and managed multi-region redundancy.",
+      points: ["Protected in minutes — nothing to run", "Customer-managed keys; Arkive can't decrypt", "Multi-region redundancy & managed failover", "Simple per-TB pricing"],
+    },
+    {
+      ico: "🔒", h: "Arkive Secure Appliance", tag: "Offline hardware you own",
+      p: "A physical, air-gapped copy that lives on-site under your control — recoverable even during an internet outage.",
+      points: ["Tamper-evident, HSM-sealed storage", "Full local recovery, offline", "Physically isolated from network attacks", "One-time hardware cost, no monthly storage fee"],
+    },
+    {
+      ico: "🌐", h: "Bring your own storage", tag: "AWS · Azure · Google Cloud",
+      p: "Keep data in your own cloud account with popular providers. Independent of Arkive; you pay your provider directly.",
+      points: ["Your bucket, your account, your control", "Works with AWS S3, Azure Blob & Google Cloud", "Customer-managed or private-by-design keys", "Transparent third-party cost estimates"],
+    },
+  ],
+};
+
+export const hardware = {
+  h1: "Arkive Secure Appliance",
+  lead: "An offline, tamper-evident vault you keep on-site — a physically isolated copy no network attack can reach. Available with every plan.",
+  image: "/appliance.png",
+  points: [
+    "Multi-bay, hot-swappable secure storage",
+    "HSM-sealed, tamper-evident enclosure",
+    "On-device status display & guided setup",
+    "Full local recovery during an internet outage",
+  ],
+  note: "Leased hardware: a low monthly fee plus a one-time setup. Capacities and prices are configurable in your plan.",
 };
 
 export const about = {

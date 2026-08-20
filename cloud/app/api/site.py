@@ -54,11 +54,28 @@ def _content_row(db: Session) -> SiteContent:
 
 @public_router.get("/site")
 def get_site(db: Session = Depends(get_db)):
-    """Public marketing content. Merged over defaults so partial edits are safe."""
+    """Public marketing content + public-safe platform pricing (so the marketing
+    site's plans/hardware reflect the pricing defined in the admin). Merged over
+    defaults so partial edits are safe."""
     row = _content_row(db)
     merged = {**DEFAULT_SITE, **(row.content or {})}
-    return {"content": merged, "published": bool(row.published),
+    return {"content": merged, "pricing": _public_pricing(db),
+            "published": bool(row.published),
             "updated_at": row.updated_at.isoformat() if row.updated_at else None}
+
+
+def _public_pricing(db: Session) -> dict:
+    """Public-safe slice of the platform pricing model (no secrets)."""
+    from .billing import get_pricing, pricing_public
+    pr = pricing_public(get_pricing(db))
+    return {
+        "currency": pr["currency"],
+        "license_plans": pr["license_plans"],
+        "cloud_price_per_tb_month": pr["cloud_price_per_tb_month"],
+        "s3_price_per_tb_month": pr["s3_price_per_tb_month"],
+        "azure_price_per_tb_month": pr["azure_price_per_tb_month"],
+        "appliance_tiers": pr["appliance_tiers"],
+    }
 
 
 @admin_router.get("/site")
