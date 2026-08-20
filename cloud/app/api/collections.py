@@ -112,7 +112,15 @@ def update_collection(collection_id: str, body: UpdateCollectionRequest,
         coll.backup_interval_minutes = (None if body.backup_interval_minutes < 0
                                         else body.backup_interval_minutes)
     if body.config is not None:
+        # Changing the "back up from" date must restart the crawl from scratch —
+        # drop the stored cursor so the next run re-scans with the new window.
+        prev_since = (coll.config or {}).get("sinceDate") or ""
+        new_since = (body.config or {}).get("sinceDate") or ""
         coll.config = body.config
+        if new_since != prev_since and coll.connector_account_id:
+            acct = db.get(ConnectorAccount, coll.connector_account_id)
+            if acct is not None:
+                acct.sync_cursor = None
     db.commit()
     db.refresh(coll)
     audit.record(db, actor=principal.user_id, action="collection.updated",
@@ -181,6 +189,10 @@ def _collection_view(db: Session, c: Collection) -> dict:
         "default_interval_minutes": get_settings().sync_interval_minutes,
         "last_backup_run_at": c.last_backup_run_at.isoformat() if c.last_backup_run_at else None,
         "config": c.config or {},
+        # Big-history sources support a "back up from this date" window; crawling
+        # runs in resumable chunks (Google Photos, etc.).
+        "supports_since": bool(conn and conn.capabilities().historical),
+        "since_date": (c.config or {}).get("sinceDate") or "",
     }
 
 

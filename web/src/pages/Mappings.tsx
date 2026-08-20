@@ -31,6 +31,7 @@ interface Mapping {
   offpolicy_points: number;
   backup_interval_minutes: number | null; default_interval_minutes: number;
   last_backup_run_at: string | null;
+  supports_since?: boolean; since_date?: string;
   config?: FileConfig;
 }
 interface ActivityEvent {
@@ -72,6 +73,7 @@ export default function Mappings() {
   const [editGmailExclude, setEditGmailExclude] = useState<string[]>([]);
   const [editGmailSpamTrash, setEditGmailSpamTrash] = useState<boolean>(false);
   const [editCategories, setEditCategories] = useState<string[]>([]);
+  const [editSince, setEditSince] = useState<string>("");
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   // Endpoint-files folder picker: which mapping/agent it's configuring.
   const [picker, setPicker] = useState<{ agentId: string; mappingId: string; initial: FileConfig } | null>(null);
@@ -211,6 +213,7 @@ export default function Mappings() {
     setEditGmailExclude([...(m.config?.excludeFolders || [])]);
     setEditGmailSpamTrash(!!m.config?.includeSpamTrash);
     setEditCategories([...(m.config?.includeCategories || [])]);
+    setEditSince(m.since_date || "");
   }
 
   function toggleEditDest(id: string) {
@@ -238,6 +241,9 @@ export default function Mappings() {
       }
       if (filterCatsFor(m.source_type).length > 0) {
         body.config = { ...(m.config || {}), ...(body.config || {}), includeCategories: editCategories };
+      }
+      if (m.supports_since) {
+        body.config = { ...(m.config || {}), ...(body.config || {}), sinceDate: editSince || "" };
       }
       await api.put(`/collections/${m.id}`, body);
       setEditId(null);
@@ -528,6 +534,26 @@ export default function Mappings() {
                         </span>
                       </div>
                     </div>
+                    {m.supports_since && (
+                      <div className="stack" style={{ gap: 6 }}>
+                        <span className="faint" style={{ fontSize: 11.5 }}>
+                          Back up history from (leave blank = entire library)
+                        </span>
+                        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <input type="date" value={editSince}
+                                 onChange={(e) => setEditSince(e.target.value)}
+                                 style={{ padding: "5px 8px", borderRadius: 6 }} />
+                          {editSince && (
+                            <button className="btn ghost sm" onClick={() => setEditSince("")}>Clear</button>
+                          )}
+                          <span className="faint" style={{ fontSize: 11 }}>
+                            {editSince
+                              ? `Only items dated ${editSince} and newer are captured.`
+                              : "Everything is crawled in the background (can take hours for large libraries)."}
+                          </span>
+                        </div>
+                      </div>
+                    )}
                     {m.source_type === "gmail" && (
                       <div className="stack" style={{ gap: 6 }}>
                         <span className="faint" style={{ fontSize: 11.5 }}>Skip folders (excluded from backup)</span>

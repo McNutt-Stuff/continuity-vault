@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -15,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
 from ..models import Collection, SyncJob
-from .sync_worker import run_backup
+from .sync_worker import crawl_has_more, run_backup
 
 logger = logging.getLogger("cv.jobs")
 
@@ -57,16 +58,31 @@ def _run(job_id: str, destinations: Optional[List[str]]) -> None:
             return
 
         def progress(done: int, total: int, message: str) -> None:
-            job.processed = int(done)
-            job.total = int(total)
+            job.processed = base["n"] + int(done)
+            job.total = max(int(job.total or 0), job.processed, base["n"] + int(total))
             job.message = (message or "")[:200]
             db.commit()
 
+        base = {"n": 0}
         try:
-            receipt = run_backup(db, collection, destinations, progress=progress)
+            receipt = None
+            # Big-history sources (e.g. Google Photos) crawl in resumable chunks:
+            # keep pulling while the persisted cursor reports more, so one job can
+            # span hours without holding the whole library in memory. Guarded by a
+            # wall-clock and iteration cap so a runaway source can't loop forever.
+            deadline = time.time() + 6 * 3600
+            for _ in range(100000):
+                receipt = run_backup(db, collection, destinations, progress=progress)
+                base["n"] = job.processed  # carry the running total into the next chunk
+                db.refresh(collection)
+                if not crawl_has_more(db, collection) or time.time() > deadline:
+                    break
+                job.message = f"Crawling… {job.processed:,} items so far"
+                db.commit()
+                time.sleep(1)  # gentle pacing between chunks
             job.snapshot_id = getattr(receipt, "snapshot_id", None)
             job.total = job.total or job.processed
-            job.processed = job.total
+            job.processed = max(job.processed, 0)
             job.status = "done"
             job.message = "Completed"
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI

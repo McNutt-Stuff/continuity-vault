@@ -91,6 +91,10 @@ class ConnectorCapabilities:
     rate_limit_per_min: int = 600
     # Source is collected by a local desktop agent (native CLI), not a cloud pull.
     requires_agent: bool = False
+    # Source has a large history worth crawling in resumable chunks and supports a
+    # "back up from this date" window (config["sinceDate"]). Big-history pulls run
+    # as a looping background job (chunk → persist cursor → continue).
+    historical: bool = False
     # Metadata keys promoted into the searchable index blob.
     searchable_fields: List[str] = field(default_factory=list)
     # Metadata keys exposed as filter facets in the UI.

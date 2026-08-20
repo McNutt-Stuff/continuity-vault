@@ -154,6 +154,17 @@ def _storage_id(kind: str) -> Optional[str]:
     return kind.split(":", 1)[1] if kind.startswith("store:") else None
 
 
+def crawl_has_more(db: Session, collection: Collection) -> bool:
+    """True when a big-history source (e.g. Google Photos) still has more to crawl
+    — its persisted cursor reports has_more. Lets a background job loop chunk by
+    chunk until the whole library is captured."""
+    if not collection.connector_account_id:
+        return False
+    acct = db.get(ConnectorAccount, collection.connector_account_id)
+    cur = acct.sync_cursor if acct else None
+    return bool(isinstance(cur, dict) and cur.get("has_more"))
+
+
 def run_backup(db: Session, collection: Collection, destinations: Optional[List[str]] = None,
                progress: Optional[Callable[[int, int, str], None]] = None
                ) -> SnapshotReceipt:

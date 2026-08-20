@@ -471,7 +471,10 @@ class GooglePhotosConnector(Connector):
 
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
+            incremental=True,
             supports_pagination=True,
+            delta=True,
+            historical=True,  # big library — resumable chunked crawl + since-date window
             searchable_fields=["filename", "mime", "kind"],
             facet_fields=["kind"],
         )
@@ -486,11 +489,17 @@ class GooglePhotosConnector(Connector):
             icon="image", color="#fbbc05", doc_types=["photo", "video"],
         )
 
-    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+    def fetch(self, account_label, cursor=None, config=None) -> FetchResult:
         config = config or {}
         if config.get("access_token"):
-            yield from live.fetch_google_photos(config["access_token"], _content_cap())
-            return
+            objs, new_cursor = live.fetch_google_photos(
+                config["access_token"], cursor=cursor, config=config,
+                content_cap=_content_cap())
+            return FetchResult(objects=objs, cursor=new_cursor,
+                               has_more=bool((new_cursor or {}).get("has_more")))
+        return FetchResult(objects=list(self.fetch_objects(account_label, config=config)))
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         for i, (name, kind) in enumerate([("IMG_2043.jpg", "photo"),
                                           ("Birthday.mp4", "video")]):
             yield SourceObject(

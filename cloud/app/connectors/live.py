@@ -631,49 +631,105 @@ def fetch_google_calendar(access_token: str,
                     break
 
 
-def fetch_google_photos(access_token: str,
-                        content_cap: int = _DEFAULT_CAP,
-                        options: Optional[dict] = None) -> Iterable[SourceObject]:
-    """Back up the Google Photos library (photos + videos) via the Library API.
+def _photos_date(value: Optional[str]):
+    """Parse a 'YYYY-MM-DD' (or ISO datetime) into a date, or None."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except Exception:
+        try:
+            return datetime.strptime(value[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
 
-    Each media item's bytes are downloaded from its ``baseUrl`` (``=d`` original
-    for photos, ``=dv`` for videos), honoring the per-object content cap."""
+
+def fetch_google_photos(access_token: str, cursor: Optional[dict] = None,
+                        config: Optional[dict] = None,
+                        content_cap: int = _DEFAULT_CAP):
+    """Back up Google Photos in resumable chunks (big libraries take hours).
+
+    Each call fetches a bounded chunk and returns a cursor so a looping
+    background job can crawl everything without holding it all in memory. When
+    ``config['sinceDate']`` is set, only items from that date forward are pulled
+    (mediaItems:search dateFilter); otherwise the whole library is listed. After
+    the first full crawl finishes, later runs pull only items newer than the
+    newest one seen (incremental by date). Returns ``(objects, cursor)`` where
+    ``cursor`` = {mode, pageToken, has_more, newest, since}."""
+    config = config or {}
+    state = cursor if isinstance(cursor, dict) else {}
+    since = config.get("sinceDate") or state.get("since")
+    chunk_items = int(config.get("crawlChunkItems") or 200)
+    mode = state.get("mode") or "crawl"
+    page_token = state.get("pageToken")
+    newest = state.get("newest")
+
+    base = "https://photoslibrary.googleapis.com/v1"
     headers = {"Authorization": f"Bearer {access_token}"}
-    url = "https://photoslibrary.googleapis.com/v1/mediaItems"
-    with httpx.Client(timeout=60) as c:
-        token: Optional[str] = None
-        while True:
-            params = {"pageSize": 100}
-            if token:
-                params["pageToken"] = token
-            r = c.get(url, headers=headers, params=params)
+    objects: List[SourceObject] = []
+
+    def _range_body(start_date, page):
+        today = datetime.now(timezone.utc).date()
+        body = {"pageSize": 100, "filters": {"dateFilter": {"ranges": [{
+            "startDate": {"year": start_date.year, "month": start_date.month, "day": start_date.day},
+            "endDate": {"year": today.year, "month": today.month, "day": today.day},
+        }]}}}
+        if page:
+            body["pageToken"] = page
+        return body
+
+    with httpx.Client(timeout=90) as c:
+        while len(objects) < chunk_items:
+            # Incremental (post-crawl) uses the newest seen; a since window uses
+            # search; a fresh full crawl lists everything.
+            start = _photos_date(newest) if mode == "incremental" else _photos_date(since)
+            if start is not None:
+                r = c.post(f"{base}/mediaItems:search", headers=headers,
+                           json=_range_body(start, page_token))
+            else:
+                params = {"pageSize": 100}
+                if page_token:
+                    params["pageToken"] = page_token
+                r = c.get(f"{base}/mediaItems", headers=headers, params=params)
             if r.status_code >= 400:
                 logger.warning("Google Photos API %s: %s (enable the Photos Library API "
                                "and grant photoslibrary.readonly)", r.status_code, r.text[:300])
-                return
-            body = r.json()
-            for m in body.get("mediaItems", []):
+                break
+            data = r.json()
+            items = data.get("mediaItems", [])
+            for m in items:
                 mime = m.get("mimeType", "")
                 is_video = mime.startswith("video/")
                 base_url = m.get("baseUrl", "")
                 dl = f"{base_url}={'dv' if is_video else 'd'}" if base_url else ""
-                data, backed = _download(dl, content_cap) if dl else (b"", False)
+                content, backed = _download(dl, content_cap) if dl else (b"", False)
                 meta = m.get("mediaMetadata") or {}
-                yield SourceObject(
+                ct = meta.get("creationTime")
+                if ct and (newest is None or ct > newest):
+                    newest = ct
+                objects.append(SourceObject(
                     object_id=f"google_photos:{m.get('id')}",
                     doc_type="video" if is_video else "photo",
                     category="photo", title=m.get("filename") or "Photo",
-                    content=data,
+                    content=content,
                     preview=f"{mime} · {meta.get('width', '')}x{meta.get('height', '')}".strip(" ·"),
                     meta={"filename": m.get("filename"), "mime": mime,
                           "kind": "video" if is_video else "photo",
-                          "created": meta.get("creationTime"),
-                          "content_backed_up": backed},
-                    labels=["Google Photos"],
-                    size_bytes=len(data) or 0)
-            token = body.get("nextPageToken")
-            if not token:
+                          "created": ct, "content_backed_up": backed},
+                    labels=["Google Photos"], size_bytes=len(content) or 0))
+            page_token = data.get("nextPageToken")
+            if not page_token or not items:
                 break
+
+    crawl_done = not page_token
+    if crawl_done and mode != "incremental":
+        # First full pass complete — switch to date-incremental for future runs.
+        new_cursor = {"mode": "incremental", "pageToken": None, "has_more": False,
+                      "newest": newest, "since": since}
+    else:
+        new_cursor = {"mode": mode, "pageToken": page_token, "has_more": bool(page_token),
+                      "newest": newest, "since": since}
+    return objects, new_cursor
 
 
 # --------------------------------------------------------------------------- #

@@ -78,9 +78,9 @@ _SOURCE_FAMILY = {
     "outlook": "Microsoft", "onedrive": "Microsoft",
     "icloud": "Apple",
     "dropbox": "Dropbox",
-    "onepassword": "1Password",
     "reddit": "Reddit", "facebook": "Meta", "instagram": "Meta",
-    "endpoint_files": "Device", "custom": "Custom",
+    "onepassword": "Endpoint Collected", "endpoint_files": "Endpoint Collected",
+    "custom": "Custom",
 }
 _SOURCE_TYPE = {
     "gmail": "Email", "outlook": "Email",
