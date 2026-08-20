@@ -48,60 +48,22 @@ CV_CONTROL_PLANE_URL="${CV_CONTROL_PLANE_URL:-$(_persisted CV_CONTROL_PLANE_URL)
 # Roles that run the Python control-plane application (API + web portal).
 _runs_app() { [[ "$CV_NODE_ROLE" != "public-web" ]]; }
 
-# Interactively fill in any missing node settings. Reads from the terminal
-# (/dev/tty) so it works even when the installer is piped via curl | bash.
-# Skipped entirely for non-interactive runs (no TTY) — those use env/defaults.
+# Resolve node settings non-interactively. The installer NEVER prompts — a
+# node's role and fleet settings come from env vars (baked into the one-line
+# install command from the admin Nodes page), a persisted role marker, or the
+# existing env file. Anything still unknown defaults to a control-plane node.
+# This guarantees existing nodes are never asked to re-choose their role, even
+# when a failed update rolls back and re-runs the installer.
 prompt_config() {
-  local have_tty=0
-  [[ -e /dev/tty ]] && have_tty=1
-  local first_install=1
-  [[ -f /etc/arkive/role || -f /etc/continuity-vault.env ]] && first_install=0
-
-  if [[ -z "$CV_NODE_ROLE" ]]; then
-    # Only ask on a genuine first install. An existing install whose role marker
-    # simply predates this feature is a control-plane node — never re-prompt it.
-    if [[ "$have_tty" == "1" && "$first_install" == "1" ]]; then
-      printf "\n  %sSelect the node role to install:%s\n" "$BOLD" "$RESET" >/dev/tty
-      printf "    1) control-plane   %s(full stack: API, workers, admin, CMS)%s\n" "$DIM" "$RESET" >/dev/tty
-      printf "    2) customer-tenant %s(tenant app + portal; reports to control plane)%s\n" "$DIM" "$RESET" >/dev/tty
-      printf "    3) public-web      %s(marketing website only; reports to control plane)%s\n" "$DIM" "$RESET" >/dev/tty
-      local choice=""
-      read -rp "  Role [1-3] (default 1): " choice </dev/tty || true
-      case "$choice" in
-        2|customer-tenant) CV_NODE_ROLE="customer-tenant" ;;
-        3|public-web)      CV_NODE_ROLE="public-web" ;;
-        *)                 CV_NODE_ROLE="control-plane" ;;
-      esac
-    else
-      CV_NODE_ROLE="control-plane"
-    fi
-  fi
-
+  CV_NODE_ROLE="${CV_NODE_ROLE:-control-plane}"
   case "$CV_NODE_ROLE" in
     control-plane|customer-tenant|public-web) ;;
     *) echo "Unknown CV_NODE_ROLE='$CV_NODE_ROLE' (control-plane|customer-tenant|public-web)"; exit 1 ;;
   esac
-
-  # Prompt for the domain on a first interactive install.
-  if [[ "$have_tty" == "1" && "$first_install" == "1" ]]; then
-    local d=""
-    read -rp "  Public domain for this node [${CV_DOMAIN}]: " d </dev/tty || true
-    [[ -n "$d" ]] && CV_DOMAIN="$d"
-  fi
-
-  # Non-control-plane nodes need the control plane URL + shared secret.
+  # Non-control-plane nodes need the control plane URL; default to the canonical
+  # one when unset so a misconfigured run still points somewhere sensible.
   if [[ "$CV_NODE_ROLE" != "control-plane" ]]; then
-    if [[ -z "$CV_CONTROL_PLANE_URL" && "$have_tty" == "1" ]]; then
-      local u=""
-      read -rp "  Control plane base URL [https://vault.arkive.life]: " u </dev/tty || true
-      CV_CONTROL_PLANE_URL="${u:-https://vault.arkive.life}"
-    fi
-    if [[ -z "$CV_NODE_SECRET" && "$have_tty" == "1" ]]; then
-      local s=""
-      read -rsp "  Fleet node secret (CV_NODE_SECRET): " s </dev/tty || true
-      echo >/dev/tty
-      CV_NODE_SECRET="$s"
-    fi
+    CV_CONTROL_PLANE_URL="${CV_CONTROL_PLANE_URL:-https://vault.arkive.life}"
   fi
   CV_NODE_NAME="${CV_NODE_NAME:-$CV_DOMAIN}"
   CV_ADMIN_EMAIL="admin@${CV_DOMAIN#*.}"
@@ -310,6 +272,8 @@ write_node_marker() {
   mkdir -p /etc/arkive
   echo "$CV_NODE_ROLE" > /etc/arkive/role
   git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null > /etc/arkive/version || true
+  # Bundle nodes ship a NODE_VERSION stamp; record it so self-update can diff.
+  [[ -f "$REPO_SRC/NODE_VERSION" ]] && cp "$REPO_SRC/NODE_VERSION" /etc/arkive/bundle-version
   chown -R "$CV_USER":"$CV_USER" /etc/arkive 2>/dev/null || true
 }
 
@@ -320,6 +284,15 @@ install_heartbeat() {
   cp "$INSTALL_DIR/infra/systemd/cv-node-heartbeat.timer" /etc/systemd/system/
   systemctl daemon-reload
   systemctl enable --now cv-node-heartbeat.timer
+}
+
+# Install the self-update timer on fleet nodes so they pull new bundles from the
+# control plane (never GitHub) on a schedule.
+install_node_update() {
+  cp "$INSTALL_DIR/infra/systemd/cv-node-update.service" /etc/systemd/system/
+  cp "$INSTALL_DIR/infra/systemd/cv-node-update.timer" /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable --now cv-node-update.timer
 }
 
 health_check() {
@@ -365,6 +338,7 @@ if [[ "$CV_NODE_ROLE" == "public-web" ]]; then
   step_always "Recording node marker"        write_node_marker
   step_always "Configuring TLS reverse proxy" configure_caddy_site
   step_always "Installing fleet heartbeat"   install_heartbeat
+  step_always "Installing self-update timer" install_node_update
   finish
   printf "  Website: %shttps://%s%s\n" "$BOLD" "$CV_DOMAIN" "$RESET"
   printf "  Role:    public-web (reports to %s)\n\n" "${CV_CONTROL_PLANE_URL:-<control plane>}"
@@ -390,6 +364,7 @@ step_always "Configuring TLS reverse proxy" configure_caddy
 step_always "Verifying service health"     health_check
 if [[ "$CV_NODE_ROLE" == "customer-tenant" ]]; then
   step_always "Installing fleet heartbeat"   install_heartbeat
+  step_always "Installing self-update timer" install_node_update
 fi
 
 finish

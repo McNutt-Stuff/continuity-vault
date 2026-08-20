@@ -1,0 +1,8 @@
+[Unit]
+Description=Arkive fleet node self-update from the control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/arkive-src/updater/node-update.sh

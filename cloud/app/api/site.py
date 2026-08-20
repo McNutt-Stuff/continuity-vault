@@ -11,12 +11,15 @@ Public marketing-site content API + admin CMS + fleet-node communication.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import secrets
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -174,6 +177,65 @@ def node_bootstrap():
         return PlainTextResponse(path.read_text())
     except Exception:
         raise HTTPException(404, "bootstrap unavailable")
+
+
+# The code a fleet node needs — served from the control plane so public-web and
+# customer-tenant nodes never touch GitHub. Only the dirs each node role uses.
+_NODE_BUNDLE_DIRS = ("cloud", "shared", "web", "site", "installers", "infra", "updater")
+_NODE_BUNDLE_EXCLUDE = (".venv", "__pycache__", "node_modules", ".git", ".pyc",
+                        "web/dist", "site/dist")
+_node_bundle_version_cache: str | None = None
+
+
+def _node_bundle_version() -> str:
+    """Stable content hash of the node bundle; changes only when code changes so
+    a node's self-update timer only re-installs on real updates."""
+    global _node_bundle_version_cache
+    if _node_bundle_version_cache:
+        return _node_bundle_version_cache
+    root = _repo_root()
+    h = hashlib.sha256()
+    for d in _NODE_BUNDLE_DIRS:
+        base = root / d
+        if not base.exists():
+            continue
+        for f in sorted(base.rglob("*")):
+            if f.is_file() and not any(x in str(f) for x in _NODE_BUNDLE_EXCLUDE):
+                h.update(str(f.relative_to(root)).encode())
+                try:
+                    h.update(f.read_bytes())
+                except Exception:
+                    pass
+    _node_bundle_version_cache = h.hexdigest()[:12]
+    return _node_bundle_version_cache
+
+
+@public_router.get("/nodes/bundle/version")
+def node_bundle_version():
+    return {"version": _node_bundle_version()}
+
+
+@public_router.get("/nodes/bundle")
+def node_bundle():
+    """Serve the node install bundle (source + installers). Fleet nodes download
+    this from the control plane instead of cloning the public repo."""
+    root = _repo_root()
+    buf = io.BytesIO()
+
+    def _filter(ti: tarfile.TarInfo):
+        return None if any(x in ti.name for x in _NODE_BUNDLE_EXCLUDE) else ti
+
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for d in _NODE_BUNDLE_DIRS:
+            p = root / d
+            if p.exists():
+                tar.add(str(p), arcname=d, filter=_filter)
+        version = _node_bundle_version().encode()
+        vi = tarfile.TarInfo("NODE_VERSION")
+        vi.size = len(version)
+        tar.addfile(vi, io.BytesIO(version))
+    return Response(content=buf.getvalue(), media_type="application/gzip",
+                    headers={"Content-Disposition": "attachment; filename=arkive-node.tar.gz"})
 
 
 class NodeInstallerRequest(BaseModel):

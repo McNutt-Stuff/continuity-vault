@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for Arkive node updates from the control plane
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Unit=cv-node-update.service
+
+[Install]
+WantedBy=timers.target
