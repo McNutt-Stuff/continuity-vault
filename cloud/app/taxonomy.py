@@ -34,6 +34,7 @@ class Category(str, Enum):
     MESSAGE = "message"
     CONTACT = "contact"
     DOCUMENT = "document"
+    IMAGE = "image"
     MEDIA = "media"
     FILE = "file"
     CALENDAR = "calendar"
@@ -58,7 +59,9 @@ CATEGORY_META: Dict[Category, dict] = {
                        "sensitivity": Sensitivity.SENSITIVE, "index_preview": True},
     Category.DOCUMENT: {"display": "Documents", "icon": "file",
                         "sensitivity": Sensitivity.STANDARD, "index_preview": True},
-    Category.MEDIA: {"display": "Media", "icon": "image",
+    Category.IMAGE: {"display": "Images", "icon": "image",
+                     "sensitivity": Sensitivity.STANDARD, "index_preview": True},
+    Category.MEDIA: {"display": "Video & Audio", "icon": "activity",
                      "sensitivity": Sensitivity.STANDARD, "index_preview": True},
     Category.FILE: {"display": "Files", "icon": "database",
                     "sensitivity": Sensitivity.STANDARD, "index_preview": True},
@@ -82,7 +85,8 @@ KINDS: Dict[Category, List[str]] = {
     Category.CONTACT: ["person", "organization", "group", "contact"],
     Category.DOCUMENT: ["pdf", "text", "spreadsheet", "presentation", "form",
                         "ebook", "code", "drawing"],
-    Category.MEDIA: ["image", "photo", "video", "audio"],
+    Category.IMAGE: ["image", "photo"],
+    Category.MEDIA: ["video", "audio"],
     Category.FILE: ["archive", "binary", "generic", "file"],
     Category.CALENDAR: ["event", "task", "reminder"],
     Category.NOTE: ["note", "journal", "bookmark"],

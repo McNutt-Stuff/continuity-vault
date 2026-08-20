@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError, getToken } from "../api";
 import { useAuth } from "../auth";
-import { Card, Pill, bytes, timeAgo, fmtAbsolute } from "../components/ui";
+import { Card, Pill, bytes, timeAgo, fmtAbsolute, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { notify } from "../components/dialog";
@@ -83,7 +83,8 @@ const CATEGORY_META: Record<string, { icon: IconName; label: string; color: stri
   message: { icon: "mail", label: "Messages", color: "#ea4335" },
   contact: { icon: "user", label: "Contacts", color: "#35d0a5" },
   document: { icon: "file", label: "Documents", color: "#4f7cff" },
-  media: { icon: "image", label: "Media", color: "#7a5cff" },
+  image: { icon: "image", label: "Images", color: "#35d0a5" },
+  media: { icon: "activity", label: "Video & Audio", color: "#7a5cff" },
   file: { icon: "database", label: "Files", color: "#9aa7bf" },
   calendar: { icon: "calendar", label: "Calendar", color: "#0078d4" },
   note: { icon: "note", label: "Notes", color: "#35d0a5" },
@@ -291,6 +292,7 @@ export default function Search() {
   const [attrKey, setAttrKey] = useState("");
   const [data, setData] = useState<SearchResp | null>(null);
   const [locked, setLocked] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
   const [recovered, setRecovered] = useState<Recovered[]>([]);
   const [viewing, setViewing] = useState<Viewing | null>(null);
@@ -454,6 +456,7 @@ export default function Search() {
   }
 
   async function run() {
+    setLoading(true);
     try {
       const params = new URLSearchParams();
       if (q) params.set("q", q);
@@ -464,7 +467,15 @@ export default function Search() {
       setData(await api.get<SearchResp>(`/search?${params.toString()}`));
       setLocked(false);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 403) setLocked(true);
+      if (e instanceof ApiError && e.status === 403) {
+        setLocked(true);
+      } else {
+        // Don't fail silently — show why search didn't return.
+        setMsg((e as ApiError).message || "Search failed");
+        setTimeout(() => setMsg(""), 6000);
+      }
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -542,6 +553,15 @@ export default function Search() {
         />
         <button className="btn primary sm" onClick={run}>Search</button>
       </div>
+
+      {loading && <Loading label="Searching your protected data…" />}
+      {!loading && data && data.results.length === 0 && (
+        <Card><div className="loading-state muted">
+          {data.total_indexed === 0
+            ? "Nothing is indexed yet — run a backup, then search."
+            : `No matches${q ? ` for “${q}”` : ""}. Search covers titles and indexed metadata (sender, path, tags, folder…), not encrypted file contents.`}
+        </div></Card>
+      )}
 
       {data && (() => {
         const cats = Object.entries(data.facets.category).sort((a, b) => b[1] - a[1]);

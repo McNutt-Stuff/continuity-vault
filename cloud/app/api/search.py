@@ -32,7 +32,7 @@ from ..models import (
     Vault,
 )
 from ..storage import build_destination
-from ..taxonomy import describe, sensitivity_for
+from ..taxonomy import category_for_kind, describe, sensitivity_for
 
 router = APIRouter(prefix="/search", tags=["search"])
 logger = logging.getLogger("cv.search")
@@ -181,18 +181,56 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         seen.add(key)
         unique.append(r)
 
-    # Facets reflect the de-duplicated universe so counts match what's shown.
+    # Every facet is cross-filtered: its counts reflect the set narrowed by the
+    # OTHER active filters (so choosing a source updates the type/category/label
+    # options), while its own filter is excluded. Categories are normalized via
+    # the current taxonomy so stale stored rows (e.g. images once tagged "media")
+    # are corrected on read.
+    ql = q.lower().strip() if q else ""
+
+    def _cat(r: SearchDocument) -> str:
+        return category_for_kind(r.doc_type)
+
+    def _attr_match(r: SearchDocument) -> bool:
+        if not attr_key:
+            return True
+        v = (r.meta or {}).get(attr_key)
+        if isinstance(v, (list, tuple)):
+            return attr_val in [str(x) for x in v]
+        return str(v) == attr_val
+
+    def _matches(r: SearchDocument, skip: str = "") -> bool:
+        if skip != "source" and source_type and r.source_type != source_type:
+            return False
+        if skip != "type" and doc_type and r.doc_type != doc_type:
+            return False
+        if skip != "category" and category and _cat(r) != category:
+            return False
+        if skip != "label" and label and label not in (r.labels or []):
+            return False
+        if skip != "attr" and not _attr_match(r):
+            return False
+        if ql:
+            hay = " ".join([r.title or "", r.preview or "", r.search_blob or ""]).lower()
+            if ql not in hay:
+                return False
+        return True
+
     by_source: dict[str, int] = {}
     by_type: dict[str, int] = {}
     by_category: dict[str, int] = {}
     by_label: dict[str, int] = {}
     for r in unique:
-        by_source[r.source_type] = by_source.get(r.source_type, 0) + 1
-        by_type[r.doc_type] = by_type.get(r.doc_type, 0) + 1
-        if r.category:
-            by_category[r.category] = by_category.get(r.category, 0) + 1
-        for lbl in (r.labels or []):
-            by_label[lbl] = by_label.get(lbl, 0) + 1
+        if _matches(r, skip="source"):
+            by_source[r.source_type] = by_source.get(r.source_type, 0) + 1
+        if _matches(r, skip="type"):
+            by_type[r.doc_type] = by_type.get(r.doc_type, 0) + 1
+        if _matches(r, skip="category"):
+            cat = _cat(r)
+            by_category[cat] = by_category.get(cat, 0) + 1
+        if _matches(r, skip="label"):
+            for lbl in (r.labels or []):
+                by_label[lbl] = by_label.get(lbl, 0) + 1
 
     # Resolve friendly source titles (the linked account label / mapping name)
     # and connector display names for every collection referenced by results.
@@ -208,33 +246,15 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
             conn = get_connector(c.source_type)
             coll_display[c.id] = conn.display_name if conn else c.source_type
     source_display: dict[str, str] = {}
-    for st in by_source:
+    for st in {r.source_type for r in unique}:
         conn = get_connector(st)
         source_display[st] = conn.display_name if conn else st
 
-    # Base filter: everything except the discrete-attribute filter (so the
-    # attribute facets reflect what's available within the current source/type).
-    ql = q.lower().strip() if q else ""
-    base = []
-    for r in unique:
-        if source_type and r.source_type != source_type:
-            continue
-        if doc_type and r.doc_type != doc_type:
-            continue
-        if category and r.category != category:
-            continue
-        if label and label not in (r.labels or []):
-            continue
-        if ql:
-            hay = " ".join([r.title or "", r.preview or "", r.search_blob or ""]).lower()
-            if ql not in hay:
-                continue
-        base.append(r)
-
-    # Dynamic attribute facets from the discrete indexed metadata of the base set.
-    # Each data type brings its own keys (folder, from, vault, kind, path…).
+    # Attribute facets over the set filtered by every OTHER filter (not attr).
     meta_facets: dict[str, dict[str, int]] = {}
-    for r in base:
+    for r in unique:
+        if not _matches(r, skip="attr"):
+            continue
         for k, v in (r.meta or {}).items():
             if k == "client_encrypted" or v in (None, "", [], {}):
                 continue
@@ -252,16 +272,8 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         for k, vals in meta_facets.items() if len(vals) > 1
     }
 
-    # Final rows: apply the attribute filter on top of the base set.
-    def _matches_attr(r: SearchDocument) -> bool:
-        if not attr_key:
-            return True
-        v = (r.meta or {}).get(attr_key)
-        if isinstance(v, (list, tuple)):
-            return attr_val in [str(x) for x in v]
-        return str(v) == attr_val
-
-    filtered = [r for r in base if _matches_attr(r)]
+    # Final rows: every active filter applied.
+    filtered = [r for r in unique if _matches(r)]
     # Order newest-first by when the entity was first ingested (matches what the
     # UI shows), falling back to modified/created when unknown.
     filtered.sort(
@@ -326,8 +338,8 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         "source_label": coll_label.get(r.collection_id, source_display.get(r.source_type, r.source_type)),
         "source_display": coll_display.get(r.collection_id, source_display.get(r.source_type, r.source_type)),
         "doc_type": r.doc_type,
-        "category": r.category,
-        "sensitivity": sensitivity_for(r.category or ""),
+        "category": _cat(r),
+        "sensitivity": sensitivity_for(_cat(r)),
         "title": r.title,
         "preview": r.preview,
         "meta": r.meta,
