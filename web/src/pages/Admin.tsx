@@ -121,9 +121,13 @@ function Tenants() {
 
 function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [t, setT] = useState<any>(null);
+  const [err, setErr] = useState("");
   const [toast, setToast] = useState("");
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3200); }
-  async function load() { try { setT(await api.get<any>(`/admin/tenants/${id}`)); } catch { /* ignore */ } }
+  async function load() {
+    try { setErr(""); setT(await api.get<any>(`/admin/tenants/${id}`)); }
+    catch (e) { setErr((e as { message?: string }).message || "Failed to load tenant"); }
+  }
   useEffect(() => { void load(); }, [id]);
 
   async function editTenant() {
@@ -186,7 +190,13 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
     catch (e) { flash((e as { message?: string }).message || "Delete failed"); }
   }
 
-  if (!t) return <Card><div className="muted">Loading tenant…</div></Card>;
+  if (!t) return (
+    <Card>
+      <button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 10 }}>← Tenants</button>
+      {err ? <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 13 }}>Couldn't load tenant: {err}</div>
+           : <div className="muted">Loading tenant…</div>}
+    </Card>
+  );
   const licensedTb = ((t.licensed_bytes || 0) / (1024 ** 4)).toFixed(2);
 
   return (
