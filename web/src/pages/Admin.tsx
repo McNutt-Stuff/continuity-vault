@@ -643,6 +643,7 @@ function PriceField({ label, value, onChange }: { label: string; value: number; 
 interface EmailCfg {
   provider: string; enabled: boolean; from_email: string; from_name: string;
   reply_to: string; region: string;
+  aws_access_key_id: string; has_aws_secret: boolean;
 }
 interface AdminUser { id: string; email: string; display_name: string; role: string; status: string; tenant_id: string; tenant_name: string; }
 
@@ -651,6 +652,7 @@ function EmailAdmin() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [toast, setToast] = useState("");
   const [testTo, setTestTo] = useState("");
+  const [awsSecret, setAwsSecret] = useState("");
 
   // Broadcast composer
   const [audience, setAudience] = useState<"all" | "selected">("all");
@@ -670,7 +672,10 @@ function EmailAdmin() {
 
   async function saveCfg() {
     if (!cfg) return;
-    try { const r = await api.put<EmailCfg>("/admin/email-config", cfg); setCfg(r); flash("Email settings saved"); }
+    // Only send the secret when the admin typed a new one (blank preserves it).
+    const payload: Record<string, unknown> = { ...cfg };
+    if (awsSecret.trim()) payload.aws_secret_access_key = awsSecret.trim();
+    try { const r = await api.put<EmailCfg>("/admin/email-config", payload); setCfg(r); setAwsSecret(""); flash("Email settings saved"); }
     catch { flash("Could not save settings"); }
   }
   async function sendTest() {
@@ -722,6 +727,11 @@ function EmailAdmin() {
               <input type="checkbox" checked={cfg.enabled} onChange={(e) => setC("enabled", e.target.checked)} /> Send live emails
             </label>
           </Field>
+          <Field label="AWS access key ID"><input className="input sm" value={cfg.aws_access_key_id} onChange={(e) => setC("aws_access_key_id", e.target.value)} placeholder="AKIA…" autoComplete="off" /></Field>
+          <Field label={`AWS secret access key${cfg.has_aws_secret ? " (saved)" : ""}`}>
+            <input className="input sm" type="password" value={awsSecret} onChange={(e) => setAwsSecret(e.target.value)}
+                   placeholder={cfg.has_aws_secret ? "•••••••• leave blank to keep" : "secret access key"} autoComplete="off" />
+          </Field>
         </div>
         <div className="row" style={{ gap: 10, marginTop: 14, flexWrap: "wrap" }}>
           <button className="btn primary" onClick={saveCfg}>Save settings</button>
@@ -729,7 +739,8 @@ function EmailAdmin() {
           <button className="btn" onClick={sendTest}>Send test</button>
         </div>
         <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-          Credentials come from the platform AWS identity (IAM role / env) — never stored here.
+          Set the AWS access key + secret of an IAM user with <b>ses:SendEmail</b>, or leave them blank to
+          use the instance IAM role / environment. The secret is encrypted at rest and never returned.
           Verify the <b>arkive.life</b> domain in SES and publish SPF, DKIM & DMARC records for deliverability.
         </div>
       </Card>

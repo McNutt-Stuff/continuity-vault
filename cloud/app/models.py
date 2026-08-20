@@ -510,6 +510,8 @@ class EmailConfig(Base):
     from_name = Column(String, default="Arkive")
     reply_to = Column(String, default="support@arkive.life")
     region = Column(String, default="us-east-1")
+    aws_access_key_id = Column(String, default="")        # SES access key id
+    aws_secret_encrypted = Column(String, default="")     # SES secret, encrypted at rest
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 

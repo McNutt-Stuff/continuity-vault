@@ -48,13 +48,22 @@ def _config() -> dict:
         "from_name": "Arkive",
         "reply_to": "",
         "region": settings.s3_region,
+        "aws_access_key_id": settings.aws_access_key_id or "",
+        "aws_secret": settings.aws_secret_access_key or "",
     }
     try:
         from .db import SessionLocal
         from .models import EmailConfig
+        from . import credstore
         with SessionLocal() as db:
             row = db.get(EmailConfig, "default")
             if row is not None:
+                secret = settings.aws_secret_access_key or ""
+                if row.aws_secret_encrypted:
+                    try:
+                        secret = credstore.decrypt("platform", row.aws_secret_encrypted).get("s", "")
+                    except Exception:
+                        pass
                 cfg = {
                     "provider": row.provider,
                     "enabled": bool(row.enabled),
@@ -62,6 +71,8 @@ def _config() -> dict:
                     "from_name": row.from_name,
                     "reply_to": row.reply_to or "",
                     "region": row.region or settings.s3_region,
+                    "aws_access_key_id": row.aws_access_key_id or settings.aws_access_key_id or "",
+                    "aws_secret": secret,
                 }
     except Exception as exc:  # DB not ready (e.g. first boot) — use fallback
         log.debug("email config load failed, using fallback: %s", exc)
@@ -149,9 +160,11 @@ def text_to_html(text: str) -> str:
 def _send_ses(cfg: dict, to: str, subject: str, html: str, text: str) -> None:
     import boto3  # lazy so dev without boto3 still runs
     kwargs = {"region_name": cfg["region"]}
-    if settings.aws_access_key_id and settings.aws_secret_access_key:
-        kwargs["aws_access_key_id"] = settings.aws_access_key_id
-        kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+    key = cfg.get("aws_access_key_id") or settings.aws_access_key_id
+    secret = cfg.get("aws_secret") or settings.aws_secret_access_key
+    if key and secret:
+        kwargs["aws_access_key_id"] = key
+        kwargs["aws_secret_access_key"] = secret
     client = boto3.client("ses", **kwargs)
     source = f'{cfg["from_name"]} <{cfg["from_email"]}>' if cfg["from_name"] else cfg["from_email"]
     params = {

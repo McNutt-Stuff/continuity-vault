@@ -94,7 +94,9 @@ def _email_config(db: Session):
 def _email_config_view(row) -> dict:
     return {"provider": row.provider, "enabled": bool(row.enabled),
             "from_email": row.from_email, "from_name": row.from_name,
-            "reply_to": row.reply_to, "region": row.region}
+            "reply_to": row.reply_to, "region": row.region,
+            "aws_access_key_id": row.aws_access_key_id or "",
+            "has_aws_secret": bool(row.aws_secret_encrypted)}
 
 
 @router.get("/email-config")
@@ -109,14 +111,20 @@ class EmailConfigUpdate(BaseModel):
     from_name: str | None = None
     reply_to: str | None = None
     region: str | None = None
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None  # write-only; encrypted at rest
 
 
 @router.put("/email-config")
 def update_email_config(body: EmailConfigUpdate, db: Session = Depends(get_db)):
-    from .. import emailer
+    from .. import emailer, credstore
     row = _email_config(db)
-    for k, v in body.dict(exclude_none=True).items():
+    data = body.dict(exclude_none=True)
+    secret = data.pop("aws_secret_access_key", None)
+    for k, v in data.items():
         setattr(row, k, v)
+    if secret is not None:  # empty string clears it; a value (re)encrypts it
+        row.aws_secret_encrypted = credstore.encrypt("platform", {"s": secret}) if secret.strip() else ""
     db.commit()
     emailer.invalidate_config_cache()
     return _email_config_view(row)
