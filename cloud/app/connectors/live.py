@@ -639,7 +639,8 @@ def create_picker_session(access_token: str) -> dict:
     with httpx.Client(timeout=30) as c:
         r = c.post(f"{_PICKER}/sessions",
                    headers={"Authorization": f"Bearer {access_token}"}, json={})
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise RuntimeError(f"{r.status_code} {r.text[:400]}")
         return r.json()
 
 
@@ -648,7 +649,8 @@ def get_picker_session(access_token: str, session_id: str) -> dict:
     with httpx.Client(timeout=30) as c:
         r = c.get(f"{_PICKER}/sessions/{session_id}",
                   headers={"Authorization": f"Bearer {access_token}"})
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise RuntimeError(f"{r.status_code} {r.text[:400]}")
         return r.json()
 
 
