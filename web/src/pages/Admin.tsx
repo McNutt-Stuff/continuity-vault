@@ -647,20 +647,20 @@ function WebsiteCMS() {
           <Card style={{ marginBottom: 12 }}>
             <div style={{ fontWeight: 700, marginBottom: 10 }}>Brand</div>
             <div className="grid grid-2" style={{ gap: 10 }}>
-              <Field label="Brand name" value={content.brand || ""} onChange={(v) => setPath(["brand"], v)} />
-              <Field label="Tagline" value={content.tagline || ""} onChange={(v) => setPath(["tagline"], v)} />
+              <CmsField label="Brand name" value={content.brand || ""} onChange={(v) => setPath(["brand"], v)} />
+              <CmsField label="Tagline" value={content.tagline || ""} onChange={(v) => setPath(["tagline"], v)} />
             </div>
           </Card>
 
           <Card style={{ marginBottom: 12 }}>
             <div style={{ fontWeight: 700, marginBottom: 10 }}>Hero</div>
             <div className="stack" style={{ gap: 10 }}>
-              <Field label="Eyebrow" value={hero.eyebrow || ""} onChange={(v) => setPath(["hero", "eyebrow"], v)} />
-              <Field label="Headline" value={hero.h1 || ""} onChange={(v) => setPath(["hero", "h1"], v)} />
-              <Field label="Lead paragraph" area value={hero.lead || ""} onChange={(v) => setPath(["hero", "lead"], v)} />
+              <CmsField label="Eyebrow" value={hero.eyebrow || ""} onChange={(v) => setPath(["hero", "eyebrow"], v)} />
+              <CmsField label="Headline" value={hero.h1 || ""} onChange={(v) => setPath(["hero", "h1"], v)} />
+              <CmsField label="Lead paragraph" area value={hero.lead || ""} onChange={(v) => setPath(["hero", "lead"], v)} />
               <div className="grid grid-2" style={{ gap: 10 }}>
-                <Field label="Primary button" value={hero.ctaPrimary || ""} onChange={(v) => setPath(["hero", "ctaPrimary"], v)} />
-                <Field label="Secondary button" value={hero.ctaSecondary || ""} onChange={(v) => setPath(["hero", "ctaSecondary"], v)} />
+                <CmsField label="Primary button" value={hero.ctaPrimary || ""} onChange={(v) => setPath(["hero", "ctaPrimary"], v)} />
+                <CmsField label="Secondary button" value={hero.ctaSecondary || ""} onChange={(v) => setPath(["hero", "ctaSecondary"], v)} />
               </div>
             </div>
           </Card>
@@ -670,13 +670,13 @@ function WebsiteCMS() {
             <div className="grid grid-3">
               {plans.map((p, i) => (
                 <div key={i} className="stack" style={{ gap: 8, padding: 12, border: "1px solid var(--border-soft)", borderRadius: 12 }}>
-                  <Field label="Name" value={p.name || ""} onChange={(v) => setPath(["pricing", "plans", i, "name"], v)} />
+                  <CmsField label="Name" value={p.name || ""} onChange={(v) => setPath(["pricing", "plans", i, "name"], v)} />
                   <div className="grid grid-2" style={{ gap: 8 }}>
-                    <Field label="Price" value={p.price || ""} onChange={(v) => setPath(["pricing", "plans", i, "price"], v)} />
-                    <Field label="Per" value={p.per || ""} onChange={(v) => setPath(["pricing", "plans", i, "per"], v)} />
+                    <CmsField label="Price" value={p.price || ""} onChange={(v) => setPath(["pricing", "plans", i, "price"], v)} />
+                    <CmsField label="Per" value={p.per || ""} onChange={(v) => setPath(["pricing", "plans", i, "per"], v)} />
                   </div>
-                  <Field label="Blurb" area value={p.blurb || ""} onChange={(v) => setPath(["pricing", "plans", i, "blurb"], v)} />
-                  <Field label="Button" value={p.cta || ""} onChange={(v) => setPath(["pricing", "plans", i, "cta"], v)} />
+                  <CmsField label="Blurb" area value={p.blurb || ""} onChange={(v) => setPath(["pricing", "plans", i, "blurb"], v)} />
+                  <CmsField label="Button" value={p.cta || ""} onChange={(v) => setPath(["pricing", "plans", i, "cta"], v)} />
                 </div>
               ))}
             </div>
@@ -685,9 +685,9 @@ function WebsiteCMS() {
           <Card>
             <div style={{ fontWeight: 700, marginBottom: 10 }}>Contact</div>
             <div className="grid grid-3" style={{ gap: 10 }}>
-              <Field label="General email" value={contact.email || ""} onChange={(v) => setPath(["contact", "email"], v)} />
-              <Field label="Sales email" value={contact.sales || ""} onChange={(v) => setPath(["contact", "sales"], v)} />
-              <Field label="Support email" value={contact.support || ""} onChange={(v) => setPath(["contact", "support"], v)} />
+              <CmsField label="General email" value={contact.email || ""} onChange={(v) => setPath(["contact", "email"], v)} />
+              <CmsField label="Sales email" value={contact.sales || ""} onChange={(v) => setPath(["contact", "sales"], v)} />
+              <CmsField label="Support email" value={contact.support || ""} onChange={(v) => setPath(["contact", "support"], v)} />
             </div>
           </Card>
         </>
@@ -697,7 +697,7 @@ function WebsiteCMS() {
   );
 }
 
-function Field({ label, value, onChange, area }: { label: string; value: string; onChange: (v: string) => void; area?: boolean }) {
+function CmsField({ label, value, onChange, area }: { label: string; value: string; onChange: (v: string) => void; area?: boolean }) {
   return (
     <label className="stack" style={{ gap: 4 }}>
       <span className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em" }}>{label}</span>
