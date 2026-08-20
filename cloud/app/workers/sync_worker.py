@@ -271,14 +271,16 @@ def _run_backup_streaming(db: Session, collection: Collection,
                           destinations: List[str], caps, label: str,
                           progress: Optional[Callable[[int, int, str], None]]
                           ) -> SnapshotReceipt:
-    """Pull a media-heavy source lazily and ingest in bounded batches so memory
-    stays flat regardless of library size (each batch = one recovery point)."""
+    """Pull a content-heavy source lazily and ingest in bounded batches so memory
+    stays flat regardless of library/mailbox size (each batch = one recovery
+    point). ``state['cursor']`` (set by the connector) is persisted for deltas."""
     batch_bytes_cap = 64 * 1024 * 1024  # flush a batch at ~64 MiB of content
     batch_count_cap = 50
     batch: List = []
     batch_bytes = 0
     total = 0
     last_receipt: Optional[SnapshotReceipt] = None
+    state: dict = {}
     if progress:
         progress(0, 0, f"Fetching from {label}…")
 
@@ -292,7 +294,8 @@ def _run_backup_streaming(db: Session, collection: Collection,
         batch = []
         batch_bytes = 0
 
-    for obj in connector.fetch_objects(label, config=config):
+    cursor = account.sync_cursor if account else None
+    for obj in connector.fetch_stream(label, cursor=cursor, config=config, state=state):
         batch.append(obj)
         batch_bytes += len(getattr(obj, "content", b"") or b"")
         total += 1
@@ -301,6 +304,7 @@ def _run_backup_streaming(db: Session, collection: Collection,
             if progress:
                 progress(total, total, f"Encrypted & stored {total} items…")
     flush()
+    new_cursor = state.get("cursor")
 
     if total == 0:
         prior = (db.query(SnapshotReceipt)
@@ -309,6 +313,8 @@ def _run_backup_streaming(db: Session, collection: Collection,
         if prior is not None:
             if account:
                 account.last_sync_at = datetime.now(timezone.utc)
+                if new_cursor is not None:
+                    account.sync_cursor = new_cursor
                 db.commit()
             return prior
     if last_receipt is None:  # first run with nothing pulled — establish a baseline
@@ -317,6 +323,8 @@ def _run_backup_streaming(db: Session, collection: Collection,
                                       facet_fields=caps.facet_fields, actor="sync-worker")
     if account:
         account.last_sync_at = datetime.now(timezone.utc)
+        if new_cursor is not None:
+            account.sync_cursor = new_cursor
         db.commit()
     return last_receipt
 

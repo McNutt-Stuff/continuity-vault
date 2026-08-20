@@ -136,6 +136,7 @@ class GmailConnector(Connector):
             incremental=True,
             supports_pagination=True,
             delta=True,
+            streaming=True,
             searchable_fields=["from", "to", "folder", "labels"],
             facet_fields=["folder"],
         )
@@ -166,6 +167,21 @@ class GmailConnector(Connector):
                          "includeSpamTrash": config.get("includeSpamTrash")})
             return FetchResult(objects=objects, cursor=new_cursor, has_more=False)
         return FetchResult(objects=list(self.fetch_objects(account_label, config=config)))
+
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
+        # Yield messages one at a time so a huge mailbox ingests in bounded
+        # batches (never materialized into RAM); record the delta cursor in state.
+        config = config or {}
+        if config.get("access_token"):
+            from ..config import get_settings
+            s = get_settings()
+            yield from live.stream_gmail(
+                config["access_token"], cursor=cursor,
+                max_messages=s.sync_max_items, content_cap=s.content_max_bytes,
+                options={"excludeFolders": config.get("excludeFolders"),
+                         "includeSpamTrash": config.get("includeSpamTrash")}, state=state)
+        else:
+            yield from self.fetch_objects(account_label, config=config)
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         emails = [
@@ -198,6 +214,7 @@ class OutlookConnector(Connector):
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
             incremental=True,
+            streaming=True,
             searchable_fields=["from", "to", "folder"],
             facet_fields=["folder"],
         )
@@ -247,6 +264,7 @@ class OneDriveConnector(Connector):
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
             incremental=True,
+            streaming=True,
             searchable_fields=["path", "mime"],
             facet_fields=["mime"],
         )
@@ -296,6 +314,7 @@ class DropboxConnector(Connector):
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
             incremental=True,
+            streaming=True,
             searchable_fields=["path", "mime"],
             facet_fields=["mime"],
         )
@@ -344,6 +363,7 @@ class ICloudConnector(Connector):
 
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
+            streaming=True,
             searchable_fields=["album", "kind", "path"],
             facet_fields=["kind", "album"],
             filter_categories=[

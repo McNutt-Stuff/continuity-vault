@@ -200,6 +200,39 @@ def fetch_gmail(access_token: str, cursor: Optional[dict] = None,
     return objects, new_cursor
 
 
+def stream_gmail(access_token: str, cursor: Optional[dict] = None,
+                 max_messages: int = 5000, content_cap: int = _DEFAULT_CAP,
+                 options: Optional[dict] = None, state: Optional[dict] = None):
+    """Lazy Gmail pull: yields one message at a time (so the caller can ingest in
+    bounded batches instead of holding the whole mailbox in RAM) and records the
+    new cursor in ``state['cursor']`` once done."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    cursor = cursor or {}
+    options = options or {}
+    exclude = {str(f).upper() for f in (options.get("excludeFolders") or [])}
+    include_spam_trash = bool(options.get("includeSpamTrash")) and not (exclude & {"SPAM", "TRASH"})
+    query = " ".join(_GMAIL_EXCLUDE_QUERY[f] for f in exclude if f in _GMAIL_EXCLUDE_QUERY)
+    with httpx.Client(timeout=60) as c:
+        history_id = cursor.get("history_id")
+        if history_id:
+            try:
+                ids = _gmail_history_ids(c, headers, str(history_id), max_messages)
+            except _HistoryGone:
+                logger.info("gmail history %s expired; full resync", history_id)
+                ids = _gmail_list_ids(c, headers, max_messages, query, include_spam_trash)
+        else:
+            ids = _gmail_list_ids(c, headers, max_messages, query, include_spam_trash)
+        for mid in ids:
+            o = _gmail_message(c, headers, mid, content_cap)
+            if not o:
+                continue
+            if exclude and (set(o.meta.get("labelIds", [])) & exclude):
+                continue
+            yield o
+        if state is not None:
+            state["cursor"] = {"history_id": _gmail_history_id(c, headers)}
+
+
 def fetch_graph_mail(access_token: str, limit: int = 40,
                      content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
     headers = {"Authorization": f"Bearer {access_token}"}

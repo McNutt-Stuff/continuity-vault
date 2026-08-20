@@ -154,6 +154,14 @@ class Connector:
         objects = list(self.fetch_objects(account_label, config=config))
         return FetchResult(objects=objects, cursor=None, has_more=False)
 
+    def fetch_stream(self, account_label: str, cursor=None,
+                     config: Optional[dict] = None, state: Optional[dict] = None):
+        """Yield objects lazily for bounded-memory (batched) ingest so a large,
+        content-heavy source can't materialize its whole payload into RAM. The
+        default adapts ``fetch_objects`` (no cursor); connectors that support
+        deltas override and set ``state['cursor']`` for the next run."""
+        yield from self.fetch_objects(account_label, config=config)
+
     def fetch_objects(self, account_label: str, since: Optional[datetime] = None,
                       config: Optional[dict] = None) -> Iterable[SourceObject]:
         raise NotImplementedError
