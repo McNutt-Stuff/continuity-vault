@@ -81,6 +81,7 @@ interface SearchResp {
 const CATEGORY_META: Record<string, { icon: IconName; label: string; color: string }> = {
   credential: { icon: "key", label: "Credentials", color: "#f5a623" },
   message: { icon: "mail", label: "Messages", color: "#ea4335" },
+  social: { icon: "activity", label: "Social", color: "#c56cf0" },
   contact: { icon: "user", label: "Contacts", color: "#35d0a5" },
   document: { icon: "file", label: "Documents", color: "#4f7cff" },
   image: { icon: "image", label: "Images", color: "#35d0a5" },

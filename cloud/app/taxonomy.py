@@ -32,6 +32,7 @@ from typing import Dict, List, Tuple
 class Category(str, Enum):
     CREDENTIAL = "credential"
     MESSAGE = "message"
+    SOCIAL = "social"
     CONTACT = "contact"
     DOCUMENT = "document"
     IMAGE = "image"
@@ -55,6 +56,8 @@ CATEGORY_META: Dict[Category, dict] = {
                           "sensitivity": Sensitivity.RESTRICTED, "index_preview": False},
     Category.MESSAGE: {"display": "Messages", "icon": "mail",
                        "sensitivity": Sensitivity.SENSITIVE, "index_preview": True},
+    Category.SOCIAL: {"display": "Social", "icon": "activity",
+                      "sensitivity": Sensitivity.SENSITIVE, "index_preview": True},
     Category.CONTACT: {"display": "Contacts", "icon": "user",
                        "sensitivity": Sensitivity.SENSITIVE, "index_preview": True},
     Category.DOCUMENT: {"display": "Documents", "icon": "file",
@@ -81,7 +84,8 @@ KINDS: Dict[Category, List[str]] = {
                           "oauth_token", "secure_note", "software_license", "database",
                           "wifi", "server", "crypto_wallet", "credit_card",
                           "bank_account", "recovery_codes", "membership", "secret"],
-    Category.MESSAGE: ["email", "chat", "sms", "voicemail", "comment"],
+    Category.MESSAGE: ["email", "chat", "sms", "voicemail"],
+    Category.SOCIAL: ["post", "comment", "story", "reel", "tweet"],
     Category.CONTACT: ["person", "organization", "group", "contact"],
     Category.DOCUMENT: ["pdf", "text", "spreadsheet", "presentation", "form",
                         "ebook", "code", "drawing"],
