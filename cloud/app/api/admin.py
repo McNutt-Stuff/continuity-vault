@@ -68,6 +68,7 @@ class PricingUpdate(BaseModel):
     cloud_price_per_tb_month: float | None = None
     s3_price_per_tb_month: float | None = None
     azure_price_per_tb_month: float | None = None
+    license_plans: list[dict] | None = None
     appliance_tiers: list[dict] | None = None
     data_value_per_type: dict | None = None
 

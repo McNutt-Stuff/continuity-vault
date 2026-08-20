@@ -98,6 +98,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE tenants ADD COLUMN licensed_bytes BIGINT DEFAULT 0",
         "ALTER TABLE tenants ADD COLUMN protection_options JSON",
         "ALTER TABLE tenants ADD COLUMN appliance_plan JSON",
+        "ALTER TABLE pricing_config ADD COLUMN license_plans JSON",
         "ALTER TABLE email_config ADD COLUMN aws_access_key_id VARCHAR",
         "ALTER TABLE email_config ADD COLUMN aws_secret_encrypted VARCHAR",
         "ALTER TABLE nodes ADD COLUMN storage_service_id VARCHAR",

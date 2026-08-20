@@ -8,7 +8,7 @@ DEFAULT_SITE = {
     "brand": "Arkive",
     "tagline": "Digital continuity, made certain.",
     "hero": {
-        "eyebrow": "Quantum-safe · Zero-knowledge · Hybrid cloud",
+        "eyebrow": "Quantum-safe · Private by design · Hybrid cloud",
         "h1": "Protect the digital life you can't afford to lose.",
         "lead": ("Arkive continuously backs up your email, files, photos, passwords and "
                  "accounts — encrypted with post-quantum cryptography, stored across a cloud "
@@ -18,7 +18,7 @@ DEFAULT_SITE = {
         "ctaSecondary": "See how it works",
         "badges": [
             "Post-quantum encryption (ML-KEM / ML-DSA)",
-            "Zero-knowledge — we can't read your data",
+            "Private by design — we can't read your data",
             "Offline appliance option",
         ],
     },
@@ -35,7 +35,7 @@ DEFAULT_SITE = {
             {"name": "Personal", "price": "$9", "per": "/month",
              "blurb": "For individuals protecting their digital life.", "cta": "Start free trial",
              "features": ["Up to 1 TB protected", "All personal sources", "Unlimited version history",
-                          "Zero-knowledge encryption", "Unified search & recovery"]},
+                          "Private-by-design encryption", "Unified search & recovery"]},
             {"name": "Family / Pro", "price": "$24", "per": "/month", "featured": True,
              "blurb": "For families and power users who want it all.", "cta": "Start free trial",
              "features": ["Up to 5 TB protected", "Everything in Personal", "Multiple users & shared vaults",

@@ -490,10 +490,13 @@ class PricingConfig(Base):
     id = Column(String, primary_key=True, default="default")
     currency = Column(String, default="USD")
     # Recurring, per TB / month.
-    protection_price_per_tb_month = Column(Float, default=6.0)   # the data-protection subscription
+    protection_price_per_tb_month = Column(Float, default=6.0)   # legacy flat rate / fallback
     cloud_price_per_tb_month = Column(Float, default=10.0)       # Arkive Cloud storage
     s3_price_per_tb_month = Column(Float, default=23.0)          # AWS S3 Standard estimate
     azure_price_per_tb_month = Column(Float, default=18.0)       # Azure Blob Hot estimate
+    # License tiers for recurring data-protection pricing. Each tenant is on one
+    # tier (Tenant.plan == tier id). [{id, name, price_per_tb_month, min_tb}].
+    license_plans = Column(JSON, default=list)
     # One-time appliance device pricing: [{capacity_tb, price, model}].
     appliance_tiers = Column(JSON, default=list)
     # Estimated value per protected object, keyed by object bucket.

@@ -111,8 +111,38 @@ def _mirror_site_content(s) -> None:
         with open(tmp, "wb") as fh:
             fh.write(body)
         os.replace(tmp, dest)  # atomic swap so the site never reads a partial file
+        _inline_into_index(os.path.dirname(dest), body.decode("utf-8", "replace"))
     except Exception as e:
         print(f"[heartbeat] could not mirror site content: {e}", file=sys.stderr)
+
+
+def _inline_into_index(webroot: str, body_text: str) -> None:
+    """Embed the published content into index.html as window.__ARKIVE_CMS__ so
+    the page renders real content on first paint without any runtime fetch."""
+    import os
+    import re
+    index = os.path.join(webroot, "index.html")
+    try:
+        html = open(index, "r", encoding="utf-8").read()
+    except Exception:
+        return
+    start, end = "<!--ARKIVE_CMS_START-->", "<!--ARKIVE_CMS_END-->"
+    safe = body_text.replace("</", "<\\/")  # never break out of the <script>
+    block = f'{start}<script>window.__ARKIVE_CMS__={safe}</script>{end}'
+    if start in html and end in html:
+        new = re.sub(re.escape(start) + ".*?" + re.escape(end),
+                     lambda _m: block, html, count=1, flags=re.S)
+    else:
+        new = html.replace("</head>", block + "</head>", 1)
+    if new == html:
+        return
+    try:
+        tmp = index + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(new)
+        os.replace(tmp, index)
+    except Exception as e:
+        print(f"[heartbeat] could not inline site content: {e}", file=sys.stderr)
 
 
 def _apply_blueprint(bp: dict) -> None:

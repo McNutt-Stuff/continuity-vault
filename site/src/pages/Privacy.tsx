@@ -8,7 +8,7 @@ export default function Privacy() {
         <h1 style={{ fontSize: 40 }}>Privacy Policy</h1>
         <p>Last updated: {new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</p>
         <p>
-          Arkive is built on a zero-knowledge foundation. This policy explains what we collect, how we
+          Arkive is built on a private-by-design foundation. This policy explains what we collect, how we
           protect it, and the rights you have. Because your protected data is encrypted before it reaches us,
           we cannot read its contents — even if we wanted to.
         </p>
@@ -38,7 +38,7 @@ export default function Privacy() {
         <h2>Your rights</h2>
         <p>
           You can access, export, and delete your data at any time. You choose key ownership (customer-managed
-          or fully zero-knowledge) per vault. Contact us to exercise any privacy right.
+          or fully private-by-design) per vault. Contact us to exercise any privacy right.
         </p>
 
         <h2>Data retention</h2>

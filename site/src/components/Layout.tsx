@@ -66,7 +66,7 @@ export function Layout({ children }: { children: ReactNode }) {
           </div>
           <div className="footer-bottom">
             <span>© {new Date().getFullYear()} {site.brand}. All rights reserved.</span>
-            <span>Post-quantum · Zero-knowledge · Made for continuity</span>
+            <span>Post-quantum · Private by design · Made for continuity</span>
           </div>
         </div>
       </footer>

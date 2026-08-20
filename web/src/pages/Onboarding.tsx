@@ -19,10 +19,12 @@ interface Pricing {
   tiers: Tier[];
 }
 interface ValueRow { key: string; label: string; icon: string; color: string; count: number; value_each: number; value_total: number; }
+interface LicensePlan { id: string; name: string; price_per_tb_month: number; min_tb: number; }
 interface Plan {
   options: string[]; licensed_tb: number; used_bytes: number; used_tb: number;
   objects_total: number; value_breakdown: ValueRow[]; data_value_total: number;
   appliance_plan: { capacity_tb: number; qty: number }[];
+  license_plan?: LicensePlan; min_tb?: number;
 }
 
 const iconName = (n: string) => (["cloud", "server", "key", "shield", "check", "database", "file"].includes(n) ? n : "database") as never;
@@ -47,7 +49,8 @@ export default function Onboarding() {
     api.get<Plan>("/billing/plan").then((p) => {
       setPlan(p);
       setOptions(new Set(p.options));
-      setLicensedTb(Math.max(p.licensed_tb || 0, Math.ceil((p.used_tb || 0) * 10) / 10, 1));
+      const min = p.license_plan?.min_tb || 0;
+      setLicensedTb(Math.max(p.licensed_tb || 0, Math.ceil((p.used_tb || 0) * 10) / 10, min, 1));
       const q: Record<number, number> = {};
       for (const a of p.appliance_plan || []) q[a.capacity_tb] = a.qty;
       setQty(q);
@@ -55,11 +58,14 @@ export default function Onboarding() {
   }, []);
 
   const usedTb = plan?.used_tb || 0;
-  const maxTb = Math.max(20, Math.ceil(usedTb * 3));
+  const minTb = plan?.license_plan?.min_tb || 0;
+  const rate = plan?.license_plan?.price_per_tb_month ?? pricing?.protection_price_per_tb_month ?? 0;
+  const maxTb = Math.max(20, Math.ceil(usedTb * 3), Math.ceil(minTb * 2));
 
   const costs = useMemo(() => {
     if (!pricing) return null;
-    const protection = licensedTb * pricing.protection_price_per_tb_month;
+    const billableTb = Math.max(licensedTb, minTb);
+    const protection = billableTb * rate;
     const cloud = options.has("cv-cloud") ? usedTb * pricing.cloud_price_per_tb_month : 0;
     const thirdParty = options.has("customer-cloud") ? usedTb * pricing.s3_price_per_tb_month : 0;
     const applianceMonthly = (pricing.appliance_tiers || []).reduce((s, t) => s + (qty[t.capacity_tb] || 0) * t.monthly, 0);
@@ -68,8 +74,8 @@ export default function Onboarding() {
     const annual = totalMonthly * 12;
     const dataValue = plan?.data_value_total || 0;
     const ratio = annual > 0 ? dataValue / annual : null;
-    return { protection, cloud, thirdParty, applianceMonthly, applianceSetup, totalMonthly, annual, dataValue, ratio };
-  }, [pricing, options, licensedTb, qty, usedTb, plan]);
+    return { protection, cloud, thirdParty, applianceMonthly, applianceSetup, totalMonthly, annual, dataValue, ratio, billableTb };
+  }, [pricing, options, licensedTb, qty, usedTb, plan, minTb, rate]);
 
   function toggle(id: string) {
     setSaved(false);
@@ -182,10 +188,12 @@ export default function Onboarding() {
           <Card>
             <div className="spread" style={{ marginBottom: 4 }}>
               <h3 style={{ margin: 0 }}>Protection level</h3>
-              <span className="faint" style={{ fontSize: 12 }}>{money2(pricing.protection_price_per_tb_month)} / TB · month</span>
+              <span className="faint" style={{ fontSize: 12 }}>{money2(rate)} / TB · month</span>
             </div>
             <div className="muted" style={{ fontSize: 12.5, marginBottom: 16 }}>
-              How much data protection you license. You can raise it any time as you protect more.
+              {plan.license_plan
+                ? <>On the <b>{plan.license_plan.name}</b> plan — {money2(rate)}/TB·mo{minTb > 0 ? `, ${minTb} TB minimum` : ""}. You can raise your licensed data any time as you protect more.</>
+                : <>How much data protection you license. You can raise it any time as you protect more.</>}
             </div>
             <div className="spread" style={{ alignItems: "flex-end", marginBottom: 8 }}>
               <div>
@@ -197,11 +205,11 @@ export default function Onboarding() {
                 <div className="faint" style={{ fontSize: 12 }}>{plan.objects_total.toLocaleString()} objects</div>
               </div>
             </div>
-            <input type="range" min={0.5} max={maxTb} step={0.5} value={Math.min(licensedTb, maxTb)}
-                   onChange={(e) => { setSaved(false); setLicensedTb(Number(e.target.value)); }}
+            <input type="range" min={Math.max(0.5, minTb)} max={maxTb} step={0.5} value={Math.min(Math.max(licensedTb, minTb), maxTb)}
+                   onChange={(e) => { setSaved(false); setLicensedTb(Math.max(Number(e.target.value), minTb)); }}
                    style={{ width: "100%", accentColor: overLicensed ? "#f2545b" : "#4f7cff" }} />
             <div className="spread faint" style={{ fontSize: 11 }}>
-              <span>0.5 TB</span><span>{maxTb} TB</span>
+              <span>{Math.max(0.5, minTb)} TB{minTb > 0 ? " (min)" : ""}</span><span>{maxTb} TB</span>
             </div>
             {overLicensed && (
               <div style={{ marginTop: 8 }}>
@@ -215,7 +223,7 @@ export default function Onboarding() {
         <div className="stack" style={{ gap: 16, position: "sticky", top: 16 }}>
           <Card>
             <h3 style={{ margin: "0 0 12px" }}>Your monthly cost</h3>
-            <CostRow label="Data protection" detail={`${licensedTb.toFixed(licensedTb < 10 ? 1 : 0)} TB × ${money2(pricing.protection_price_per_tb_month)}`} value={money2(costs.protection)} />
+            <CostRow label="Data protection" detail={`${costs.billableTb.toFixed(costs.billableTb < 10 ? 1 : 0)} TB × ${money2(rate)}${plan.license_plan ? ` · ${plan.license_plan.name}` : ""}`} value={money2(costs.protection)} />
             {options.has("cv-cloud") && (
               <CostRow label="Arkive Cloud storage" detail={`${usedTb.toFixed(2)} TB × ${money2(pricing.cloud_price_per_tb_month)}`} value={money2(costs.cloud)} />
             )}

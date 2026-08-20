@@ -75,13 +75,23 @@ _DEFAULT_TIERS = [
 _DEFAULT_VALUE = {"email": 2, "credential": 50, "document": 15, "photo": 5,
                   "media": 8, "file": 3, "contact": 1}
 
+# Recurring license tiers. Each tenant is on one tier (Tenant.plan == id); the
+# tier sets the per-TB/month data-protection rate and the minimum licensed TB.
+_DEFAULT_PLANS = [
+    {"id": "consumer", "name": "Consumer", "price_per_tb_month": 8.0, "min_tb": 1},
+    {"id": "family", "name": "Family", "price_per_tb_month": 6.0, "min_tb": 2},
+    {"id": "business", "name": "Business", "price_per_tb_month": 5.0, "min_tb": 5},
+    {"id": "enterprise", "name": "Enterprise", "price_per_tb_month": 4.0, "min_tb": 25},
+]
+
 
 def get_pricing(db: Session) -> PricingConfig:
     """Fetch the single platform pricing row, creating sensible defaults once."""
     p = db.get(PricingConfig, "default")
     if p is None:
         p = PricingConfig(id="default", appliance_tiers=_DEFAULT_TIERS,
-                          data_value_per_type=_DEFAULT_VALUE)
+                          data_value_per_type=_DEFAULT_VALUE,
+                          license_plans=_DEFAULT_PLANS)
         db.add(p)
         db.commit()
         db.refresh(p)
@@ -91,7 +101,23 @@ def get_pricing(db: Session) -> PricingConfig:
         p.appliance_tiers = _DEFAULT_TIERS
     if not p.data_value_per_type:
         p.data_value_per_type = _DEFAULT_VALUE
+    if not p.license_plans:
+        p.license_plans = _DEFAULT_PLANS
     return p
+
+
+def effective_plan(p: PricingConfig, plan_id: str | None) -> dict:
+    """Resolve the license tier a tenant is on. Falls back to the first tier,
+    then to the legacy flat protection rate so pricing always resolves."""
+    plans = p.license_plans or _DEFAULT_PLANS
+    if plan_id:
+        for pl in plans:
+            if pl.get("id") == plan_id:
+                return pl
+    if plans:
+        return plans[0]
+    return {"id": "custom", "name": "Custom",
+            "price_per_tb_month": p.protection_price_per_tb_month, "min_tb": 0}
 
 
 def pricing_public(p: PricingConfig) -> dict:
@@ -101,6 +127,7 @@ def pricing_public(p: PricingConfig) -> dict:
         "cloud_price_per_tb_month": p.cloud_price_per_tb_month,
         "s3_price_per_tb_month": p.s3_price_per_tb_month,
         "azure_price_per_tb_month": p.azure_price_per_tb_month,
+        "license_plans": p.license_plans or _DEFAULT_PLANS,
         "appliance_tiers": p.appliance_tiers or _DEFAULT_TIERS,
         "data_value_per_type": p.data_value_per_type or _DEFAULT_VALUE,
         "tiers": STORAGE_TIERS,
@@ -136,11 +163,16 @@ def get_pricing_public(tenant: Tenant = Depends(security.get_tenant),
 
 def _compute_plan(db: Session, tenant: Tenant) -> dict:
     p = get_pricing(db)
+    plan = effective_plan(p, tenant.plan)
+    rate = float(plan.get("price_per_tb_month", p.protection_price_per_tb_month))
+    min_tb = float(plan.get("min_tb", 0) or 0)
     options = list(tenant.protection_options or [])
     total, used_bytes, by_bucket = _usage(db, tenant.id)
     used_tb = used_bytes / TB
     licensed_bytes = int(tenant.licensed_bytes or 0)
     licensed_tb = licensed_bytes / TB
+    # The tier's minimum is the floor for what a customer pays for.
+    billable_tb = max(licensed_tb, min_tb)
 
     # Object-value breakdown → estimated worth of the protected data.
     values = p.data_value_per_type or _DEFAULT_VALUE
@@ -175,7 +207,7 @@ def _compute_plan(db: Session, tenant: Tenant) -> dict:
                                 "unit_monthly": monthly, "unit_setup": setup,
                                 "monthly_total": qty * monthly, "setup_total": qty * setup})
 
-    protection_monthly = round(licensed_tb * p.protection_price_per_tb_month, 2)
+    protection_monthly = round(billable_tb * rate, 2)
     cloud_storage_monthly = round(used_tb * p.cloud_price_per_tb_month, 2) if "cv-cloud" in options else 0.0
     third_party_monthly = round(used_tb * p.s3_price_per_tb_month, 2) if "customer-cloud" in options else 0.0
     appliance_monthly = round(appliance_monthly, 2)
@@ -186,8 +218,14 @@ def _compute_plan(db: Session, tenant: Tenant) -> dict:
     return {
         "options": options,
         "currency": p.currency,
+        "license_plan": {
+            "id": plan.get("id"), "name": plan.get("name", "Plan"),
+            "price_per_tb_month": rate, "min_tb": min_tb,
+        },
         "licensed_bytes": licensed_bytes,
         "licensed_tb": round(licensed_tb, 3),
+        "billable_tb": round(billable_tb, 3),
+        "min_tb": min_tb,
         "used_bytes": used_bytes,
         "used_tb": round(used_tb, 4),
         "percent": round(min(100.0, used_bytes / licensed_bytes * 100), 1) if licensed_bytes else None,
@@ -229,7 +267,10 @@ def update_plan(body: PlanUpdate,
     if body.options is not None:
         tenant.protection_options = [o for o in body.options if o in valid]
     if body.licensed_tb is not None:
-        tenant.licensed_bytes = int(max(0.0, body.licensed_tb) * TB)
+        # Never allow licensing below the tenant's tier minimum.
+        p = get_pricing(db)
+        min_tb = float(effective_plan(p, tenant.plan).get("min_tb", 0) or 0)
+        tenant.licensed_bytes = int(max(body.licensed_tb, min_tb, 0.0) * TB)
     if body.appliance_plan is not None:
         tenant.appliance_plan = [
             {"capacity_tb": s.get("capacity_tb"), "qty": int(s.get("qty") or 0)}

@@ -30,7 +30,7 @@ export default function Home() {
               {[
                 ["📧", "Gmail — 48,204 messages", "Post-quantum · versioned"],
                 ["🗂️", "OneDrive — 12,880 files", "Immutable · WORM"],
-                ["🔐", "1Password — 214 items", "Zero-knowledge"],
+                ["🔐", "1Password — 214 items", "Private by design"],
                 ["🖼️", "Photos — 31,507 items", "Originals preserved"],
               ].map(([i, t, s]) => (
                 <div key={t} style={{ display: "flex", gap: 12, alignItems: "center", padding: "10px 0", borderTop: "1px solid var(--border)" }}>

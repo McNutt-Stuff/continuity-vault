@@ -16,7 +16,7 @@ export const site = {
 };
 
 export const home = {
-  eyebrow: "Quantum-safe · Zero-knowledge · Hybrid cloud",
+  eyebrow: "Quantum-safe · Private by design · Hybrid cloud",
   h1: "Protect the digital life you can't afford to lose.",
   lead:
     "Arkive continuously backs up your email, files, photos, passwords and accounts — encrypted with post-quantum cryptography, stored across a cloud you control and offline secure hardware. Recover anything, prove it's intact, and never lose what matters.",
@@ -24,7 +24,7 @@ export const home = {
   ctaSecondary: { label: "See how it works", to: "/features" },
   badges: [
     "Post-quantum encryption (ML-KEM / ML-DSA)",
-    "Zero-knowledge — we can't read your data",
+    "Private by design — we can't read your data",
     "Offline appliance option",
   ],
   stats: [
@@ -35,7 +35,7 @@ export const home = {
   ],
   valueProps: [
     { ico: "🛡️", h: "Tamper-evident", p: "Every snapshot is hash-chained and signed. You can prove your data is authentic and unchanged — down to the object." },
-    { ico: "🔑", h: "You hold the keys", p: "Zero-knowledge by design. Keys are unlocked by your passkeys and hardware tokens — Arkive never sees plaintext." },
+    { ico: "🔑", h: "You hold the keys", p: "Private by design. Keys are unlocked by your passkeys and hardware tokens — Arkive never sees plaintext." },
     { ico: "🧭", h: "Everything, unified", p: "Gmail, Outlook, Drive, iCloud, 1Password, social and your devices — searchable in one secure place." },
   ],
   steps: [
@@ -55,7 +55,7 @@ export const features = {
         { ico: "📧", h: "Email & messages", p: "Full-fidelity backup of Gmail and Outlook — messages, attachments, and metadata — with incremental delta sync." },
         { ico: "🗂️", h: "Files & cloud drives", p: "OneDrive, Dropbox, iCloud Drive and your endpoint files, captured with versioned history." },
         { ico: "🖼️", h: "Photos & media", p: "Protect your photo libraries and media, organized and searchable, with originals preserved." },
-        { ico: "🔐", h: "Passwords & secrets", p: "1Password vaults collected locally by an agent and double-encrypted — zero-knowledge end to end." },
+        { ico: "🔐", h: "Passwords & secrets", p: "1Password vaults collected locally by an agent and double-encrypted — private end to end." },
         { ico: "👥", h: "Contacts & calendar", p: "Keep the people and plans that hold your life together — contacts, events, and history." },
         { ico: "💬", h: "Social & accounts", p: "Archive posts, photos and account data from the platforms that hold your memories." },
       ],
@@ -87,7 +87,7 @@ export const useCases = {
   cases: [
     { ico: "👨‍👩‍👧", h: "Families & individuals", p: "Protect a lifetime of email, photos, documents and accounts. Plan for the unexpected with recovery your loved ones can rely on.", points: ["Everything in one secure place", "Simple, guided protection setup", "Legacy & recovery planning"] },
     { ico: "🏢", h: "Small & mid-size business", p: "Keep the business running through ransomware, departures, and outages with verifiable, policy-driven recovery.", points: ["Per-source retention & routing", "Role-based access & approvals", "Compliance-ready audit trail"] },
-    { ico: "⚖️", h: "Regulated & high-trust", p: "Meet strict data-handling requirements with zero-knowledge encryption, immutability and provable integrity.", points: ["Customer-managed keys", "Immutable, tamper-evident storage", "Offline air-gapped option"] },
+    { ico: "⚖️", h: "Regulated & high-trust", p: "Meet strict data-handling requirements with private-by-design encryption, immutability and provable integrity.", points: ["Customer-managed keys", "Immutable, tamper-evident storage", "Offline air-gapped option"] },
     { ico: "🧑‍💻", h: "Prosumers & creators", p: "Never lose your work or your accounts. Archive social, media and cloud drives with full version history.", points: ["Big-history photo & media capture", "Cross-account unified search", "You own the keys"] },
   ],
 };
@@ -97,10 +97,10 @@ export const security = {
   lead: "Arkive is engineered for a zero-trust, post-quantum world. Your data is protected in transit, at rest, and against threats that don't exist yet.",
   pillars: [
     { ico: "⚛️", h: "Post-quantum by default", p: "Hybrid cryptography combines classical and NIST post-quantum algorithms (ML-KEM, ML-DSA) so a future quantum computer can't retroactively decrypt your archive." },
-    { ico: "🕶️", h: "Zero-knowledge", p: "Encryption happens before data leaves your environment. Keys are released only by your passkeys / hardware tokens. Operators never have standing access to plaintext." },
+    { ico: "🕶️", h: "Private by design", p: "Encryption happens before data leaves your environment. Keys are released only by your passkeys / hardware tokens. Operators never have standing access to plaintext." },
     { ico: "🔗", h: "Provable integrity", p: "A hash-chained, signed ledger makes every snapshot tamper-evident. You can independently verify nothing has been altered." },
     { ico: "🧱", h: "Ransomware-resistant", p: "Immutable, object-locked recovery points and offline appliances keep clean copies beyond the reach of attackers." },
-    { ico: "🗝️", h: "Customer-managed keys", p: "Choose customer-managed or fully zero-knowledge key ownership per vault. Your data, your control." },
+    { ico: "🗝️", h: "Customer-managed keys", p: "Choose customer-managed or fully private-by-design key ownership per vault. Your data, your control." },
     { ico: "🏛️", h: "Isolation & least privilege", p: "Strict per-tenant isolation across identity, storage, policy and encryption layers — enforced at every request." },
   ],
 };
@@ -115,7 +115,7 @@ export const pricing = {
       price: "$9", per: "/month",
       blurb: "For individuals protecting their digital life.",
       cta: "Start free trial",
-      features: ["Up to 1 TB protected", "All personal sources", "Unlimited version history", "Zero-knowledge encryption", "Unified search & recovery"],
+      features: ["Up to 1 TB protected", "All personal sources", "Unlimited version history", "Private-by-design encryption", "Unified search & recovery"],
     },
     {
       name: "Family / Pro",
@@ -140,12 +140,33 @@ export const about = {
   lead: "Arkive was founded on a simple conviction: the most important things in your digital life — your memories, your records, your accounts — should be impossible to lose, impossible to tamper with, and impossible for anyone but you to read.",
   body: [
     { h: "Why we built Arkive", p: "Backups have always been an afterthought — until the day you need them. We set out to build continuity that's continuous, verifiable, and private by default, using cryptography strong enough to outlast the threats on the horizon." },
-    { h: "How we're different", p: "Most services trade your privacy for convenience. Arkive is zero-knowledge: we can operate your protection without ever reading your data. And with post-quantum encryption and offline hardware, we protect against tomorrow's threats, not just today's." },
+    { h: "How we're different", p: "Most services trade your privacy for convenience. Arkive is private by design: we can operate your protection without ever reading your data. And with post-quantum encryption and offline hardware, we protect against tomorrow's threats, not just today's." },
     { h: "Our commitment", p: "Your keys, your data, your control. We hold ourselves to provable integrity and least-privilege access, and we publish how it works. Continuity you can trust starts with transparency." },
   ],
   values: [
-    { h: "Privacy is non-negotiable", p: "Zero-knowledge is the floor, not a feature." },
-    { h: "Prove, don't promise", p: "Every claim is backed by cryptographic evidence." },
-    { h: "Built to outlast", p: "Post-quantum, immutable, and offline-capable." },
+    { h: "Private by design", p: "Encryption happens before your data leaves your control — we operate your protection without ever reading it." },
+    { h: "Prove, don't promise", p: "Every claim is backed by verifiable, cryptographic evidence." },
+    { h: "Built to endure", p: "Post-quantum, immutable, and offline-capable — engineered to outlast the threats on the horizon." },
   ],
+  resilience: {
+    h: "Built to endure",
+    lead: "Resilience isn't a single feature — it's independent layers designed so that when one line of defense is tested, the others still hold. Arkive keeps your data protected, intact, and recoverable through failures, attacks, and the passage of time.",
+    layers: [
+      { ico: "⚛️", h: "Cryptographic resilience", p: "Hybrid post-quantum encryption (ML-KEM / ML-DSA) defends against today's attackers and the quantum computers of tomorrow — so data captured now can't be decrypted later." },
+      { ico: "🔗", h: "Tamper-evident integrity", p: "A hash-chained, signed ledger makes every snapshot provably unaltered. You can independently verify nothing has been changed." },
+      { ico: "🧱", h: "Ransomware-resistant copies", p: "Immutable, object-locked recovery points keep clean, unchangeable copies beyond the reach of an attacker who gets inside." },
+      { ico: "🛡️", h: "Offline & air-gapped", p: "Optional offline appliances hold a physically isolated copy that no network compromise can touch." },
+      { ico: "🌐", h: "Hybrid & multi-location", p: "A cloud you control plus local hardware means no single outage, provider, or region can take your continuity down." },
+      { ico: "✅", h: "Provable recovery", p: "Every restore is verifiable and audited — so you know recovery works before the day you depend on it." },
+    ],
+  },
+  pedigree: {
+    h: "Built by people who secure the world's most critical systems.",
+    lead: "Arkive was built by engineers who have designed and operated the platforms that protect institutions where failure is not an option. We brought that same discipline — the standards used to defend money, lives, and nations — to protecting your digital life.",
+    points: [
+      { ico: "🏦", h: "Global banks", p: "Systems entrusted with the integrity and continuity of the world's financial infrastructure, under relentless adversarial pressure." },
+      { ico: "🏥", h: "Healthcare", p: "Platforms safeguarding the most sensitive patient data under the strictest privacy and availability requirements." },
+      { ico: "🏛️", h: "Government", p: "High-assurance, high-trust environments where security, resilience, and provable integrity are mandatory, not optional." },
+    ],
+  },
 };

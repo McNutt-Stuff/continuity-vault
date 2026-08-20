@@ -86,12 +86,17 @@ function Tenants() {
   useEffect(() => { void load(); }, []);
 
   async function newTenant() {
+    let planOpts = [{ label: "business", value: "business" }];
+    try {
+      const pr = await api.get<any>("/admin/pricing");
+      if (pr.license_plans?.length) planOpts = pr.license_plans.map((pl: any) =>
+        ({ label: `${pl.name} — $${pl.price_per_tb_month}/TB·mo, min ${pl.min_tb}TB`, value: pl.id }));
+    } catch { /* fall back to default */ }
     const r = await formDialog({
       title: "New tenant", confirmLabel: "Create tenant",
       fields: [
         { name: "name", label: "Organization name", required: true },
-        { name: "plan", label: "Plan", defaultValue: "business",
-          options: ["consumer", "family", "business", "enterprise"].map((v) => ({ label: v, value: v })) },
+        { name: "plan", label: "License plan", defaultValue: planOpts[0]?.value, options: planOpts },
         { name: "key_ownership_model", label: "Key ownership", defaultValue: "customer-managed",
           options: [{ label: "Customer-managed", value: "customer-managed" }, { label: "Zero-knowledge", value: "zero-knowledge" }] },
         { name: "licensed_tb", label: "Licensed data (TB)", defaultValue: "1" },
@@ -148,12 +153,17 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
   useEffect(() => { void load(); }, [id]);
 
   async function editTenant() {
+    let planOpts = [{ label: t.plan, value: t.plan }];
+    try {
+      const pr = await api.get<any>("/admin/pricing");
+      if (pr.license_plans?.length) planOpts = pr.license_plans.map((pl: any) =>
+        ({ label: `${pl.name} — $${pl.price_per_tb_month}/TB·mo, min ${pl.min_tb}TB`, value: pl.id }));
+    } catch { /* fall back to current */ }
     const r = await formDialog({
       title: "Edit tenant", confirmLabel: "Save",
       fields: [
         { name: "name", label: "Name", defaultValue: t.name, required: true },
-        { name: "plan", label: "Plan", defaultValue: t.plan,
-          options: ["consumer", "family", "business", "enterprise"].map((v) => ({ label: v, value: v })) },
+        { name: "plan", label: "License plan", defaultValue: t.plan, options: planOpts },
         { name: "status", label: "Status", defaultValue: t.status,
           options: ["active", "suspended", "trial"].map((v) => ({ label: v, value: v })) },
         { name: "licensed_tb", label: "Licensed data (TB)", defaultValue: String(((t.licensed_bytes || 0) / (1024 ** 4)).toFixed(2)) },
@@ -873,12 +883,14 @@ function Updates() {
   );
 }
 
+interface LicensePlan { id: string; name: string; price_per_tb_month: number; min_tb: number; }
 interface PricingCfg {
   currency: string;
   protection_price_per_tb_month: number;
   cloud_price_per_tb_month: number;
   s3_price_per_tb_month: number;
   azure_price_per_tb_month: number;
+  license_plans: LicensePlan[];
   appliance_tiers: { capacity_tb: number; monthly: number; setup: number; model: string }[];
   data_value_per_type: Record<string, number>;
 }
@@ -897,16 +909,49 @@ function Pricing() {
 
   const num = (v: string) => Number(v) || 0;
   const valueKeys = ["email", "credential", "document", "photo", "media", "file", "contact"];
+  const plans = p.license_plans || [];
+  function setPlan(i: number, patch: Partial<LicensePlan>) {
+    const a = plans.map((pl, idx) => idx === i ? { ...pl, ...patch } : pl);
+    set("license_plans", a);
+  }
+  function addPlan() {
+    const id = `plan-${Date.now().toString(36)}`;
+    set("license_plans", [...plans, { id, name: "New plan", price_per_tb_month: 6, min_tb: 1 }]);
+  }
+  function removePlan(i: number) { set("license_plans", plans.filter((_, idx) => idx !== i)); }
 
   return (
     <>
       <Card style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ marginBottom: 4 }}>
+          <h3 style={{ marginTop: 0 }}>Recurring license plans</h3>
+          <button className="btn sm" onClick={addPlan}>+ Add plan</button>
+        </div>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>
+          Each tenant is assigned a plan (on the Tenants page). The plan sets the recurring
+          data-protection rate per TB · month and the minimum TB the customer is billed for.
+        </div>
+        <table className="table">
+          <thead><tr><th>Plan name</th><th>Plan ID</th><th>Price / TB · mo ($)</th><th>Minimum (TB)</th><th></th></tr></thead>
+          <tbody>
+            {plans.map((pl, i) => (
+              <tr key={i}>
+                <td><input className="input sm" value={pl.name} onChange={(e) => setPlan(i, { name: e.target.value })} /></td>
+                <td><input className="input sm" value={pl.id} onChange={(e) => setPlan(i, { id: e.target.value.trim() })} style={{ width: 130 }} /></td>
+                <td><input className="input sm" type="number" step="0.01" value={pl.price_per_tb_month} onChange={(e) => setPlan(i, { price_per_tb_month: num(e.target.value) })} style={{ width: 120 }} /></td>
+                <td><input className="input sm" type="number" step="0.5" value={pl.min_tb} onChange={(e) => setPlan(i, { min_tb: num(e.target.value) })} style={{ width: 110 }} /></td>
+                <td><button className="btn ghost sm" onClick={() => removePlan(i)} title="Remove">Remove</button></td>
+              </tr>
+            ))}
+            {plans.length === 0 && <tr><td colSpan={5} className="faint" style={{ fontSize: 12.5 }}>No plans — add one to define recurring pricing.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+
+      <Card style={{ marginBottom: 16 }}>
         <h3 style={{ marginTop: 0 }}>Recurring pricing (per TB · month)</h3>
         <div className="grid grid-4" style={{ gap: 12 }}>
-          <PriceField label="Data protection" value={p.protection_price_per_tb_month} onChange={(v) => set("protection_price_per_tb_month", num(v))} />
           <PriceField label="Arkive Cloud storage" value={p.cloud_price_per_tb_month} onChange={(v) => set("cloud_price_per_tb_month", num(v))} />
-          <PriceField label="AWS S3 estimate" value={p.s3_price_per_tb_month} onChange={(v) => set("s3_price_per_tb_month", num(v))} />
-          <PriceField label="Azure estimate" value={p.azure_price_per_tb_month} onChange={(v) => set("azure_price_per_tb_month", num(v))} />
         </div>
       </Card>
 
@@ -936,6 +981,16 @@ function Pricing() {
             <PriceField key={k} label={k[0].toUpperCase() + k.slice(1)} value={p.data_value_per_type[k] ?? 0}
                         onChange={(v) => set("data_value_per_type", { ...p.data_value_per_type, [k]: num(v) })} />
           ))}
+        </div>
+        <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--border-soft)" }}>
+          <h4 style={{ margin: "0 0 4px" }}>Third-party cloud storage estimates (per TB · month)</h4>
+          <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>
+            Shown to customers who bring their own bucket, to estimate what they'll pay their provider directly.
+          </div>
+          <div className="grid grid-4" style={{ gap: 12 }}>
+            <PriceField label="AWS S3 estimate" value={p.s3_price_per_tb_month} onChange={(v) => set("s3_price_per_tb_month", num(v))} />
+            <PriceField label="Azure estimate" value={p.azure_price_per_tb_month} onChange={(v) => set("azure_price_per_tb_month", num(v))} />
+          </div>
         </div>
       </Card>
 

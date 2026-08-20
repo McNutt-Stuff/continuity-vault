@@ -54,6 +54,17 @@ async function fetchJson(url: string): Promise<any | null> {
   }
 }
 
+// Applies content inlined into index.html by the node's heartbeat
+// (window.__ARKIVE_CMS__). Synchronous, so calling it before the first render
+// paints real content with zero network query. Returns true if it applied.
+export function applyInlineCms(): boolean {
+  const g = (globalThis as any).__ARKIVE_CMS__;
+  if (!g || typeof g !== "object") return false;
+  if (g.published === false) return false;
+  applyCms(g.content);
+  return true;
+}
+
 // Loads published content and applies it over the bundled defaults. Resolves
 // regardless of outcome so the caller renders defaults immediately and updates
 // on success.
