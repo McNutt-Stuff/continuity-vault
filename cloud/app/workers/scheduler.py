@@ -132,6 +132,11 @@ def run_due() -> int:
                     db.rollback()
                     logger.warning("photo reminder failed for %s: %s", c.id, exc)
                 continue
+            # Media-heavy, non-delta sources (Facebook/Instagram) re-fetch the
+            # WHOLE library every run — never auto-run them on a schedule (wasteful
+            # + risks memory pressure). They back up only on explicit manual runs.
+            if caps.streaming and not caps.delta:
+                continue
             interval = _effective_interval(c, default_minutes)
             if not _is_due(c, interval, now):
                 continue

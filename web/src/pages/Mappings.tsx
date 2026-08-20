@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import { Card, Pill, bytes, serverDate, timeAgo } from "../components/ui";
+import { Card, Pill, bytes, serverDate, timeAgo, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, notify } from "../components/dialog";
@@ -56,6 +56,7 @@ export default function Mappings() {
   const [targets, setTargets] = useState<StorageTarget[]>([]);
   const [mappings, setMappings] = useState<Mapping[]>([]);
   const [toast, setToast] = useState("");
+  const [loaded, setLoaded] = useState(false);
 
   // New-mapping form. sourceSel encodes the chosen source:
   //   "acct:<accountId>"  (cloud connector account)
@@ -86,21 +87,25 @@ export default function Mappings() {
   const [openActivity, setOpenActivity] = useState<Record<string, boolean>>({});
 
   async function load() {
-    const [acc, ags, tenant, coll, tgts] = await Promise.all([
-      api.get<Account[]>("/connectors/accounts"),
-      api.get<Agent[]>("/agents").catch(() => [] as Agent[]),
-      api.get<{ vaults: Vault[] }>("/tenant"),
-      api.get<Mapping[]>("/collections"),
-      api.get<StorageTarget[]>("/tenant/storage-targets"),
-    ]);
-    setAccounts(acc);
-    setAgents(ags);
-    setVaults(tenant.vaults);
-    setMappings(coll);
-    setTargets(tgts);
-    if (!vaultId && tenant.vaults[0]) setVaultId(tenant.vaults[0].id);
-    try { setCatalog(await api.get<CatalogItem[]>("/connectors/catalog")); } catch { /* ignore */ }
-    try { setActivity(await api.get<Activity>("/activity")); } catch { /* ignore */ }
+    try {
+      const [acc, ags, tenant, coll, tgts] = await Promise.all([
+        api.get<Account[]>("/connectors/accounts"),
+        api.get<Agent[]>("/agents").catch(() => [] as Agent[]),
+        api.get<{ vaults: Vault[] }>("/tenant"),
+        api.get<Mapping[]>("/collections"),
+        api.get<StorageTarget[]>("/tenant/storage-targets"),
+      ]);
+      setAccounts(acc);
+      setAgents(ags);
+      setVaults(tenant.vaults);
+      setMappings(coll);
+      setTargets(tgts);
+      if (!vaultId && tenant.vaults[0]) setVaultId(tenant.vaults[0].id);
+      try { setCatalog(await api.get<CatalogItem[]>("/connectors/catalog")); } catch { /* ignore */ }
+      try { setActivity(await api.get<Activity>("/activity")); } catch { /* ignore */ }
+    } finally {
+      setLoaded(true);
+    }
   }
   useEffect(() => {
     void load();
@@ -292,6 +297,8 @@ export default function Mappings() {
       await notify({ title: "Sync failed", message: (e as ApiError).message, tone: "danger" });
     }
   }
+
+  if (!loaded && mappings.length === 0) return <Loading label="Loading data map…" />;
 
   return (
     <>
