@@ -96,7 +96,18 @@ class _S3Base(ProtectionDestination):
         )
         try:
             self._s3.head_bucket(Bucket=bucket)
-        except Exception:
+        except Exception as exc:
+            # Only auto-create when the bucket genuinely doesn't exist (404).
+            # A 403 / SignatureDoesNotMatch / region redirect means bad creds or
+            # wrong region — re-raise so the real cause surfaces instead of a
+            # misleading CreateBucket error (which also needs s3:CreateBucket).
+            status = None
+            try:
+                status = exc.response["ResponseMetadata"]["HTTPStatusCode"]
+            except Exception:
+                pass
+            if status != 404:
+                raise
             create_args = {"Bucket": bucket}
             if region != "us-east-1":
                 create_args["CreateBucketConfiguration"] = {"LocationConstraint": region}
@@ -206,6 +217,10 @@ def destination_from_service(kind: str, cfg: dict) -> Optional[ProtectionDestina
         bucket = cfg.get("bucket")
         if not bucket:
             return None
+        # Tolerate a pasted ARN — S3 wants the bare bucket name.
+        bucket = str(bucket).strip().rstrip("/")
+        if "arn" in bucket.lower() and ":" in bucket:
+            bucket = bucket.rsplit(":", 1)[-1]
         return CVCloudDestination(
             bucket=bucket,
             region=cfg.get("region") or "us-east-1",

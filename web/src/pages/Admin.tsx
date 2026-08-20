@@ -17,6 +17,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "service-objects", label: "Service objects", icon: "mail", group: "Integrations" },
   { key: "pricing", label: "Pricing", icon: "database", group: "Integrations" },
   { key: "nodes", label: "Nodes", icon: "server", group: "Infrastructure" },
+  { key: "storage-usage", label: "Storage usage", icon: "database", group: "Infrastructure" },
   { key: "fleet", label: "Appliance fleet", icon: "server", group: "Infrastructure" },
   { key: "crypto", label: "Crypto", icon: "lock", group: "Infrastructure" },
   { key: "updates", label: "Updates", icon: "clock", group: "Infrastructure" },
@@ -32,6 +33,7 @@ export default function Admin() {
       {s === "tenants" && <Tenants />}
       {s === "reports" && <Reports />}
       {s === "nodes" && <Nodes />}
+      {s === "storage-usage" && <StorageUsageAdmin />}
       {s === "config-objects" && <ConfigObjectsAdmin />}
       {s === "sources" && <SourcesAdmin />}
       {s === "service-objects" && <><ServiceObjectsAdmin /><EmailAdmin /></>}
@@ -342,8 +344,6 @@ function Nodes() {
     try { await api.post("/admin/nodes", r); flash("Node registered"); await load(); } catch { flash("Failed"); }
   }
   async function editNode(n: any) {
-    const storage = svcs.filter((x) => x.category === "storage");
-    const email = svcs.filter((x) => x.category === "email");
     const r = await formDialog({
       title: `Edit ${n.name}`, confirmLabel: "Save",
       fields: [
@@ -354,20 +354,22 @@ function Nodes() {
         { name: "endpoint", label: "Endpoint", defaultValue: n.endpoint },
         { name: "status", label: "Status", defaultValue: n.status,
           options: ["active", "draining", "maintenance", "offline"].map((v) => ({ label: v, value: v })) },
-        { name: "storage_service_id", label: "Storage service", defaultValue: n.storage_service_id || "",
-          options: [{ label: "— default (env / local) —", value: "" }, ...storage.map((x) => ({ label: `${x.name}${x.configured ? "" : " (incomplete)"}`, value: x.id }))] },
-        { name: "email_service_id", label: "Email service", defaultValue: n.email_service_id || "",
-          options: [{ label: "— default —", value: "" }, ...email.map((x) => ({ label: `${x.name}${x.configured ? "" : " (incomplete)"}`, value: x.id }))] },
       ],
     });
     if (!r) return;
     try { await api.put(`/admin/nodes/${n.id}`, r); flash("Node updated"); await load(); } catch { flash("Failed"); }
+  }
+  async function setNodeService(n: any, patch: { storage_service_id?: string; email_service_id?: string }) {
+    try { await api.put(`/admin/nodes/${n.id}`, patch); flash("Services updated"); await load(); } catch { flash("Failed"); }
   }
   async function removeNode(n: any) {
     if (n.is_self) { void notify({ title: "Not allowed", message: "You can't remove the current node.", tone: "warn" }); return; }
     if (!await confirmDialog({ title: "Remove node?", message: `Remove ${n.name} from the fleet.`, tone: "danger", confirmLabel: "Remove" })) return;
     try { await api.del(`/admin/nodes/${n.id}`); flash("Node removed"); await load(); } catch { flash("Failed"); }
   }
+
+  const storageSvcs = svcs.filter((x) => x.category === "storage");
+  const emailSvcs = svcs.filter((x) => x.category === "email");
 
   return (
     <>
@@ -420,6 +422,27 @@ function Nodes() {
                 <Pill tone={n.email_service ? "info" : "warn"}>
                   <Icon name="mail" size={11} /> {n.email_service || "Email: default"}
                 </Pill>
+              </div>
+              <div className="stack" style={{ gap: 8, marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
+                <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }}>Assigned services</div>
+                <label className="row" style={{ gap: 8, alignItems: "center" }}>
+                  <Icon name="database" size={13} />
+                  <span className="faint" style={{ fontSize: 12, width: 52 }}>Storage</span>
+                  <select className="input sm flex1" value={n.storage_service_id || ""}
+                          onChange={(e) => setNodeService(n, { storage_service_id: e.target.value })}>
+                    <option value="">Default (env / local)</option>
+                    {storageSvcs.map((x) => <option key={x.id} value={x.id}>{x.name}{x.configured ? "" : " (incomplete)"}</option>)}
+                  </select>
+                </label>
+                <label className="row" style={{ gap: 8, alignItems: "center" }}>
+                  <Icon name="mail" size={13} />
+                  <span className="faint" style={{ fontSize: 12, width: 52 }}>Email</span>
+                  <select className="input sm flex1" value={n.email_service_id || ""}
+                          onChange={(e) => setNodeService(n, { email_service_id: e.target.value })}>
+                    <option value="">Default</option>
+                    {emailSvcs.map((x) => <option key={x.id} value={x.id}>{x.name}{x.configured ? "" : " (incomplete)"}</option>)}
+                  </select>
+                </label>
               </div>
               <div className="row" style={{ gap: 8, marginTop: 12 }}>
                 <button className="btn ghost sm" onClick={() => editNode(n)}>Edit</button>
@@ -1056,10 +1079,16 @@ function ServiceObjectsAdmin() {
     try { await api.del(`/admin/service-objects/${o.id}`); flash("Deleted"); await load(); } catch { flash("Delete failed"); }
   }
   async function testObject(o: ServiceObj) {
+    let payload: Record<string, string> = {};
+    if (o.category === "email") {
+      const to = await promptDialog({ title: "Send test email", label: "Recipient address", placeholder: "you@example.com" });
+      if (!to || !to.trim()) return;
+      payload = { to: to.trim() };
+    }
     flash("Testing…");
     try {
-      const r = await api.post<{ ok: boolean; error?: string | null }>(`/admin/service-objects/${o.id}/test`, {});
-      flash(r.ok ? "Storage reachable — write/read OK" : `Test failed: ${r.error || "unknown error"}`);
+      const r = await api.post<{ ok: boolean; error?: string | null }>(`/admin/service-objects/${o.id}/test`, payload);
+      flash(r.ok ? (o.category === "email" ? "Test email sent" : "Storage reachable — write/read OK") : `Test failed: ${r.error || "unknown error"}`);
     } catch { flash("Test failed"); }
   }
 
@@ -1126,7 +1155,7 @@ function ServiceObjectsAdmin() {
 
         <ServiceTable title="Storage services" rows={storage} onEdit={editDraft} onDelete={delObject} onTest={testObject} testable />
         <div style={{ height: 14 }} />
-        <ServiceTable title="Email services" rows={email} onEdit={editDraft} onDelete={delObject} onTest={testObject} />
+        <ServiceTable title="Email services" rows={email} onEdit={editDraft} onDelete={delObject} onTest={testObject} testable />
         <div className="muted" style={{ fontSize: 12, marginTop: 12 }}>
           Storage services back Arkive Cloud: mappings routed to <b>cv-cloud</b> store and restore through
           the storage service selected on the running node. S3 defaults to Intelligent-Tiering and Azure to the
@@ -1165,5 +1194,86 @@ function ServiceTable({ title, rows, onEdit, onDelete, onTest, testable }: {
         </tbody>
       </table>
     </div>
+  );
+}
+
+interface StorageUsage {
+  cloud_total: { bytes: number; objects: number; recovery_points: number; tenants: number };
+  by_tenant: { tenant_id: string; tenant_name: string; plan: string; licensed_bytes: number; bytes: number; objects: number; recovery_points: number }[];
+  services: { id: string; name: string; kind: string; kind_label: string; enabled: boolean; nodes: string[]; active: boolean; settings: Record<string, string> }[];
+}
+
+function StorageUsageAdmin() {
+  const [d, setD] = useState<StorageUsage | null>(null);
+  useEffect(() => { api.get<StorageUsage>("/admin/storage-usage").then(setD).catch(() => {}); }, []);
+  if (!d) return <Card><div className="muted">Loading storage usage…</div></Card>;
+  const t = d.cloud_total;
+  return (
+    <>
+      <div className="grid grid-4">
+        <Stat label="Cloud data stored" value={bytes(t.bytes)} />
+        <Stat label="Recovery points" value={t.recovery_points.toLocaleString()} />
+        <Stat label="Objects" value={t.objects.toLocaleString()} />
+        <Stat label="Tenants using cloud" value={t.tenants} />
+      </div>
+
+      <Card style={{ marginTop: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Storage services</h3>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>Arkive Cloud backends and the nodes that write to them. New backups land on each node's active service.</div>
+        <div className="grid grid-2">
+          {d.services.map((s) => (
+            <Card key={s.id}>
+              <div className="spread" style={{ marginBottom: 8 }}>
+                <div className="row" style={{ gap: 10 }}>
+                  <div className="result-icon" style={{ width: 32, height: 32, background: "var(--inset)" }}><Icon name="database" size={16} /></div>
+                  <div>
+                    <div style={{ fontWeight: 700 }}>{s.name}</div>
+                    <div className="faint" style={{ fontSize: 11.5 }}>{s.kind_label}</div>
+                  </div>
+                </div>
+                <Pill tone={s.active ? "ok" : "warn"}>{s.active ? "Active" : "Idle"}</Pill>
+              </div>
+              <div className="faint" style={{ fontSize: 12 }}>
+                {s.settings.bucket ? `bucket ${s.settings.bucket}` : s.settings.container ? `container ${s.settings.container}` : "—"}
+                {s.settings.region ? ` · ${s.settings.region}` : ""}
+              </div>
+              <div className="row" style={{ gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                {s.nodes.length
+                  ? s.nodes.map((n) => <Pill key={n} tone="info"><Icon name="server" size={11} /> {n}</Pill>)
+                  : <span className="faint" style={{ fontSize: 12 }}>No node assigned</span>}
+              </div>
+            </Card>
+          ))}
+          {d.services.length === 0 && <div className="muted">No storage services configured.</div>}
+        </div>
+      </Card>
+
+      <Card style={{ marginTop: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Data stored by tenant</h3>
+        <table className="table">
+          <thead><tr><th>Tenant</th><th>Plan</th><th>Recovery points</th><th>Objects</th><th>Data stored</th><th>Of licensed</th></tr></thead>
+          <tbody>
+            {d.by_tenant.map((r) => {
+              const pct = r.licensed_bytes ? Math.round((r.bytes / r.licensed_bytes) * 100) : null;
+              return (
+                <tr key={r.tenant_id}>
+                  <td style={{ fontWeight: 600 }}>{r.tenant_name}</td>
+                  <td><Pill tone="info">{r.plan}</Pill></td>
+                  <td>{r.recovery_points.toLocaleString()}</td>
+                  <td>{r.objects.toLocaleString()}</td>
+                  <td style={{ fontWeight: 600 }}>{bytes(r.bytes)}</td>
+                  <td className="faint">{r.licensed_bytes ? `${bytes(r.licensed_bytes)} · ${pct}%` : "—"}</td>
+                </tr>
+              );
+            })}
+            {d.by_tenant.length === 0 && <tr><td colSpan={6} className="muted">No cloud data stored yet.</td></tr>}
+          </tbody>
+        </table>
+        <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+          Totals sum bytes written across all cloud recovery points (before de-duplication). Per-service
+          attribution follows each node's active storage target.
+        </div>
+      </Card>
+    </>
   );
 }

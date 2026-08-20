@@ -991,6 +991,10 @@ class ServiceObjectBody(BaseModel):
     settings: dict = {}
 
 
+class ServiceTest(BaseModel):
+    to: str | None = None  # recipient for an email-service test send
+
+
 @router.post("/service-objects")
 def create_service_object(body: ServiceObjectBody,
                           principal: security.Principal = Depends(security.require_platform_admin),
@@ -1062,7 +1066,7 @@ def delete_service_object(sid: str,
 
 
 @router.post("/service-objects/{sid}/test")
-def test_service_object(sid: str,
+def test_service_object(sid: str, body: "ServiceTest | None" = None,
                         principal: security.Principal = Depends(security.require_platform_admin),
                         db: Session = Depends(get_db)):
     svc = db.get(ServiceObject, sid)
@@ -1082,4 +1086,89 @@ def test_service_object(sid: str,
             return {"ok": ok, "error": None if ok else "readback mismatch"}
         except Exception as exc:  # surface the backend error to the admin
             return {"ok": False, "error": str(exc)}
+    if svc.kind == "email-ses":
+        from .. import emailer
+        to = ((body.to if body else None) or "").strip()
+        if not to:
+            return {"ok": False, "error": "enter a recipient email address"}
+        from_email = (cfg.get("from_email") or "").strip()
+        if not from_email:
+            return {"ok": False, "error": "set a From email on this service object"}
+        # Test THIS service object's own config (not the node-resolved sender).
+        send_cfg = {
+            "region": cfg.get("region") or get_settings().s3_region,
+            "from_email": from_email,
+            "from_name": cfg.get("from_name") or "Arkive",
+            "reply_to": cfg.get("reply_to") or "",
+            "aws_access_key_id": (cfg.get("aws_access_key_id") or "").strip(),
+            "aws_secret": (cfg.get("aws_secret_access_key") or "").strip(),
+        }
+        html = emailer.render(
+            "Test email from Arkive",
+            emailer.text_to_html(f"This confirms the '{svc.name}' email service object is "
+                                 "configured correctly and can deliver mail."),
+            preheader="Arkive email service test")
+        try:
+            emailer._send_ses(send_cfg, to, "Test email from Arkive", html,
+                              "Arkive email service test — this service object is configured correctly.")
+            result = {"ok": True, "error": None}
+        except Exception as exc:  # surface the SES error to the admin
+            result = {"ok": False, "error": str(exc)}
+        audit.record(db, actor=principal.user_id, action="admin.service_object_test",
+                     category="admin", detail={"name": svc.name, "to": to,
+                                               "ok": result["ok"], "error": result["error"]})
+        return result
     return {"ok": False, "error": "test not supported for this service kind"}
+
+
+@router.get("/storage-usage")
+def storage_usage(db: Session = Depends(get_db)):
+    """How much data Arkive Cloud (cv-cloud) holds, broken down by tenant, plus
+    the storage service objects and the nodes that write to them."""
+    tenants = {t.id: t for t in db.query(Tenant).all()}
+    by_tenant: dict = {}
+    total_bytes = total_objects = total_points = 0
+    for r in db.query(SnapshotReceipt).filter(SnapshotReceipt.destination == "cv-cloud").all():
+        b = r.total_bytes or 0
+        total_bytes += b
+        total_objects += r.object_count or 0
+        total_points += 1
+        agg = by_tenant.setdefault(r.tenant_id, {"bytes": 0, "objects": 0, "points": 0})
+        agg["bytes"] += b
+        agg["objects"] += r.object_count or 0
+        agg["points"] += 1
+
+    tenant_rows = []
+    for tid, agg in by_tenant.items():
+        t = tenants.get(tid)
+        tenant_rows.append({
+            "tenant_id": tid,
+            "tenant_name": t.name if t else "(unknown)",
+            "plan": t.plan if t else "",
+            "licensed_bytes": (t.licensed_bytes or 0) if t else 0,
+            "bytes": agg["bytes"], "objects": agg["objects"],
+            "recovery_points": agg["points"],
+        })
+    tenant_rows.sort(key=lambda x: x["bytes"], reverse=True)
+
+    svc_nodes: dict = {}
+    for n in db.query(Node).all():
+        if n.storage_service_id:
+            svc_nodes.setdefault(n.storage_service_id, []).append(n.name)
+    services = []
+    for s in db.query(ServiceObject).filter(ServiceObject.kind.like("storage-%")).all():
+        services.append({
+            "id": s.id, "name": s.name, "kind": s.kind,
+            "kind_label": _SERVICE_KINDS.get(s.kind, {}).get("label", s.kind),
+            "enabled": bool(s.enabled),
+            "nodes": svc_nodes.get(s.id, []),
+            "active": s.id in svc_nodes,
+            "settings": s.settings or {},
+        })
+
+    return {
+        "cloud_total": {"bytes": total_bytes, "objects": total_objects,
+                        "recovery_points": total_points, "tenants": len(tenant_rows)},
+        "by_tenant": tenant_rows,
+        "services": services,
+    }
