@@ -198,21 +198,24 @@ def _send_smtp(cfg: dict, to: str, subject: str, html: str, text: str) -> None:
         server.send_message(msg)
 
 
-def send(to: str, subject: str, *, html: str, text: str = "") -> str:
-    """Send one branded email. Returns the delivery channel used ('ses'|'smtp'|'log')."""
+def send_verbose(to: str, subject: str, *, html: str, text: str = "") -> dict:
+    """Send one branded email, returning {channel, error, provider}. ``channel``
+    is 'ses'|'smtp'|'log'|'error'; ``error`` holds the provider message on failure
+    (surfaced by the admin test so misconfig — sandbox, unverified sender — is
+    diagnosable instead of silently swallowed)."""
     cfg = _config()
     text = text or "Please view this message in an HTML-capable email client."
     provider = cfg["provider"] if cfg["enabled"] else "log"
-    try:
-        if provider == "ses":
-            _send_ses(cfg, to, subject, html, text)
-            return "ses"
-        if provider == "smtp" and settings.smtp_host:
-            _send_smtp(cfg, to, subject, html, text)
-            return "smtp"
-    except Exception as exc:  # never raise into request paths — log and degrade
-        log.error("email send failed (%s -> %s): %s", provider, to, exc)
-        return "error"
+    if provider in ("ses", "smtp") and not (provider == "smtp" and not settings.smtp_host):
+        try:
+            if provider == "ses":
+                _send_ses(cfg, to, subject, html, text)
+            else:
+                _send_smtp(cfg, to, subject, html, text)
+            return {"channel": provider, "error": None, "provider": provider}
+        except Exception as exc:  # never raise into request paths
+            log.error("email send failed (%s -> %s): %s", provider, to, exc)
+            return {"channel": "error", "error": str(exc), "provider": provider}
     # Log mode (no live provider): emit the subject plus each body line as its
     # own short, tagged record so sign-in codes are always readable/greppable in
     # the service logs (journalctl -u cv-cloud), regardless of line-length limits.
@@ -221,7 +224,12 @@ def send(to: str, subject: str, *, html: str, text: str = "") -> str:
         line = line.strip()
         if line:
             log.warning("EMAIL body> %s", line)
-    return "log"
+    return {"channel": "log", "error": None, "provider": "log"}
+
+
+def send(to: str, subject: str, *, html: str, text: str = "") -> str:
+    """Send one branded email. Returns the delivery channel used ('ses'|'smtp'|'log')."""
+    return send_verbose(to, subject, html=html, text=text)["channel"]
 
 
 def send_bulk(recipients: Iterable[str], subject: str, *, html: str,

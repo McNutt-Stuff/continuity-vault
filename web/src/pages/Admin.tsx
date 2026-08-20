@@ -680,7 +680,12 @@ function EmailAdmin() {
   }
   async function sendTest() {
     if (!testTo.trim()) return;
-    try { const r = await api.post<{ channel: string }>("/admin/email-test", { to: testTo.trim() }); flash(`Test sent via ${r.channel}`); }
+    try {
+      const r = await api.post<{ channel: string; provider: string; error?: string | null; delivered: boolean }>("/admin/email-test", { to: testTo.trim() });
+      if (r.delivered) flash(`Test sent via ${r.channel}`);
+      else if (r.channel === "log") flash("Logged only — enable SES (provider=ses + Enabled)");
+      else flash(`Send failed: ${r.error || "unknown error"}`);
+    }
     catch { flash("Test failed"); }
   }
   function toggleUser(id: string) {

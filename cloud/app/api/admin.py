@@ -156,11 +156,13 @@ def send_email_test(body: EmailTest,
                              "delivery is configured correctly.\n\nIf you received this, "
                              "SES is wired up and ready."),
         preheader="Arkive email delivery test")
-    channel = emailer.send(body.to.strip(), "Test email from Arkive", html=html,
-                           text="Arkive email delivery test — SES is configured correctly.")
+    result = emailer.send_verbose(body.to.strip(), "Test email from Arkive", html=html,
+                                  text="Arkive email delivery test — SES is configured correctly.")
     audit.record(db, actor=principal.user_id, action="admin.email_test",
-                 detail={"to": body.to, "channel": channel})
-    return {"channel": channel, "delivered": channel in ("ses", "smtp", "log")}
+                 detail={"to": body.to, "channel": result["channel"], "error": result["error"]})
+    return {"channel": result["channel"], "provider": result["provider"],
+            "error": result["error"],
+            "delivered": result["channel"] in ("ses", "smtp")}
 
 
 class EmailBroadcast(BaseModel):
