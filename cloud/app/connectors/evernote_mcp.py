@@ -370,6 +370,7 @@ def fetch(access_token: str, content_cap: int = _DEFAULT_CAP,
 
     if not access_token:
         return
+    logger.warning("Evernote MCP: fetch starting (token len=%d)", len(access_token))
     session = _McpSession(access_token)
     try:
         session.initialize()
@@ -378,16 +379,33 @@ def fetch(access_token: str, content_cap: int = _DEFAULT_CAP,
         session.close()
         return
 
+    # Beta bring-up: the server's tool arg/response schemas aren't documented, so
+    # log what it actually exposes and returns to guide the field mapping.
     try:
-        offset, page, seen = 0, 100, 0
+        listed = session._call("tools/list")
+        names = [t.get("name") for t in (listed.get("tools") or [])]
+        logger.warning("Evernote MCP: tools/list → %s", names)
+        for t in (listed.get("tools") or []):
+            if t.get("name") in ("search_notes", "get_note", "get_attachment"):
+                logger.warning("Evernote MCP: %s inputSchema=%s",
+                               t.get("name"), json.dumps(t.get("inputSchema"))[:600])
+    except Exception as exc:
+        logger.warning("Evernote MCP: tools/list failed: %s", exc)
+
+    try:
+        offset, page, seen, first = 0, 100, 0, True
         while True:
             try:
                 res = session.tool("search_notes", {"query": "", "limit": page, "offset": offset})
             except Exception as exc:
                 logger.warning("Evernote MCP: search_notes failed: %s", exc)
                 break
+            if first:
+                logger.warning("Evernote MCP: search_notes raw → %s", json.dumps(res)[:800])
+                first = False
             data = _tool_json(res)
             notes = _as_list(data, "notes", "results", "items")
+            logger.warning("Evernote MCP: parsed %d note(s) at offset %d", len(notes), offset)
             if not notes:
                 break
             for nm in notes:
