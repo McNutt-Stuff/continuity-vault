@@ -230,6 +230,12 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
             by_category[cat] = by_category.get(cat, 0) + 1
         if _matches(r, skip="label"):
             for lbl in (r.labels or []):
+                # Labels must be simple strings; coerce anything else so a bad
+                # ingest can never make an unhashable facet key crash search.
+                if not isinstance(lbl, str):
+                    lbl = (lbl.get("name") or lbl.get("title")) if isinstance(lbl, dict) else str(lbl)
+                if not lbl:
+                    continue
                 by_label[lbl] = by_label.get(lbl, 0) + 1
 
     # Resolve friendly source titles (the linked account label / mapping name)

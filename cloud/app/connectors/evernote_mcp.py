@@ -353,6 +353,13 @@ def _capped(raw: bytes, cap: int) -> Tuple[bytes, bool]:
     return json.dumps({"_arkive": "content_exceeds_cap", "bytes": len(raw)}).encode(), False
 
 
+def _name(v, default: str = "") -> str:
+    """Coerce a possibly-object value (tag/notebook) to a plain string name."""
+    if isinstance(v, dict):
+        return v.get("name") or v.get("title") or v.get("label") or default
+    return str(v) if v not in (None, "") else default
+
+
 def _strip_enml(enml: str) -> str:
     """ENML/HTML note body → plain, searchable text."""
     import html
@@ -489,9 +496,10 @@ def fetch(access_token: str, content_cap: int = _DEFAULT_CAP,
                     first_note = False
                 note = full if isinstance(full, dict) else {}
                 title = note.get("title") or nm.get("title") or "Untitled note"
-                notebook = (note.get("notebook") or note.get("notebookName")
-                            or nm.get("notebook") or "Notebook")
-                tags = note.get("tags") or nm.get("tags") or []
+                notebook = _name(note.get("notebook") or note.get("notebookName")
+                                 or nm.get("notebook"), "Notebook")
+                raw_tags = note.get("tags") or nm.get("tags") or []
+                tags = [t for t in (_name(x) for x in raw_tags) if t]
                 enml = (note.get("content") or note.get("enml") or note.get("body")
                         or note.get("contentEnml") or "")
                 text = (_strip_enml(enml) if isinstance(enml, str) else str(enml)) or nm.get("snippet") or ""
