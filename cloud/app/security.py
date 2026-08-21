@@ -174,6 +174,18 @@ def is_owner(role: str) -> bool:
     return role == "owner"
 
 
+# Tenant models (see models.Tenant.tenant_type). Only dedicated/restricted tenants
+# expose the customer-facing Organization management UI; shared (personal) tenants
+# are 1:1 with no org, and internal is Arkive operations.
+TENANT_TYPES = ("shared", "dedicated", "restricted", "internal")
+ORG_TENANT_TYPES = ("dedicated", "restricted")
+
+
+def org_enabled(tenant_type: str) -> bool:
+    """Whether this tenant model offers the Organization Admin experience."""
+    return tenant_type in ORG_TENANT_TYPES
+
+
 def get_user(principal: Principal = Depends(get_principal),
              db: Session = Depends(get_db)) -> User:
     user = db.get(User, principal.user_id)

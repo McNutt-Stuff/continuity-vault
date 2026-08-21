@@ -47,6 +47,17 @@ class Tenant(Base):
     licensed_bytes = Column(BigInteger, default=0)  # data allowance they pay for (0 = unlimited)
     protection_options = Column(JSON, default=list)  # enabled storage tiers (feature gating)
     appliance_plan = Column(JSON, default=list)  # desired appliances [{capacity_tb, qty}]
+    # Tenant model determines UX + isolation posture:
+    #   shared      — personal accounts pooled in one tenant; each user is 1:1,
+    #                  no organization view/settings.
+    #   dedicated   — family/business tenant with full organization management.
+    #   restricted  — high-value/enterprise tenant with elevated security (placeholder).
+    #   internal    — Arkive Operations; where employee + platform-admin accounts live.
+    tenant_type = Column(String, default="dedicated")
+    # The customer-node that processes this tenant's workers, indexing, sync,
+    # appliance/agent channels and storage. NULL = processed on the control plane
+    # itself (single-box default). Assigning a node offloads tenant processing.
+    node_id = Column(String, ForeignKey("nodes.id"), nullable=True, index=True)
     status = Column(String, default="active")
     created_at = Column(DateTime, default=_now)
 

@@ -23,6 +23,7 @@ def seed(db: Session | None = None) -> None:
         tenant = Tenant(
             name="Northwind Family Office",
             plan="enterprise",
+            tenant_type="dedicated",
             key_ownership_model="split-control",
             storage_prefix="t-northwind",
         )
@@ -40,6 +41,7 @@ def seed(db: Session | None = None) -> None:
 
         # Platform (backend) admin tenant — Arkive operations.
         platform = Tenant(name="Arkive Operations", plan="platform",
+                          tenant_type="internal",
                           key_ownership_model="platform-managed",
                           storage_prefix="t-arkive-ops")
         db.add(platform)

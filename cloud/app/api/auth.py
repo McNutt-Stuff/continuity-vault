@@ -500,14 +500,17 @@ def webauthn_auth_verify(body: AuthVerifyRequest,
 def me(principal: security.Principal = Depends(security.get_principal),
        db: Session = Depends(get_db)):
     user = db.get(User, principal.user_id)
+    tenant = db.get(Tenant, user.tenant_id)
+    ttype = (tenant.tenant_type if tenant else "dedicated") or "dedicated"
     return {
         "user_id": user.id,
         "email": user.email,
         "display_name": user.display_name,
         "role": user.role,
         "tenant_id": user.tenant_id,
+        "tenant_type": ttype,
         "is_platform_admin": user.is_platform_admin,
-        "can_admin": security.is_org_admin(user.role) or user.is_platform_admin,
+        "can_admin": security.is_org_admin(user.role) and security.org_enabled(ttype),
         "is_owner": security.is_owner(user.role),
         "email_verified": user.email_verified,
         "passkey_verified": principal.passkey_verified,

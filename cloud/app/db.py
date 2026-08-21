@@ -133,6 +133,12 @@ def _apply_additive_migrations() -> None:
         "  SELECT u.id FROM users u WHERE u.tenant_id = connector_accounts.tenant_id "
         "  AND u.role = 'owner' ORDER BY u.created_at LIMIT 1) "
         "WHERE owner_user_id IS NULL",
+        # Tenant type + customer-node assignment (scaling architecture). Existing
+        # platform tenants become 'internal'; everyone else stays 'dedicated'.
+        "ALTER TABLE tenants ADD COLUMN tenant_type VARCHAR DEFAULT 'dedicated'",
+        "ALTER TABLE tenants ADD COLUMN node_id VARCHAR",
+        "UPDATE tenants SET tenant_type = 'internal' WHERE plan = 'platform' "
+        "AND (tenant_type IS NULL OR tenant_type = 'dedicated')",
         # Byte counts can exceed 32-bit INTEGER (>2.1GB) — widen to BIGINT so
         # storing appliance capacity / large content doesn't overflow on Postgres.
         "ALTER TABLE appliance_storages ALTER COLUMN capacity_bytes TYPE BIGINT",

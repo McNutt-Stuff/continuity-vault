@@ -232,8 +232,10 @@ def list_tenants(db: Session = Depends(get_db)):
             "id": t.id,
             "name": t.name,
             "plan": t.plan,
+            "tenant_type": t.tenant_type or "dedicated",
             "key_ownership_model": t.key_ownership_model,
             "status": t.status,
+            "node_id": t.node_id,
             "users": db.query(func.count(User.id)).filter(User.tenant_id == t.id).scalar(),
             "appliances": db.query(func.count(Appliance.id))
                 .filter(Appliance.tenant_id == t.id).scalar(),
@@ -291,27 +293,67 @@ def _tenant_counts(db: Session, tid: str) -> dict:
     }
 
 
+def _storage_usage(db: Session, tid: str, pricing) -> dict:
+    """Actual bytes physically stored for a tenant, split by channel (Arkive
+    Cloud, appliance, customer bucket) + the recurring cost of each channel."""
+    rows = (db.query(SnapshotReceipt.destination,
+                     func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0))
+            .filter(SnapshotReceipt.tenant_id == tid)
+            .group_by(SnapshotReceipt.destination).all())
+    cloud = appliance = customer = 0
+    for dest, b in rows:
+        b = int(b or 0)
+        d = dest or ""
+        if d == "customer-s3":
+            customer += b
+        elif d == "cv-cloud":
+            cloud += b
+        else:  # store:<id> / appliance / appliance:<id>
+            appliance += b
+    return {
+        "cloud_bytes": cloud, "appliance_bytes": appliance, "customer_bytes": customer,
+        "cloud_monthly": round(cloud / _TB * pricing.cloud_price_per_tb_month, 2),
+        "customer_monthly": round(customer / _TB * pricing.s3_price_per_tb_month, 2),
+    }
+
+
 def _tenant_view(db: Session, t: Tenant, detail: bool = False) -> dict:
     v = {
         "id": t.id, "name": t.name, "plan": t.plan, "status": t.status,
+        "tenant_type": t.tenant_type or "dedicated",
+        "node_id": t.node_id,
         "key_ownership_model": t.key_ownership_model,
         "licensed_bytes": int(t.licensed_bytes or 0),
         "protection_options": t.protection_options or [],
+        "appliance_plan": t.appliance_plan or [],
         "created_at": t.created_at.isoformat() if t.created_at else None,
         **_tenant_counts(db, t.id),
     }
+    n = db.get(Node, t.node_id) if t.node_id else None
+    v["node"] = ({"id": n.id, "name": n.name, "role": n.role,
+                  "endpoint": n.endpoint, "status": n.status} if n else None)
     if detail:
+        from .billing import _compute_plan, get_pricing
         v["members"] = [_user_view(u) for u in
                         db.query(User).filter(User.tenant_id == t.id).order_by(User.email.asc()).all()]
         v["vaults"] = [{"id": vv.id, "name": vv.name,
                         "key_ownership_model": vv.key_ownership_model}
                        for vv in db.query(Vault).filter(Vault.tenant_id == t.id).all()]
+        # Tight coupling to what the customer selected in Protection Setup + what
+        # they pay Arkive, and the real footprint per storage channel.
+        try:
+            v["billing"] = _compute_plan(db, t)
+        except Exception:  # noqa: BLE001 - never fail the tenant view on pricing
+            v["billing"] = None
+        v["storage_usage"] = _storage_usage(db, t.id, get_pricing(db))
     return v
 
 
 class TenantCreate(BaseModel):
     name: str
     plan: str = "business"
+    tenant_type: str = "dedicated"
+    node_id: str | None = None
     key_ownership_model: str = "customer-managed"
     licensed_tb: float = 0
     owner_email: str | None = None
@@ -322,8 +364,11 @@ class TenantCreate(BaseModel):
 def create_tenant(body: TenantCreate,
                   principal: security.Principal = Depends(security.require_platform_admin),
                   db: Session = Depends(get_db)):
+    ttype = body.tenant_type if body.tenant_type in security.TENANT_TYPES else "dedicated"
     tenant = Tenant(
         name=body.name.strip() or "New Organization", plan=body.plan,
+        tenant_type=ttype,
+        node_id=body.node_id or None,
         key_ownership_model=body.key_ownership_model,
         storage_prefix=f"t-{secrets.token_hex(4)}",
         licensed_bytes=int(max(0.0, body.licensed_tb) * _TB),
@@ -359,6 +404,8 @@ def tenant_detail(tid: str, db: Session = Depends(get_db)):
 class TenantUpdate(BaseModel):
     name: str | None = None
     plan: str | None = None
+    tenant_type: str | None = None
+    node_id: str | None = None
     status: str | None = None
     key_ownership_model: str | None = None
     licensed_tb: float | None = None
@@ -375,6 +422,10 @@ def update_tenant(tid: str, body: TenantUpdate,
         t.name = body.name.strip()
     if body.plan is not None:
         t.plan = body.plan
+    if body.tenant_type is not None and body.tenant_type in security.TENANT_TYPES:
+        t.tenant_type = body.tenant_type
+    if body.node_id is not None:
+        t.node_id = body.node_id or None
     if body.status is not None:
         t.status = body.status
     if body.key_ownership_model is not None:
@@ -384,7 +435,8 @@ def update_tenant(tid: str, body: TenantUpdate,
     db.commit()
     audit.record(db, actor=principal.user_id, action="admin.tenant_updated",
                  tenant_id=t.id, category="admin",
-                 detail={"status": t.status, "plan": t.plan})
+                 detail={"status": t.status, "plan": t.plan, "tenant_type": t.tenant_type,
+                         "node_id": t.node_id})
     return _tenant_view(db, t, detail=True)
 
 
@@ -773,7 +825,7 @@ def delete_node(nid: str,
 # Node blueprints — the role-specific config/version pushed to fleet nodes.    #
 # --------------------------------------------------------------------------- #
 
-NODE_ROLES = ["control-plane", "customer-tenant", "public-web"]
+NODE_ROLES = ["control-plane", "customer-tenant", "worker", "public-web"]
 
 
 def _blueprint_view(bp: NodeBlueprint) -> dict:

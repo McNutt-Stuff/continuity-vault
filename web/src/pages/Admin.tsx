@@ -77,6 +77,25 @@ function Overview() {
   );
 }
 
+const TENANT_TYPE_OPTS = [
+  { label: "Shared — personal accounts (no organization)", value: "shared" },
+  { label: "Dedicated — family / business (full org management)", value: "dedicated" },
+  { label: "Restricted — high-value / enterprise (elevated security)", value: "restricted" },
+  { label: "Internal — Arkive operations (employees / platform admin)", value: "internal" },
+];
+const TENANT_TYPE_LABEL: Record<string, string> = {
+  shared: "Shared", dedicated: "Dedicated", restricted: "Restricted", internal: "Internal",
+};
+
+async function nodeOptions(): Promise<{ label: string; value: string }[]> {
+  const base = [{ label: "Control plane (default — processed in-box)", value: "" }];
+  try {
+    const ns = await api.get<{ id: string; name: string; role: string }[]>("/admin/nodes");
+    const workers = ns.filter((n) => ["customer-tenant", "worker"].includes(n.role));
+    return [...base, ...workers.map((n) => ({ label: `${n.name} (${n.role})`, value: n.id }))];
+  } catch { return base; }
+}
+
 function Tenants() {
   const [rows, setRows] = useState<any[]>([]);
   const [sel, setSel] = useState<string | null>(null);
@@ -92,13 +111,16 @@ function Tenants() {
       if (pr.license_plans?.length) planOpts = pr.license_plans.map((pl: any) =>
         ({ label: `${pl.name} — $${pl.price_per_tb_month}/TB·mo, min ${pl.min_tb}TB`, value: pl.id }));
     } catch { /* fall back to default */ }
+    const nodeOpts = await nodeOptions();
     const r = await formDialog({
       title: "New tenant", confirmLabel: "Create tenant",
       fields: [
         { name: "name", label: "Organization name", required: true },
+        { name: "tenant_type", label: "Tenant type", defaultValue: "dedicated", options: TENANT_TYPE_OPTS },
         { name: "plan", label: "License plan", defaultValue: planOpts[0]?.value, options: planOpts },
         { name: "key_ownership_model", label: "Key ownership", defaultValue: "customer-managed",
           options: [{ label: "Customer-managed", value: "customer-managed" }, { label: "Zero-knowledge", value: "zero-knowledge" }] },
+        { name: "node_id", label: "Processing node", defaultValue: "", options: nodeOpts },
         { name: "licensed_tb", label: "Licensed data (TB)", defaultValue: "1" },
         { name: "owner_email", label: "Owner email (optional)" },
         { name: "owner_name", label: "Owner name (optional)" },
@@ -159,11 +181,14 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
       if (pr.license_plans?.length) planOpts = pr.license_plans.map((pl: any) =>
         ({ label: `${pl.name} — $${pl.price_per_tb_month}/TB·mo, min ${pl.min_tb}TB`, value: pl.id }));
     } catch { /* fall back to current */ }
+    const nodeOpts = await nodeOptions();
     const r = await formDialog({
       title: "Edit tenant", confirmLabel: "Save",
       fields: [
         { name: "name", label: "Name", defaultValue: t.name, required: true },
+        { name: "tenant_type", label: "Tenant type", defaultValue: t.tenant_type || "dedicated", options: TENANT_TYPE_OPTS },
         { name: "plan", label: "License plan", defaultValue: t.plan, options: planOpts },
+        { name: "node_id", label: "Processing node", defaultValue: t.node_id || "", options: nodeOpts },
         { name: "status", label: "Status", defaultValue: t.status,
           options: ["active", "suspended", "trial"].map((v) => ({ label: v, value: v })) },
         { name: "licensed_tb", label: "Licensed data (TB)", defaultValue: String(((t.licensed_bytes || 0) / (1024 ** 4)).toFixed(2)) },
@@ -239,7 +264,10 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
         <div className="spread">
           <div>
             <h3 style={{ margin: 0 }}>{t.name}</h3>
-            <div className="faint" style={{ fontSize: 12 }}>{t.plan} · {t.key_ownership_model} · {licensedTb} TB licensed</div>
+            <div className="faint" style={{ fontSize: 12 }}>
+              {TENANT_TYPE_LABEL[t.tenant_type] || t.tenant_type || "Dedicated"} · {t.plan} · {t.key_ownership_model} · {licensedTb} TB licensed
+              {t.node ? ` · node: ${t.node.name}` : " · processed on control plane"}
+            </div>
           </div>
           <Pill tone={t.status === "active" ? "ok" : "warn"}>{t.status}</Pill>
         </div>
@@ -254,6 +282,58 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
           <Mini label="Vaults" value={t.vaults?.length ?? 0} />
         </div>
       </Card>
+
+      {(() => {
+        const b = t.billing;
+        const su = t.storage_usage;
+        const money = (n: number) => "$" + (Math.round((n || 0) * 100) / 100)
+          .toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+        const channelLabel: Record<string, string> = {
+          "cv-cloud": "Arkive Cloud", "appliance": "Offline appliance",
+          "customer-cloud": "Your cloud (S3 / Azure)",
+        };
+        const options: string[] = b?.options || t.protection_options || [];
+        return (
+          <Card style={{ marginBottom: 16 }}>
+            <div className="spread" style={{ marginBottom: 6 }}>
+              <h3 style={{ margin: 0 }}>Protection &amp; billing</h3>
+              {b?.costs && <Pill tone="info">{money(b.costs.total_monthly)}/mo to Arkive</Pill>}
+            </div>
+            <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>
+              Coupled to what the customer selected in Protection Setup — licensed amount, storage channels, and what they pay us.
+            </div>
+            <div className="grid grid-4" style={{ gap: 12, marginBottom: 14 }}>
+              <Mini label="License plan" value={b?.license_plan?.name || t.plan} />
+              <Mini label="Licensed" value={`${b?.licensed_tb ?? licensedTb} TB`} />
+              <Mini label="Billable" value={b?.billable_tb != null ? `${b.billable_tb} TB` : "—"} />
+              <Mini label="Used" value={`${b?.used_tb ?? 0} TB${b?.percent != null ? ` · ${b.percent}%` : ""}`} />
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>Storage channels the customer enabled</div>
+              <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                {options.length === 0 && <span className="muted" style={{ fontSize: 12 }}>None selected yet</span>}
+                {options.map((o) => <Pill key={o} tone="info">{channelLabel[o] || o}</Pill>)}
+              </div>
+            </div>
+            <table className="table">
+              <thead><tr><th>Storage channel</th><th>Stored</th><th>Monthly cost</th></tr></thead>
+              <tbody>
+                <tr><td>Arkive Cloud</td><td>{bytes(su?.cloud_bytes || 0)}</td><td>{money(su?.cloud_monthly || 0)}</td></tr>
+                <tr><td>Appliance storage</td><td>{bytes(su?.appliance_bytes || 0)}</td><td className="faint">on-prem · no cloud cost</td></tr>
+                <tr><td>Customer cloud bucket</td><td>{bytes(su?.customer_bytes || 0)}</td><td>{money(su?.customer_monthly || 0)}</td></tr>
+              </tbody>
+            </table>
+            {b?.costs && (
+              <div className="grid grid-4" style={{ gap: 12, marginTop: 14 }}>
+                <Mini label="Protection / license" value={`${money(b.costs.protection_monthly)}/mo`} />
+                <Mini label="Cloud storage" value={`${money(b.costs.cloud_storage_monthly)}/mo`} />
+                <Mini label="Appliance plan" value={`${money(b.costs.appliance_monthly)}/mo`} />
+                <Mini label="Total to Arkive" value={`${money(b.costs.total_monthly)}/mo`} />
+              </div>
+            )}
+          </Card>
+        );
+      })()}
 
       <Card>
         <div className="spread" style={{ marginBottom: 10 }}>

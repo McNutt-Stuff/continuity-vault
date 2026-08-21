@@ -56,6 +56,7 @@ export interface Me {
   display_name: string;
   role: string;
   tenant_id: string;
+  tenant_type?: string;
   is_platform_admin: boolean;
   can_admin?: boolean;
   is_owner?: boolean;
