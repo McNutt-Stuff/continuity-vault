@@ -103,7 +103,7 @@ def _record_sync_error(db: Session, account: Optional[ConnectorAccount],
             db, actor="sync-worker",
             action="connector.reauth_required" if needs_auth else "connector.sync_failed",
             tenant_id=collection.tenant_id, resource=account.id,
-            category="connector", severity="warning" if needs_auth else "error",
+            category="connector", severity="warning",
             detail={"type": collection.source_type, "account": account.account_label,
                     "error": msg, "needs_reauth": needs_auth})
     except Exception:

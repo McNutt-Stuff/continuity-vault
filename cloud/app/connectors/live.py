@@ -513,63 +513,6 @@ def fetch_1password(creds: dict) -> Iterable[SourceObject]:
                 )
 
 
-def fetch_icloud(creds: dict) -> Iterable[SourceObject]:
-    """Best-effort iCloud pull (Contacts + Drive listing) via the pyicloud
-    library and an app-specific password. iCloud has no official API and may
-    require interactive 2FA, in which case a status note is returned."""
-    apple_id = creds.get("username")
-    password = creds.get("token")
-    if not apple_id or not password:
-        yield _status("icloud:status", "iCloud connected",
-                      "Provide your Apple ID and app-specific password.", "iCloud")
-        return
-    try:
-        from pyicloud import PyiCloudService  # optional dependency
-    except Exception:
-        yield _status("icloud:status", "iCloud connected",
-                      "Install 'pyicloud' on the server to enable iCloud sync.", "iCloud")
-        return
-    try:
-        api = PyiCloudService(apple_id, password)
-    except Exception as exc:
-        yield _status("icloud:status", "iCloud connected",
-                      f"iCloud sign-in failed: {exc}", "iCloud")
-        return
-    if getattr(api, "requires_2fa", False) or getattr(api, "requires_2sa", False):
-        yield _status("icloud:status", "iCloud connected",
-                      "iCloud requires interactive two-factor auth; automated sync unavailable.",
-                      "iCloud")
-        return
-
-    try:
-        for ct in (api.contacts.all() or []):
-            name = " ".join(filter(None, [ct.get("firstName"), ct.get("lastName")])) \
-                or ct.get("companyName") or "Contact"
-            emails = [e.get("field") for e in ct.get("emailAddresses", []) if e.get("field")]
-            phones = [p.get("field") for p in ct.get("phones", []) if p.get("field")]
-            yield SourceObject(
-                object_id=f"icloud:contact:{ct.get('contactId')}",
-                doc_type="contact", title=name,
-                content=json.dumps(ct).encode(),
-                preview=", ".join(emails + phones)[:140],
-                meta={"emails": emails, "phones": phones}, labels=["Contacts"])
-    except Exception:
-        pass
-
-    try:
-        drive = api.drive
-        for name in drive.dir():
-            node = drive[name]
-            _cat, _kind = classify_file(name)
-            yield SourceObject(
-                object_id=f"icloud:drive:{name}", doc_type=_kind, category=_cat, title=name,
-                content=json.dumps({"name": name, "type": getattr(node, "type", None)}).encode(),
-                preview=f"iCloud Drive · {getattr(node, 'type', 'item')}",
-                meta={"path": f"/{name}"}, labels=["iCloud Drive"])
-    except Exception:
-        pass
-
-
 # --------------------------------------------------------------------------- #
 # Google Contacts + Calendar (People / Calendar API)                          #
 # --------------------------------------------------------------------------- #
@@ -884,35 +827,86 @@ def fetch_instagram(access_token: str, content_cap: int = _DEFAULT_CAP,
 
 def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                    options: Optional[dict] = None) -> Iterable[SourceObject]:
-    """Back up the member's LinkedIn profile (OpenID Connect userinfo) and, when
-    the app has Community Management / member-social access, their posts. Posts
-    are best-effort and silently skipped when the scope isn't granted."""
+    """Back up as much of the member's LinkedIn account as the granted access
+    allows: profile, a consolidated résumé, posts, messages and connections.
+
+    LinkedIn's "Sign In" product only grants ``openid profile email`` (identity),
+    so anything deeper (posts, messages, connection list, work history) needs
+    LinkedIn partner access. Every section is therefore best-effort and silently
+    skipped when its API/scope isn't available, without failing the backup."""
     headers = {"Authorization": f"Bearer {access_token}"}
+    api_hdr = {**headers, "X-Restli-Protocol-Version": "2.0.0"}
+    userinfo: dict = {}
+    me: dict = {}
     sub = None
     with httpx.Client(timeout=60) as c:
+        # OpenID Connect identity (always available with the base scopes).
         try:
             r = c.get("https://api.linkedin.com/v2/userinfo", headers=headers)
             if r.status_code < 400:
-                d = r.json()
-                sub = d.get("sub")
-                if _want(options, "profile"):
-                    name = d.get("name") or "LinkedIn profile"
-                    yield SourceObject(
-                        object_id=f"linkedin:profile:{sub or name}",
-                        doc_type="profile", category="social", title=name,
-                        content=json.dumps(d).encode(),
-                        preview=d.get("email") or name,
-                        meta={"email": d.get("email"),
-                              "locale": d.get("locale"), "kind": "profile"},
-                        labels=["Profile"])
+                userinfo = r.json()
+                sub = userinfo.get("sub")
         except Exception:
             pass
-        if sub and _want(options, "posts"):
+        # Richer profile (localized name/headline/vanity) — needs r_liteprofile.
+        try:
+            rm = c.get("https://api.linkedin.com/v2/me", headers=api_hdr, params={
+                "projection": "(id,localizedFirstName,localizedLastName,"
+                              "localizedHeadline,vanityName)"})
+            if rm.status_code < 400:
+                me = rm.json()
+                sub = sub or me.get("id")
+        except Exception:
+            pass
+
+        person_urn = f"urn:li:person:{sub}" if sub else None
+        name = (userinfo.get("name")
+                or " ".join(filter(None, [me.get("localizedFirstName"),
+                                          me.get("localizedLastName")]))
+                or "LinkedIn member")
+
+        # PROFILE — the member's identity card.
+        if _want(options, "profile") and (userinfo or me):
+            merged = {**me, **userinfo}
+            yield SourceObject(
+                object_id=f"linkedin:profile:{sub or name}",
+                doc_type="profile", category="social", title=name,
+                content=json.dumps(merged).encode(),
+                preview=userinfo.get("email") or me.get("localizedHeadline") or name,
+                meta={"email": userinfo.get("email"),
+                      "headline": me.get("localizedHeadline"),
+                      "vanity_name": me.get("vanityName"),
+                      "locale": userinfo.get("locale"), "kind": "profile"},
+                labels=["Profile"])
+
+        # RÉSUMÉ — a consolidated professional document. Work history / education
+        # / skills need r_basicprofile (partner); without it we still capture the
+        # core identity, headline and public profile URL.
+        if _want(options, "resume") and (userinfo or me):
+            resume = {
+                "name": name,
+                "headline": me.get("localizedHeadline"),
+                "email": userinfo.get("email"),
+                "vanityName": me.get("vanityName"),
+                "picture": userinfo.get("picture"),
+                "locale": userinfo.get("locale"),
+                "profileUrl": (f"https://www.linkedin.com/in/{me.get('vanityName')}"
+                               if me.get("vanityName") else None),
+            }
+            yield SourceObject(
+                object_id=f"linkedin:resume:{sub or name}",
+                doc_type="resume", category="document",
+                title=f"{name} — LinkedIn résumé",
+                content=json.dumps(resume).encode(),
+                preview=resume.get("headline") or name,
+                meta={"headline": resume.get("headline"), "kind": "resume"},
+                labels=["Resume"])
+
+        # POSTS / ARTICLES — needs Community Management / member-social access.
+        if person_urn and _want(options, "posts"):
             try:
-                hdr = {**headers, "X-Restli-Protocol-Version": "2.0.0"}
-                params = {"q": "authors",
-                          "authors": f"List(urn:li:person:{sub})", "count": 50}
-                rp = c.get("https://api.linkedin.com/v2/ugcPosts", headers=hdr, params=params)
+                params = {"q": "authors", "authors": f"List({person_urn})", "count": 50}
+                rp = c.get("https://api.linkedin.com/v2/ugcPosts", headers=api_hdr, params=params)
                 if rp.status_code < 400:
                     for post in rp.json().get("elements", []):
                         share = (((post.get("specificContent") or {})
@@ -925,6 +919,59 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                             content=json.dumps(post).encode(), preview=text[:200],
                             meta={"created": (post.get("created") or {}).get("time"),
                                   "kind": "post"}, labels=["Posts"])
+            except Exception:
+                pass
+
+        # MESSAGES — LinkedIn's Messaging API is partner-only; best-effort.
+        if person_urn and _want(options, "messages"):
+            try:
+                r = c.get("https://api.linkedin.com/v2/messages", headers=api_hdr, params={
+                    "q": "participants", "participants": f"List({person_urn})", "count": 50})
+                if r.status_code < 400:
+                    for msg in r.json().get("elements", []):
+                        body = ((msg.get("body") or {}).get("text")
+                                or (msg.get("eventContent") or {}).get("text") or "(message)")
+                        yield SourceObject(
+                            object_id=f"linkedin:msg:{msg.get('id') or msg.get('entityUrn')}",
+                            doc_type="message", category="message",
+                            title=(body[:80] or "LinkedIn message"),
+                            content=json.dumps(msg).encode(), preview=body[:200],
+                            meta={"created": msg.get("createdAt"), "kind": "message"},
+                            labels=["Messages"])
+            except Exception:
+                pass
+
+        # CONNECTIONS — count (r_1st_connections_size) + full list (r_network,
+        # partner). Both best-effort.
+        if person_urn and _want(options, "connections"):
+            try:
+                r = c.get(f"https://api.linkedin.com/v2/networkSizes/{person_urn}",
+                          headers=api_hdr, params={"edgeType": "CONNECTION"})
+                if r.status_code < 400:
+                    d = r.json()
+                    n = d.get("firstDegreeSize")
+                    if n is not None:
+                        yield SourceObject(
+                            object_id=f"linkedin:connections:{sub}",
+                            doc_type="contact", category="contact",
+                            title=f"{n} LinkedIn connections",
+                            content=json.dumps(d).encode(),
+                            preview=f"{n} first-degree connections",
+                            meta={"count": n, "kind": "connections"}, labels=["Connections"])
+            except Exception:
+                pass
+            try:
+                r = c.get("https://api.linkedin.com/v2/connections", headers=api_hdr,
+                          params={"q": "viewer", "start": 0, "count": 100})
+                if r.status_code < 400:
+                    for conn in r.json().get("elements", []):
+                        cname = " ".join(filter(None, [conn.get("localizedFirstName"),
+                                                       conn.get("localizedLastName")])) or "Connection"
+                        yield SourceObject(
+                            object_id=f"linkedin:conn:{conn.get('id') or cname}",
+                            doc_type="contact", category="contact", title=cname,
+                            content=json.dumps(conn).encode(), preview=cname,
+                            meta={"kind": "connection"}, labels=["Connections"])
             except Exception:
                 pass
 

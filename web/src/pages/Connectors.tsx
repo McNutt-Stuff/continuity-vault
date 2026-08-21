@@ -383,7 +383,7 @@ export default function Connectors() {
                   </div>
                 )}
               </div>
-              <Pill tone={err ? "warn" : "ok"}>{a.needs_reauth ? "needs reauth" : a.auth_status}</Pill>
+              <Pill tone={err ? "warn" : "ok"}>{a.needs_reauth ? "Reconnect needed" : err ? "Issue" : "Healthy"}</Pill>
               {a.needs_reauth
                 ? <button className="btn sm primary" onClick={() => reconnect(a)}><Icon name="key" size={13} /> Reconnect</button>
                 : (a.connector_type === "google_photos"

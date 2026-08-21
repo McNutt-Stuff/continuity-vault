@@ -17,7 +17,7 @@ interface AuditResp {
 }
 
 const SEV_TONE: Record<string, "ok" | "info" | "warn" | "danger"> = {
-  info: "info", notice: "ok", warning: "warn", critical: "danger",
+  info: "info", notice: "ok", warning: "warn", error: "danger", critical: "danger",
 };
 const CAT_ICON: Record<string, IconName> = {
   security: "shield", credential: "key", admin: "server", system: "database", activity: "user",
@@ -53,7 +53,7 @@ export default function Audit() {
   useEffect(() => { void load(); }, [category, severity]);
 
   const rows = (data?.events ?? []).filter((e) =>
-    !abnormal || e.severity === "warning" || e.severity === "critical");
+    !abnormal || ["warning", "error", "critical"].includes(e.severity));
 
   if (!loaded && !data) return <Loading label="Loading audit log…" />;
 

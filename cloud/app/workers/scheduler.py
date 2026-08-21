@@ -34,7 +34,11 @@ def _now() -> datetime:
 def start_scheduler() -> None:
     global _thread
     settings = get_settings()
-    if not settings.sync_enabled or _thread is not None:
+    if not settings.sync_enabled:
+        logger.warning("backup scheduler DISABLED (CV_SYNC_ENABLED is false) — "
+                       "no automatic backups will run until it is re-enabled")
+        return
+    if _thread is not None:
         return
     tick = max(15, settings.scheduler_tick_seconds)
 
@@ -118,58 +122,69 @@ def _maybe_photo_reminder(db, collection, now: datetime) -> None:
     db.commit()
 
 
+def _process_collection(db, c: Collection, now: datetime, default_minutes: int) -> tuple[int, int, int]:
+    """Handle one mapping for this cycle. Returns (eligible, due, ran) as 0/1
+    counters. Raising is fine — the caller isolates it so one broken source can
+    never abort the whole scheduling cycle."""
+    conn = get_connector(c.source_type)
+    if conn is None:
+        return (0, 0, 0)
+    caps = conn.capabilities()
+    # Picker sources (Google Photos) can't auto-pull — remind the user instead.
+    if caps.picker:
+        try:
+            _maybe_photo_reminder(db, c, now)
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            logger.warning("photo reminder failed for %s: %s", c.id, exc)
+        return (0, 0, 0)
+    interval = _effective_interval(c, default_minutes, caps)
+    # Agent-collected sources are PUSH (the endpoint owns its cadence); a source
+    # with no linked account can't be pulled. Neither is cloud-schedulable.
+    if caps.requires_agent or not c.connector_account_id:
+        return (0, 0, 0)
+    if not _is_due(c, interval, now):
+        return (1, 0, 0)
+    try:
+        run_backup(db, c)
+        logger.info("scheduled backup: collection=%s (%s) source=%s "
+                    "destinations=%s interval=%dmin", c.id, c.name,
+                    c.source_type, c.destinations, interval)
+        c.last_backup_run_at = now
+        db.commit()
+        return (1, 1, 1)
+    except Exception as exc:  # noqa: BLE001 - isolate per-source failures
+        db.rollback()
+        # run_backup already recorded the error on the source; still stamp the run
+        # time so a persistently-failing source doesn't retry every tick.
+        try:
+            c.last_backup_run_at = now
+            db.commit()
+        except Exception:
+            db.rollback()
+        logger.warning("scheduled backup failed for collection %s (%s): %s",
+                       c.id, c.source_type, exc)
+        return (1, 1, 0)
+
+
 def run_due() -> int:
     """Run a backup for every mapping whose cadence is due. Returns count run."""
     settings = get_settings()
     default_minutes = max(1, settings.sync_interval_minutes)
     now = _now()
-    ran = 0
+    total = eligible = due = ran = 0
     with SessionLocal() as db:
         for c in db.query(Collection).all():
-            conn = get_connector(c.source_type)
-            if conn is None:
-                continue
-            caps = conn.capabilities()
-            # Picker sources (Google Photos) can't auto-pull — instead remind the
-            # user on a cadence to pick new items.
-            if caps.picker:
-                try:
-                    _maybe_photo_reminder(db, c, now)
-                except Exception as exc:  # noqa: BLE001
-                    db.rollback()
-                    logger.warning("photo reminder failed for %s: %s", c.id, exc)
-                continue
-            interval = _effective_interval(c, default_minutes, caps)
-            if not _is_due(c, interval, now):
-                continue
+            total += 1
             try:
-                if caps.requires_agent:
-                    # Agent-collected sources are PUSH: the endpoint agent owns the
-                    # cadence (it knows when it's online and can reach the data) and
-                    # runs its own timer from the mapping config it pulls on
-                    # heartbeat. The cloud must NOT queue collects on a schedule —
-                    # that fired blindly at offline/unreachable endpoints and could
-                    # loop. (Manual "Sync now" still queues an explicit one-off.)
-                    continue
-                if not c.connector_account_id:
-                    continue  # nothing to authenticate a pull with
-                run_backup(db, c)
-                logger.info("scheduled backup: collection=%s (%s) source=%s "
-                            "destinations=%s interval=%dmin", c.id, c.name,
-                            c.source_type, c.destinations, interval)
-                c.last_backup_run_at = now
-                db.commit()
-                ran += 1
-            except Exception as exc:  # noqa: BLE001 - isolate per-source failures
+                e, d, r = _process_collection(db, c, now, default_minutes)
+                eligible += e
+                due += d
+                ran += r
+            except Exception as exc:  # noqa: BLE001 - never abort the whole cycle
                 db.rollback()
-                # run_backup already recorded the error on the source; still stamp
-                # the run time so a persistently-failing source doesn't retry every
-                # tick (it retries on its normal cadence).
-                try:
-                    c.last_backup_run_at = now
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                logger.warning("scheduled backup failed for collection %s (%s): %s",
+                logger.warning("scheduler: skipping collection %s (%s): %s",
                                c.id, c.source_type, exc)
+    logger.debug("scheduler cycle: mappings=%d cloud-eligible=%d due=%d ran=%d",
+                 total, eligible, due, ran)
     return ran

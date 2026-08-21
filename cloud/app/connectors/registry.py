@@ -652,11 +652,14 @@ class LinkedInConnector(Connector):
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
             streaming=True,
-            searchable_fields=["kind"],
+            searchable_fields=["kind", "headline"],
             facet_fields=["kind"],
             filter_categories=[
                 {"id": "profile", "label": "Profile"},
-                {"id": "posts", "label": "Posts"},
+                {"id": "resume", "label": "Résumé"},
+                {"id": "posts", "label": "Posts & articles"},
+                {"id": "messages", "label": "Messages"},
+                {"id": "connections", "label": "Connections"},
             ],
         )
 
@@ -667,7 +670,8 @@ class LinkedInConnector(Connector):
             authorize_url="https://www.linkedin.com/oauth/v2/authorization",
             token_url="https://www.linkedin.com/oauth/v2/accessToken",
             scopes=["openid", "profile", "email"],
-            icon="user", color="#0a66c2", doc_types=["profile", "post"],
+            icon="user", color="#0a66c2",
+            doc_types=["profile", "resume", "post", "message", "contact"],
         )
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
@@ -682,6 +686,11 @@ class LinkedInConnector(Connector):
             doc_type="profile", category="social", title="LinkedIn profile",
             content=json.dumps({"name": account_label, "headline": "Sample profile"}).encode(),
             preview=account_label, meta={"kind": "profile"}, labels=["Profile"], modified_at=_dt(0))
+        yield SourceObject(
+            object_id=_oid(self.connector_type, account_label, 1),
+            doc_type="resume", category="document", title=f"{account_label} — LinkedIn résumé",
+            content=json.dumps({"name": account_label, "headline": "Sample profile"}).encode(),
+            preview="Résumé", meta={"kind": "resume"}, labels=["Resume"], modified_at=_dt(1))
 
 
 @register_connector

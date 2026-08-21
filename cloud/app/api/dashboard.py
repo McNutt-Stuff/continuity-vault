@@ -39,7 +39,7 @@ _OBJECT_BUCKETS: list[dict] = [
     {"key": "credential", "label": "Credentials", "icon": "key", "color": "#0364d3",
      "types": {"secret", "note", "password", "login"}},
     {"key": "document", "label": "Documents", "icon": "file", "color": "#4f7cff",
-     "types": {"pdf", "text", "spreadsheet", "presentation", "record"}},
+     "types": {"pdf", "text", "spreadsheet", "presentation", "record", "resume"}},
     {"key": "photo", "label": "Photos & images", "icon": "image", "color": "#35d0a5",
      "types": {"image", "photo"}},
     {"key": "media", "label": "Audio & video", "icon": "activity", "color": "#f5a623",
@@ -49,7 +49,7 @@ _OBJECT_BUCKETS: list[dict] = [
      "types": {"event"}},    {"key": "file", "label": "Files & archives", "icon": "database", "color": "#7a5cff",
      "types": {"file", "archive"}},
     {"key": "contact", "label": "Contacts", "icon": "user", "color": "#c56cf0",
-     "types": {"contact", "person", "organization", "group"}},
+     "types": {"contact", "person", "organization", "group", "profile"}},
 ]
 _ICON_MAP = {"folder": "file", "gear": "database"}  # connector icon → available UI icon
 
