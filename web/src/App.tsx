@@ -99,9 +99,9 @@ function Sidebar() {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="brand-logo">A</div>
+        <div className="brand-icon" />
         <div>
-          <div className="brand-name">{inAdmin ? "Admin center" : "Arkive"}</div>
+          <div className={inAdmin ? "brand-name" : "brand-name wordmark"}>{inAdmin ? "Admin center" : "ARKIVE"}</div>
           <div className="faint" style={{ fontSize: 11 }}>vault.arkive.life</div>
         </div>
       </div>

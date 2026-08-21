@@ -88,7 +88,14 @@ h3 { font-size: 15px; }
   background: linear-gradient(135deg, var(--brand), var(--accent));
   display: grid; place-items: center; font-weight: 800; color: #08101f;
 }
+/* App mark — swaps by theme (dark square in dark mode, light in light mode) */
+.brand-icon {
+  width: 32px; height: 32px; flex: none; border-radius: 8px;
+  background: url("/logos/icon-dark.png") center / contain no-repeat;
+}
+[data-theme="light"] .brand-icon { background-image: url("/logos/icon-light.png"); }
 .brand-name { font-weight: 700; font-size: 15px; letter-spacing: -0.02em; }
+.brand-name.wordmark { font-weight: 800; font-size: 16px; letter-spacing: 0.18em; }
 .nav-item {
   display: flex; align-items: center; gap: 11px; padding: 9px 11px;
   border-radius: var(--radius-sm); color: var(--text-dim); cursor: pointer;
@@ -136,12 +143,21 @@ h3 { font-size: 15px; }
   font-weight: 550; font-size: 13.5px; transition: filter .12s, background .12s;
 }
 .btn:hover { filter: brightness(1.12); }
-.btn.primary { background: linear-gradient(135deg, var(--brand), #3a67e6); border-color: transparent; }
+.btn.primary { background: linear-gradient(135deg, var(--brand), #3a67e6); border-color: transparent; color: #fff; }
 .btn.accent { background: linear-gradient(135deg, var(--accent), #22b98c); border-color: transparent; color: #062018; }
 .btn.ghost { background: transparent; }
 .btn.danger { background: transparent; border-color: var(--danger-c); color: var(--danger-c); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn.sm { padding: 6px 11px; font-size: 12.5px; }
+
+/* Light mode: soften the primary blue so it reads less harsh on white. */
+[data-theme="light"] .btn.primary,
+.auth-card .btn.primary {
+  background: linear-gradient(135deg, #5c83f0, #4069db);
+  box-shadow: 0 8px 18px -10px rgba(64, 105, 219, .55);
+}
+[data-theme="light"] .btn.primary:hover,
+.auth-card .btn.primary:hover { filter: brightness(1.05); }
 
 /* Pills / badges */
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
@@ -175,8 +191,9 @@ h3 { font-size: 15px; }
 .search-bar input { background: none; border: none; outline: none; color: var(--text);
   font-size: 15px; width: 100%; }
 .result-row { display: flex; align-items: center; gap: 14px; padding: 13px 14px;
-  border: 1px solid var(--border-soft); border-radius: 10px; margin-bottom: 8px; cursor: pointer; }
-.result-row:hover { border-color: var(--border); background: var(--bg-elev); }
+  border: 1px solid var(--border-soft); border-radius: 10px; margin-bottom: 8px; cursor: pointer;
+  background: var(--bg-elev); }
+.result-row:hover { border-color: var(--border); background: var(--bg-elev-2); }
 .result-icon { width: 38px; height: 38px; border-radius: 9px; display: grid; place-items: center;
   font-weight: 700; color: #fff; flex-shrink: 0; }
 
