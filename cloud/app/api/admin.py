@@ -363,59 +363,24 @@ def _storage_usage(db: Session, tid: str, pricing) -> dict:
     }
 
 
-def _user_usage(db: Session, u: User) -> dict:
-    """Physical footprint owned by a single account, split by storage channel,
-    across the vaults that account owns."""
-    vault_ids = [vid for (vid,) in
-                 db.query(Vault.id).filter(Vault.owner_user_id == u.id).all()]
-    cloud = appliance = customer = 0
-    objects = 0
-    if vault_ids:
-        rows = (db.query(SnapshotReceipt.destination,
-                         func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0))
-                .filter(SnapshotReceipt.vault_id.in_(vault_ids))
-                .group_by(SnapshotReceipt.destination).all())
-        for dest, b in rows:
-            b = int(b or 0)
-            d = dest or ""
-            if d == "customer-s3":
-                customer += b
-            elif d == "cv-cloud":
-                cloud += b
-            else:
-                appliance += b
-        objects = (db.query(func.count(distinct(SearchDocument.object_id)))
-                   .filter(SearchDocument.vault_id.in_(vault_ids)).scalar()) or 0
-    return {"cloud_bytes": cloud, "appliance_bytes": appliance,
-            "customer_bytes": customer, "total_bytes": cloud + appliance + customer,
-            "objects": int(objects)}
-
-
-def _user_billing(db: Session, u: User, tenant: Tenant, pricing) -> dict:
-    """Per-account monthly cost = a base plan rate (Personal for shared tenants,
-    otherwise the tenant's license plan) applied to what the account protects,
-    plus the storage channels it actually consumes."""
-    from .billing import effective_plan
-    usage = _user_usage(db, u)
-    ttype = (tenant.tenant_type or "dedicated") if tenant else "dedicated"
-    plan_id = "personal" if ttype == "shared" else ((tenant.plan if tenant else None) or None)
-    plan = effective_plan(pricing, plan_id)
-    used_tb = usage["total_bytes"] / _TB
-    billable_tb = max(used_tb, float(plan.get("min_tb", 0) or 0))
-    protection = round(billable_tb * float(plan.get("price_per_tb_month", 0) or 0), 2)
-    cloud_storage = round(usage["cloud_bytes"] / _TB * pricing.cloud_price_per_tb_month, 2)
-    customer_storage = round(usage["customer_bytes"] / _TB * pricing.s3_price_per_tb_month, 2)
-    total = round(protection + cloud_storage + customer_storage, 2)
+def _user_billing(db: Session, u: User, tenant: Tenant, pricing=None) -> dict:
+    """Per-account cost via the ONE canonical pricing calculation (billing.user_plan)
+    so admin numbers match the customer's Protection Setup exactly. Flattens the
+    canonical breakdown into the compact shape the user tables consume."""
+    from .billing import user_plan
+    up = user_plan(db, u, tenant)
+    c = up["costs"]
     return {
-        "plan": {"id": plan.get("id"), "name": plan.get("name"),
-                 "price_per_tb_month": plan.get("price_per_tb_month")},
-        "used_bytes": usage["total_bytes"], "used_tb": round(used_tb, 4),
-        "objects": usage["objects"],
-        "protection_monthly": protection,
-        "cloud_storage_monthly": cloud_storage,
-        "customer_storage_monthly": customer_storage,
-        "total_monthly": total,
-        "currency": pricing.currency,
+        "plan": up["license_plan"],
+        "used_bytes": up["used_bytes"], "used_tb": up["used_tb"],
+        "objects": up["objects_total"],
+        "billable_tb": up["billable_tb"],
+        "protection_monthly": c["protection_monthly"],
+        "cloud_storage_monthly": c["cloud_storage_monthly"],
+        "customer_storage_monthly": c["third_party_estimate_monthly"],
+        "appliance_monthly": c["appliance_monthly"],
+        "total_monthly": c["total_monthly"],
+        "currency": up["currency"],
     }
 
 
@@ -789,7 +754,7 @@ def _send_access_email(db: Session, u: User, subject: str, intro: str) -> dict:
 @router.get("/reports")
 def reports(db: Session = Depends(get_db)):
     """Usage + billing rollup across every tenant."""
-    from .billing import _usage, get_pricing
+    from .billing import _compute_plan, get_pricing
     pricing = get_pricing(db)
     # Actual bytes stored in Arkive Cloud (cv-cloud) per tenant — the footprint
     # we pay the storage provider for (distinct from logical protected bytes).
@@ -803,15 +768,13 @@ def reports(db: Session = Depends(get_db)):
     totals = {"tenants": 0, "users": 0, "objects": 0, "bytes": 0,
               "recovery_points": 0, "monthly_revenue": 0.0, "cloud_bytes": 0}
     for t in db.query(Tenant).all():
-        objects, used_bytes, _ = _usage(db, t.id)
         counts = _tenant_counts(db, t.id)
-        options = t.protection_options or []
-        licensed_tb = (t.licensed_bytes or 0) / _TB
-        used_tb = used_bytes / _TB
-        monthly = licensed_tb * pricing.protection_price_per_tb_month
-        if "cv-cloud" in options:
-            monthly += used_tb * pricing.cloud_price_per_tb_month
-        monthly = round(monthly, 2)
+        # SINGLE SOURCE OF TRUTH: same calculation as the customer's Protection
+        # Setup and the tenant detail view (base plan + selections + usage).
+        bp = _compute_plan(db, t)
+        objects = bp["objects_total"]
+        used_bytes = bp["used_bytes"]
+        monthly = bp["costs"]["total_monthly"]
         cloud_bytes = int(cloud_by_tenant.get(t.id, 0) or 0)
         rows.append({
             "id": t.id, "name": t.name, "plan": t.plan, "status": t.status,
@@ -821,7 +784,7 @@ def reports(db: Session = Depends(get_db)):
             "cloud_bytes": cloud_bytes,
             "licensed_bytes": int(t.licensed_bytes or 0),
             "recovery_points": counts["recovery_points"],
-            "monthly_cost": monthly, "options": options,
+            "monthly_cost": monthly, "options": bp["options"],
         })
         totals["tenants"] += 1
         totals["users"] += counts["users"]

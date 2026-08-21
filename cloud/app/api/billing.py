@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from .. import audit, security
 from ..db import get_db
-from ..models import PricingConfig, SearchDocument, Tenant
+from ..models import PricingConfig, SearchDocument, Tenant, Vault
 from .dashboard import _OBJECT_BUCKETS, _bucket_for
 
 router = APIRouter(prefix="/billing", tags=["billing"])
@@ -165,15 +165,38 @@ def get_pricing_public(tenant: Tenant = Depends(security.get_tenant),
 def _compute_plan(db: Session, tenant: Tenant) -> dict:
     p = get_pricing(db)
     plan = effective_plan(p, tenant.plan)
+    total, used_bytes, by_bucket = _usage(db, tenant.id)
+    out = _price_breakdown(
+        p, plan=plan,
+        licensed_bytes=int(tenant.licensed_bytes or 0),
+        options=list(tenant.protection_options or []),
+        appliance_plan=list(tenant.appliance_plan or []),
+        used_bytes=used_bytes, by_bucket=by_bucket,
+        charge_on="licensed")
+    out["objects_total"] = total
+    return out
+
+
+def _price_breakdown(p: PricingConfig, *, plan: dict, licensed_bytes: int,
+                     options: list, appliance_plan: list,
+                     used_bytes: int, by_bucket: dict,
+                     charge_on: str = "licensed") -> dict:
+    """The ONE canonical pricing calculation shared by the customer's Protection
+    Setup (`GET /billing/plan`) and every admin view (tenant detail, reports,
+    global users). total_monthly = base plan on billable TB + enabled storage
+    channels (used TB) + appliance lease.
+
+    charge_on="licensed" bills protection on the committed licensed capacity
+    (org tenants). charge_on="used" bills pay-as-you-go on protected data
+    (personal accounts on the Personal plan)."""
     rate = float(plan.get("price_per_tb_month", p.protection_price_per_tb_month))
     min_tb = float(plan.get("min_tb", 0) or 0)
-    options = list(tenant.protection_options or [])
-    total, used_bytes, by_bucket = _usage(db, tenant.id)
+    options = list(options or [])
     used_tb = used_bytes / TB
-    licensed_bytes = int(tenant.licensed_bytes or 0)
-    licensed_tb = licensed_bytes / TB
+    licensed_tb = (licensed_bytes or 0) / TB
     # The tier's minimum is the floor for what a customer pays for.
-    billable_tb = max(licensed_tb, min_tb)
+    floor_tb = used_tb if charge_on == "used" else licensed_tb
+    billable_tb = max(floor_tb, min_tb)
 
     # Object-value breakdown → estimated worth of the protected data.
     values = p.data_value_per_type or _DEFAULT_VALUE
@@ -194,7 +217,7 @@ def _compute_plan(db: Session, tenant: Tenant) -> dict:
     appliance_setup = 0.0
     appliance_monthly = 0.0
     appliance_lines = []
-    for sel in (tenant.appliance_plan or []):
+    for sel in (appliance_plan or []):
         cap = sel.get("capacity_tb")
         qty = int(sel.get("qty") or 0)
         t = tiers.get(cap)
@@ -223,14 +246,15 @@ def _compute_plan(db: Session, tenant: Tenant) -> dict:
             "id": plan.get("id"), "name": plan.get("name", "Plan"),
             "price_per_tb_month": rate, "min_tb": min_tb,
         },
-        "licensed_bytes": licensed_bytes,
+        "charge_on": charge_on,
+        "licensed_bytes": int(licensed_bytes or 0),
         "licensed_tb": round(licensed_tb, 3),
         "billable_tb": round(billable_tb, 3),
         "min_tb": min_tb,
-        "used_bytes": used_bytes,
+        "used_bytes": int(used_bytes or 0),
         "used_tb": round(used_tb, 4),
         "percent": round(min(100.0, used_bytes / licensed_bytes * 100), 1) if licensed_bytes else None,
-        "objects_total": total,
+        "objects_total": 0,
         "value_breakdown": breakdown,
         "data_value_total": round(data_value_total, 2),
         "appliance_plan": appliance_lines,
@@ -245,6 +269,52 @@ def _compute_plan(db: Session, tenant: Tenant) -> dict:
         },
         "value_ratio": value_ratio,
     }
+
+
+def _user_usage(db: Session, user) -> tuple[int, int, dict]:
+    """Deduped object count + protected bytes for a single account, scoped to
+    the vaults it owns — the SAME logical-size basis as tenant `_usage`."""
+    vault_ids = [vid for (vid,) in
+                 db.query(Vault.id).filter(Vault.owner_user_id == user.id).all()]
+    if not vault_ids:
+        return 0, 0, {}
+    docs = (db.query(SearchDocument)
+            .filter(SearchDocument.vault_id.in_(vault_ids))
+            .order_by(SearchDocument.created_at.desc()).all())
+    seen: set = set()
+    used_bytes = 0
+    total = 0
+    by_bucket: dict = {}
+    for d in docs:
+        key = (d.source_type, d.object_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        total += 1
+        used_bytes += int(d.size_bytes or 0)
+        bk = _bucket_for(d.doc_type)["key"]
+        by_bucket[bk] = by_bucket.get(bk, 0) + 1
+    return total, used_bytes, by_bucket
+
+
+def user_plan(db: Session, user, tenant: Tenant) -> dict:
+    """Per-account billing via the canonical pricing. Shared-tenant accounts are
+    pay-as-you-go on the Personal base plan (charged on used data); members of an
+    org tenant inherit the tenant's plan + protection selections."""
+    p = get_pricing(db)
+    shared = (tenant.tenant_type or "dedicated") == "shared"
+    plan = effective_plan(p, "personal" if shared else tenant.plan)
+    total, used_bytes, by_bucket = _user_usage(db, user)
+    out = _price_breakdown(
+        p, plan=plan,
+        licensed_bytes=used_bytes if shared else int(tenant.licensed_bytes or 0),
+        options=list(tenant.protection_options or []),
+        appliance_plan=[] if shared else list(tenant.appliance_plan or []),
+        used_bytes=used_bytes, by_bucket=by_bucket,
+        charge_on="used" if shared else "licensed")
+    out["objects_total"] = total
+    return out
+
 
 
 @router.get("/plan")

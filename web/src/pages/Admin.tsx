@@ -532,9 +532,9 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
             <table className="table">
               <thead><tr><th>Storage channel</th><th>Stored</th><th>Monthly cost</th></tr></thead>
               <tbody>
-                <tr><td>Arkive Cloud</td><td>{bytes(su?.cloud_bytes || 0)}</td><td>{money(su?.cloud_monthly || 0)}</td></tr>
-                <tr><td>Appliance storage</td><td>{bytes(su?.appliance_bytes || 0)}</td><td className="faint">on-prem · no cloud cost</td></tr>
-                <tr><td>Customer cloud bucket</td><td>{bytes(su?.customer_bytes || 0)}</td><td>{money(su?.customer_monthly || 0)}</td></tr>
+                <tr><td>Arkive Cloud</td><td>{bytes(su?.cloud_bytes || 0)}</td><td>{money(b?.costs?.cloud_storage_monthly || 0)}</td></tr>
+                <tr><td>Appliance storage</td><td>{bytes(su?.appliance_bytes || 0)}</td><td className="faint">{b?.costs?.appliance_monthly ? `${money(b.costs.appliance_monthly)}/mo lease` : "on-prem · no per-TB cost"}</td></tr>
+                <tr><td>Customer cloud bucket</td><td>{bytes(su?.customer_bytes || 0)}</td><td className="faint">{money(b?.costs?.third_party_estimate_monthly || 0)} est. (you pay provider)</td></tr>
               </tbody>
             </table>
             {!isShared && b?.costs && (
