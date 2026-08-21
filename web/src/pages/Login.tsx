@@ -90,23 +90,21 @@ export default function Login() {
     <div className="auth-wrap">
       <div className="auth-card card">
         <div className="auth-logo">
-          <img src="/logos/logo-square.png" alt="Arkive — Your digital legacy, protected forever." />
-        </div>
-        <div className="faint" style={{ fontSize: 12.5, textAlign: "center", marginBottom: 22 }}>
-          Digital continuity &amp; cyber-recovery
+          <img src="/logos/Logo-Full.png" alt="Arkive — Your digital legacy, protected forever." />
         </div>
 
         {stage === "email" && (
           <>
+            <div className="auth-sub">Sign in to your secure vault</div>
             <div className="field">
-              <label>Work email</label>
+              <label>Your email</label>
               <input
                 className="input"
                 autoFocus
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && onContinue()}
-                placeholder="you@company.com"
+                placeholder="you@email.com"
               />
             </div>
             <button className="btn primary" style={{ width: "100%" }} onClick={onContinue} disabled={busy || !email}>
