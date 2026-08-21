@@ -39,8 +39,8 @@ export const home = {
     { ico: "🧭", h: "Everything, unified", p: "Gmail, Outlook, Drive, iCloud, 1Password, social and your devices — searchable in one secure place." },
   ],
   steps: [
-    { h: "Connect your sources", p: "Link accounts with OAuth or install a lightweight agent for your devices. Nothing leaves your control unencrypted." },
-    { h: "We protect continuously", p: "Arkive captures new and changed items on your schedule, versions them, and stores them where you choose." },
+    { h: "Connect your sources", p: "Link all of your accounts and devices in minutes. Nothing leaves your control unencrypted." },
+    { h: "We protect continuously", p: "Arkive automatically captures new and changed items, versions them, and stores them where you choose." },
     { h: "Recover with confidence", p: "Search everything, preview safely in a time-limited window, and restore with approvals and a verifiable audit trail." },
   ],
 };

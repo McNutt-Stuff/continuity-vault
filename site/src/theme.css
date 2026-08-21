@@ -255,13 +255,17 @@ p { color: var(--muted); margin: 0 0 16px; }
 }
 
 @media (max-width: 560px) {
-  .wrap { padding: 0 16px; }
+  .wrap { padding: 0 20px; }
   .section { padding: 48px 0; }
   .section.tight { padding: 40px 0; }
-  .hero { padding: 52px 0 44px; }
+  .hero { padding: 40px 0 40px; }
+  .hero h1 { margin-bottom: 16px; }
+  .hero .lead { margin-bottom: 24px; }
+  .hero-visual { margin-top: 36px; }
   .hero-cta { flex-direction: column; align-items: stretch; }
   .hero-cta .btn { justify-content: center; }
-  .hero-badges { gap: 12px; }
+  .hero-badges { gap: 12px; margin-top: 26px; }
+  .stat-strip { grid-template-columns: 1fr 1fr; margin-top: 36px !important; gap: 22px; }
   .cta-band { padding: 40px 22px; border-radius: 20px; }
   .card, .scenario { padding: 22px; }
   .scenario-head { gap: 12px; }

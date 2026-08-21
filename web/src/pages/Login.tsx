@@ -89,12 +89,11 @@ export default function Login() {
   return (
     <div className="auth-wrap">
       <div className="auth-card card">
-        <div className="row" style={{ marginBottom: 18 }}>
-          <div className="brand-logo">A</div>
-          <div>
-            <div className="brand-name">Arkive</div>
-            <div className="faint" style={{ fontSize: 12 }}>Digital continuity & cyber-recovery</div>
-          </div>
+        <div className="auth-logo">
+          <img src="/logos/logo-square.png" alt="Arkive — Your digital legacy, protected forever." />
+        </div>
+        <div className="faint" style={{ fontSize: 12.5, textAlign: "center", marginBottom: 22 }}>
+          Digital continuity &amp; cyber-recovery
         </div>
 
         {stage === "email" && (
