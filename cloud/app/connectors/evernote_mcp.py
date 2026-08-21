@@ -353,6 +353,61 @@ def _capped(raw: bytes, cap: int) -> Tuple[bytes, bool]:
     return json.dumps({"_arkive": "content_exceeds_cap", "bytes": len(raw)}).encode(), False
 
 
+def _strip_enml(enml: str) -> str:
+    """ENML/HTML note body → plain, searchable text."""
+    import html
+    import re
+    if not enml or "<" not in enml:
+        return enml or ""
+    text = re.sub(r"(?is)<(script|style|en-media)[^>]*>.*?</\1>", " ", enml)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+
+def _en_media(enml: str) -> list:
+    """Extract (hash, mime) for every <en-media> attachment reference in ENML."""
+    import re
+    out = []
+    for tag in re.findall(r"<en-media\b[^>]*?>", enml or ""):
+        h = re.search(r'hash="([0-9a-f]{32})"', tag)
+        if not h:
+            continue
+        t = re.search(r'type="([^"]+)"', tag)
+        out.append((h.group(1), t.group(1) if t else "application/octet-stream"))
+    return out
+
+
+def _attachment_bytes(res: dict) -> bytes:
+    """Pull raw bytes from a get_attachment result — either an MCP resource/image
+    blob (base64) or a base64 field in the structured payload."""
+    for block in (res.get("content") or []) if isinstance(res, dict) else []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "resource":
+            r = block.get("resource") or {}
+            b = r.get("blob") or r.get("data")
+            if b:
+                try:
+                    return base64.b64decode(b)
+                except Exception:
+                    pass
+        if block.get("type") in ("image", "audio", "blob") and block.get("data"):
+            try:
+                return base64.b64decode(block["data"])
+            except Exception:
+                pass
+    data = _tool_json(res)
+    if isinstance(data, dict):
+        for k in ("data", "base64", "content", "bytes"):
+            v = data.get(k)
+            if isinstance(v, str):
+                try:
+                    return base64.b64decode(v)
+                except Exception:
+                    pass
+    return b""
+
+
 # --------------------------------------------------------------------------- #
 # Fetch                                                                        #
 # --------------------------------------------------------------------------- #
@@ -393,80 +448,78 @@ def fetch(access_token: str, content_cap: int = _DEFAULT_CAP,
         logger.warning("Evernote MCP: tools/list failed: %s", exc)
 
     try:
-        offset, page, seen, first = 0, 100, 0, True
-        while True:
+        # search_notes takes ONLY a query (empty = all active notes). It does not
+        # accept limit/offset, so a single call returns the note set.
+        try:
+            res = session.tool("search_notes", {"query": ""})
+        except Exception as exc:
+            logger.warning("Evernote MCP: search_notes failed: %s", exc)
+            session.close()
+            return
+        logger.warning("Evernote MCP: search_notes raw → %s", json.dumps(res)[:1200])
+        data = _tool_json(res)
+        notes = _as_list(data, "notes", "results", "items", "matches")
+        logger.warning("Evernote MCP: parsed %d note(s)", len(notes))
+
+        first_note = True
+        for nm in notes:
+            note_id = (nm.get("noteId") or nm.get("guid") or nm.get("id")) if isinstance(nm, dict) else nm
+            if not note_id:
+                continue
             try:
-                res = session.tool("search_notes", {"query": "", "limit": page, "offset": offset})
+                full = _tool_json(session.tool("get_note", {"noteId": note_id}))
             except Exception as exc:
-                logger.warning("Evernote MCP: search_notes failed: %s", exc)
-                break
-            if first:
-                logger.warning("Evernote MCP: search_notes raw → %s", json.dumps(res)[:800])
-                first = False
-            data = _tool_json(res)
-            notes = _as_list(data, "notes", "results", "items")
-            logger.warning("Evernote MCP: parsed %d note(s) at offset %d", len(notes), offset)
-            if not notes:
-                break
-            for nm in notes:
-                note_id = nm.get("id") or nm.get("guid") or nm.get("noteId")
-                if not note_id:
-                    continue
-                try:
-                    full = _tool_json(session.tool("get_note", {"note_id": note_id}))
-                except Exception:
-                    full = nm
-                note = full if isinstance(full, dict) else nm
-                title = note.get("title") or nm.get("title") or "Untitled note"
-                notebook = (note.get("notebook") or note.get("notebookName")
-                            or nm.get("notebook") or "Notebook")
-                tags = note.get("tags") or nm.get("tags") or []
-                text = note.get("content") or note.get("text") or ""
+                logger.warning("Evernote MCP: get_note failed for %s: %s", note_id, exc)
+                full = nm
+            if first_note:
+                logger.warning("Evernote MCP: get_note raw → %s", json.dumps(full)[:1200])
+                first_note = False
+            note = full if isinstance(full, dict) else (nm if isinstance(nm, dict) else {})
+            title = note.get("title") or (nm.get("title") if isinstance(nm, dict) else "") or "Untitled note"
+            notebook = (note.get("notebook") or note.get("notebookName")
+                        or (nm.get("notebook") if isinstance(nm, dict) else "") or "Notebook")
+            tags = note.get("tags") or (nm.get("tags") if isinstance(nm, dict) else []) or []
+            enml = note.get("content") or note.get("enml") or note.get("body") or ""
+            text = _strip_enml(enml) if isinstance(enml, str) else str(enml)
 
-                if want("notes"):
-                    body = json.dumps({"title": title, "notebook": notebook,
-                                       "tags": tags, "content": text}).encode()
-                    content, backed = _capped(body, content_cap)
+            if want("notes"):
+                body = json.dumps({"title": title, "notebook": notebook,
+                                   "tags": tags, "content": text}).encode()
+                content, backed = _capped(body, content_cap)
+                yield SourceObject(
+                    object_id=f"evernote:note:{note_id}",
+                    doc_type="note",
+                    title=title,
+                    content=content,
+                    preview=(str(text)[:200] or f"Note in {notebook}"),
+                    meta={"notebook": notebook, "tags": tags, "kind": "note",
+                          "content_backed_up": backed},
+                    labels=[notebook, *(tags if isinstance(tags, list) else [])],
+                )
+
+            if want("attachments") and isinstance(enml, str):
+                import mimetypes
+                for idx, (h, mime) in enumerate(_en_media(enml)):
+                    ext = mimetypes.guess_extension(mime.split(";")[0]) or ""
+                    fname = f"{title[:40]}-{h[:8]}{ext}"
+                    cat, kind = classify_file(fname, mime)
+                    raw = b""
+                    try:
+                        ares = session.tool("get_attachment", {"noteId": note_id, "hash": h})
+                        raw = _attachment_bytes(ares)
+                    except Exception as exc:
+                        logger.warning("Evernote MCP: get_attachment failed (%s): %s", h[:8], exc)
+                    content, backed = _capped(raw, content_cap) if raw else (
+                        json.dumps({"_arkive": "no_content"}).encode(), False)
                     yield SourceObject(
-                        object_id=f"evernote:note:{note_id}",
-                        doc_type="note",
-                        title=title,
+                        object_id=f"evernote:res:{note_id}:{h}",
+                        doc_type=kind, category=cat,
+                        title=fname,
                         content=content,
-                        preview=(str(text)[:200] or f"Note in {notebook}"),
-                        meta={"notebook": notebook, "tags": tags, "kind": "note",
-                              "content_backed_up": backed},
-                        labels=[notebook, *(tags if isinstance(tags, list) else [])],
+                        preview=f"{mime} · {title}",
+                        meta={"notebook": notebook, "note": title, "mime": mime,
+                              "hash": h, "kind": "attachment", "content_backed_up": backed},
+                        labels=[notebook, "Attachments"],
                     )
-
-                if want("attachments"):
-                    for att in _as_list(note, "attachments", "resources"):
-                        att_id = att.get("id") or att.get("guid")
-                        fname = att.get("filename") or att.get("name") or f"attachment-{att_id}"
-                        mime = att.get("mime") or att.get("contentType") or "application/octet-stream"
-                        cat, kind = classify_file(fname, mime)
-                        raw = b""
-                        if att_id:
-                            try:
-                                ares = _tool_json(session.tool("get_attachment", {"attachment_id": att_id}))
-                                b64 = (ares.get("data") if isinstance(ares, dict) else None) or ""
-                                raw = base64.b64decode(b64) if b64 else b""
-                            except Exception:
-                                raw = b""
-                        content, backed = _capped(raw, content_cap) if raw else (
-                            json.dumps({"_arkive": "no_content"}).encode(), False)
-                        yield SourceObject(
-                            object_id=f"evernote:res:{att_id}",
-                            doc_type=kind, category=cat,
-                            title=fname,
-                            content=content,
-                            preview=f"{mime} · {title}",
-                            meta={"notebook": notebook, "note": title, "mime": mime,
-                                  "kind": "attachment", "content_backed_up": backed},
-                            labels=[notebook, "Attachments"],
-                        )
-                seen += 1
-            offset += len(notes)
-            if len(notes) < page:
-                break
     finally:
         session.close()
