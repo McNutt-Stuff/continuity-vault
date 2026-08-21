@@ -148,7 +148,7 @@ def _providers() -> Dict[str, ProviderSpec]:
 
 OAUTH_TYPES = set(_providers().keys())
 # Providers that authorize with a manually-entered token / app password.
-TOKEN_TYPES = {"onepassword", "icloud", "evernote"}
+TOKEN_TYPES = {"onepassword", "icloud"}
 
 
 def get_spec(connector_type: str) -> Optional[ProviderSpec]:
@@ -238,6 +238,10 @@ def exchange_code(connector_type: str, code: str) -> dict:
 
 
 def refresh_tokens(connector_type: str, refresh_token: str) -> dict:
+    # Evernote uses its MCP OAuth server (discovered endpoints), not a static spec.
+    if connector_type == "evernote":
+        from . import evernote_mcp
+        return evernote_mcp.refresh(refresh_token, redirect_uri())
     spec = get_spec(connector_type)
     if not spec:
         raise ValueError(f"unknown OAuth provider {connector_type}")

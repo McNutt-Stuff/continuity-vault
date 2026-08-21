@@ -665,9 +665,9 @@ class EvernoteConnector(Connector):
         return OAuthSpec(
             connector_type=self.connector_type,
             display_name=self.display_name,
-            auth_type="api-token",
-            authorize_url="https://www.evernote.com/api/DeveloperToken.action",
-            token_url="",
+            auth_type="oauth2",
+            authorize_url="https://accounts.evernote.com/oauth2/authorize",
+            token_url="https://accounts.evernote.com/oauth2/token",
             scopes=[],
             icon="note",
             color="#2dbe60",
@@ -676,9 +676,10 @@ class EvernoteConnector(Connector):
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}
-        if config.get("token"):
-            yield from live.fetch_evernote(
-                config["token"], _content_cap(),
+        if config.get("access_token"):
+            from . import evernote_mcp
+            yield from evernote_mcp.fetch(
+                config["access_token"], _content_cap(),
                 options={"includeCategories": config.get("includeCategories")})
             return
         # Simulated dataset (demo/local) — notes across notebooks with tags.

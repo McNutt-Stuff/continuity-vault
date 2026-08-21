@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     facebook_client_secret: str | None = None
     instagram_client_id: str | None = None
     instagram_client_secret: str | None = None
+    # Evernote's modern API is its MCP server (OAuth 2.0). No app registration is
+    # offered — the client is registered dynamically (RFC 7591) and cached. Set
+    # a static client only if Evernote later provides one.
+    evernote_mcp_url: str = "https://mcp.evernote.com/mcp"
+    evernote_client_id: str | None = None
+    evernote_client_secret: str | None = None
 
     seed_demo_data: bool = True
 

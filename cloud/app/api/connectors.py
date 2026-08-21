@@ -14,6 +14,7 @@ from .. import audit, credstore, security
 from ..config import get_settings
 from ..connectors import ALL_CONNECTORS, get_connector
 from ..connectors import oauth
+from ..connectors import evernote_mcp
 from ..db import get_db
 from ..models import Collection, ConnectorAccount, Tenant
 
@@ -69,11 +70,11 @@ def _setup_instructions(connector_type: str) -> list[str]:
         ]
     if connector_type == "evernote":
         return [
-            "In Evernote, open Settings and create a Developer Token (or request one at",
-            "dev.evernote.com for your account).",
-            "Install the Evernote SDK on the server (pip install evernote3).",
-            "Paste the developer token here to link your account. Notes and their",
-            "attachments are pulled, encrypted, versioned, and made searchable.",
+            "Evernote uses its MCP server (mcp.evernote.com) over OAuth 2.0 — the",
+            "legacy API is deprecated. No developer token is needed.",
+            f"The client registers dynamically; set this OAuth redirect: {redirect}",
+            "Click Connect and approve access on Evernote's consent screen.",
+            "Notes and attachments are pulled, encrypted, versioned, and searchable.",
         ]
     return []
 
@@ -113,9 +114,11 @@ def catalog(tenant: Tenant = Depends(security.get_tenant)):
         spec = c.oauth_spec()
         caps = c.capabilities()
         ctype = spec.connector_type
-        mode = "oauth" if oauth.is_oauth(ctype) else "token"
+        is_ev = ctype == "evernote"
+        is_oauth_mode = oauth.is_oauth(ctype) or is_ev
+        mode = "oauth" if is_oauth_mode else "token"
         # Platform admins can disable an OAuth source for all tenants.
-        if oauth.is_oauth(ctype) and not platform_config.source_enabled(ctype):
+        if is_oauth_mode and not platform_config.source_enabled(ctype):
             continue
         out.append({
             "type": ctype,
@@ -127,7 +130,7 @@ def catalog(tenant: Tenant = Depends(security.get_tenant)):
             "category": _SOURCE_TYPE.get(ctype, "Other"),
             "docTypes": spec.doc_types,
             "mode": mode,
-            "configured": oauth.is_configured(ctype),
+            "configured": (True if is_ev else oauth.is_configured(ctype)),
             "requiresAgent": caps.requires_agent,
             "setup": _setup_instructions(ctype),
             "capabilities": {
@@ -150,6 +153,26 @@ def connect(connector_type: str, body: ConnectRequest,
             tenant: Tenant = Depends(security.get_tenant)):
     if not get_connector(connector_type):
         raise HTTPException(404, "unknown connector")
+    if connector_type == "evernote":
+        # Evernote MCP: OAuth 2.1 + PKCE against its discovered auth server. The
+        # PKCE verifier rides in the signed state so the callback can complete.
+        if not evernote_mcp.is_configured():
+            raise HTTPException(400, {
+                "error": "provider_not_configured",
+                "setup": _setup_instructions(connector_type),
+            })
+        verifier, challenge = evernote_mcp.make_pkce()
+        state = oauth.sign_state({
+            "tid": tenant.id, "uid": principal.user_id,
+            "type": connector_type, "label": body.account_label or "",
+            "pkce": verifier, "n": str(uuid.uuid4()),
+        })
+        try:
+            url = evernote_mcp.authorize_url(state, challenge, oauth.redirect_uri())
+        except Exception as exc:
+            logger.error("Evernote MCP authorize failed: %s", exc)
+            raise HTTPException(502, "could not start Evernote authorization")
+        return {"mode": "oauth", "authorize_url": url}
     if oauth.is_oauth(connector_type):
         if not oauth.is_configured(connector_type):
             raise HTTPException(400, {
@@ -179,6 +202,22 @@ def oauth_callback(code: str | None = Query(default=None),
         return RedirectResponse(f"{portal}/connectors?error=invalid_state")
 
     connector_type = data["type"]
+    if connector_type == "evernote":
+        try:
+            tokens = evernote_mcp.exchange_code(code, data.get("pkce", ""), oauth.redirect_uri())
+        except Exception as exc:
+            logger.error("Evernote MCP token exchange failed: %s", exc)
+            return RedirectResponse(f"{portal}/connectors?error=token_exchange")
+        account = ConnectorAccount(
+            tenant_id=data["tid"], connector_type=connector_type,
+            account_label=data.get("label") or "Evernote account", auth_status="linked",
+            encrypted_credentials=credstore.encrypt(data["tid"], tokens),
+            scopes=(tokens.get("scope") or "").split())
+        db.add(account)
+        db.commit()
+        audit.record(db, actor=data["uid"], action="connector.linked",
+                     tenant_id=data["tid"], resource=account.id, detail={"type": connector_type})
+        return RedirectResponse(f"{portal}/connectors?connected={connector_type}")
     try:
         tokens = oauth.exchange_code(connector_type, code)
     except Exception as exc:
