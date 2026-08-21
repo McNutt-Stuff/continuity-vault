@@ -120,8 +120,11 @@ create_user_dirs() {
 
 sync_code() {
   if command -v rsync >/dev/null; then
+    # Keep the built web/ and site/ dist dirs: --delete would otherwise wipe the
+    # live site before it's rebuilt, taking a public-web node down if the new
+    # build fails. The build steps overwrite dist on success.
     rsync -a --delete --exclude '.git' --exclude '.venv' --exclude 'node_modules' \
-      --exclude 'web/dist' "$REPO_SRC/" "$INSTALL_DIR/"
+      --exclude 'web/dist' --exclude 'site/dist' "$REPO_SRC/" "$INSTALL_DIR/"
   else
     cp -r "$REPO_SRC/." "$INSTALL_DIR/"
   fi
