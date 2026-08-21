@@ -882,3 +882,50 @@ def fetch_instagram(access_token: str, content_cap: int = _DEFAULT_CAP,
             params = None
 
 
+def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
+                   options: Optional[dict] = None) -> Iterable[SourceObject]:
+    """Back up the member's LinkedIn profile (OpenID Connect userinfo) and, when
+    the app has Community Management / member-social access, their posts. Posts
+    are best-effort and silently skipped when the scope isn't granted."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    sub = None
+    with httpx.Client(timeout=60) as c:
+        try:
+            r = c.get("https://api.linkedin.com/v2/userinfo", headers=headers)
+            if r.status_code < 400:
+                d = r.json()
+                sub = d.get("sub")
+                if _want(options, "profile"):
+                    name = d.get("name") or "LinkedIn profile"
+                    yield SourceObject(
+                        object_id=f"linkedin:profile:{sub or name}",
+                        doc_type="profile", category="social", title=name,
+                        content=json.dumps(d).encode(),
+                        preview=d.get("email") or name,
+                        meta={"email": d.get("email"),
+                              "locale": d.get("locale"), "kind": "profile"},
+                        labels=["Profile"])
+        except Exception:
+            pass
+        if sub and _want(options, "posts"):
+            try:
+                hdr = {**headers, "X-Restli-Protocol-Version": "2.0.0"}
+                params = {"q": "authors",
+                          "authors": f"List(urn:li:person:{sub})", "count": 50}
+                rp = c.get("https://api.linkedin.com/v2/ugcPosts", headers=hdr, params=params)
+                if rp.status_code < 400:
+                    for post in rp.json().get("elements", []):
+                        share = (((post.get("specificContent") or {})
+                                  .get("com.linkedin.ugc.ShareContent") or {})
+                                 .get("shareCommentary") or {})
+                        text = share.get("text") or "(post)"
+                        yield SourceObject(
+                            object_id=f"linkedin:{post.get('id')}",
+                            doc_type="post", category="social", title=text[:80],
+                            content=json.dumps(post).encode(), preview=text[:200],
+                            meta={"created": (post.get("created") or {}).get("time"),
+                                  "kind": "post"}, labels=["Posts"])
+            except Exception:
+                pass
+
+

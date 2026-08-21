@@ -645,6 +645,46 @@ class InstagramConnector(Connector):
 
 
 @register_connector
+class LinkedInConnector(Connector):
+    connector_type = "linkedin"
+    display_name = "LinkedIn"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            streaming=True,
+            searchable_fields=["kind"],
+            facet_fields=["kind"],
+            filter_categories=[
+                {"id": "profile", "label": "Profile"},
+                {"id": "posts", "label": "Posts"},
+            ],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="oauth2",
+            authorize_url="https://www.linkedin.com/oauth/v2/authorization",
+            token_url="https://www.linkedin.com/oauth/v2/accessToken",
+            scopes=["openid", "profile", "email"],
+            icon="user", color="#0a66c2", doc_types=["profile", "post"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_linkedin(
+                config["access_token"], _content_cap(),
+                options={"includeCategories": config.get("includeCategories")})
+            return
+        yield SourceObject(
+            object_id=_oid(self.connector_type, account_label, 0),
+            doc_type="profile", category="social", title="LinkedIn profile",
+            content=json.dumps({"name": account_label, "headline": "Sample profile"}).encode(),
+            preview=account_label, meta={"kind": "profile"}, labels=["Profile"], modified_at=_dt(0))
+
+
+@register_connector
 class EvernoteConnector(Connector):
     connector_type = "evernote"
     display_name = "Evernote"

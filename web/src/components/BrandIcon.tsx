@@ -12,7 +12,7 @@ const SYNCED = new Set([
   "gmail", "onepassword", "outlook", "onedrive", "dropbox", "icloud",
   "google_drive", "slack", "notion", "github",
   "reddit", "facebook", "instagram", "google_calendar", "google_contacts",
-  "google_photos", "evernote",
+  "google_photos", "evernote", "linkedin",
 ]);
 
 // Returns the source type when a dedicated brand icon exists, else null so the

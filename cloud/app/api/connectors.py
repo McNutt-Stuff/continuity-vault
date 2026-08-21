@@ -76,6 +76,13 @@ def _setup_instructions(connector_type: str) -> list[str]:
             "Click Connect and approve access on Evernote's consent screen.",
             "Notes and attachments are pulled, encrypted, versioned, and searchable.",
         ]
+    if connector_type == "linkedin":
+        return [
+            "At linkedin.com/developers, create an app and add the 'Sign In with LinkedIn using OpenID Connect' product.",
+            f"Add this Authorized redirect URL: {redirect}",
+            "Request scopes: openid, profile, email. Backing up member posts also needs LinkedIn's Community Management API (partner access).",
+            "Set CV_LINKEDIN_CLIENT_ID and CV_LINKEDIN_CLIENT_SECRET on the server, then restart.",
+        ]
     return []
 
 
@@ -88,6 +95,7 @@ _SOURCE_FAMILY = {
     "icloud": "Apple",
     "dropbox": "Dropbox",
     "reddit": "Reddit", "facebook": "Meta", "instagram": "Meta",
+    "linkedin": "LinkedIn",
     "evernote": "Evernote",
     "onepassword": "Endpoint Collected", "endpoint_files": "Endpoint Collected",
     "custom": "Custom",
@@ -101,6 +109,7 @@ _SOURCE_TYPE = {
     "google_calendar": "Calendar",
     "onepassword": "Passwords",
     "reddit": "Social", "facebook": "Social", "instagram": "Social",
+    "linkedin": "Social",
     "evernote": "Notes",
     "custom": "Other",
 }
@@ -396,6 +405,10 @@ def _fetch_account_label(connector_type: str, tokens: dict) -> str | None:
                                params={"fields": "username", "access_token": at})
                 name = r.json().get("username")
                 return f"@{name}" if name else None
+            if connector_type == "linkedin":
+                r = client.get("https://api.linkedin.com/v2/userinfo", headers=headers)
+                d = r.json()
+                return d.get("email") or d.get("name")
     except Exception:
         return None
     return None

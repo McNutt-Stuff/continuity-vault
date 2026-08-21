@@ -143,6 +143,15 @@ def _providers() -> Dict[str, ProviderSpec]:
             client_secret=s.instagram_client_secret,
             extra_auth_params={},
         ),
+        "linkedin": ProviderSpec(
+            connector_type="linkedin",
+            authorize_url="https://www.linkedin.com/oauth/v2/authorization",
+            token_url="https://www.linkedin.com/oauth/v2/accessToken",
+            scopes=["openid", "profile", "email"],
+            client_id=s.linkedin_client_id,
+            client_secret=s.linkedin_client_secret,
+            extra_auth_params={},
+        ),
     }
 
 
