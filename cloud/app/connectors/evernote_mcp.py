@@ -138,18 +138,26 @@ def client_credentials(redirect_uri: str) -> Tuple[Optional[str], Optional[str]]
     if not reg:
         logger.warning("Evernote MCP: no registration endpoint; set CV_EVERNOTE_CLIENT_ID")
         return None, None
+    # MCP clients register as public clients that authenticate with PKCE (no
+    # client secret) — that's what Evernote's DCR expects.
     body = {
         "client_name": "Arkive Continuity Vault",
         "redirect_uris": [redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
-        "token_endpoint_auth_method": "client_secret_basic",
-        "scope": " ".join(disc.get("scopes_supported") or []),
+        "token_endpoint_auth_method": "none",
+        "application_type": "web",
     }
+    scope = " ".join(disc.get("scopes_supported") or [])
+    if scope:
+        body["scope"] = scope
     try:
         with httpx.Client(timeout=20) as c:
-            r = c.post(reg, json=body)
-            r.raise_for_status()
+            r = c.post(reg, json=body, headers={"Accept": "application/json"})
+            if r.status_code >= 400:
+                logger.warning("Evernote MCP DCR rejected (%s) at %s: %s",
+                               r.status_code, reg, r.text[:600])
+                return None, None
             data = r.json()
         _client_cache = {"client_id": data.get("client_id"),
                          "client_secret": data.get("client_secret")}
