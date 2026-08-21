@@ -58,6 +58,7 @@ SOURCE_ICONS: dict[str, dict] = {
     "reddit":     {"file": "Reddit Logo Icon.svg", "search": "Reddit logo icon"},
     "facebook":   {"file": "2023 Facebook icon.svg", "search": "2023 Facebook icon"},
     "instagram":  {"file": "Instagram icon.svg", "search": "Instagram logo icon"},
+    "evernote":   {"file": "Evernote.svg", "search": "Evernote logo"},
     "google_calendar": {"file": "Google Calendar icon (2020).svg", "search": "Google Calendar icon"},
     "google_contacts": {"file": "Google Contacts icon.svg", "search": "Google Contacts icon"},
     "google_photos": {"file": "Google Photos icon (2020).svg", "search": "Google Photos logo"},

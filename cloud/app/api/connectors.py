@@ -67,6 +67,14 @@ def _setup_instructions(connector_type: str) -> list[str]:
             "Connect with your Apple ID and that app-specific password.",
             "Note: accounts requiring interactive 2FA can't be synced automatically.",
         ]
+    if connector_type == "evernote":
+        return [
+            "In Evernote, open Settings and create a Developer Token (or request one at",
+            "dev.evernote.com for your account).",
+            "Install the Evernote SDK on the server (pip install evernote3).",
+            "Paste the developer token here to link your account. Notes and their",
+            "attachments are pulled, encrypted, versioned, and made searchable.",
+        ]
     return []
 
 
@@ -79,6 +87,7 @@ _SOURCE_FAMILY = {
     "icloud": "Apple",
     "dropbox": "Dropbox",
     "reddit": "Reddit", "facebook": "Meta", "instagram": "Meta",
+    "evernote": "Evernote",
     "onepassword": "Endpoint Collected", "endpoint_files": "Endpoint Collected",
     "custom": "Custom",
 }
@@ -91,6 +100,7 @@ _SOURCE_TYPE = {
     "google_calendar": "Calendar",
     "onepassword": "Passwords",
     "reddit": "Social", "facebook": "Social", "instagram": "Social",
+    "evernote": "Notes",
     "custom": "Other",
 }
 

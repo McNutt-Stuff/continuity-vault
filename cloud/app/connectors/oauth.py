@@ -148,7 +148,7 @@ def _providers() -> Dict[str, ProviderSpec]:
 
 OAUTH_TYPES = set(_providers().keys())
 # Providers that authorize with a manually-entered token / app password.
-TOKEN_TYPES = {"onepassword", "icloud"}
+TOKEN_TYPES = {"onepassword", "icloud", "evernote"}
 
 
 def get_spec(connector_type: str) -> Optional[ProviderSpec]:

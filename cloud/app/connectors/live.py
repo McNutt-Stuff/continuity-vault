@@ -363,6 +363,136 @@ def fetch_dropbox(access_token: str, limit: int = 1000,
             body = r.json()
 
 
+def _ms_to_dt(ms: Optional[int]) -> datetime:
+    """Evernote timestamps are milliseconds since the epoch."""
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc)
+    except Exception:
+        return _now()
+
+
+def _strip_enml(enml: str) -> str:
+    """ENML/HTML note body → plain, searchable text."""
+    import html
+    import re
+    if not enml:
+        return ""
+    text = re.sub(r"(?is)<(script|style|en-media)[^>]*>.*?</\1>", " ", enml)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+
+def fetch_evernote(token: str, content_cap: int = _DEFAULT_CAP,
+                   options: Optional[dict] = None) -> Iterable[SourceObject]:
+    """Best-effort Evernote pull via the Evernote SDK (optional dep: evernote3).
+
+    Yields each note (ENML → plain-text preview) and, when enabled, its
+    attachments (resources) as file objects. ``options.includeCategories``
+    (notes / attachments) filters what's captured. Content is capped to protect
+    memory; oversized attachments are recorded as placeholders — matching the
+    other content-heavy connectors."""
+    options = options or {}
+
+    def want(cat: str) -> bool:
+        inc = options.get("includeCategories") or []
+        return not inc or cat in inc
+
+    try:
+        from evernote.api.client import EvernoteClient  # optional dependency
+        from evernote.edam.notestore.ttypes import NoteFilter, NotesMetadataResultSpec
+    except Exception:
+        logger.info("evernote SDK not installed; skipping Evernote live pull")
+        return
+
+    try:
+        client = EvernoteClient(token=token, sandbox=False)
+        note_store = client.get_note_store()
+        nb_names = {nb.guid: nb.name for nb in note_store.listNotebooks()}
+        try:
+            tag_names = {t.guid: t.name for t in note_store.listTags()}
+        except Exception:
+            tag_names = {}
+    except Exception as exc:
+        logger.warning("Evernote auth/list failed: %s", exc)
+        return
+
+    spec = NotesMetadataResultSpec(
+        includeTitle=True, includeNotebookGuid=True, includeUpdated=True,
+        includeTagGuids=True, includeContentLength=True)
+    nf = NoteFilter()
+    offset, page = 0, 50
+    while True:
+        try:
+            res = note_store.findNotesMetadata(nf, offset, page, spec)
+        except Exception as exc:
+            logger.warning("Evernote findNotesMetadata failed: %s", exc)
+            break
+        notes = res.notes or []
+        for md in notes:
+            notebook = nb_names.get(md.notebookGuid, "Notebook")
+            tags = [tag_names.get(g, g) for g in (md.tagGuids or [])]
+            updated = _ms_to_dt(getattr(md, "updated", None))
+
+            if want("notes"):
+                try:
+                    enml = note_store.getNoteContent(md.guid)
+                except Exception:
+                    enml = ""
+                text = _strip_enml(enml)
+                body = json.dumps({"title": md.title, "notebook": notebook,
+                                   "tags": tags, "content": text}).encode()
+                content, backed = _capped(body, content_cap)
+                yield SourceObject(
+                    object_id=f"evernote:note:{md.guid}",
+                    doc_type="note",
+                    title=md.title or "Untitled note",
+                    content=content,
+                    preview=(text[:200] or f"Note in {notebook}"),
+                    meta={"notebook": notebook, "tags": tags, "kind": "note",
+                          "content_backed_up": backed},
+                    labels=[notebook, *tags],
+                    modified_at=updated,
+                )
+
+            if want("attachments"):
+                try:
+                    note = note_store.getNote(md.guid, False, False, False, False)
+                    resources = note.resources or []
+                except Exception:
+                    resources = []
+                for ri, r in enumerate(resources):
+                    fname = ((getattr(r.attributes, "fileName", None) if r.attributes else None)
+                             or f"attachment-{ri + 1}")
+                    mime = r.mime or "application/octet-stream"
+                    size = int(getattr(r.data, "size", 0) or 0) if r.data else 0
+                    cat, kind = classify_file(fname, mime)
+                    raw = b""
+                    if 0 < size <= content_cap:
+                        try:
+                            raw = note_store.getResourceData(r.guid)
+                        except Exception:
+                            raw = b""
+                    content, backed = (_capped(raw, content_cap) if raw else (
+                        json.dumps({"_arkive": "content_exceeds_cap" if size > content_cap
+                                    else "no_content", "bytes": size}).encode(), False))
+                    yield SourceObject(
+                        object_id=f"evernote:res:{r.guid}",
+                        doc_type=kind, category=cat,
+                        title=fname,
+                        content=content,
+                        preview=f"{mime} · {size // 1000} KB · {md.title or 'note'}",
+                        meta={"notebook": notebook, "note": md.title, "mime": mime,
+                              "kind": "attachment", "content_backed_up": backed},
+                        labels=[notebook, "Attachments"],
+                        size_bytes=size or None,  # type: ignore
+                        modified_at=updated,
+                    )
+        offset += len(notes)
+        total = getattr(res, "totalNotes", 0) or 0
+        if not notes or offset >= total:
+            break
+
+
 def fetch_icloud(username: str, password: str,
                  content_cap: int = _DEFAULT_CAP,
                  options: Optional[dict] = None) -> Iterable[SourceObject]:

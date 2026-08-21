@@ -645,6 +645,65 @@ class InstagramConnector(Connector):
 
 
 @register_connector
+class EvernoteConnector(Connector):
+    connector_type = "evernote"
+    display_name = "Evernote"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            incremental=True,   # Evernote sync is USN-based (updateCount)
+            streaming=True,     # notes carry attachments (resources) → bounded ingest
+            searchable_fields=["notebook", "tags", "author", "kind"],
+            facet_fields=["notebook", "kind"],
+            filter_categories=[
+                {"id": "notes", "label": "Notes"},
+                {"id": "attachments", "label": "Attachments"},
+            ],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type,
+            display_name=self.display_name,
+            auth_type="api-token",
+            authorize_url="https://www.evernote.com/api/DeveloperToken.action",
+            token_url="",
+            scopes=[],
+            icon="note",
+            color="#2dbe60",
+            doc_types=["note", "file"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("token"):
+            yield from live.fetch_evernote(
+                config["token"], _content_cap(),
+                options={"includeCategories": config.get("includeCategories")})
+            return
+        # Simulated dataset (demo/local) — notes across notebooks with tags.
+        samples = [
+            ("Home Renovation Plan", "Projects", ["home", "budget"], "Contractor quotes, permit checklist, and the phased timeline for the kitchen remodel."),
+            ("Recipes to Try", "Personal", ["cooking"], "Weeknight pasta, no-knead sourdough, and a slow-roast brisket to attempt this fall."),
+            ("Q3 Strategy Notes", "Work", ["strategy", "okr"], "Top priorities, hiring plan, and the product roadmap headed into the next quarter."),
+            ("Travel — Japan", "Travel", ["itinerary"], "Flights, ryokan bookings, JR pass details, and a day-by-day plan for Kyoto and Tokyo."),
+            ("Meeting Notes — June", "Work", ["meetings"], "Action items, owners, and decisions from the weekly staff sync."),
+        ]
+        for i, (title, notebook, tags, body) in enumerate(samples):
+            yield SourceObject(
+                object_id=_oid(self.connector_type, account_label, i),
+                doc_type="note",
+                title=title,
+                content=json.dumps({"title": title, "notebook": notebook,
+                                    "tags": tags, "content": body}).encode(),
+                preview=body[:140],
+                meta={"notebook": notebook, "tags": tags, "kind": "note"},
+                labels=[notebook, *tags],
+                modified_at=_dt(i * 5),
+            )
+
+
+@register_connector
 class CustomRecordsConnector(Connector):
     """A fully customizable puller for testing and bespoke sources.
 
