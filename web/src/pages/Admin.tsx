@@ -86,6 +86,9 @@ const TENANT_TYPE_OPTS = [
 const TENANT_TYPE_LABEL: Record<string, string> = {
   shared: "Shared", dedicated: "Dedicated", restricted: "Restricted", internal: "Internal",
 };
+const TENANT_TYPE_TONE: Record<string, "ok" | "info" | "warn" | "danger"> = {
+  shared: "warn", dedicated: "info", restricted: "danger", internal: "ok",
+};
 
 async function nodeOptions(): Promise<{ label: string; value: string }[]> {
   const base = [{ label: "Control plane (default — processed in-box)", value: "" }];
@@ -105,22 +108,47 @@ function Tenants() {
   useEffect(() => { void load(); }, []);
 
   async function newTenant() {
+    const nodeOpts = await nodeOptions();
+    const base = await formDialog({
+      title: "New tenant",
+      message: "Shared = a pool of isolated personal accounts (each self-manages a Personal plan). Dedicated / Restricted = a managed organization. Internal = Arkive operations.",
+      confirmLabel: "Continue",
+      fields: [
+        { name: "name", label: "Name", required: true, placeholder: "e.g. Personal Accounts — US" },
+        { name: "tenant_type", label: "Tenant type", defaultValue: "dedicated", options: TENANT_TYPE_OPTS },
+        { name: "key_ownership_model", label: "Key ownership", defaultValue: "customer-managed",
+          options: [{ label: "Customer-managed", value: "customer-managed" }, { label: "Zero-knowledge", value: "zero-knowledge" }] },
+        { name: "node_id", label: "Processing node", defaultValue: "", options: nodeOpts },
+      ],
+    });
+    if (!base) return;
+
+    // Shared tenants pool isolated personal accounts — no org-level license plan,
+    // licensed amount, or single owner. Each account self-manages a Personal plan.
+    if (base.tenant_type === "shared") {
+      try {
+        await api.post("/admin/tenants", {
+          name: base.name, tenant_type: "shared", plan: "personal",
+          key_ownership_model: base.key_ownership_model, node_id: base.node_id,
+        });
+        flash("Shared tenant created"); await load();
+      } catch { flash("Could not create tenant"); }
+      return;
+    }
+
+    // Managed org (dedicated / restricted / internal): collect the license plan,
+    // licensed data, and an optional owner account.
     let planOpts = [{ label: "business", value: "business" }];
     try {
       const pr = await api.get<any>("/admin/pricing");
       if (pr.license_plans?.length) planOpts = pr.license_plans.map((pl: any) =>
         ({ label: `${pl.name} — $${pl.price_per_tb_month}/TB·mo, min ${pl.min_tb}TB`, value: pl.id }));
     } catch { /* fall back to default */ }
-    const nodeOpts = await nodeOptions();
     const r = await formDialog({
-      title: "New tenant", confirmLabel: "Create tenant",
+      title: `New ${TENANT_TYPE_LABEL[base.tenant_type] || base.tenant_type} tenant`,
+      confirmLabel: "Create tenant",
       fields: [
-        { name: "name", label: "Organization name", required: true },
-        { name: "tenant_type", label: "Tenant type", defaultValue: "dedicated", options: TENANT_TYPE_OPTS },
         { name: "plan", label: "License plan", defaultValue: planOpts[0]?.value, options: planOpts },
-        { name: "key_ownership_model", label: "Key ownership", defaultValue: "customer-managed",
-          options: [{ label: "Customer-managed", value: "customer-managed" }, { label: "Zero-knowledge", value: "zero-knowledge" }] },
-        { name: "node_id", label: "Processing node", defaultValue: "", options: nodeOpts },
         { name: "licensed_tb", label: "Licensed data (TB)", defaultValue: "1" },
         { name: "owner_email", label: "Owner email (optional)" },
         { name: "owner_name", label: "Owner name (optional)" },
@@ -128,7 +156,12 @@ function Tenants() {
     });
     if (!r) return;
     try {
-      await api.post("/admin/tenants", { ...r, licensed_tb: Number(r.licensed_tb) || 0 });
+      await api.post("/admin/tenants", {
+        name: base.name, tenant_type: base.tenant_type,
+        key_ownership_model: base.key_ownership_model, node_id: base.node_id,
+        plan: r.plan, licensed_tb: Number(r.licensed_tb) || 0,
+        owner_email: r.owner_email, owner_name: r.owner_name,
+      });
       flash("Tenant created"); await load();
     } catch { flash("Could not create tenant"); }
   }
@@ -143,18 +176,23 @@ function Tenants() {
       </div>
       <Card>
         <table className="table">
-          <thead><tr><th>Tenant</th><th>Plan</th><th>Users</th><th>Appliances</th><th>Sources</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Tenant</th><th>Type</th><th>Node</th><th>Plan</th><th>Accounts</th><th>Sources</th><th>Status</th><th></th></tr></thead>
           <tbody>
             {rows.map((t) => (
               <tr key={t.id} style={{ cursor: "pointer" }} onClick={() => setSel(t.id)}>
                 <td style={{ fontWeight: 600 }}>{t.name}</td>
-                <td><Pill tone="info">{t.plan}</Pill></td>
-                <td>{t.users}</td><td>{t.appliances}</td><td>{t.sources}</td>
+                <td><Pill tone={TENANT_TYPE_TONE[t.tenant_type] || "info"}>{TENANT_TYPE_LABEL[t.tenant_type] || t.tenant_type}</Pill></td>
+                <td className="faint">{t.node || "Control plane"}</td>
+                <td>{t.tenant_type === "shared"
+                  ? <span className="faint" style={{ fontSize: 12 }}>per-account</span>
+                  : <Pill tone="info">{t.plan}</Pill>}</td>
+                <td>{t.users}</td>
+                <td>{t.sources ?? 0}</td>
                 <td><Pill tone={t.status === "active" ? "ok" : "warn"}>{t.status}</Pill></td>
                 <td className="faint" style={{ textAlign: "right" }}>Manage →</td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={7} className="muted">No tenants.</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={8} className="muted">No tenants.</td></tr>}
           </tbody>
         </table>
       </Card>
@@ -175,27 +213,35 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
   useEffect(() => { void load(); }, [id]);
 
   async function editTenant() {
+    const isShared = t.tenant_type === "shared";
     let planOpts = [{ label: t.plan, value: t.plan }];
-    try {
-      const pr = await api.get<any>("/admin/pricing");
-      if (pr.license_plans?.length) planOpts = pr.license_plans.map((pl: any) =>
-        ({ label: `${pl.name} — $${pl.price_per_tb_month}/TB·mo, min ${pl.min_tb}TB`, value: pl.id }));
-    } catch { /* fall back to current */ }
+    if (!isShared) {
+      try {
+        const pr = await api.get<any>("/admin/pricing");
+        if (pr.license_plans?.length) planOpts = pr.license_plans.map((pl: any) =>
+          ({ label: `${pl.name} — $${pl.price_per_tb_month}/TB·mo, min ${pl.min_tb}TB`, value: pl.id }));
+      } catch { /* fall back to current */ }
+    }
     const nodeOpts = await nodeOptions();
-    const r = await formDialog({
-      title: "Edit tenant", confirmLabel: "Save",
-      fields: [
-        { name: "name", label: "Name", defaultValue: t.name, required: true },
-        { name: "tenant_type", label: "Tenant type", defaultValue: t.tenant_type || "dedicated", options: TENANT_TYPE_OPTS },
+    // Shared tenants have no org-level plan / licensed amount (per-account Personal plan).
+    const fields: any[] = [
+      { name: "name", label: "Name", defaultValue: t.name, required: true },
+      { name: "tenant_type", label: "Tenant type", defaultValue: t.tenant_type || "dedicated", options: TENANT_TYPE_OPTS },
+      { name: "node_id", label: "Processing node", defaultValue: t.node_id || "", options: nodeOpts },
+      { name: "status", label: "Status", defaultValue: t.status,
+        options: ["active", "suspended", "trial"].map((v) => ({ label: v, value: v })) },
+    ];
+    if (!isShared) {
+      fields.push(
         { name: "plan", label: "License plan", defaultValue: t.plan, options: planOpts },
-        { name: "node_id", label: "Processing node", defaultValue: t.node_id || "", options: nodeOpts },
-        { name: "status", label: "Status", defaultValue: t.status,
-          options: ["active", "suspended", "trial"].map((v) => ({ label: v, value: v })) },
         { name: "licensed_tb", label: "Licensed data (TB)", defaultValue: String(((t.licensed_bytes || 0) / (1024 ** 4)).toFixed(2)) },
-      ],
-    });
+      );
+    }
+    const r = await formDialog({ title: "Edit tenant", confirmLabel: "Save", fields });
     if (!r) return;
-    try { await api.put(`/admin/tenants/${id}`, { ...r, licensed_tb: Number(r.licensed_tb) || 0 }); flash("Saved"); await load(); }
+    const payload: any = { ...r };
+    if (r.licensed_tb !== undefined) payload.licensed_tb = Number(r.licensed_tb) || 0;
+    try { await api.put(`/admin/tenants/${id}`, payload); flash("Saved"); await load(); }
     catch { flash("Save failed"); }
   }
   async function suspend() {
@@ -265,14 +311,18 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
           <div>
             <h3 style={{ margin: 0 }}>{t.name}</h3>
             <div className="faint" style={{ fontSize: 12 }}>
-              {TENANT_TYPE_LABEL[t.tenant_type] || t.tenant_type || "Dedicated"} · {t.plan} · {t.key_ownership_model} · {licensedTb} TB licensed
+              {TENANT_TYPE_LABEL[t.tenant_type] || t.tenant_type || "Dedicated"}
+              {t.tenant_type === "shared"
+                ? ` · ${t.users} account${t.users === 1 ? "" : "s"} · per-account Personal plan`
+                : ` · ${t.plan} · ${licensedTb} TB licensed`}
+              {` · ${t.key_ownership_model}`}
               {t.node ? ` · node: ${t.node.name}` : " · processed on control plane"}
             </div>
           </div>
           <Pill tone={t.status === "active" ? "ok" : "warn"}>{t.status}</Pill>
         </div>
         <div className="grid grid-4" style={{ gap: 12, marginTop: 14 }}>
-          <Mini label="Users" value={t.users} />
+          <Mini label={t.tenant_type === "shared" ? "Accounts" : "Users"} value={t.users} />
           <Mini label="Appliances" value={t.appliances} />
           <Mini label="Agents" value={t.agents} />
           <Mini label="Sources" value={t.sources} />
@@ -286,6 +336,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
       {(() => {
         const b = t.billing;
         const su = t.storage_usage;
+        const isShared = t.tenant_type === "shared";
         const money = (n: number) => "$" + (Math.round((n || 0) * 100) / 100)
           .toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
         const channelLabel: Record<string, string> = {
@@ -296,24 +347,35 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
         return (
           <Card style={{ marginBottom: 16 }}>
             <div className="spread" style={{ marginBottom: 6 }}>
-              <h3 style={{ margin: 0 }}>Protection &amp; billing</h3>
-              {b?.costs && <Pill tone="info">{money(b.costs.total_monthly)}/mo to Arkive</Pill>}
+              <h3 style={{ margin: 0 }}>{isShared ? "Accounts & storage" : "Protection & billing"}</h3>
+              {isShared
+                ? <Pill tone="info">{t.users} account{t.users === 1 ? "" : "s"}</Pill>
+                : (b?.costs && <Pill tone="info">{money(b.costs.total_monthly)}/mo to Arkive</Pill>)}
             </div>
             <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>
-              Coupled to what the customer selected in Protection Setup — licensed amount, storage channels, and what they pay us.
+              {isShared
+                ? "A pool of isolated personal accounts — each self-manages its own Personal plan; there is no shared organization plan or licensed amount."
+                : "Coupled to what the customer selected in Protection Setup — licensed amount, storage channels, and what they pay us."}
             </div>
-            <div className="grid grid-4" style={{ gap: 12, marginBottom: 14 }}>
-              <Mini label="License plan" value={b?.license_plan?.name || t.plan} />
-              <Mini label="Licensed" value={`${b?.licensed_tb ?? licensedTb} TB`} />
-              <Mini label="Billable" value={b?.billable_tb != null ? `${b.billable_tb} TB` : "—"} />
-              <Mini label="Used" value={`${b?.used_tb ?? 0} TB${b?.percent != null ? ` · ${b.percent}%` : ""}`} />
-            </div>
-            <div style={{ marginBottom: 12 }}>
-              <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>Storage channels the customer enabled</div>
-              <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-                {options.length === 0 && <span className="muted" style={{ fontSize: 12 }}>None selected yet</span>}
-                {options.map((o) => <Pill key={o} tone="info">{channelLabel[o] || o}</Pill>)}
+            {!isShared && (
+              <div className="grid grid-4" style={{ gap: 12, marginBottom: 14 }}>
+                <Mini label="License plan" value={b?.license_plan?.name || t.plan} />
+                <Mini label="Licensed" value={`${b?.licensed_tb ?? licensedTb} TB`} />
+                <Mini label="Billable" value={b?.billable_tb != null ? `${b.billable_tb} TB` : "—"} />
+                <Mini label="Used" value={`${b?.used_tb ?? 0} TB${b?.percent != null ? ` · ${b.percent}%` : ""}`} />
               </div>
+            )}
+            {!isShared && (
+              <div style={{ marginBottom: 12 }}>
+                <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>Storage channels the customer enabled</div>
+                <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                  {options.length === 0 && <span className="muted" style={{ fontSize: 12 }}>None selected yet</span>}
+                  {options.map((o) => <Pill key={o} tone="info">{channelLabel[o] || o}</Pill>)}
+                </div>
+              </div>
+            )}
+            <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>
+              {isShared ? "Storage footprint across all accounts in this tenant" : "Storage footprint"}
             </div>
             <table className="table">
               <thead><tr><th>Storage channel</th><th>Stored</th><th>Monthly cost</th></tr></thead>
@@ -323,7 +385,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
                 <tr><td>Customer cloud bucket</td><td>{bytes(su?.customer_bytes || 0)}</td><td>{money(su?.customer_monthly || 0)}</td></tr>
               </tbody>
             </table>
-            {b?.costs && (
+            {!isShared && b?.costs && (
               <div className="grid grid-4" style={{ gap: 12, marginTop: 14 }}>
                 <Mini label="Protection / license" value={`${money(b.costs.protection_monthly)}/mo`} />
                 <Mini label="Cloud storage" value={`${money(b.costs.cloud_storage_monthly)}/mo`} />

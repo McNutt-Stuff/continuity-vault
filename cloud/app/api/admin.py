@@ -227,6 +227,7 @@ def overview(db: Session = Depends(get_db)):
 
 @router.get("/tenants")
 def list_tenants(db: Session = Depends(get_db)):
+    nodes = {n.id: n.name for n in db.query(Node).all()}
     out = []
     for t in db.query(Tenant).all():
         out.append({
@@ -237,9 +238,12 @@ def list_tenants(db: Session = Depends(get_db)):
             "key_ownership_model": t.key_ownership_model,
             "status": t.status,
             "node_id": t.node_id,
+            "node": nodes.get(t.node_id) if t.node_id else None,
             "users": db.query(func.count(User.id)).filter(User.tenant_id == t.id).scalar(),
             "appliances": db.query(func.count(Appliance.id))
                 .filter(Appliance.tenant_id == t.id).scalar(),
+            "sources": db.query(func.count(ConnectorAccount.id))
+                .filter(ConnectorAccount.tenant_id == t.id).scalar(),
         })
     return out
 
