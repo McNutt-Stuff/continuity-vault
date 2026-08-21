@@ -21,11 +21,11 @@ from sqlalchemy.orm import Session
 
 from cv_crypto.provider import get_provider
 
-from .. import audit, authcodes, keybroker, security
+from .. import audit, authcodes, security
 from ..config import get_settings
 from ..db import get_db
 from ..emailer import send_email
-from ..models import Passkey, Tenant, User, Vault
+from ..models import Passkey, Tenant, User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
@@ -124,11 +124,10 @@ def signup(body: SignupRequest, db: Session = Depends(get_db)):
     user = User(tenant_id=tenant.id, email=email, display_name=body.display_name.strip(),
                 role="owner", email_verified=False, status="active")
     db.add(user)
-    vault = Vault(tenant_id=tenant.id, name="Primary Vault",
-                  key_ownership_model="customer-managed")
-    db.add(vault)
     db.flush()
-    keybroker.provision_vault_root_key(vault.id, vault.key_ownership_model)
+    from .tenant import provision_vault
+    provision_vault(db, tenant=tenant, owner_user_id=user.id, name="Primary Vault",
+                    key_ownership_model="customer-managed")
     db.commit()
 
     code = authcodes.issue_code(email, "verify")

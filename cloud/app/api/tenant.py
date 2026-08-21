@@ -14,6 +14,24 @@ from ..models import Appliance, ApplianceStorage, Collection, Tenant, Vault
 router = APIRouter(prefix="/tenant", tags=["tenant"])
 
 
+def provision_vault(db: Session, *, tenant: Tenant, owner_user_id: str | None,
+                    name: str, key_ownership_model: str | None = None,
+                    crypto_profile_id: str = "cvp-hybrid-2026a") -> Vault:
+    """The single place a vault is minted: create the row + provision its root
+    key and recovery keypair so keys are always set up consistently. Caller
+    commits. Used by user/tenant/account creation across the app."""
+    kom = key_ownership_model or tenant.key_ownership_model or "customer-managed"
+    vault = Vault(tenant_id=tenant.id, owner_user_id=owner_user_id,
+                  name=name, key_ownership_model=kom,
+                  crypto_profile_id=crypto_profile_id)
+    db.add(vault)
+    db.flush()
+    result = keybroker.provision_vault_root_key(vault.id, kom)
+    vault.wrapped_keys = [{"recipient": "primary", "hash": result["record"]["rootKeyHash"]}]
+    keybroker.provision_recovery_keypair(vault.id)
+    return vault
+
+
 DESTINATION_OPTIONS = [
     {
         "id": "cv-cloud",
@@ -151,24 +169,17 @@ def create_vault(body: CreateVaultRequest,
                  principal: security.Principal = Depends(security.get_principal),
                  tenant: Tenant = Depends(security.get_tenant),
                  db: Session = Depends(get_db)):
-    vault = Vault(
-        tenant_id=tenant.id,
-        owner_user_id=principal.user_id,
-        name=body.name,
-        key_ownership_model=body.key_ownership_model,
-        crypto_profile_id=body.crypto_profile_id,
-    )
-    db.add(vault)
+    vault = provision_vault(db, tenant=tenant, owner_user_id=principal.user_id,
+                            name=body.name.strip() or "New Vault",
+                            key_ownership_model=body.key_ownership_model,
+                            crypto_profile_id=body.crypto_profile_id)
     db.commit()
     db.refresh(vault)
-    # Provision the vault root key + recovery keypair in the key broker (spec 10.x).
-    result = keybroker.provision_vault_root_key(vault.id, body.key_ownership_model)
-    vault.wrapped_keys = [{"recipient": "primary", "hash": result["record"]["rootKeyHash"]}]
-    keybroker.provision_recovery_keypair(vault.id)
-    db.commit()
     audit.record(db, actor=principal.user_id, action="vault.created",
                  tenant_id=tenant.id, resource=vault.id)
-    return {"id": vault.id, "name": vault.name}
+    return {"id": vault.id, "name": vault.name,
+            "key_ownership_model": vault.key_ownership_model,
+            "crypto_profile_id": vault.crypto_profile_id}
 
 
 @router.get("/keys")

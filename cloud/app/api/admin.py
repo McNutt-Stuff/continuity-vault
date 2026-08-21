@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from cv_crypto.profiles import PROFILE_REGISTRY
 from cv_crypto.provider import get_provider
 
-from .. import audit, authcodes, credstore, keybroker, platform_config, security, services
+from .. import audit, authcodes, credstore, platform_config, security, services
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
@@ -449,17 +449,19 @@ def create_tenant(body: TenantCreate,
     )
     db.add(tenant)
     db.flush()
-    vault = Vault(tenant_id=tenant.id, name="Primary Vault",
-                  key_ownership_model=body.key_ownership_model)
-    db.add(vault)
-    db.flush()
-    keybroker.provision_vault_root_key(vault.id, vault.key_ownership_model)
+    # Create the owner first so the primary vault can belong to them.
+    owner = None
     if body.owner_email:
         email = body.owner_email.strip().lower()
-        if not db.query(User).filter(User.email == email).first():
-            db.add(User(tenant_id=tenant.id, email=email,
-                        display_name=(body.owner_name or email).strip(),
-                        role="owner", status="active"))
+        if not db.query(User).filter(func.lower(User.email) == email).first():
+            owner = User(tenant_id=tenant.id, email=email,
+                         display_name=(body.owner_name or email).strip(),
+                         role="owner", status="active")
+            db.add(owner)
+            db.flush()
+    from .tenant import provision_vault
+    provision_vault(db, tenant=tenant, owner_user_id=(owner.id if owner else None),
+                    name="Primary Vault", key_ownership_model=body.key_ownership_model)
     db.commit()
     audit.record(db, actor=principal.user_id, action="admin.tenant_created",
                  tenant_id=tenant.id, category="admin", severity="notice",
@@ -584,6 +586,11 @@ def create_user(tid: str, body: UserCreate,
              first_name=first, last_name=last, phone=(body.phone or "").strip(),
              role=role, status="active")
     db.add(u)
+    db.flush()
+    # Every account gets its own encrypted vault so it can store data immediately.
+    from .tenant import provision_vault
+    vname = f"{(first or display).split()[0]}'s Vault" if (first or display) else "My Vault"
+    provision_vault(db, tenant=t, owner_user_id=u.id, name=vname)
     db.commit()
     db.refresh(u)
     invited = None

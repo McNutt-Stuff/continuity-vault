@@ -3,6 +3,7 @@ import { api } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { formDialog, notify } from "../components/dialog";
 import { getTheme, applyTheme, Theme } from "../theme";
 
 interface Tenant { name: string; plan: string; key_ownership_model: string; vaults: any[]; }
@@ -24,6 +25,40 @@ export default function Settings() {
     api.get<Tenant>("/tenant").then(setTenant).catch(() => {}).finally(() => setLoaded(true));
     api.get<KeyInfo[]>("/tenant/keys").then(setKeys).catch(() => {});
   }, []);
+
+  async function loadVaultsAndKeys() {
+    const [t, k] = await Promise.all([
+      api.get<Tenant>("/tenant").catch(() => null),
+      api.get<KeyInfo[]>("/tenant/keys").catch(() => [] as KeyInfo[]),
+    ]);
+    if (t) setTenant(t);
+    setKeys(k);
+  }
+
+  async function createVault() {
+    const r = await formDialog({
+      title: "New vault",
+      message: "A vault is your own encrypted store with its own root key. You can route different sources into different vaults.",
+      confirmLabel: "Create vault",
+      fields: [
+        { name: "name", label: "Vault name", required: true, placeholder: "e.g. Personal, Photos, Work" },
+        { name: "key_ownership_model", label: "Key ownership", defaultValue: tenant?.key_ownership_model || "customer-managed",
+          options: [
+            { label: "Customer-managed — you hold the keys", value: "customer-managed" },
+            { label: "Zero-knowledge — only you can decrypt", value: "zero-knowledge" },
+          ] },
+      ],
+    });
+    if (!r) return;
+    try {
+      await api.post("/tenant/vaults", r);
+      await loadVaultsAndKeys();
+      setToast("Vault created");
+      setTimeout(() => setToast(""), 2500);
+    } catch (e) {
+      notify({ message: (e as { message?: string }).message || "Could not create vault", tone: "warn" });
+    }
+  }
 
   function pickTheme(t: Theme) { applyTheme(t); setThemeState(t); }
 
@@ -134,7 +169,12 @@ export default function Settings() {
           <Row label="Key ownership" value={tenant?.key_ownership_model} />
           <Row label="Your role" value={me?.role} />
           <div className="divider" />
-          <h3 style={{ marginBottom: 10 }}>Your vaults</h3>
+          <div className="spread" style={{ marginBottom: 10 }}>
+            <h3 style={{ margin: 0 }}>Your vaults</h3>
+            <button className="btn primary sm" onClick={createVault}>
+              <Icon name="shield" size={14} /> New vault
+            </button>
+          </div>
           {tenant?.vaults.map((v) => (
             <div key={v.id} className="result-row">
               <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
@@ -147,6 +187,11 @@ export default function Settings() {
               <Pill tone="info">{v.key_ownership_model}</Pill>
             </div>
           ))}
+          {(!tenant?.vaults || tenant.vaults.length === 0) && (
+            <div className="muted" style={{ fontSize: 12.5 }}>
+              You don't have a vault yet. Create one to start protecting data.
+            </div>
+          )}
         </Card>
       </div>
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
