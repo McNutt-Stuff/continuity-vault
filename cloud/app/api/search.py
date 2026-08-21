@@ -122,6 +122,38 @@ def _location_label(destination: str, store_labels: dict[str, str] | None = None
     }.get(base, destination)
 
 
+def _as_str(v):
+    """Coerce a label/meta value to a display string (objects → name/title)."""
+    if isinstance(v, dict):
+        return v.get("name") or v.get("title") or ""
+    return v if isinstance(v, str) else str(v)
+
+
+def _clean_labels(labels) -> list:
+    """Labels must be plain strings for the UI — coerce objects, drop empties."""
+    out = []
+    for l in (labels or []):
+        s = _as_str(l)
+        if s:
+            out.append(s)
+    return out
+
+
+def _clean_meta(meta) -> dict:
+    """Coerce object/list-of-object meta values so the UI never renders a dict."""
+    if not isinstance(meta, dict):
+        return {}
+    out = {}
+    for k, v in meta.items():
+        if isinstance(v, list):
+            out[k] = [_as_str(x) if isinstance(x, dict) else x for x in v]
+        elif isinstance(v, dict):
+            out[k] = _as_str(v)
+        else:
+            out[k] = v
+    return out
+
+
 def _store_label_map(db: Session, tenant_id: str) -> dict[str, str]:
     """Map ``store:<id>`` → "<appliance> · <storage>" for the tenant."""
     out: dict[str, str] = {}
@@ -348,8 +380,8 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         "sensitivity": sensitivity_for(_cat(r)),
         "title": r.title,
         "preview": r.preview,
-        "meta": r.meta,
-        "labels": r.labels,
+        "meta": _clean_meta(r.meta),
+        "labels": _clean_labels(r.labels),
         "size_bytes": r.size_bytes,
         "modified_at": r.modified_at.isoformat() if r.modified_at else None,
         "first_ingested_at": (first_ingested.get((r.source_type, r.object_id)).isoformat()
