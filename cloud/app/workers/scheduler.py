@@ -18,17 +18,54 @@ from datetime import datetime, timedelta, timezone
 from ..config import get_settings
 from ..connectors import get_connector
 from ..db import SessionLocal
-from ..models import Collection, ConnectorAccount, PendingAction
+from ..models import Collection, ConnectorAccount, Node, PendingAction, Tenant
 from .sync_worker import run_backup
 
 logger = logging.getLogger("cv.scheduler")
 
 _thread: threading.Thread | None = None
+_scope_logged = False
 
 
 def _now() -> datetime:
     # Naive UTC to match the tz-naive DateTime columns.
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _my_node(db) -> Node | None:
+    """The Node row for the running instance. On a shared fleet DB each app
+    instance is identified by its CV_NODE_NAME + role (matching the fleet
+    heartbeat upsert); the control plane also has an is_self row."""
+    s = get_settings()
+    role = s.node_role or "control-plane"
+    name = s.node_name or s.domain
+    n = (db.query(Node)
+         .filter(Node.name == name, Node.role == role).first())
+    if n is None and role == "control-plane":
+        n = db.query(Node).filter(Node.is_self.is_(True)).first()
+    return n
+
+
+def _owned_tenant_ids(db) -> set[str] | None:
+    """The tenant ids whose sync work THIS node should run, or None when node
+    scoping is off (process everything, legacy single-DB behavior).
+
+    - control plane: unassigned tenants (node_id IS NULL) + any pinned to itself
+    - customer-tenant node: only tenants pinned to this node (node_id == self)"""
+    s = get_settings()
+    if not s.node_sync_scope:
+        return None
+    role = s.node_role or "control-plane"
+    me = _my_node(db)
+    my_id = me.id if me else None
+    q = db.query(Tenant.id)
+    if role == "control-plane":
+        rows = q.filter((Tenant.node_id.is_(None)) | (Tenant.node_id == my_id)).all()
+    elif not my_id:
+        rows = []  # can't resolve our own node → own nothing (don't poach)
+    else:
+        rows = q.filter(Tenant.node_id == my_id).all()
+    return {tid for (tid,) in rows}
 
 
 def start_scheduler() -> None:
@@ -58,8 +95,11 @@ def start_scheduler() -> None:
 
     _thread = threading.Thread(target=loop, name="cv-sync-scheduler", daemon=True)
     _thread.start()
-    logger.info("backup scheduler started (tick %ds, default cadence %d min)",
-                tick, settings.sync_interval_minutes)
+    logger.info("backup scheduler started (tick %ds, default cadence %d min, node=%s role=%s scope=%s)",
+                tick, settings.sync_interval_minutes,
+                settings.node_name or settings.domain,
+                settings.node_role or "control-plane",
+                "per-node" if settings.node_sync_scope else "all-tenants")
 
 
 def _purge_recovered() -> None:
@@ -169,13 +209,25 @@ def _process_collection(db, c: Collection, now: datetime, default_minutes: int) 
 
 def run_due() -> int:
     """Run a backup for every mapping whose cadence is due. Returns count run."""
+    global _scope_logged
     settings = get_settings()
     default_minutes = max(1, settings.sync_interval_minutes)
     now = _now()
-    total = eligible = due = ran = 0
+    total = eligible = due = ran = skipped_node = 0
     with SessionLocal() as db:
+        owned = _owned_tenant_ids(db)  # None = no node scoping
+        if settings.node_sync_scope and not _scope_logged:
+            logger.info("node sync scope ON: role=%s node=%s owns %s tenant(s) — "
+                        "other tenants are handled by their assigned node",
+                        settings.node_role or "control-plane",
+                        settings.node_name or settings.domain,
+                        "all" if owned is None else len(owned))
+            _scope_logged = True
         for c in db.query(Collection).all():
             total += 1
+            if owned is not None and c.tenant_id not in owned:
+                skipped_node += 1
+                continue
             try:
                 e, d, r = _process_collection(db, c, now, default_minutes)
                 eligible += e
@@ -185,6 +237,7 @@ def run_due() -> int:
                 db.rollback()
                 logger.warning("scheduler: skipping collection %s (%s): %s",
                                c.id, c.source_type, exc)
-    logger.debug("scheduler cycle: mappings=%d cloud-eligible=%d due=%d ran=%d",
-                 total, eligible, due, ran)
+    log = logger.info if ran else logger.debug
+    log("scheduler cycle: mappings=%d cloud-eligible=%d due=%d ran=%d not-this-node=%d",
+        total, eligible, due, ran, skipped_node)
     return ran

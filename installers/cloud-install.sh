@@ -82,6 +82,28 @@ _existing_db_pw() {
 DB_PASSWORD="${CV_DB_PASSWORD:-$(_existing_db_pw)}"
 DB_PASSWORD="${DB_PASSWORD:-$(openssl rand -hex 16)}"
 
+# Shared control-plane DB (opt-in). A customer-tenant node can point at the
+# control plane's Postgres so it sees the same tenants/sources and writes the
+# same search index — required for per-node sync scoping (CV_NODE_SYNC_SCOPE).
+# Provide CV_DATABASE_URL at install time (or leave a non-local URL in the env
+# file) to use it; the installer then skips local Postgres and never overrides it.
+_current_db_url() {
+  [[ -f /etc/continuity-vault.env ]] || return 0
+  sed -n 's#^CV_DATABASE_URL=##p' /etc/continuity-vault.env | head -1
+}
+EXTERNAL_DB_URL="${CV_DATABASE_URL:-}"
+if [[ -z "$EXTERNAL_DB_URL" ]]; then
+  _cur="$(_current_db_url)"
+  [[ -n "$_cur" && "$_cur" != *"@localhost/"* ]] && EXTERNAL_DB_URL="$_cur"
+fi
+USE_EXTERNAL_DB=0
+[[ -n "$EXTERNAL_DB_URL" && "$EXTERNAL_DB_URL" != *"@localhost/"* ]] && USE_EXTERNAL_DB=1
+if [[ "$USE_EXTERNAL_DB" == "1" ]]; then
+  DB_URL="$EXTERNAL_DB_URL"
+else
+  DB_URL="postgresql+psycopg://cvault:${DB_PASSWORD}@localhost/continuity"
+fi
+
 # Native liboqs version to build for real post-quantum crypto (ML-KEM / ML-DSA /
 # SLH-DSA). MUST match the liboqs-python binding version installed below so the
 # binding loads our system library instead of auto-building its own.
@@ -196,7 +218,7 @@ write_env() {
 CV_ENVIRONMENT=production
 CV_DOMAIN=${CV_DOMAIN}
 CV_API_BASE_URL=https://${CV_DOMAIN}/api
-CV_DATABASE_URL=postgresql+psycopg://cvault:${DB_PASSWORD}@localhost/continuity
+CV_DATABASE_URL=${DB_URL}
 CV_SESSION_SECRET=${session_secret}
 CV_RP_ID=${CV_DOMAIN}
 CV_RP_ORIGIN=https://${CV_DOMAIN}
@@ -231,8 +253,11 @@ CV_SITE_CONTENT_PATH=${INSTALL_DIR}/site/dist/site.json
 # CV_DROPBOX_CLIENT_SECRET=...
 EOF
   else
-    sed -i "s#^CV_DATABASE_URL=.*#CV_DATABASE_URL=postgresql+psycopg://cvault:${DB_PASSWORD}@localhost/continuity#" \
-      /etc/continuity-vault.env
+    # Keep the DB URL current, but never clobber an external (shared) DB URL.
+    if [[ "$USE_EXTERNAL_DB" != "1" ]]; then
+      sed -i "s#^CV_DATABASE_URL=.*#CV_DATABASE_URL=postgresql+psycopg://cvault:${DB_PASSWORD}@localhost/continuity#" \
+        /etc/continuity-vault.env
+    fi
   fi
   # Keep node-role membership in sync on every run (upsert each key).
   local k v
@@ -359,7 +384,12 @@ if [[ "$CV_NODE_ROLE" == "public-web" ]]; then
 fi
 
 # control-plane and customer-tenant both run the Python application stack.
-step_always "Configuring PostgreSQL database" setup_database
+# Skip local Postgres when this node uses the shared control-plane database.
+if [[ "$USE_EXTERNAL_DB" == "1" ]]; then
+  note "Using shared control-plane database (skipping local PostgreSQL setup)"
+else
+  step_always "Configuring PostgreSQL database" setup_database
+fi
 step_if_changed "Installing Python control plane" \
   "$INSTALL_DIR/cloud/requirements.txt $INSTALL_DIR/shared $INSTALL_DIR/.venv/pyvenv.cfg" \
   install_python
