@@ -53,6 +53,63 @@ from ..config import get_settings
 logger = logging.getLogger("cv.sync")
 
 
+def _is_auth_error(exc: Exception) -> bool:
+    """Heuristic: does this failure mean the source needs re-authorization?"""
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) in (401, 403):
+        return True
+    s = str(exc).lower()
+    tokens = ("401", "403", "invalid_grant", "invalid_token", "unauthorized",
+              "forbidden", "token has expired", "token expired", "reauth",
+              "access_denied", "revoked", "needs-reauth", "invalid credentials")
+    return any(t in s for t in tokens)
+
+
+def _record_sync_success(db: Session, account: Optional[ConnectorAccount], count: int) -> None:
+    """Mark a source healthy after a successful sync (clears any prior error)."""
+    if account is None:
+        return
+    account.last_sync_at = datetime.now(timezone.utc)
+    account.last_object_count = int(count)
+    account.last_error = None
+    account.last_error_at = None
+    if account.auth_status == "needs-reauth":
+        account.auth_status = "linked"
+    db.commit()
+    logger.info("sync ok: source=%s account=%s captured=%d",
+                getattr(account, "connector_type", "?"), account.account_label, count)
+
+
+def _record_sync_error(db: Session, account: Optional[ConnectorAccount],
+                       collection: Collection, exc: Exception) -> None:
+    """Persist a source's failure + emit an audit event; flag re-auth needs so
+    the UI can offer a Reconnect button and the overview can warn."""
+    if account is None:
+        return
+    msg = (str(exc)[:500] or exc.__class__.__name__)
+    needs_auth = _is_auth_error(exc)
+    account.last_error = msg
+    account.last_error_at = datetime.now(timezone.utc)
+    if needs_auth:
+        account.auth_status = "needs-reauth"
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+    logger.error("sync failed: source=%s account=%s reauth=%s error=%s",
+                 collection.source_type, account.account_label, needs_auth, msg)
+    try:
+        audit.record(
+            db, actor="sync-worker",
+            action="connector.reauth_required" if needs_auth else "connector.sync_failed",
+            tenant_id=collection.tenant_id, resource=account.id,
+            category="connector", severity="warning" if needs_auth else "error",
+            detail={"type": collection.source_type, "account": account.account_label,
+                    "error": msg, "needs_reauth": needs_auth})
+    except Exception:
+        db.rollback()
+
+
 def _encrypt_content_units(snapshot_key: bytes, content: bytes, object_id: str,
                            chunk_size: int) -> list:
     """Encrypt one source object into storage units. Small content becomes a
@@ -220,50 +277,55 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
     label = account.account_label if account else collection.name
     if progress:
         progress(0, 0, f"Fetching from {label}…")
-    config = _account_config(db, collection, account)
-    # Fold the mapping's own settings (e.g. Gmail folder exclusions) into the
-    # connector config alongside the credentials.
-    if collection.config:
-        config = {**config, **collection.config}
-    caps = connector.capabilities()
-    # Media-heavy sources (Facebook/Instagram photos, etc.) stream: ingest in
-    # bounded batches so a large library can't materialize into memory and OOM.
-    if caps.streaming:
-        return _run_backup_streaming(db, collection, account, connector, config,
-                                     destinations, caps, label, progress)
-    # Incremental: pass the stored cursor; the connector returns a new cursor to
-    # persist (full first backup, then deltas since the last sync).
-    result = connector.fetch(label, cursor=(account.sync_cursor if account else None),
-                             config=config)
-    objects = list(result.objects)
+    logger.debug("sync start: source=%s collection=%s label=%s",
+                 collection.source_type, collection.id, label)
+    try:
+        config = _account_config(db, collection, account)
+        # Fold the mapping's own settings (e.g. Gmail folder exclusions) into the
+        # connector config alongside the credentials.
+        if collection.config:
+            config = {**config, **collection.config}
+        caps = connector.capabilities()
+        # Media-heavy sources (Facebook/Instagram photos, etc.) stream: ingest in
+        # bounded batches so a large library can't materialize into memory and OOM.
+        if caps.streaming:
+            return _run_backup_streaming(db, collection, account, connector, config,
+                                         destinations, caps, label, progress)
+        # Incremental: pass the stored cursor; the connector returns a new cursor to
+        # persist (full first backup, then deltas since the last sync).
+        result = connector.fetch(label, cursor=(account.sync_cursor if account else None),
+                                 config=config)
+        objects = list(result.objects)
+        logger.debug("sync fetched %d object(s): source=%s", len(objects), collection.source_type)
 
-    # A delta run with nothing new: advance the cursor, don't create an empty
-    # recovery point. (First-ever run still ingests to establish a baseline.)
-    if not objects and account is not None:
-        prior = (db.query(SnapshotReceipt)
-                 .filter(SnapshotReceipt.collection_id == collection.id)
-                 .order_by(SnapshotReceipt.created_at.desc()).first())
-        if prior is not None:
-            account.last_sync_at = datetime.now(timezone.utc)
+        # A delta run with nothing new: advance the cursor, don't create an empty
+        # recovery point. (First-ever run still ingests to establish a baseline.)
+        if not objects and account is not None:
+            prior = (db.query(SnapshotReceipt)
+                     .filter(SnapshotReceipt.collection_id == collection.id)
+                     .order_by(SnapshotReceipt.created_at.desc()).first())
+            if prior is not None:
+                if result.cursor is not None:
+                    account.sync_cursor = result.cursor
+                _record_sync_success(db, account, 0)
+                if progress:
+                    progress(0, 0, "No new items")
+                return prior
+
+        if progress:
+            progress(0, len(objects), f"Encrypting & storing {len(objects)} items…")
+        receipt = ingest_objects(db, collection, objects, destinations,
+                                 searchable_fields=caps.searchable_fields,
+                                 facet_fields=caps.facet_fields, actor="sync-worker",
+                                 progress=progress)
+        if account:
             if result.cursor is not None:
                 account.sync_cursor = result.cursor
-            db.commit()
-            if progress:
-                progress(0, 0, "No new items")
-            return prior
-
-    if progress:
-        progress(0, len(objects), f"Encrypting & storing {len(objects)} items…")
-    receipt = ingest_objects(db, collection, objects, destinations,
-                             searchable_fields=caps.searchable_fields,
-                             facet_fields=caps.facet_fields, actor="sync-worker",
-                             progress=progress)
-    if account:
-        account.last_sync_at = datetime.now(timezone.utc)
-        if result.cursor is not None:
-            account.sync_cursor = result.cursor
-        db.commit()
-    return receipt
+            _record_sync_success(db, account, len(objects))
+        return receipt
+    except Exception as exc:
+        _record_sync_error(db, account, collection, exc)
+        raise
 
 
 def _run_backup_streaming(db: Session, collection: Collection,
@@ -312,20 +374,18 @@ def _run_backup_streaming(db: Session, collection: Collection,
                  .order_by(SnapshotReceipt.created_at.desc()).first())
         if prior is not None:
             if account:
-                account.last_sync_at = datetime.now(timezone.utc)
                 if new_cursor is not None:
                     account.sync_cursor = new_cursor
-                db.commit()
+                _record_sync_success(db, account, 0)
             return prior
     if last_receipt is None:  # first run with nothing pulled — establish a baseline
         last_receipt = ingest_objects(db, collection, [], destinations,
                                       searchable_fields=caps.searchable_fields,
                                       facet_fields=caps.facet_fields, actor="sync-worker")
     if account:
-        account.last_sync_at = datetime.now(timezone.utc)
         if new_cursor is not None:
             account.sync_cursor = new_cursor
-        db.commit()
+        _record_sync_success(db, account, total)
     return last_receipt
 
 

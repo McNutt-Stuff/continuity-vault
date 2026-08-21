@@ -97,6 +97,12 @@ def startup() -> None:
     from .workers.scheduler import start_scheduler
     start_scheduler()
 
+    # Verbose sync diagnostics when enabled (per-source fetch/ingest/errors).
+    if settings.sync_debug:
+        import logging
+        for name in ("cv.sync", "cv.scheduler", "cv.connectors", "cv.connectors.evernote_mcp"):
+            logging.getLogger(name).setLevel(logging.DEBUG)
+
 
 @app.get("/api/health")
 def health():

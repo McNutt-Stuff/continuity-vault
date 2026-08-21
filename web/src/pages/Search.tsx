@@ -38,10 +38,11 @@ interface OnePasswordView {
   title: string; category: string; vault?: string; updatedAt?: string;
   fields: OpField[]; urls: { label?: string; href: string }[]; notes?: string;
 }
+interface NoteView { title?: string; notebook?: string; tags?: string[]; content?: string }
 interface Viewing {
   item: Recovered;
-  kind: "text" | "image" | "binary" | "email" | "onepassword";
-  text?: string; url?: string; email?: EmailView; onePassword?: OnePasswordView;
+  kind: "text" | "image" | "binary" | "email" | "onepassword" | "pdf" | "audio" | "video" | "note";
+  text?: string; url?: string; email?: EmailView; onePassword?: OnePasswordView; note?: NoteView;
 }
 
 interface Result {
@@ -404,12 +405,36 @@ export default function Search() {
         await loadRecovered();
         return;
       }
+      if (mime === "application/pdf") {
+        setViewing({ item, kind: "pdf", url });
+        await loadRecovered();
+        return;
+      }
+      if (mime.startsWith("audio/")) {
+        setViewing({ item, kind: "audio", url });
+        await loadRecovered();
+        return;
+      }
+      if (mime.startsWith("video/")) {
+        setViewing({ item, kind: "video", url });
+        await loadRecovered();
+        return;
+      }
       const text = await blob.text();
       const oversized = text.trimStart().startsWith("{") && text.includes("content_exceeds_cap");
       // 1Password items: parse the op JSON into a structured credential display.
       if (!oversized && isOnePassword(item)) {
         try {
           setViewing({ item, kind: "onepassword", onePassword: parse1Password(JSON.parse(text)), url });
+          await loadRecovered();
+          return;
+        } catch { /* fall through to generic rendering */ }
+      }
+      // Notes (e.g. Evernote): render the note body rather than raw JSON.
+      if (!oversized && item.doc_type === "note") {
+        try {
+          const n = JSON.parse(text);
+          setViewing({ item, kind: "note", note: n, url });
           await loadRecovered();
           return;
         } catch { /* fall through to generic rendering */ }
@@ -751,6 +776,29 @@ export default function Search() {
               )}
               {viewing.kind === "image" && (
                 <img src={viewing.url} alt={viewing.item.title} style={{ maxWidth: "100%", borderRadius: 8 }} />
+              )}
+              {viewing.kind === "pdf" && (
+                <iframe src={viewing.url} title={viewing.item.title}
+                        style={{ width: "100%", height: "70vh", border: "none", borderRadius: 8, background: "#fff" }} />
+              )}
+              {viewing.kind === "audio" && (
+                <audio controls src={viewing.url} style={{ width: "100%" }} />
+              )}
+              {viewing.kind === "video" && (
+                <video controls src={viewing.url} style={{ maxWidth: "100%", maxHeight: "70vh", borderRadius: 8 }} />
+              )}
+              {viewing.kind === "note" && viewing.note && (
+                <div>
+                  {(viewing.note.notebook || viewing.note.tags?.length) && (
+                    <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
+                      {viewing.note.notebook ? `📓 ${viewing.note.notebook}` : ""}
+                      {viewing.note.tags?.length ? `  ·  ${viewing.note.tags.join(", ")}` : ""}
+                    </div>
+                  )}
+                  <pre className="log-pane" style={{ maxHeight: "60vh", whiteSpace: "pre-wrap" }}>
+                    {viewing.note.content || "(empty note)"}
+                  </pre>
+                </div>
               )}
               {viewing.kind === "binary" && (
                 <div className="muted" style={{ padding: 16 }}>

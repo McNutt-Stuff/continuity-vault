@@ -128,21 +128,38 @@ def activity(limit: int = 40,
     } for j in jobs]
 
     pending = sum(1 for e in events if e["status"] == "pending")
+
+    # Sources currently in an error / needs-reauth state (from the last sync).
+    source_errors = [{
+        "kind": "source-error",
+        "account_id": a.id,
+        "source": a.account_label,
+        "source_type": a.connector_type,
+        "needs_reauth": a.auth_status == "needs-reauth",
+        "error": a.last_error,
+        "at": a.last_error_at.isoformat() if a.last_error_at else None,
+    } for a in (db.query(ConnectorAccount)
+                .filter(ConnectorAccount.tenant_id == tenant.id,
+                        ConnectorAccount.last_error.isnot(None))
+                .order_by(ConnectorAccount.last_error_at.desc()).all())]
+
     return {
         "in_flight": in_flight,
         "events": events,
         "jobs": job_items,
+        "source_errors": source_errors,
         "summary": {
             "recent": len(events),
             "pending": pending,
             "queued_agents": len(in_flight),
             "active_jobs": len(job_items),
+            "source_errors": len(source_errors),
         },
     }
 
 
 # Severities that constitute an operator-facing alert.
-_ALERT_SEVERITIES = ("warning", "critical")
+_ALERT_SEVERITIES = ("warning", "error", "critical")
 
 
 @router.get("/alerts")

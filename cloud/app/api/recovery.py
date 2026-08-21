@@ -145,8 +145,15 @@ def view_content(item_id: str,
     audit.record(db, actor=principal.user_id, action="recovery.viewed",
                  tenant_id=tenant.id, resource=item.object_id,
                  detail={"location": item.location, "bytes": item.size_bytes})
-    return Response(content=data, media_type=item.mime,
-                    headers={"Content-Disposition": f'inline; filename="{item.title}"'})
+    # Content-Disposition must be Latin-1 safe; titles can hold Unicode (curly
+    # quotes, emoji). Give an ASCII fallback plus an RFC 5987 UTF-8 filename*.
+    from urllib.parse import quote
+    title = item.title or "file"
+    ascii_name = (title.encode("ascii", "ignore").decode().replace('"', "").replace("\\", "").strip()
+                  or "file")
+    disp = f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(title)}"
+    return Response(content=data, media_type=item.mime or "application/octet-stream",
+                    headers={"Content-Disposition": disp})
 
 
 @router.delete("/{item_id}")

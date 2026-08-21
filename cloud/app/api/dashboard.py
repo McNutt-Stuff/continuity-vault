@@ -192,6 +192,10 @@ def overview(tenant: Tenant = Depends(security.get_tenant),
             "key_ownership_model": tenant.key_ownership_model,
             "encrypted": True,
         },
+        "connector_health": {
+            "issues": sum(1 for a in accounts if a.last_error or a.auth_status == "needs-reauth"),
+            "needs_reauth": sum(1 for a in accounts if a.auth_status == "needs-reauth"),
+        },
     }
 
 

@@ -109,6 +109,9 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",
         "ALTER TABLE audit_events ADD COLUMN category VARCHAR DEFAULT 'activity'",
         "ALTER TABLE connector_accounts ADD COLUMN sync_cursor JSON",
+        "ALTER TABLE connector_accounts ADD COLUMN last_object_count INTEGER",
+        "ALTER TABLE connector_accounts ADD COLUMN last_error TEXT",
+        "ALTER TABLE connector_accounts ADD COLUMN last_error_at TIMESTAMP",
         "ALTER TABLE appliance_storages ADD COLUMN used_bytes INTEGER DEFAULT 0",
         "ALTER TABLE appliance_storages ADD COLUMN health JSON",
         # Byte counts can exceed 32-bit INTEGER (>2.1GB) — widen to BIGINT so

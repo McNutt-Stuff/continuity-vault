@@ -19,6 +19,7 @@ interface Overview {
     oldest_content_at: string | null;
   };
   protection: { key_ownership_model: string; encrypted: boolean };
+  connector_health?: { issues: number; needs_reauth: number };
 }
 interface Tenant { name: string; plan: string; key_ownership_model: string; }
 interface PendingAction {
@@ -95,6 +96,24 @@ export default function Dashboard() {
           </button>
         </div>
       </div>
+
+      {ov?.connector_health && ov.connector_health.issues > 0 && (
+        <Card style={{ marginBottom: 16, borderColor: "var(--warn)", cursor: "pointer" }} onClick={() => nav("/connectors")}>
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            <div className="result-icon" style={{ background: "var(--inset)", color: "var(--warn)" }}>
+              <Icon name="alert" size={18} />
+            </div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>Some of your sources are having issues</div>
+              <div className="faint" style={{ fontSize: 12.5 }}>
+                {ov.connector_health.issues} source{ov.connector_health.issues === 1 ? "" : "s"} need attention
+                {ov.connector_health.needs_reauth > 0 ? ` · ${ov.connector_health.needs_reauth} need re-authorization` : ""} — click to investigate
+              </div>
+            </div>
+            <Icon name="link" size={16} />
+          </div>
+        </Card>
+      )}
 
       {actions.length > 0 && (
         <Card style={{ marginBottom: 16, borderColor: "var(--accent,#4f7cff)" }}>

@@ -145,6 +145,7 @@ def catalog(tenant: Tenant = Depends(security.get_tenant)):
 
 class ConnectRequest(BaseModel):
     account_label: str | None = None
+    account_id: str | None = None  # set to re-authorize an existing source
 
 
 @router.post("/{connector_type}/connect")
@@ -165,6 +166,7 @@ def connect(connector_type: str, body: ConnectRequest,
         state = oauth.sign_state({
             "tid": tenant.id, "uid": principal.user_id,
             "type": connector_type, "label": body.account_label or "",
+            "aid": body.account_id or "",
             "pkce": verifier, "n": str(uuid.uuid4()),
         })
         try:
@@ -182,6 +184,7 @@ def connect(connector_type: str, body: ConnectRequest,
         state = oauth.sign_state({
             "tid": tenant.id, "uid": principal.user_id,
             "type": connector_type, "label": body.account_label or "",
+            "aid": body.account_id or "",
             "n": str(uuid.uuid4()),
         })
         return {"mode": "oauth", "authorize_url": oauth.authorize_url(connector_type, state)}
@@ -208,15 +211,7 @@ def oauth_callback(code: str | None = Query(default=None),
         except Exception as exc:
             logger.error("Evernote MCP token exchange failed: %s", exc)
             return RedirectResponse(f"{portal}/connectors?error=token_exchange")
-        account = ConnectorAccount(
-            tenant_id=data["tid"], connector_type=connector_type,
-            account_label=data.get("label") or "Evernote account", auth_status="linked",
-            encrypted_credentials=credstore.encrypt(data["tid"], tokens),
-            scopes=(tokens.get("scope") or "").split())
-        db.add(account)
-        db.commit()
-        audit.record(db, actor=data["uid"], action="connector.linked",
-                     tenant_id=data["tid"], resource=account.id, detail={"type": connector_type})
+        _link_or_reauth(db, data, connector_type, tokens, "Evernote account")
         return RedirectResponse(f"{portal}/connectors?connected={connector_type}")
     try:
         tokens = oauth.exchange_code(connector_type, code)
@@ -224,22 +219,40 @@ def oauth_callback(code: str | None = Query(default=None),
         logger.error("OAuth token exchange failed for %s: %s", connector_type, exc)
         return RedirectResponse(f"{portal}/connectors?error=token_exchange")
 
-    label = data.get("label") or _fetch_account_label(connector_type, tokens) \
-        or f"{connector_type} account"
+    default_label = (_fetch_account_label(connector_type, tokens)
+                     or f"{connector_type} account")
+    _link_or_reauth(db, data, connector_type, tokens, default_label)
+    return RedirectResponse(f"{portal}/connectors?connected={connector_type}")
+
+
+def _link_or_reauth(db: Session, data: dict, connector_type: str,
+                    tokens: dict, default_label: str) -> ConnectorAccount:
+    """Create a new linked source, or — when re-authorizing (state carries the
+    account id) — refresh the existing one and clear its error/reauth state."""
+    creds = credstore.encrypt(data["tid"], tokens)
+    scopes = (tokens.get("scope") or "").split()
+    aid = data.get("aid")
+    existing = db.get(ConnectorAccount, aid) if aid else None
+    if existing is not None and existing.tenant_id == data["tid"]:
+        existing.encrypted_credentials = creds
+        existing.scopes = scopes
+        existing.auth_status = "linked"
+        existing.last_error = None
+        existing.last_error_at = None
+        db.commit()
+        audit.record(db, actor=data["uid"], action="connector.reauthorized",
+                     tenant_id=data["tid"], resource=existing.id,
+                     category="connector", detail={"type": connector_type})
+        return existing
     account = ConnectorAccount(
-        tenant_id=data["tid"],
-        connector_type=connector_type,
-        account_label=label,
-        auth_status="linked",
-        encrypted_credentials=credstore.encrypt(data["tid"], tokens),
-        scopes=(tokens.get("scope") or "").split(),
-    )
+        tenant_id=data["tid"], connector_type=connector_type,
+        account_label=data.get("label") or default_label, auth_status="linked",
+        encrypted_credentials=creds, scopes=scopes)
     db.add(account)
     db.commit()
     audit.record(db, actor=data["uid"], action="connector.linked",
-                 tenant_id=data["tid"], resource=account.id,
-                 detail={"type": connector_type})
-    return RedirectResponse(f"{portal}/connectors?connected={connector_type}")
+                 tenant_id=data["tid"], resource=account.id, detail={"type": connector_type})
+    return account
 
 
 class TokenLinkRequest(BaseModel):
@@ -283,6 +296,11 @@ def list_accounts(tenant: Tenant = Depends(security.get_tenant),
     return [{"id": a.id, "connector_type": a.connector_type,
              "account_label": a.account_label, "auth_status": a.auth_status,
              "last_sync_at": a.last_sync_at.isoformat() if a.last_sync_at else None,
+             "last_object_count": a.last_object_count,
+             "last_error": a.last_error,
+             "last_error_at": a.last_error_at.isoformat() if a.last_error_at else None,
+             "needs_reauth": a.auth_status == "needs-reauth",
+             "has_error": bool(a.last_error),
              "scopes": a.scopes} for a in accounts]
 
 

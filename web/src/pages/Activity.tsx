@@ -13,9 +13,13 @@ interface Job {
   id: string; source: string; source_type?: string; kind: string;
   status: string; processed: number; total: number; message: string;
 }
+interface SourceError {
+  account_id: string; source: string; source_type?: string;
+  needs_reauth?: boolean; error?: string; at?: string | null;
+}
 interface Activity {
-  in_flight: Event[]; events: Event[]; jobs: Job[];
-  summary: { recent: number; pending: number; queued_agents: number; active_jobs: number };
+  in_flight: Event[]; events: Event[]; jobs: Job[]; source_errors?: SourceError[];
+  summary: { recent: number; pending: number; queued_agents: number; active_jobs: number; source_errors?: number };
 }
 
 function ago(iso?: string | null): string {
@@ -72,6 +76,29 @@ export default function ActivityPage() {
         <Stat label="Sealing" value={data?.summary.pending ?? 0} hint="awaiting appliance seal" />
         <Stat label="Objects ingested" value={objectsTotal} hint={bytes(bytesTotal)} />
       </div>
+
+      {data && (data.source_errors?.length ?? 0) > 0 && (
+        <Card style={{ marginBottom: 16, borderColor: "var(--warn)" }}>
+          <h3 style={{ marginBottom: 10, color: "var(--warn)" }}>
+            <Icon name="alert" size={15} /> Source issues
+          </h3>
+          {data.source_errors!.map((s) => (
+            <div key={s.account_id} className="result-row">
+              <div className="result-icon" style={{ background: "var(--inset)", color: "var(--warn)" }}>
+                <SourceGlyph type={s.source_type} size={18} />
+              </div>
+              <div className="flex1">
+                <div style={{ fontWeight: 600 }}>{s.source}</div>
+                <div className="faint" style={{ fontSize: 12 }}>
+                  {s.needs_reauth ? "Needs re-authorization" : "Last sync failed"}
+                  {s.error ? ` — ${s.error.slice(0, 160)}` : ""} {s.at ? `· ${ago(s.at)}` : ""}
+                </div>
+              </div>
+              <a className="btn sm primary" href="/connectors">{s.needs_reauth ? "Reconnect" : "Investigate"}</a>
+            </div>
+          ))}
+        </Card>
+      )}
 
       {data && (data.jobs.length > 0 || data.in_flight.length > 0) && (
         <Card style={{ marginBottom: 16 }}>

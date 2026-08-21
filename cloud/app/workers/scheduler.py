@@ -67,9 +67,16 @@ def _purge_recovered() -> None:
             logger.info("purged %d expired recovery window(s)", n)
 
 
-def _effective_interval(c: Collection, default_minutes: int) -> int:
-    """Resolve a mapping's cadence: NULL → global default; value as-is otherwise."""
-    return default_minutes if c.backup_interval_minutes is None else c.backup_interval_minutes
+def _effective_interval(c: Collection, default_minutes: int, caps=None) -> int:
+    """Resolve a mapping's cadence: NULL → global default; value as-is otherwise.
+    Full-refetch sources (streaming, no delta) re-pull the whole library each run,
+    so when the admin hasn't set a cadence they default to daily, not the global
+    (usually hourly) default."""
+    if c.backup_interval_minutes is not None:
+        return c.backup_interval_minutes
+    if caps is not None and caps.streaming and not caps.delta:
+        return max(default_minutes, 1440)
+    return default_minutes
 
 
 def _is_due(c: Collection, interval_minutes: int, now: datetime) -> bool:
@@ -132,12 +139,7 @@ def run_due() -> int:
                     db.rollback()
                     logger.warning("photo reminder failed for %s: %s", c.id, exc)
                 continue
-            # Media-heavy, non-delta sources (Facebook/Instagram) re-fetch the
-            # WHOLE library every run — never auto-run them on a schedule (wasteful
-            # + risks memory pressure). They back up only on explicit manual runs.
-            if caps.streaming and not caps.delta:
-                continue
-            interval = _effective_interval(c, default_minutes)
+            interval = _effective_interval(c, default_minutes, caps)
             if not _is_due(c, interval, now):
                 continue
             try:
@@ -151,10 +153,6 @@ def run_due() -> int:
                     continue
                 if not c.connector_account_id:
                     continue  # nothing to authenticate a pull with
-                # Delta sources sync incrementally; non-delta sources only run
-                # on a cadence the admin set explicitly (a full re-snapshot).
-                if not caps.delta and c.backup_interval_minutes is None:
-                    continue
                 run_backup(db, c)
                 logger.info("scheduled backup: collection=%s (%s) source=%s "
                             "destinations=%s interval=%dmin", c.id, c.name,
@@ -164,6 +162,14 @@ def run_due() -> int:
                 ran += 1
             except Exception as exc:  # noqa: BLE001 - isolate per-source failures
                 db.rollback()
+                # run_backup already recorded the error on the source; still stamp
+                # the run time so a persistently-failing source doesn't retry every
+                # tick (it retries on its normal cadence).
+                try:
+                    c.last_backup_run_at = now
+                    db.commit()
+                except Exception:
+                    db.rollback()
                 logger.warning("scheduled backup failed for collection %s (%s): %s",
                                c.id, c.source_type, exc)
     return ran

@@ -27,6 +27,11 @@ interface Account {
   account_label: string;
   auth_status: string;
   last_sync_at: string | null;
+  last_object_count?: number | null;
+  last_error?: string | null;
+  last_error_at?: string | null;
+  needs_reauth?: boolean;
+  has_error?: boolean;
 }
 interface Vault { id: string; name: string; }
 interface Agent { id: string; name: string; hostname: string; collectors: string[]; }
@@ -174,6 +179,16 @@ export default function Connectors() {
       const err = e as ApiError;
       if (err.status === 400) setSetup(c);
       else await notify({ title: "Couldn't start authorization", message: err.message, tone: "danger" });
+    }
+  }
+
+  async function reconnect(a: Account) {
+    try {
+      const res = await api.post<{ authorize_url?: string }>(`/connectors/${a.connector_type}/connect`, { account_id: a.id });
+      if (res.authorize_url) { window.location.href = res.authorize_url; return; }
+      await notify({ title: "Re-add this source", message: "This source is linked with a token — remove and add it again to re-authorize.", tone: "warn" });
+    } catch (e) {
+      await notify({ title: "Couldn't start re-authorization", message: (e as ApiError).message, tone: "danger" });
     }
   }
 
@@ -344,8 +359,9 @@ export default function Connectors() {
         {accounts.length === 0 && <div className="muted">No sources linked yet.</div>}
         {accounts.map((a) => {
           const c = catalog.find((x) => x.type === a.connector_type);
+          const err = !!(a.needs_reauth || a.has_error);
           return (
-            <div key={a.id} className="result-row">
+            <div key={a.id} className="result-row" style={err ? { borderLeft: "3px solid var(--warn)" } : undefined}>
               <div className="result-icon" style={{ background: brandForSource(a.connector_type) ? "var(--inset)" : (c?.color ?? "var(--bg-elev-2)") }}>
                 {brandForSource(a.connector_type)
                   ? <BrandIcon name={brandForSource(a.connector_type)!} size={18} />
@@ -355,12 +371,24 @@ export default function Connectors() {
                 <div style={{ fontWeight: 600 }}>{a.account_label}</div>
                 <div className="faint" style={{ fontSize: 12 }}>
                   {c?.displayName ?? a.connector_type} · last sync {timeAgo(a.last_sync_at)}
+                  {a.last_object_count != null
+                    ? ` · ${a.last_object_count.toLocaleString()} object${a.last_object_count === 1 ? "" : "s"} collected`
+                    : ""}
                 </div>
+                {err && (
+                  <div style={{ fontSize: 12, color: "var(--warn)", marginTop: 3, display: "flex", gap: 6, alignItems: "center" }}>
+                    <Icon name="alert" size={11} />
+                    {a.needs_reauth ? "Needs re-authorization" : "Last sync failed"}
+                    {a.last_error ? ` — ${a.last_error.slice(0, 140)}` : ""}
+                  </div>
+                )}
               </div>
-              <Pill tone={a.auth_status === "linked" ? "ok" : "warn"}>{a.auth_status}</Pill>
-              {a.connector_type === "google_photos"
-                ? <button className="btn sm primary" onClick={() => setPhotoPicker(a.id)}>Add photos</button>
-                : <button className="btn sm primary" onClick={() => backup(a)}>Back up now</button>}
+              <Pill tone={err ? "warn" : "ok"}>{a.needs_reauth ? "needs reauth" : a.auth_status}</Pill>
+              {a.needs_reauth
+                ? <button className="btn sm primary" onClick={() => reconnect(a)}><Icon name="key" size={13} /> Reconnect</button>
+                : (a.connector_type === "google_photos"
+                    ? <button className="btn sm primary" onClick={() => setPhotoPicker(a.id)}>Add photos</button>
+                    : <button className="btn sm primary" onClick={() => backup(a)}>Back up now</button>)}
               <button className="btn sm ghost" onClick={() => unlink(a)}>Unlink</button>
             </div>
           );

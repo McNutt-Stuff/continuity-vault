@@ -145,6 +145,9 @@ class ConnectorAccount(Base):
     scopes = Column(JSON, default=list)
     sync_cursor = Column(JSON, nullable=True)  # incremental sync state (e.g. Gmail historyId)
     last_sync_at = Column(DateTime, nullable=True)
+    last_object_count = Column(Integer, nullable=True)  # items captured in the last sync
+    last_error = Column(Text, nullable=True)            # last sync error message (NULL = healthy)
+    last_error_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 
 

@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     # Scheduled connector sync (background delta worker).
     sync_enabled: bool = True
     sync_interval_minutes: int = 30
+    # Verbose per-source sync logging (cv.sync / cv.scheduler at DEBUG).
+    sync_debug: bool = False
     # How often the scheduler wakes to check each mapping's per-mapping cadence.
     scheduler_tick_seconds: int = 60
     # Safety cap on how many items a single full backup pulls from a source.
