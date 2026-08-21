@@ -87,16 +87,36 @@ def _storage_meta(dest: str, stores: dict) -> dict:
 
 
 @router.get("")
-def overview(tenant: Tenant = Depends(security.get_tenant),
+def overview(scope: str = "me",
+             principal: security.Principal = Depends(security.get_principal),
+             tenant: Tenant = Depends(security.get_tenant),
              db: Session = Depends(get_db)):
-    accounts = db.query(ConnectorAccount).filter(
-        ConnectorAccount.tenant_id == tenant.id).all()
-    agents = db.query(DesktopAgent).filter(
-        DesktopAgent.tenant_id == tenant.id,
-        DesktopAgent.state != "retired").all()
-    collections = db.query(Collection).filter(
-        Collection.tenant_id == tenant.id).all()
-    vaults = db.query(Vault).filter(Vault.tenant_id == tenant.id).all()
+    # Data partitioning: a member sees only their own vaults; an org admin can
+    # switch to the whole organization for aggregate statistics.
+    vault_ids, eff_scope = security.scoped_vault_ids(db, principal, scope)
+    can_switch = security.is_org_admin(principal.role) or principal.is_platform_admin
+
+    collections = (db.query(Collection)
+                   .filter(Collection.tenant_id == tenant.id,
+                           Collection.vault_id.in_(vault_ids)).all()) if vault_ids else []
+    if eff_scope == "org":
+        accounts = db.query(ConnectorAccount).filter(
+            ConnectorAccount.tenant_id == tenant.id).all()
+        agents = db.query(DesktopAgent).filter(
+            DesktopAgent.tenant_id == tenant.id,
+            DesktopAgent.state != "retired").all()
+    else:
+        # A member's sources are those mapped into their own vaults.
+        acct_ids = {c.connector_account_id for c in collections if c.connector_account_id}
+        agent_ids = {c.agent_id for c in collections if c.agent_id}
+        accounts = (db.query(ConnectorAccount)
+                    .filter(ConnectorAccount.tenant_id == tenant.id,
+                            ConnectorAccount.id.in_(acct_ids)).all()) if acct_ids else []
+        agents = (db.query(DesktopAgent)
+                  .filter(DesktopAgent.tenant_id == tenant.id,
+                          DesktopAgent.id.in_(agent_ids)).all()) if agent_ids else []
+    vaults = (db.query(Vault).filter(Vault.tenant_id == tenant.id,
+                                     Vault.id.in_(vault_ids)).all()) if vault_ids else []
 
     # --- Protected sources + the mix of source types we cover ----------------
     type_counts: dict[str, int] = {}
@@ -113,8 +133,9 @@ def overview(tenant: Tenant = Depends(security.get_tenant),
 
     # --- Objects protected (deduped per logical object) + type breakdown -----
     docs = (db.query(SearchDocument)
-            .filter(SearchDocument.tenant_id == tenant.id)
-            .order_by(SearchDocument.created_at.desc()).all())
+            .filter(SearchDocument.tenant_id == tenant.id,
+                    SearchDocument.vault_id.in_(vault_ids))
+            .order_by(SearchDocument.created_at.desc()).all()) if vault_ids else []
     seen: set[tuple] = set()
     bucket_counts: dict[str, int] = {}
     source_obj_counts: dict[str, int] = {}
@@ -163,8 +184,10 @@ def overview(tenant: Tenant = Depends(security.get_tenant),
     # Bytes actually written (cumulative across recovery points), grouped into
     # the three places data can live. Customer cloud is shown only when used.
     usage = {"cloud": 0, "appliance": 0, "customer": 0}
-    for r in db.query(SnapshotReceipt).filter(
-            SnapshotReceipt.tenant_id == tenant.id).all():
+    receipts = (db.query(SnapshotReceipt)
+                .filter(SnapshotReceipt.tenant_id == tenant.id,
+                        SnapshotReceipt.vault_id.in_(vault_ids)).all()) if vault_ids else []
+    for r in receipts:
         b = int(r.total_bytes or 0)
         dest = r.destination or ""
         if dest == "customer-s3":
@@ -177,7 +200,8 @@ def overview(tenant: Tenant = Depends(security.get_tenant),
     # not when we ingested it.
     oldest = (db.query(func.min(SearchDocument.modified_at))
               .filter(SearchDocument.tenant_id == tenant.id,
-                      SearchDocument.modified_at.isnot(None)).scalar())
+                      SearchDocument.vault_id.in_(vault_ids),
+                      SearchDocument.modified_at.isnot(None)).scalar()) if vault_ids else None
 
     return {
         "sources": {"count": sum(type_counts.values()), "types": source_types},
@@ -196,6 +220,8 @@ def overview(tenant: Tenant = Depends(security.get_tenant),
             "issues": sum(1 for a in accounts if a.last_error or a.auth_status == "needs-reauth"),
             "needs_reauth": sum(1 for a in accounts if a.auth_status == "needs-reauth"),
         },
+        "scope": eff_scope,
+        "can_switch_scope": can_switch,
     }
 
 
@@ -220,14 +246,18 @@ def _bucket_edges(period: str, now: datetime, earliest: datetime) -> list[dateti
 
 
 @router.get("/trends")
-def trends(period: str = "week", tenant: Tenant = Depends(security.get_tenant),
+def trends(period: str = "week", scope: str = "me",
+           principal: security.Principal = Depends(security.get_principal),
+           tenant: Tenant = Depends(security.get_tenant),
            db: Session = Depends(get_db)):
     """Cumulative count of protected objects over time, per object type, so the
     dashboard can draw a growth trend line per category over a rolling window."""
+    vault_ids, _eff = security.scoped_vault_ids(db, principal, scope)
     docs = (db.query(SearchDocument.source_type, SearchDocument.object_id,
                      SearchDocument.doc_type, SearchDocument.created_at)
-            .filter(SearchDocument.tenant_id == tenant.id)
-            .order_by(SearchDocument.created_at.asc()).all())
+            .filter(SearchDocument.tenant_id == tenant.id,
+                    SearchDocument.vault_id.in_(vault_ids))
+            .order_by(SearchDocument.created_at.asc()).all()) if vault_ids else []
     # First time each logical object was protected + its bucket.
     first: dict[tuple, tuple] = {}
     earliest = None

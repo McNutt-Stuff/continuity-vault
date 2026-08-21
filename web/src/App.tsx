@@ -20,6 +20,7 @@ import Agents from "./pages/Agents";
 import Audit from "./pages/Audit";
 import ActivityPage from "./pages/Activity";
 import Settings from "./pages/Settings";
+import Organization from "./pages/Organization";
 
 const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/", label: "Overview", icon: "grid" },
@@ -72,6 +73,7 @@ export default function App() {
             <Route path="/restore" element={<Restore />} />
             <Route path="/audit" element={<Audit />} />
             <Route path="/settings" element={<Settings />} />
+            {me.can_admin && <Route path="/organization" element={<Organization />} />}
             {me.is_platform_admin && <Route path="/admin" element={<Navigate to="/admin/overview" replace />} />}
             {me.is_platform_admin && <Route path="/admin/:section" element={<Admin />} />}
             <Route path="*" element={<Navigate to="/" />} />
@@ -92,6 +94,7 @@ function Sidebar() {
       .then((t) => setOptions(t.protection_options || [])).catch(() => setOptions([]));
   }, []);
   const nav = NAV.filter((n) => {
+    if (n.to === "/audit" && !me?.can_admin) return false;  // org-level, admin only
     const req = NAV_REQUIRES[n.to];
     if (!req || !options || options.length === 0) return true;  // unconfigured → show all
     return options.includes(req);
@@ -138,6 +141,15 @@ function Sidebar() {
               {n.label}
             </NavLink>
           ))}
+          {me?.can_admin && (
+            <>
+              <div className="nav-section">Organization</div>
+              <NavLink to="/organization" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
+                <Icon name="user" />
+                Organization Admin
+              </NavLink>
+            </>
+          )}
           {me?.is_platform_admin && (
             <>
               <div className="nav-section">Platform</div>
@@ -164,13 +176,14 @@ function TopBar() {
   const title = adminKey
     ? (ADMIN_SECTIONS.find((s) => s.key === adminKey)?.label ?? "Admin center")
     : (NAV.find((n) => n.to === loc.pathname)?.label ??
-      (loc.pathname === "/onboarding" ? "Protection Setup" : "Arkive"));
+      (loc.pathname === "/onboarding" ? "Protection Setup"
+        : loc.pathname === "/organization" ? "Organization Admin" : "Arkive"));
   return (
     <div className="topbar">
       <h1>{title}</h1>
       <div className="row" style={{ gap: 14 }}>
         <ThemeToggle />
-        <AlertBell />
+        {me?.can_admin && <AlertBell />}
         {me?.passkey_verified ? (
           <Pill tone="ok">
             <Icon name="lock" size={13} /> Unlocked

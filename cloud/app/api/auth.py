@@ -507,6 +507,8 @@ def me(principal: security.Principal = Depends(security.get_principal),
         "role": user.role,
         "tenant_id": user.tenant_id,
         "is_platform_admin": user.is_platform_admin,
+        "can_admin": security.is_org_admin(user.role) or user.is_platform_admin,
+        "is_owner": security.is_owner(user.role),
         "email_verified": user.email_verified,
         "passkey_verified": principal.passkey_verified,
         "passkeys": [{"id": p.id, "label": p.label, "transport": p.transport}

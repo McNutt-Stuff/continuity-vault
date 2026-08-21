@@ -119,6 +119,7 @@ def list_recovered(principal: security.Principal = Depends(security.get_principa
     purge_expired(db)
     rows = (db.query(RecoveredItem)
             .filter(RecoveredItem.tenant_id == tenant.id,
+                    RecoveredItem.requested_by == principal.user_id,
                     RecoveredItem.destroyed.is_(False))
             .order_by(RecoveredItem.created_at.desc()).all())
     return {"items": [_view(r) for r in rows]}
@@ -131,6 +132,8 @@ def view_content(item_id: str,
                  db: Session = Depends(get_db)):
     item = db.get(RecoveredItem, item_id)
     if not item or item.tenant_id != tenant.id or item.destroyed:
+        raise HTTPException(404, "recovered item not found or destroyed")
+    if item.requested_by and item.requested_by != principal.user_id:
         raise HTTPException(404, "recovered item not found or destroyed")
     if item.expires_at < _now().replace(tzinfo=None):
         _destroy(item)
@@ -163,6 +166,8 @@ def destroy(item_id: str,
             db: Session = Depends(get_db)):
     item = db.get(RecoveredItem, item_id)
     if not item or item.tenant_id != tenant.id:
+        raise HTTPException(404, "recovered item not found")
+    if item.requested_by and item.requested_by != principal.user_id:
         raise HTTPException(404, "recovered item not found")
     _destroy(item)
     db.commit()

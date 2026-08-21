@@ -94,6 +94,10 @@ class Vault(Base):
     __tablename__ = "vaults"
     id = Column(String, primary_key=True, default=_uuid)
     tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    # The member who owns this vault. Vaults are the demarcation of a user's data:
+    # a member only ever sees content in vaults they own; org admins see aggregate
+    # statistics across the org but never another member's actual content.
+    owner_user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     name = Column(String, nullable=False)
     key_ownership_model = Column(String, default="customer-managed")
     crypto_profile_id = Column(String, default="cvp-hybrid-2026a")
@@ -137,6 +141,7 @@ class ConnectorAccount(Base):
     __tablename__ = "connector_accounts"
     id = Column(String, primary_key=True, default=_uuid)
     tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    owner_user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     connector_type = Column(String, nullable=False)
     account_label = Column(String, nullable=False)
     auth_status = Column(String, default="linked")  # linked | needs-reauth | revoked
@@ -212,6 +217,23 @@ class ApplianceStorage(Base):
     capacity_bytes = Column(BigInteger, default=0)
     used_bytes = Column(BigInteger, default=0)
     health = Column(JSON, default=dict)  # drive_health, smart, raid, temperature_c
+    created_at = Column(DateTime, default=_now)
+
+
+class ApplianceAssignment(Base):
+    """Assigns an appliance to a member. An appliance can be shared by several
+    members and a member can have several appliances. A standard member sees only
+    that they have access (view-only); an org admin sees every assignment and can
+    change them. ``can_manage`` optionally grants a member management rights on a
+    shared appliance."""
+
+    __tablename__ = "appliance_assignments"
+    __table_args__ = (UniqueConstraint("appliance_id", "user_id", name="uq_appliance_user"),)
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    appliance_id = Column(String, ForeignKey("appliances.id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    can_manage = Column(Boolean, default=False)
     created_at = Column(DateTime, default=_now)
 
 

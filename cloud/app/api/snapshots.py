@@ -13,11 +13,15 @@ router = APIRouter(prefix="/snapshots", tags=["snapshots"])
 
 
 @router.get("")
-def list_snapshots(tenant: Tenant = Depends(security.get_tenant),
+def list_snapshots(principal: security.Principal = Depends(security.get_principal),
+                   tenant: Tenant = Depends(security.get_tenant),
                    db: Session = Depends(get_db)):
+    # Data partitioning: recovery points are limited to the user's own vaults.
+    allowed = security.content_vault_ids(db, principal)
     rows = (db.query(SnapshotReceipt)
-            .filter(SnapshotReceipt.tenant_id == tenant.id)
-            .order_by(SnapshotReceipt.created_at.desc()).limit(200).all())
+            .filter(SnapshotReceipt.tenant_id == tenant.id,
+                    SnapshotReceipt.vault_id.in_(allowed))
+            .order_by(SnapshotReceipt.created_at.desc()).limit(200).all()) if allowed else []
     return [{
         "id": r.id,
         "snapshot_id": r.snapshot_id,

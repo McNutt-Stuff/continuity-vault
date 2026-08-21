@@ -114,6 +114,25 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE connector_accounts ADD COLUMN last_error_at TIMESTAMP",
         "ALTER TABLE appliance_storages ADD COLUMN used_bytes INTEGER DEFAULT 0",
         "ALTER TABLE appliance_storages ADD COLUMN health JSON",
+        # Per-user vault ownership (data partitioning). Backfill legacy/shared
+        # vaults to the org owner so no vault is left unassigned.
+        "ALTER TABLE vaults ADD COLUMN owner_user_id VARCHAR",
+        "UPDATE vaults SET owner_user_id = ("
+        "  SELECT u.id FROM users u WHERE u.tenant_id = vaults.tenant_id "
+        "  AND u.role = 'owner' ORDER BY u.created_at LIMIT 1) "
+        "WHERE owner_user_id IS NULL",
+        # Per-user source ownership. Backfill from the vault a source is mapped
+        # into, else the org owner.
+        "ALTER TABLE connector_accounts ADD COLUMN owner_user_id VARCHAR",
+        "UPDATE connector_accounts SET owner_user_id = ("
+        "  SELECT v.owner_user_id FROM collections c JOIN vaults v ON v.id = c.vault_id "
+        "  WHERE c.connector_account_id = connector_accounts.id "
+        "  AND v.owner_user_id IS NOT NULL LIMIT 1) "
+        "WHERE owner_user_id IS NULL",
+        "UPDATE connector_accounts SET owner_user_id = ("
+        "  SELECT u.id FROM users u WHERE u.tenant_id = connector_accounts.tenant_id "
+        "  AND u.role = 'owner' ORDER BY u.created_at LIMIT 1) "
+        "WHERE owner_user_id IS NULL",
         # Byte counts can exceed 32-bit INTEGER (>2.1GB) — widen to BIGINT so
         # storing appliance capacity / large content doesn't overflow on Postgres.
         "ALTER TABLE appliance_storages ALTER COLUMN capacity_bytes TYPE BIGINT",

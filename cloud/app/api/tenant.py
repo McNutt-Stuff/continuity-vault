@@ -113,16 +113,25 @@ def storage_targets(tenant: Tenant = Depends(security.get_tenant),
 
 
 @router.get("")
-def get_tenant_info(tenant: Tenant = Depends(security.get_tenant),
-                    db: Session = Depends(get_db)):
-    vaults = db.query(Vault).filter(Vault.tenant_id == tenant.id).all()
+def get_tenant_info(principal: security.Principal = Depends(security.get_principal),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    # A member only sees their own vaults; this drives "which vault does my data
+    # live in" selections. Org-wide vault views live under /org.
+    vaults = (db.query(Vault)
+              .filter(Vault.tenant_id == tenant.id,
+                      Vault.owner_user_id == principal.user_id).all())
     return {
         "id": tenant.id,
         "name": tenant.name,
+        "org_name": tenant.name,
         "plan": tenant.plan,
         "key_ownership_model": tenant.key_ownership_model,
         "protection_options": tenant.protection_options or [],
         "licensed_bytes": int(tenant.licensed_bytes or 0),
+        "role": principal.role,
+        "can_admin": security.is_org_admin(principal.role) or principal.is_platform_admin,
+        "is_owner": security.is_owner(principal.role),
         "vaults": [{"id": v.id, "name": v.name,
                     "key_ownership_model": v.key_ownership_model,
                     "crypto_profile_id": v.crypto_profile_id} for v in vaults],
@@ -137,11 +146,12 @@ class CreateVaultRequest(BaseModel):
 
 @router.post("/vaults")
 def create_vault(body: CreateVaultRequest,
-                 principal: security.Principal = Depends(security.require_security_admin),
+                 principal: security.Principal = Depends(security.get_principal),
                  tenant: Tenant = Depends(security.get_tenant),
                  db: Session = Depends(get_db)):
     vault = Vault(
         tenant_id=tenant.id,
+        owner_user_id=principal.user_id,
         name=body.name,
         key_ownership_model=body.key_ownership_model,
         crypto_profile_id=body.crypto_profile_id,
@@ -149,10 +159,24 @@ def create_vault(body: CreateVaultRequest,
     db.add(vault)
     db.commit()
     db.refresh(vault)
-    # Provision the vault root key in the key broker (spec 10.x).
+    # Provision the vault root key + recovery keypair in the key broker (spec 10.x).
     result = keybroker.provision_vault_root_key(vault.id, body.key_ownership_model)
     vault.wrapped_keys = [{"recipient": "primary", "hash": result["record"]["rootKeyHash"]}]
+    keybroker.provision_recovery_keypair(vault.id)
     db.commit()
     audit.record(db, actor=principal.user_id, action="vault.created",
                  tenant_id=tenant.id, resource=vault.id)
     return {"id": vault.id, "name": vault.name}
+
+
+@router.get("/keys")
+def my_keys(principal: security.Principal = Depends(security.get_principal),
+            tenant: Tenant = Depends(security.get_tenant),
+            db: Session = Depends(get_db)):
+    """The current user's own encryption keys (metadata only — never plaintext).
+    Shows the user they hold the keys: type, strength, status and fingerprint."""
+    vaults = (db.query(Vault)
+              .filter(Vault.tenant_id == tenant.id,
+                      Vault.owner_user_id == principal.user_id).all())
+    return [{"vault_id": v.id, "vault_name": v.name, **keybroker.key_metadata(v.id)}
+            for v in vaults]

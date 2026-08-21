@@ -20,6 +20,8 @@ interface Overview {
   };
   protection: { key_ownership_model: string; encrypted: boolean };
   connector_health?: { issues: number; needs_reauth: number };
+  scope?: "me" | "org";
+  can_switch_scope?: boolean;
 }
 interface Tenant { name: string; plan: string; key_ownership_model: string; }
 interface PendingAction {
@@ -53,6 +55,7 @@ export default function Dashboard() {
   const [actions, setActions] = useState<PendingAction[]>([]);
   const [pickerAccount, setPickerAccount] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [scope, setScope] = useState<"me" | "org">("me");
 
   function reloadActions() { api.get<PendingAction[]>("/actions").then(setActions).catch(() => {}); }
   async function dismissAction(id: string) {
@@ -61,15 +64,18 @@ export default function Dashboard() {
   }
 
   useEffect(() => {
-    api.get<Overview>("/overview").then(setOv).catch(() => {}).finally(() => setLoaded(true));
+    api.get<Overview>(`/overview?scope=${scope}`).then(setOv).catch(() => {}).finally(() => setLoaded(true));
+  }, [scope]);
+
+  useEffect(() => {
     api.get<Tenant>("/tenant").then(setTenant).catch(() => {});
     api.get<{ pq_available?: boolean }>("/health").then(setHealth).catch(() => {});
     reloadActions();
   }, []);
 
   useEffect(() => {
-    api.get<Trends>(`/overview/trends?period=${period}`).then(setTrends).catch(() => {});
-  }, [period]);
+    api.get<Trends>(`/overview/trends?period=${period}&scope=${scope}`).then(setTrends).catch(() => {});
+  }, [period, scope]);
 
   const objTotal = ov?.objects.breakdown.reduce((s, b) => s + b.count, 0) || 0;
 
@@ -88,6 +94,16 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="row">
+          {ov?.can_switch_scope && (
+            <div className="row" style={{ gap: 0, border: "1px solid var(--border-soft)", borderRadius: 8, overflow: "hidden" }}>
+              <button className={`btn sm ${scope === "me" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }} onClick={() => setScope("me")}>
+                <Icon name="user" size={13} /> My account
+              </button>
+              <button className={`btn sm ${scope === "org" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }} onClick={() => setScope("org")}>
+                <Icon name="grid" size={13} /> My organization
+              </button>
+            </div>
+          )}
           <button className="btn" onClick={() => nav("/onboarding")}>
             <Icon name="grid" size={15} /> Protection setup
           </button>

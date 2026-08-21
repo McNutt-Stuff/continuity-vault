@@ -32,8 +32,11 @@ def seed(db: Session | None = None) -> None:
         owner = User(tenant_id=tenant.id, email="owner@northwind.example",
                      display_name="Alex Rivera", role="owner")
         secadmin = User(tenant_id=tenant.id, email="security@northwind.example",
-                        display_name="Jordan Kim", role="security-admin")
-        db.add_all([owner, secadmin])
+                        display_name="Jordan Kim", role="admin")
+        member = User(tenant_id=tenant.id, email="member@northwind.example",
+                      display_name="Sam Chen", role="member")
+        db.add_all([owner, secadmin, member])
+        db.flush()
 
         # Platform (backend) admin tenant — Arkive operations.
         platform = Tenant(name="Arkive Operations", plan="platform",
@@ -46,15 +49,18 @@ def seed(db: Session | None = None) -> None:
                      is_platform_admin=True)
         db.add(admin)
 
-        # Primary vault with a provisioned root key.
-        vault = Vault(tenant_id=tenant.id, name="Primary Vault",
-                      key_ownership_model="split-control",
-                      crypto_profile_id="cvp-hybrid-2026a")
-        db.add(vault)
-        db.flush()
-        result = keybroker.provision_vault_root_key(vault.id, vault.key_ownership_model)
-        vault.wrapped_keys = [{"recipient": "primary",
-                               "hash": result["record"]["rootKeyHash"]}]
+        # Each member owns their own vault — the demarcation of their data.
+        for u in (owner, secadmin, member):
+            vault = Vault(tenant_id=tenant.id, owner_user_id=u.id,
+                          name=f"{u.display_name.split()[0]}'s Vault",
+                          key_ownership_model="split-control",
+                          crypto_profile_id="cvp-hybrid-2026a")
+            db.add(vault)
+            db.flush()
+            result = keybroker.provision_vault_root_key(vault.id, vault.key_ownership_model)
+            vault.wrapped_keys = [{"recipient": "primary",
+                                   "hash": result["record"]["rootKeyHash"]}]
+            keybroker.provision_recovery_keypair(vault.id)
 
         db.commit()
     except IntegrityError:

@@ -245,7 +245,7 @@ def _link_or_reauth(db: Session, data: dict, connector_type: str,
                      category="connector", detail={"type": connector_type})
         return existing
     account = ConnectorAccount(
-        tenant_id=data["tid"], connector_type=connector_type,
+        tenant_id=data["tid"], owner_user_id=data.get("uid"), connector_type=connector_type,
         account_label=data.get("label") or default_label, auth_status="linked",
         encrypted_credentials=creds, scopes=scopes)
     db.add(account)
@@ -272,6 +272,7 @@ def link_with_token(connector_type: str, body: TokenLinkRequest,
     creds = {"token": body.token, "username": body.username, "host": body.host}
     account = ConnectorAccount(
         tenant_id=tenant.id,
+        owner_user_id=principal.user_id,
         connector_type=connector_type,
         account_label=body.account_label,
         auth_status="linked",
@@ -289,10 +290,13 @@ def link_with_token(connector_type: str, body: TokenLinkRequest,
 
 
 @router.get("/accounts")
-def list_accounts(tenant: Tenant = Depends(security.get_tenant),
+def list_accounts(principal: security.Principal = Depends(security.get_principal),
+                  tenant: Tenant = Depends(security.get_tenant),
                   db: Session = Depends(get_db)):
+    # Data partitioning: a user only sees the sources they linked.
     accounts = db.query(ConnectorAccount).filter(
-        ConnectorAccount.tenant_id == tenant.id).all()
+        ConnectorAccount.tenant_id == tenant.id,
+        ConnectorAccount.owner_user_id == principal.user_id).all()
     return [{"id": a.id, "connector_type": a.connector_type,
              "account_label": a.account_label, "auth_status": a.auth_status,
              "last_sync_at": a.last_sync_at.isoformat() if a.last_sync_at else None,

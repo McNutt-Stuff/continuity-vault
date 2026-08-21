@@ -47,6 +47,10 @@ def create_collection(body: CreateCollectionRequest,
     vault = db.get(Vault, body.vault_id)
     if not vault or vault.tenant_id != tenant.id:
         raise HTTPException(404, "vault not found")
+    # A member can only map sources into a vault they own.
+    if vault.owner_user_id and vault.owner_user_id != principal.user_id \
+            and not security.is_org_admin(principal.role):
+        raise HTTPException(403, "you can only add sources to your own vault")
     # Agent-collected sources are unique per (agent, source_type): if one already
     # exists, return it instead of creating a duplicate. This is what stops the
     # agent's push from ever spawning a second entry.
@@ -201,9 +205,14 @@ def _collection_view(db: Session, c: Collection) -> dict:
 
 
 @router.get("")
-def list_collections(tenant: Tenant = Depends(security.get_tenant),
+def list_collections(principal: security.Principal = Depends(security.get_principal),
+                     tenant: Tenant = Depends(security.get_tenant),
                      db: Session = Depends(get_db)):
-    colls = db.query(Collection).filter(Collection.tenant_id == tenant.id).all()
+    # Data partitioning: a member only ever sees mappings in vaults they own.
+    allowed = security.content_vault_ids(db, principal)
+    colls = (db.query(Collection)
+             .filter(Collection.tenant_id == tenant.id,
+                     Collection.vault_id.in_(allowed)).all()) if allowed else []
     return [_collection_view(db, c) for c in colls]
 
 

@@ -17,6 +17,7 @@ from .api import (
     collections,
     connectors,
     dashboard,
+    org,
     photos,
     recovery,
     restore,
@@ -47,6 +48,7 @@ app.add_middleware(
 API = "/api"
 app.include_router(auth.router, prefix=API)
 app.include_router(tenant.router, prefix=API)
+app.include_router(org.router, prefix=API)
 app.include_router(dashboard.router, prefix=API)
 app.include_router(billing.router, prefix=API)
 app.include_router(connectors.router, prefix=API)

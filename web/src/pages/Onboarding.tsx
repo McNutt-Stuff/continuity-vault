@@ -38,6 +38,7 @@ function money2(n: number): string {
 export default function Onboarding() {
   const [pricing, setPricing] = useState<Pricing | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
+  const [org, setOrg] = useState<{ name?: string; plan?: string; can_admin?: boolean } | null>(null);
   const [options, setOptions] = useState<Set<string>>(new Set());
   const [licensedTb, setLicensedTb] = useState(1);
   const [qty, setQty] = useState<Record<number, number>>({});
@@ -46,6 +47,7 @@ export default function Onboarding() {
 
   useEffect(() => {
     api.get<Pricing>("/billing/pricing").then(setPricing).catch(() => {});
+    api.get<{ name: string; plan: string; can_admin: boolean }>("/tenant").then(setOrg).catch(() => {});
     api.get<Plan>("/billing/plan").then((p) => {
       setPlan(p);
       setOptions(new Set(p.options));
@@ -106,8 +108,15 @@ export default function Onboarding() {
   return (
     <>
       <div className="stack" style={{ marginBottom: 18 }}>
-        <h2 style={{ margin: 0 }}>Protection Setup</h2>
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <Icon name="shield" size={16} />
+          <h2 style={{ margin: 0 }}>Protection Setup</h2>
+          {org?.name && <Pill tone="info">Organization-wide</Pill>}
+        </div>
         <div className="muted" style={{ fontSize: 13 }}>
+          {org?.name
+            ? <>These settings protect <b>{org.name}</b> — they apply across the whole organization and every member's vaults. </>
+            : null}
           Choose how your data is protected, how much you protect, and see your monthly cost.
           Your selections control which storage destinations are available across the platform.
         </div>

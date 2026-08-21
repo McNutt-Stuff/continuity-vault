@@ -56,9 +56,15 @@ def activity(limit: int = 40,
              principal: security.Principal = Depends(security.get_principal),
              tenant: Tenant = Depends(security.get_tenant),
              db: Session = Depends(get_db)):
-    """Recent + in-flight backup / sync / ingest activity for this tenant."""
+    """Recent + in-flight backup / sync / ingest activity for this user."""
+    # Data partitioning: a member only sees activity from their own vaults.
+    allowed = security.content_vault_ids(db, principal)
     colls = {c.id: c for c in db.query(Collection)
-             .filter(Collection.tenant_id == tenant.id).all()}
+             .filter(Collection.tenant_id == tenant.id,
+                     Collection.vault_id.in_(allowed)).all()} if allowed else {}
+    coll_ids = list(colls.keys())
+    my_acct_ids = {c.connector_account_id for c in colls.values() if c.connector_account_id}
+    my_agent_ids = {c.agent_id for c in colls.values() if c.agent_id}
 
     def _source_label(collection_id: str) -> str:
         c = colls.get(collection_id)
@@ -76,9 +82,10 @@ def activity(limit: int = 40,
 
     # Recently completed snapshot receipts (the concrete "data landed" events).
     receipts = (db.query(SnapshotReceipt)
-                .filter(SnapshotReceipt.tenant_id == tenant.id)
+                .filter(SnapshotReceipt.tenant_id == tenant.id,
+                        SnapshotReceipt.vault_id.in_(allowed))
                 .order_by(SnapshotReceipt.created_at.desc())
-                .limit(limit).all())
+                .limit(limit).all()) if allowed else []
     dest_label = _dest_labeler(db, tenant.id)
     events = [{
         "kind": "backup",
@@ -96,8 +103,9 @@ def activity(limit: int = 40,
 
     # In-flight desktop-agent collections (queued but not yet delivered).
     in_flight = []
-    for a in (db.query(DesktopAgent)
-              .filter(DesktopAgent.tenant_id == tenant.id).all()):
+    for a in ((db.query(DesktopAgent)
+               .filter(DesktopAgent.tenant_id == tenant.id,
+                       DesktopAgent.id.in_(my_agent_ids)).all()) if my_agent_ids else []):
         pending = ([a.pending_command] if a.pending_command else []) + list(a.pending_commands or [])
         for cmd in pending:
             params = (cmd or {}).get("params") or {}
@@ -112,8 +120,9 @@ def activity(limit: int = 40,
     # Tracked connector backup/sync jobs (running + recently finished).
     jobs = (db.query(SyncJob)
             .filter(SyncJob.tenant_id == tenant.id,
+                    SyncJob.collection_id.in_(coll_ids),
                     SyncJob.status.in_(["queued", "running"]))
-            .order_by(SyncJob.created_at.desc()).all())
+            .order_by(SyncJob.created_at.desc()).all()) if coll_ids else []
     job_items = [{
         "id": j.id,
         "collection_id": j.collection_id,
@@ -138,10 +147,11 @@ def activity(limit: int = 40,
         "needs_reauth": a.auth_status == "needs-reauth",
         "error": a.last_error,
         "at": a.last_error_at.isoformat() if a.last_error_at else None,
-    } for a in (db.query(ConnectorAccount)
-                .filter(ConnectorAccount.tenant_id == tenant.id,
-                        ConnectorAccount.last_error.isnot(None))
-                .order_by(ConnectorAccount.last_error_at.desc()).all())]
+    } for a in ((db.query(ConnectorAccount)
+                 .filter(ConnectorAccount.tenant_id == tenant.id,
+                         ConnectorAccount.id.in_(my_acct_ids),
+                         ConnectorAccount.last_error.isnot(None))
+                 .order_by(ConnectorAccount.last_error_at.desc()).all()) if my_acct_ids else [])]
 
     return {
         "in_flight": in_flight,
@@ -164,7 +174,7 @@ _ALERT_SEVERITIES = ("warning", "error", "critical")
 
 @router.get("/alerts")
 def alerts(limit: int = 50,
-           principal: security.Principal = Depends(security.get_principal),
+           principal: security.Principal = Depends(security.require_org_admin),
            tenant: Tenant = Depends(security.get_tenant),
            db: Session = Depends(get_db)):
     """Abnormal / security-relevant events surfaced as operator alerts.
@@ -194,7 +204,7 @@ def alerts(limit: int = 50,
 def audit_log(limit: int = 200, category: str | None = None,
               severity: str | None = None, actor: str | None = None,
               action: str | None = None,
-              principal: security.Principal = Depends(security.get_principal),
+              principal: security.Principal = Depends(security.require_org_admin),
               tenant: Tenant = Depends(security.get_tenant),
               db: Session = Depends(get_db)):
     """Full, filterable tenant audit log (activity, security, credential access)."""

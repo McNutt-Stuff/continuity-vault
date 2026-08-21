@@ -30,6 +30,7 @@ from ..config import get_settings
 from ..db import get_db
 from ..models import (
     Appliance,
+    ApplianceAssignment,
     ApplianceCommand,
     ApplianceStorage,
     LinkingCode,
@@ -117,10 +118,27 @@ def appliance_installer(body: CreateLinkingCodeRequest,
 
 
 @fleet_router.get("")
-def list_appliances(tenant: Tenant = Depends(security.get_tenant),
+def list_appliances(principal: security.Principal = Depends(security.get_principal),
+                    tenant: Tenant = Depends(security.get_tenant),
                     db: Session = Depends(get_db)):
+    admin = security.is_org_admin(principal.role) or principal.is_platform_admin
     rows = db.query(Appliance).filter(Appliance.tenant_id == tenant.id).all()
-    return [_appliance_view(a) for a in rows]
+    # A standard member sees only appliances assigned to them (view-only); an org
+    # admin sees the whole fleet and can make changes.
+    manage = {}
+    if not admin:
+        for asn in (db.query(ApplianceAssignment)
+                    .filter(ApplianceAssignment.tenant_id == tenant.id,
+                            ApplianceAssignment.user_id == principal.user_id).all()):
+            manage[asn.appliance_id] = bool(asn.can_manage)
+        rows = [a for a in rows if a.id in manage]
+    out = []
+    for a in rows:
+        v = _appliance_view(a)
+        v["can_manage"] = admin or manage.get(a.id, False)
+        v["view_only"] = not v["can_manage"]
+        out.append(v)
+    return out
 
 
 @fleet_router.delete("/{appliance_id}")
@@ -152,28 +170,47 @@ def delete_appliance(appliance_id: str,
 
 @fleet_router.get("/{appliance_id}")
 def get_appliance(appliance_id: str,
+                  principal: security.Principal = Depends(security.get_principal),
                   tenant: Tenant = Depends(security.get_tenant),
                   db: Session = Depends(get_db)):
     a = db.get(Appliance, appliance_id)
     if not a or a.tenant_id != tenant.id:
         raise HTTPException(404, "appliance not found")
+    admin = security.is_org_admin(principal.role) or principal.is_platform_admin
+    assignment = None
+    if not admin:
+        assignment = (db.query(ApplianceAssignment)
+                      .filter(ApplianceAssignment.appliance_id == a.id,
+                              ApplianceAssignment.user_id == principal.user_id).first())
+        if not assignment:
+            raise HTTPException(404, "appliance not found")
     commands = (db.query(ApplianceCommand)
                 .filter(ApplianceCommand.appliance_id == a.id)
                 .order_by(ApplianceCommand.created_at.desc()).limit(20).all())
     view = _appliance_view(a)
+    view["can_manage"] = admin or bool(assignment and assignment.can_manage)
+    view["view_only"] = not view["can_manage"]
     view["recent_commands"] = [{"type": c.command_type, "status": c.status,
                                 "sequence": c.sequence,
                                 "created_at": c.created_at.isoformat()} for c in commands]
-    view["stored_data"] = _stored_data(db, a)
+    # A member only sees data belonging to their own vaults on a shared appliance.
+    allowed = None if admin else security.content_vault_ids(db, principal)
+    view["stored_data"] = _stored_data(db, a, allowed_vault_ids=allowed)
     return view
 
 
-def _stored_data(db: Session, a: Appliance) -> dict:
-    """Recovery points physically stored on this appliance, grouped by source."""
+def _stored_data(db: Session, a: Appliance, allowed_vault_ids: list[str] | None = None) -> dict:
+    """Recovery points physically stored on this appliance, grouped by source.
+    When ``allowed_vault_ids`` is given (a standard member), only that member's
+    own vaults are shown — never another member's sources on a shared appliance."""
     from ..models import Collection, ConnectorAccount, Vault, ApplianceStorage as _AS  # noqa
-    receipts = (db.query(SnapshotReceipt)
-                .filter(SnapshotReceipt.appliance_id == a.id)
-                .order_by(SnapshotReceipt.created_at.desc()).all())
+    if allowed_vault_ids is not None and not allowed_vault_ids:
+        return {"recovery_points": 0, "objects": 0, "bytes": 0, "sources": [], "items": []}
+    rq = (db.query(SnapshotReceipt)
+          .filter(SnapshotReceipt.appliance_id == a.id))
+    if allowed_vault_ids is not None:
+        rq = rq.filter(SnapshotReceipt.vault_id.in_(allowed_vault_ids))
+    receipts = rq.order_by(SnapshotReceipt.created_at.desc()).all()
     colls = {c.id: c for c in db.query(Collection)
              .filter(Collection.tenant_id == a.tenant_id).all()}
     vaults = {v.id: v.name for v in db.query(Vault)

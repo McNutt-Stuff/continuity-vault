@@ -189,9 +189,13 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     # snapshot for the same object. The UI must show each object once, so we keep
     # the newest row per (source, object) and remember every snapshot it appeared
     # in (for the "stored at" locations).
+    # Data partitioning: search only ever returns items from the user's own
+    # vaults — never another member's content.
+    allowed = security.content_vault_ids(db, principal)
     all_docs = (db.query(SearchDocument)
-                .filter(SearchDocument.tenant_id == tenant.id)
-                .order_by(SearchDocument.created_at.desc()).all())
+                .filter(SearchDocument.tenant_id == tenant.id,
+                        SearchDocument.vault_id.in_(allowed))
+                .order_by(SearchDocument.created_at.desc()).all()) if allowed else []
 
     unique: list[SearchDocument] = []
     seen: set[tuple] = set()

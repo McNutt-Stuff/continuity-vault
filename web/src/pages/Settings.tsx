@@ -6,15 +6,24 @@ import { Icon } from "../components/Icon";
 import { getTheme, applyTheme, Theme } from "../theme";
 
 interface Tenant { name: string; plan: string; key_ownership_model: string; vaults: any[]; }
+interface KeyInfo {
+  vault_id: string; vault_name: string; provisioned: boolean; status: string;
+  content_algorithm: string; signature_algorithm: string; recovery_kem: string | null;
+  strength_bits: number; pq_hybrid: boolean; ownership_model: string | null; root_key_hash: string | null;
+}
 
 export default function Settings() {
   const { me, enrollPasskey, refresh } = useAuth();
   const [tenant, setTenant] = useState<Tenant | null>(null);
+  const [keys, setKeys] = useState<KeyInfo[]>([]);
   const [toast, setToast] = useState("");
   const [theme, setThemeState] = useState<Theme>(getTheme());
   const [loaded, setLoaded] = useState(false);
 
-  useEffect(() => { api.get<Tenant>("/tenant").then(setTenant).catch(() => {}).finally(() => setLoaded(true)); }, []);
+  useEffect(() => {
+    api.get<Tenant>("/tenant").then(setTenant).catch(() => {}).finally(() => setLoaded(true));
+    api.get<KeyInfo[]>("/tenant/keys").then(setKeys).catch(() => {});
+  }, []);
 
   function pickTheme(t: Theme) { applyTheme(t); setThemeState(t); }
 
@@ -61,6 +70,37 @@ export default function Settings() {
         </div>
       </Card>
 
+      <Card style={{ marginBottom: 16 }}>
+        <h2 style={{ marginBottom: 4 }}>Your encryption keys</h2>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
+          You hold the keys to your data. These live in your key broker record and are shown here so you can
+          confirm their type, strength and status — the key material itself is never exposed.
+        </div>
+        {keys.map((k) => (
+          <div key={k.vault_id} className="result-row">
+            <div className="result-icon" style={{ background: "var(--bg-elev-2)" }}><Icon name="key" size={16} /></div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>{k.vault_name}</div>
+              <div className="faint" style={{ fontSize: 12 }}>
+                {k.content_algorithm} · {k.pq_hybrid ? "hybrid post-quantum" : "classical"} · {k.recovery_kem || "ML-KEM"} · {k.strength_bits}-bit
+                {k.root_key_hash ? ` · ${k.root_key_hash.slice(0, 16)}…` : ""}
+              </div>
+            </div>
+            <Pill tone={k.pq_hybrid ? "ok" : "info"}>{k.pq_hybrid ? "quantum-safe" : "classical"}</Pill>
+            <Pill tone={k.status === "active" ? "ok" : "warn"}>{k.status}</Pill>
+          </div>
+        ))}
+        {keys.length === 0 && <div className="muted" style={{ fontSize: 12.5 }}>No keys provisioned yet.</div>}
+        <div className="divider" />
+        <h3 style={{ marginBottom: 8 }}>How your keys are used</h3>
+        <ul className="faint" style={{ fontSize: 12.5, margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
+          <li>A unique root key encrypts your vault's contents with <b>AES-256-GCM</b>. Every vault has its own key.</li>
+          <li>Your key is <b>wrapped</b> (never stored in the clear) and only unwrapped for operations you authorize by unlocking with your passkey.</li>
+          <li><b>ML-KEM</b> protects recovery key exchange and <b>ML-DSA</b> signs appliance receipts — a hybrid, quantum-safe design.</li>
+          <li>Arkive can't read your data: content stays encrypted end-to-end. Only you — or, for continuity, an authorized organization-admin key recovery — can unwrap it.</li>
+        </ul>
+      </Card>
+
       <div className="grid grid-2" style={{ alignItems: "start" }}>
         <Card>
           <h2 style={{ marginBottom: 12 }}>Identity & unlock</h2>
@@ -89,12 +129,12 @@ export default function Settings() {
 
         <Card>
           <h2 style={{ marginBottom: 12 }}>Organization</h2>
-          <Row label="Tenant" value={tenant?.name} />
+          <Row label="Organization" value={tenant?.name} />
           <Row label="Plan" value={tenant?.plan} />
           <Row label="Key ownership" value={tenant?.key_ownership_model} />
           <Row label="Your role" value={me?.role} />
           <div className="divider" />
-          <h3 style={{ marginBottom: 10 }}>Vaults</h3>
+          <h3 style={{ marginBottom: 10 }}>Your vaults</h3>
           {tenant?.vaults.map((v) => (
             <div key={v.id} className="result-row">
               <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>

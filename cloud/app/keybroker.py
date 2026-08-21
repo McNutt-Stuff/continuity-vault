@@ -110,3 +110,51 @@ def release_recovery_private(vault_id: str) -> bytes:
     w = record["wrappedPriv"]
     return provider.aes_decrypt(
         master, base64.b64decode(w["nonce"]), base64.b64decode(w["ct"]), b"recovery-priv")
+
+
+def key_metadata(vault_id: str) -> Dict[str, object]:
+    """Non-sensitive metadata about a vault's key material for the keys view.
+
+    Surfaces the type, strength, status and fingerprint so a user/admin can see
+    the keys exist and are healthy without ever exposing key plaintext."""
+    provider = get_provider()
+    out: Dict[str, object] = {
+        "vault_id": vault_id,
+        "provisioned": False,
+        "root_key_hash": None,
+        "ownership_model": None,
+        "content_algorithm": "AES-256-GCM",
+        "signature_algorithm": "ML-DSA-65",
+        "recovery_kem": None,
+        "strength_bits": 256,
+        "pq_hybrid": bool(getattr(provider, "pq_available", False)),
+        "status": "missing",
+    }
+    p = _path(vault_id)
+    if p.exists():
+        rec = json.loads(p.read_text())
+        out["provisioned"] = True
+        out["root_key_hash"] = rec.get("rootKeyHash")
+        out["ownership_model"] = rec.get("ownershipModel")
+        out["status"] = "active"
+    rp = _recovery_path(vault_id)
+    if rp.exists():
+        out["recovery_kem"] = json.loads(rp.read_text()).get("kemAlg")
+    return out
+
+
+def recover_vault_key(vault_id: str) -> Dict[str, object]:
+    """Authorized recovery of a vault's key material (lost-key / end-of-life).
+
+    Unwraps the vault root key for an authorized org admin and returns its
+    fingerprint (never the raw key over the API). In production the key is
+    re-wrapped to the requesting admin's recovery public key; the fingerprint
+    lets the flow be verified and audited end-to-end."""
+    root = release_vault_root_key(vault_id)
+    return {
+        "vault_id": vault_id,
+        "recovered": True,
+        "root_key_hash": hexdigest(root),
+        "recovery_kem": key_metadata(vault_id).get("recovery_kem"),
+    }
+

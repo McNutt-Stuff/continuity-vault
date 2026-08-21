@@ -421,7 +421,7 @@ export default function Mappings() {
                     {m.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
                   </div>
                 )}
-                {!editing && (syncing[m.id] || jobFor(m.id) || eventsFor(m.id).length > 0) && (() => {
+                {!editing && (() => {
                   const evs = eventsFor(m.id);
                   const job = jobFor(m.id);
                   const isSyncing = !!syncing[m.id] || !!job;
@@ -442,6 +442,11 @@ export default function Mappings() {
                           {!job && evs.length > 0 && (
                             <span className="faint" style={{ fontSize: 11.5 }}>
                               · {latest.object_count ?? 0} objects → {destLabel(latest.destination || "cv-cloud")} · {fmtTime(latest.at)}
+                            </span>
+                          )}
+                          {!job && !isSyncing && evs.length === 0 && (
+                            <span className="faint" style={{ fontSize: 11.5 }}>
+                              · {m.last_backup_at ? `last sync ${fmtTime(m.last_backup_at)}` : "no activity yet"}
                             </span>
                           )}
                         </span>
@@ -527,25 +532,32 @@ export default function Mappings() {
                       </div>
                     )}
                     <div className="stack" style={{ gap: 6 }}>
-                      <span className="faint" style={{ fontSize: 11.5 }}>
-                        Back up automatically
-                      </span>
-                      <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                        <select style={{ padding: "5px 8px", borderRadius: 6 }}
-                                value={editInterval}
-                                onChange={(e) => setEditInterval(Number(e.target.value))}>
-                          {INTERVAL_OPTIONS.map((o) => (
-                            <option key={o.value} value={o.value}>
-                              {o.value === -1 ? `Use default (${intervalText(m.default_interval_minutes)})` : o.label}
-                            </option>
-                          ))}
-                        </select>
+                      <label className="row" style={{ gap: 8, alignItems: "center", cursor: "pointer" }}>
+                        <input type="checkbox"
+                               checked={editInterval !== 0}
+                               onChange={(e) => setEditInterval(e.target.checked ? -1 : 0)} />
+                        <span className="faint" style={{ fontSize: 11.5 }}>Back up automatically on a schedule</span>
+                      </label>
+                      {editInterval !== 0 ? (
+                        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <select style={{ padding: "5px 8px", borderRadius: 6 }}
+                                  value={editInterval}
+                                  onChange={(e) => setEditInterval(Number(e.target.value))}>
+                            {INTERVAL_OPTIONS.filter((o) => o.value !== 0).map((o) => (
+                              <option key={o.value} value={o.value}>
+                                {o.value === -1 ? `Use default (${intervalText(m.default_interval_minutes)})` : o.label}
+                              </option>
+                            ))}
+                          </select>
+                          <span className="faint" style={{ fontSize: 11 }}>
+                            Runs in the background {intervalText(editInterval < 0 ? m.default_interval_minutes : editInterval)}.
+                          </span>
+                        </div>
+                      ) : (
                         <span className="faint" style={{ fontSize: 11 }}>
-                          {editInterval === 0
-                            ? "Only backs up when you click Sync/Back up now."
-                            : `Runs in the background ${intervalText(editInterval < 0 ? m.default_interval_minutes : editInterval)}.`}
+                          Automatic backups are off — this source only backs up when you click Sync/Back up now.
                         </span>
-                      </div>
+                      )}
                     </div>
                     {m.supports_since && (
                       <div className="stack" style={{ gap: 6 }}>

@@ -5,6 +5,7 @@ import { Icon } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, notify, promptDialog } from "../components/dialog";
 import { ApplianceStatePill } from "./Dashboard";
+import { useAuth } from "../auth";
 
 interface StoreHealth {
   drive_health?: string; temperature_c?: number; power?: string;
@@ -37,6 +38,7 @@ interface Appliance {
   last_heartbeat_at: string | null; last_attestation_at: string | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   telemetry: any; stores?: Store[]; stored_data?: StoredData; recent_commands?: Command[];
+  can_manage?: boolean; view_only?: boolean;
 }
 
 // Online = a heartbeat within the last ~90s (3 missed 30s beats).
@@ -98,6 +100,8 @@ function HealthPill({ a }: { a: Appliance }) {
 }
 
 export default function Appliances() {
+  const { me } = useAuth();
+  const canAdmin = !!me?.can_admin;
   const [apps, setApps] = useState<Appliance[]>([]);
   const [selected, setSelected] = useState<Appliance | null>(null);
   const [code, setCode] = useState<string | null>(null);
@@ -176,6 +180,7 @@ export default function Appliances() {
   return (
     <div className="grid grid-2" style={{ alignItems: "start" }}>
       <div style={{ minWidth: 0 }}>
+        {canAdmin && (
         <Card style={{ marginBottom: 16 }}>
           <div className="spread" style={{ marginBottom: 8 }}>
             <h2>Turnkey activation</h2>
@@ -220,6 +225,7 @@ export default function Appliances() {
             </div>
           )}
         </Card>
+        )}
 
         {apps.map((a) => (
           <div
@@ -264,6 +270,7 @@ export default function Appliances() {
 
 function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onCommand: (a: Appliance, t: string, p?: any) => void; onRemove: (a: Appliance) => void; reload: () => Promise<void> }) {
   const t = a.telemetry ?? {};
+  const canManage = a.can_manage ?? true;
   const [kv, setKv] = useState<{ title: string; rows: [string, string][] } | null>(null);
 
   async function renameAppliance() {
@@ -340,9 +347,11 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
             <div>
               <div className="row" style={{ gap: 8, alignItems: "center" }}>
                 <h2 style={{ margin: 0 }}>{a.name}</h2>
-                <button className="btn ghost sm" title="Rename appliance" onClick={renameAppliance}>
-                  <Icon name="gear" size={13} />
-                </button>
+                {canManage && (
+                  <button className="btn ghost sm" title="Rename appliance" onClick={renameAppliance}>
+                    <Icon name="gear" size={13} />
+                  </button>
+                )}
               </div>
               <div className="faint mono" style={{ fontSize: 11.5 }}>{a.model} · v{a.software_version} · {a.serial}</div>
             </div>
@@ -365,21 +374,29 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
 
         {/* Controls header bar — signed, sequenced, expiring commands. */}
         <div className="row" style={{ gap: 8, marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border-soft)", flexWrap: "wrap", alignItems: "center" }}>
-          <button className="btn sm" onClick={() => onCommand(a, "REQUEST_VERIFICATION")}>
-            <Icon name="shield" size={13} /> Verify integrity
-          </button>
-          {a.state === "QUARANTINED"
-            ? <Pill tone="danger">Quarantined</Pill>
-            : <button className="btn sm danger" onClick={() => onCommand(a, "QUARANTINE")}>
-                <Icon name="lock" size={13} /> Quarantine
-              </button>}
+          {canManage ? (
+            <>
+              <button className="btn sm" onClick={() => onCommand(a, "REQUEST_VERIFICATION")}>
+                <Icon name="shield" size={13} /> Verify integrity
+              </button>
+              {a.state === "QUARANTINED"
+                ? <Pill tone="danger">Quarantined</Pill>
+                : <button className="btn sm danger" onClick={() => onCommand(a, "QUARANTINE")}>
+                    <Icon name="lock" size={13} /> Quarantine
+                  </button>}
+            </>
+          ) : (
+            <Pill tone="info"><Icon name="lock" size={12} /> View only</Pill>
+          )}
           <button className="btn sm ghost" onClick={showAdvanced}>
             <Icon name="search" size={13} /> Advanced
           </button>
           <div style={{ flex: 1 }} />
-          <button className="btn sm ghost danger" onClick={() => onRemove(a)}>
-            <Icon name="logout" size={13} /> Remove
-          </button>
+          {canManage && (
+            <button className="btn sm ghost danger" onClick={() => onRemove(a)}>
+              <Icon name="logout" size={13} /> Remove
+            </button>
+          )}
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 14 }}>
@@ -390,7 +407,7 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
         </div>
       </Card>
 
-      <StorageCard a={a} onAdd={addStorage} onRename={renameStorage} onDelete={deleteStorage} onAdvanced={setKv} />
+      <StorageCard a={a} canManage={canManage} onAdd={addStorage} onRename={renameStorage} onDelete={deleteStorage} onAdvanced={setKv} />
 
       <StoredDataCard a={a} />
 
@@ -465,8 +482,8 @@ function fmtUptime(s: number): string {
   return `${m}m`;
 }
 
-function StorageCard({ a, onAdd, onRename, onDelete, onAdvanced }: {
-  a: Appliance; onAdd: () => void; onRename: (s: Store) => void; onDelete: (s: Store) => void;
+function StorageCard({ a, canManage, onAdd, onRename, onDelete, onAdvanced }: {
+  a: Appliance; canManage: boolean; onAdd: () => void; onRename: (s: Store) => void; onDelete: (s: Store) => void;
   onAdvanced: (m: { title: string; rows: [string, string][] }) => void;
 }) {
   const stores = a.stores ?? [];
@@ -478,7 +495,7 @@ function StorageCard({ a, onAdd, onRename, onDelete, onAdvanced }: {
     <Card style={{ marginBottom: 16 }}>
       <div className="spread" style={{ marginBottom: 12 }}>
         <h3 style={{ margin: 0 }}>Storage</h3>
-        <button className="btn sm" onClick={onAdd}><Icon name="database" size={13} /> Add storage</button>
+        {canManage && <button className="btn sm" onClick={onAdd}><Icon name="database" size={13} /> Add storage</button>}
       </div>
       {totalCap > 0 && (
         <div style={{ marginBottom: 14 }}>
@@ -489,7 +506,7 @@ function StorageCard({ a, onAdd, onRename, onDelete, onAdvanced }: {
           <div className="progress"><span style={{ width: `${pct}%`, background: barTone }} /></div>
         </div>
       )}
-      {stores.map((s) => <StorageItem key={s.id} s={s} onRename={onRename} onDelete={onDelete} onAdvanced={onAdvanced} />)}
+      {stores.map((s) => <StorageItem key={s.id} s={s} canManage={canManage} onRename={onRename} onDelete={onDelete} onAdvanced={onAdvanced} />)}
       {stores.length === 0 && <div className="muted">No storage volumes reported yet.</div>}
     </Card>
   );
@@ -574,8 +591,8 @@ function NetworkCard({ a }: { a: Appliance }) {
   );
 }
 
-function StorageItem({ s, onRename, onDelete, onAdvanced }:
-  { s: Store; onRename: (s: Store) => void; onDelete: (s: Store) => void;
+function StorageItem({ s, canManage, onRename, onDelete, onAdvanced }:
+  { s: Store; canManage: boolean; onRename: (s: Store) => void; onDelete: (s: Store) => void;
     onAdvanced: (m: { title: string; rows: [string, string][] }) => void }) {
   const pct = s.capacity_bytes ? Math.min(100, (s.used_bytes / s.capacity_bytes) * 100) : 0;
   const h = s.health || {};
@@ -626,8 +643,8 @@ function StorageItem({ s, onRename, onDelete, onAdvanced }:
           <button className="btn sm ghost" onClick={showAdvanced} title="Advanced details">
             <Icon name="gear" size={13} />
           </button>
-          <button className="btn sm ghost" onClick={() => onRename(s)}>Rename</button>
-          {s.kind !== "builtin" && <button className="btn sm ghost" onClick={() => onDelete(s)}>Remove</button>}
+          {canManage && <button className="btn sm ghost" onClick={() => onRename(s)}>Rename</button>}
+          {canManage && s.kind !== "builtin" && <button className="btn sm ghost" onClick={() => onDelete(s)}>Remove</button>}
         </div>
       </div>
       <div className="spread faint" style={{ fontSize: 12, margin: "10px 0 4px" }}>

@@ -30,7 +30,7 @@ from cv_crypto.provider import get_provider
 
 from .config import get_settings
 from .db import get_db
-from .models import Passkey, Tenant, User
+from .models import Passkey, Tenant, User, Vault
 
 settings = get_settings()
 _serializer = URLSafeTimedSerializer(settings.session_secret, salt="cv-session")
@@ -152,9 +152,65 @@ def require_platform_admin(principal: Principal = Depends(get_principal)) -> Pri
 
 
 def require_security_admin(principal: Principal = Depends(get_principal)) -> Principal:
-    if principal.role not in ("owner", "security-admin") and not principal.is_platform_admin:
+    if not (is_org_admin(principal.role) or principal.is_platform_admin):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "security-admin role required")
     return principal
+
+
+# -- Organization roles & data partitioning ---------------------------------
+#
+# Customer-facing roles: owner (full control + billing), admin (manage users,
+# appliances, keys and see org-wide *aggregate* statistics), member (own data
+# only). "security-admin" is the legacy name for an org admin.
+
+ORG_ADMIN_ROLES = {"owner", "admin", "security-admin"}
+
+
+def is_org_admin(role: str) -> bool:
+    return role in ORG_ADMIN_ROLES
+
+
+def is_owner(role: str) -> bool:
+    return role == "owner"
+
+
+def get_user(principal: Principal = Depends(get_principal),
+             db: Session = Depends(get_db)) -> User:
+    user = db.get(User, principal.user_id)
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
+    return user
+
+
+def require_org_admin(principal: Principal = Depends(get_principal)) -> Principal:
+    """Gate customer-facing Organization Admin functions (owner or admin)."""
+    if not (is_org_admin(principal.role) or principal.is_platform_admin):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "organization admin required")
+    return principal
+
+
+def require_owner(principal: Principal = Depends(get_principal)) -> Principal:
+    if not (is_owner(principal.role) or principal.is_platform_admin):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "organization owner required")
+    return principal
+
+
+def content_vault_ids(db: Session, principal: Principal) -> list[str]:
+    """Vaults whose *content* the principal may read. Content is never shared
+    across users — even org admins only see their own vaults' items. Aggregate
+    statistics use ``scoped_vault_ids`` instead."""
+    rows = db.query(Vault.id).filter(Vault.owner_user_id == principal.user_id).all()
+    return [r[0] for r in rows]
+
+
+def scoped_vault_ids(db: Session, principal: Principal, scope: str) -> tuple[list[str], str]:
+    """Resolve the vault ids for an *aggregate* view and the effective scope.
+    Org admins requesting ``org`` see every vault in the tenant; everyone else
+    (and admins requesting ``me``) is limited to their own vaults."""
+    if scope == "org" and (is_org_admin(principal.role) or principal.is_platform_admin):
+        rows = db.query(Vault.id).filter(Vault.tenant_id == principal.tenant_id).all()
+        return [r[0] for r in rows], "org"
+    return content_vault_ids(db, principal), "me"
 
 
 def get_tenant(principal: Principal = Depends(get_principal),
