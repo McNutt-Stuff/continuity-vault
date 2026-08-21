@@ -103,6 +103,7 @@ p { color: var(--muted); margin: 0 0 16px; }
 }
 .nav-inner { display: flex; align-items: center; gap: 28px; height: 66px; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 18px; letter-spacing: -0.02em; }
+.brand-img { height: 32px; width: auto; display: block; }
 .brand-mark {
   width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
   background: linear-gradient(135deg, var(--brand), var(--brand-2)); color: #05070d; font-weight: 900;

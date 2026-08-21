@@ -11,8 +11,8 @@ export function Layout({ children }: { children: ReactNode }) {
     <>
       <header className="nav">
         <div className={`wrap nav-inner ${open ? "open" : ""}`}>
-          <Link to="/" className="brand">
-            <span className="brand-mark">A</span> {site.brand}
+          <Link to="/" className="brand" aria-label={site.brand}>
+            <img className="brand-img" src="/logo-header.png" alt={site.brand} />
           </Link>
           <nav className="nav-links">
             {site.nav.map((n) => (
