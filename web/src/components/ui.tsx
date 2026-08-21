@@ -1,7 +1,7 @@
 import { ReactNode } from "react";
 
-export function Card({ children, style, className }: { children: ReactNode; style?: React.CSSProperties; className?: string }) {
-  return <div className={`card ${className ?? ""}`} style={style}>{children}</div>;
+export function Card({ children, style, className, onClick }: { children: ReactNode; style?: React.CSSProperties; className?: string; onClick?: () => void }) {
+  return <div className={`card ${className ?? ""}`} style={style} onClick={onClick}>{children}</div>;
 }
 
 export function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: ReactNode }) {
