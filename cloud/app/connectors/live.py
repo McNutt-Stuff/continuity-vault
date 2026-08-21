@@ -363,6 +363,218 @@ def fetch_dropbox(access_token: str, limit: int = 1000,
             body = r.json()
 
 
+# --------------------------------------------------------------------------- #
+# Cloud file browsing + chunked/delta streaming (Dropbox, OneDrive)           #
+# --------------------------------------------------------------------------- #
+
+_FILE_CHUNK = 400  # files ingested per resumable crawl chunk
+
+
+def dropbox_list_folders(access_token: str, path: str = "") -> List[dict]:
+    """Immediate child folders of ``path`` (Dropbox path_lower, "" = root)."""
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    out: List[dict] = []
+    with httpx.Client(timeout=30) as c:
+        cursor: Optional[str] = None
+        while True:
+            if cursor is None:
+                r = c.post("https://api.dropboxapi.com/2/files/list_folder", headers=headers,
+                           content=json.dumps({"path": path or "", "recursive": False, "limit": 2000}))
+            else:
+                r = c.post("https://api.dropboxapi.com/2/files/list_folder/continue",
+                           headers=headers, content=json.dumps({"cursor": cursor}))
+            if r.status_code >= 400:
+                break
+            body = r.json()
+            for it in body.get("entries", []):
+                if it.get(".tag") == "folder":
+                    out.append({"path": it.get("path_lower") or it.get("path_display"),
+                                "name": it.get("name"), "hasMore": True})
+            if not body.get("has_more"):
+                break
+            cursor = body.get("cursor")
+    return sorted(out, key=lambda f: f["name"].lower())
+
+
+def _dropbox_object(c: httpx.Client, auth: dict, it: dict, cap: int) -> SourceObject:
+    _cat, _kind = classify_file(it.get("name", ""))
+    size = int(it.get("size", 0))
+    raw = b""
+    if 0 < size <= cap:
+        try:
+            dr = c.post("https://content.dropboxapi.com/2/files/download",
+                        headers={**auth, "Dropbox-API-Arg": json.dumps({"path": it.get("path_lower")})})
+            raw = dr.content if dr.status_code < 400 else b""
+        except Exception:
+            raw = b""
+    content, backed = _capped(raw, cap) if raw else (
+        json.dumps({"_arkive": "content_exceeds_cap" if size > cap else "no_content",
+                    "bytes": size}).encode(), False)
+    return SourceObject(
+        object_id=f"dropbox:{it.get('id', it['path_lower'])}",
+        doc_type=_kind, category=_cat, title=it.get("name", "file"),
+        content=content, preview=f"{size // 1000} KB · {it.get('path_display', '')}",
+        meta={"path": it.get("path_display"), "rev": it.get("rev"),
+              "content_backed_up": backed},
+        labels=["/".join(it.get("path_display", "/").split("/")[:-1]) or "/"],
+        size_bytes=size or None,  # type: ignore
+        content_hash=it.get("content_hash"))
+
+
+def stream_dropbox(access_token: str, cursor=None, config: Optional[dict] = None,
+                   state: Optional[dict] = None, content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
+    """Chunked, resumable, delta Dropbox pull. Backs up only the selected folders
+    (``config['roots']`` of path_lower; empty = whole Dropbox). Each call ingests
+    up to ``_FILE_CHUNK`` files then persists a per-root cursor; later runs use the
+    stored cursor to fetch only changes (Dropbox delta)."""
+    config = config or {}
+    state = state if state is not None else {}
+    roots = config.get("roots") or [""]
+    cur = cursor if isinstance(cursor, dict) else {}
+    rmap: dict = dict(cur.get("roots") or {})
+    emitted = 0
+    stopped_early = False
+    auth = {"Authorization": f"Bearer {access_token}"}
+    hdr = {**auth, "Content-Type": "application/json"}
+    with httpx.Client(timeout=120) as c:
+        for root in roots:
+            if emitted >= _FILE_CHUNK:
+                stopped_early = True
+                break
+            dbx_cursor = rmap.get(root)
+            while True:
+                if dbx_cursor is None:
+                    r = c.post("https://api.dropboxapi.com/2/files/list_folder", headers=hdr,
+                               content=json.dumps({"path": root or "", "recursive": True,
+                                                   "limit": 2000, "include_deleted": True}))
+                else:
+                    r = c.post("https://api.dropboxapi.com/2/files/list_folder/continue",
+                               headers=hdr, content=json.dumps({"cursor": dbx_cursor}))
+                if r.status_code >= 400:
+                    # A reset/expired cursor: restart this root from scratch once.
+                    if dbx_cursor is not None:
+                        dbx_cursor = None
+                        rmap[root] = None
+                        continue
+                    break
+                body = r.json()
+                for it in body.get("entries", []):
+                    if it.get(".tag") != "file":
+                        continue
+                    yield _dropbox_object(c, auth, it, content_cap)
+                    emitted += 1
+                dbx_cursor = body.get("cursor")
+                rmap[root] = dbx_cursor
+                if not body.get("has_more"):
+                    break
+                if emitted >= _FILE_CHUNK:
+                    stopped_early = True
+                    break
+    state["cursor"] = {"roots": rmap, "has_more": stopped_early}
+
+
+def onedrive_list_folders(access_token: str, path: str = "") -> List[dict]:
+    """Immediate child folders of ``path`` (relative to the drive root)."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    rel = (path or "").strip("/")
+    url: Optional[str] = (f"https://graph.microsoft.com/v1.0/me/drive/root:/{rel}:/children"
+                          if rel else "https://graph.microsoft.com/v1.0/me/drive/root/children")
+    params: Optional[dict] = {"$select": "id,name,folder,parentReference", "$top": 200}
+    out: List[dict] = []
+    with httpx.Client(timeout=30) as c:
+        while url:
+            r = c.get(url, headers=headers, params=params)
+            if r.status_code >= 400:
+                break
+            body = r.json()
+            for it in body.get("value", []):
+                if not it.get("folder"):
+                    continue
+                name = it.get("name", "")
+                full = f"{rel}/{name}".strip("/") if rel else name
+                out.append({"path": full, "name": name,
+                            "hasMore": int((it.get("folder") or {}).get("childCount", 0)) > 0})
+            url, params = body.get("@odata.nextLink"), None
+    return sorted(out, key=lambda f: f["name"].lower())
+
+
+def _onedrive_object(c: httpx.Client, headers: dict, it: dict, cap: int) -> SourceObject:
+    mime = (it.get("file") or {}).get("mimeType", "application/octet-stream")
+    path = (it.get("parentReference") or {}).get("path", "/drive/root:")
+    size = int(it.get("size", 0))
+    _cat, _kind = classify_file(it.get("name", ""), mime)
+    dl = it.get("@microsoft.graph.downloadUrl")
+    raw = b""
+    if dl and 0 < size <= cap:
+        try:
+            raw = c.get(dl).content
+        except Exception:
+            raw = b""
+    content, backed = _capped(raw, cap) if raw else (
+        json.dumps({"_arkive": "content_exceeds_cap" if size > cap else "no_content",
+                    "bytes": size}).encode(), False)
+    return SourceObject(
+        object_id=f"onedrive:{it['id']}", doc_type=_kind, category=_cat,
+        title=it.get("name", "file"), content=content,
+        preview=f"{mime} · {size // 1000} KB",
+        meta={"mime": mime, "path": f"{path}/{it.get('name')}", "content_backed_up": backed},
+        labels=[path.split(":")[-1] or "/"], size_bytes=size or None)  # type: ignore
+
+
+def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = None,
+                    state: Optional[dict] = None, content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
+    """Chunked, resumable, delta OneDrive pull via the Graph delta API. Backs up
+    only the selected folders (``config['roots']`` relative to root; empty = whole
+    drive). Persists a per-root delta link so later runs fetch only changes."""
+    config = config or {}
+    state = state if state is not None else {}
+    roots = config.get("roots") or [""]
+    cur = cursor if isinstance(cursor, dict) else {}
+    rmap: dict = dict(cur.get("roots") or {})
+    emitted = 0
+    stopped_early = False
+    headers = {"Authorization": f"Bearer {access_token}"}
+    select = ("id,name,size,file,folder,deleted,parentReference,"
+              "lastModifiedDateTime,@microsoft.graph.downloadUrl")
+    with httpx.Client(timeout=120) as c:
+        for root in roots:
+            if emitted >= _FILE_CHUNK:
+                stopped_early = True
+                break
+            link = rmap.get(root)
+            rel = (root or "").strip("/")
+            if link is None:
+                url: Optional[str] = (f"https://graph.microsoft.com/v1.0/me/drive/root:/{rel}:/delta"
+                                      if rel else "https://graph.microsoft.com/v1.0/me/drive/root/delta")
+                params: Optional[dict] = {"$select": select, "$top": 200}
+            else:
+                url, params = link, None
+            while url:
+                r = c.get(url, headers=headers, params=params)
+                if r.status_code >= 400:
+                    if link is not None:  # stale delta link — restart this root
+                        rmap[root] = None
+                    break
+                body = r.json()
+                for it in body.get("value", []):
+                    if it.get("folder") or it.get("deleted") or not it.get("file"):
+                        continue
+                    yield _onedrive_object(c, headers, it, content_cap)
+                    emitted += 1
+                nxt = body.get("@odata.nextLink")
+                delta = body.get("@odata.deltaLink")
+                if nxt:
+                    rmap[root] = nxt
+                    url, params = nxt, None
+                    if emitted >= _FILE_CHUNK:
+                        stopped_early = True
+                        break
+                    continue
+                rmap[root] = delta or rmap.get(root)
+                url = None
+    state["cursor"] = {"roots": rmap, "has_more": stopped_early}
+
+
 def fetch_icloud(username: str, password: str,
                  content_cap: int = _DEFAULT_CAP,
                  options: Optional[dict] = None) -> Iterable[SourceObject]:

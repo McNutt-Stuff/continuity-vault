@@ -265,6 +265,9 @@ class OneDriveConnector(Connector):
         return ConnectorCapabilities(
             incremental=True,
             streaming=True,
+            delta=True,
+            historical=True,
+            browsable=True,
             searchable_fields=["path", "mime"],
             facet_fields=["mime"],
         )
@@ -281,6 +284,18 @@ class OneDriveConnector(Connector):
             color="#0078d4",
             doc_types=["file"],
         )
+
+    def list_folders(self, config, path=""):
+        token = (config or {}).get("access_token")
+        return live.onedrive_list_folders(token, path) if token else []
+
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.stream_onedrive(config["access_token"], cursor, config,
+                                            state if state is not None else {}, _content_cap())
+            return
+        yield from self.fetch_objects(account_label, config=config)
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}
@@ -315,6 +330,9 @@ class DropboxConnector(Connector):
         return ConnectorCapabilities(
             incremental=True,
             streaming=True,
+            delta=True,
+            historical=True,
+            browsable=True,
             searchable_fields=["path", "mime"],
             facet_fields=["mime"],
         )
@@ -331,6 +349,18 @@ class DropboxConnector(Connector):
             color="#0061ff",
             doc_types=["file"],
         )
+
+    def list_folders(self, config, path=""):
+        token = (config or {}).get("access_token")
+        return live.dropbox_list_folders(token, path) if token else []
+
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.stream_dropbox(config["access_token"], cursor, config,
+                                           state if state is not None else {}, _content_cap())
+            return
+        yield from self.fetch_objects(account_label, config=config)
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}

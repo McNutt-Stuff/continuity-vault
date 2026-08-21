@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     instagram_client_secret: str | None = None
     linkedin_client_id: str | None = None
     linkedin_client_secret: str | None = None
+    # LinkedIn scopes must match the products enabled on your LinkedIn app. The
+    # "Sign In with LinkedIn using OpenID Connect" product grants these; legacy
+    # apps may need "r_liteprofile r_emailaddress". Override via CV_LINKEDIN_SCOPES.
+    linkedin_scopes: str = "openid profile email"
     # Evernote's modern API is its MCP server (OAuth 2.0). No app registration is
     # offered — the client is registered dynamically (RFC 7591) and cached. Set
     # a static client only if Evernote later provides one.

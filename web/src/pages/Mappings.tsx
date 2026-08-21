@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import { Card, Pill, bytes, serverDate, timeAgo, Loading } from "../components/ui";
+import { Card, Pill, bytes, serverDate, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, notify } from "../components/dialog";
+import { FolderPicker, FolderNode } from "../components/FolderPicker";
 
 interface Account { id: string; connector_type: string; account_label: string; }
 interface Agent { id: string; name: string; hostname: string; collectors: string[]; }
@@ -19,7 +20,7 @@ interface FileConfig {
 }
 interface CatalogItem {
   type: string;
-  capabilities?: { filterCategories?: { id: string; label: string }[] };
+  capabilities?: { filterCategories?: { id: string; label: string }[]; browsable?: boolean };
 }
 interface Mapping {
   id: string; name: string; source_type: string; source_display: string;
@@ -80,6 +81,8 @@ export default function Mappings() {
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   // Endpoint-files folder picker: which mapping/agent it's configuring.
   const [picker, setPicker] = useState<{ agentId: string; mappingId: string; initial: FileConfig } | null>(null);
+  // Cloud folder picker (Dropbox / OneDrive / other browsable sources).
+  const [cloudPicker, setCloudPicker] = useState<{ accountId: string; mappingId: string; label: string; initial: FileConfig } | null>(null);
   const [activity, setActivity] = useState<Activity | null>(null);
   // collection_id -> epoch ms when a sync was triggered (live indicator).
   const [syncing, setSyncing] = useState<Record<string, number>>({});
@@ -234,6 +237,10 @@ export default function Mappings() {
 
   function filterCatsFor(sourceType: string): { id: string; label: string }[] {
     return catalog.find((c) => c.type === sourceType)?.capabilities?.filterCategories || [];
+  }
+
+  function browsableFor(sourceType: string): boolean {
+    return !!catalog.find((c) => c.type === sourceType)?.capabilities?.browsable;
   }
 
   async function saveRouting(m: Mapping) {
@@ -407,6 +414,11 @@ export default function Mappings() {
                     {m.source_type === "endpoint_files" && (
                       <Pill tone={(m.config?.roots?.length || 0) > 0 ? "info" : "warn"}>
                         <Icon name="database" size={11} /> {m.config?.roots?.length || 0} folders
+                      </Pill>
+                    )}
+                    {!m.is_agent && browsableFor(m.source_type) && (m.config?.roots?.length || 0) > 0 && (
+                      <Pill tone="info">
+                        <Icon name="database" size={11} /> {m.config?.roots?.length} folders
                       </Pill>
                     )}
                     {m.source_type === "gmail" && (m.config?.excludeFolders?.length || 0) > 0 && (
@@ -636,6 +648,24 @@ export default function Mappings() {
                         </div>
                       </div>
                     )}
+                    {!m.is_agent && browsableFor(m.source_type) && (
+                      <div className="stack" style={{ gap: 6 }}>
+                        <span className="faint" style={{ fontSize: 11.5 }}>Folders to back up</span>
+                        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <button className="btn sm" disabled={!m.connector_account_id}
+                                  onClick={() => m.connector_account_id && setCloudPicker({
+                                    accountId: m.connector_account_id, mappingId: m.id,
+                                    label: m.source_display, initial: m.config || {} })}>
+                            <Icon name="database" size={13} /> Choose folders…
+                          </button>
+                          <span className="faint" style={{ fontSize: 11 }}>
+                            {(m.config?.roots?.length || 0) > 0
+                              ? `${m.config?.roots?.length} folder(s) selected`
+                              : "backing up everything"}
+                          </span>
+                        </div>
+                      </div>
+                    )}
                     {filterCatsFor(m.source_type).length > 0 && (
                       <div className="stack" style={{ gap: 6 }}>
                         <span className="faint" style={{ fontSize: 11.5 }}>What to back up (all if none selected)</span>
@@ -686,6 +716,24 @@ export default function Mappings() {
           initial={picker.initial}
           onClose={() => setPicker(null)}
           onSaved={() => { flash("Folder selection saved"); void load(); }}
+        />
+      )}
+      {cloudPicker && (
+        <FolderPicker
+          title={`Choose folders — ${cloudPicker.label}`}
+          note="Only the folders you select are backed up. Nothing selected = everything."
+          initialSelected={cloudPicker.initial.roots || []}
+          loadingLabel="loading your folders…"
+          emptyLabel="No subfolders here. Selecting nothing backs up the whole account."
+          loadRoots={() => api.get<{ folders: FolderNode[] }>(
+            `/connectors/accounts/${cloudPicker.accountId}/folders`).then((r) => r.folders)}
+          loadChildren={(node) => api.get<{ folders: FolderNode[] }>(
+            `/connectors/accounts/${cloudPicker.accountId}/folders?path=${encodeURIComponent(node.path)}`).then((r) => r.folders)}
+          onClose={() => setCloudPicker(null)}
+          onSave={async (roots) => {
+            await api.put(`/collections/${cloudPicker.mappingId}`, { config: { ...cloudPicker.initial, roots } });
+            setCloudPicker(null); flash("Folder selection saved"); void load();
+          }}
         />
       )}
     </>
@@ -751,213 +799,95 @@ interface FsIndex {
 // Folder picker for the Endpoint Files source. The agent maintains a cached
 // folder index (rebuilt in the background), so this loads the whole tree once
 // and navigates it locally — no per-folder scan round trips.
+// The endpoint-files picker now reuses the shared FolderPicker, providing the
+// agent-specific data source (its async cached folder index + lazy fs-expand)
+// plus the exclude-file-types / max-size controls.
 function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
   agentId: string; mappingId: string; initial: FileConfig;
   onClose: () => void; onSaved: () => void;
 }) {
-  const [index, setIndex] = useState<FsIndex | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [lazyKids, setLazyKids] = useState<Record<string, FsNode[]>>({});
-  const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<Set<string>>(new Set(initial.roots || []));
   const [excl, setExcl] = useState<string>((initial.excludeExts || []).join(", "));
   const [maxMb, setMaxMb] = useState<number>(Math.round((initial.maxSizeBytes || 100 * 1024 * 1024) / (1024 * 1024)));
-  const [loading, setLoading] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
-  const [building, setBuilding] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
 
-  function applyIndex(idx: FsIndex | null) {
-    if (idx && idx.roots && idx.roots.length) {
-      setIndex(idx);
-      setExpanded((cur) => (cur.size ? cur : new Set(idx.roots!.map((r) => r.path))));
-      return true;
+  async function loadRoots(): Promise<FolderNode[]> {
+    // Serve the agent's cached index first; nudge + poll if it isn't ready yet.
+    const first = await api.get<{ scan: FsIndex | null }>(`/agents/${agentId}/fs-scan`);
+    const cached = first.scan?.roots;
+    if (cached && cached.length) return cached as FolderNode[];
+    await api.post(`/agents/${agentId}/fs-scan`, { rebuild: false });
+    const deadline = Date.now() + 180000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2500));
+      const res = await api.get<{ scan: FsIndex | null }>(`/agents/${agentId}/fs-scan`);
+      const rs = res.scan?.roots;
+      if (rs && rs.length) return rs as FolderNode[];
     }
-    return false;
+    throw new Error("The agent hasn't reported a folder index yet. Make sure it's online and updated (it indexes on start), then Rescan drives.");
   }
 
-  async function loadIndex() {
-    setLoading(true); setErr(""); setBuilding(false);
-    try {
-      // Serve the agent's cached index first (usually already present).
-      const first = await api.get<{ scan: FsIndex | null }>(`/agents/${agentId}/fs-scan`);
-      let have = applyIndex(first.scan);
-      // Nudge the agent to push its current cache; wait only if we have nothing.
-      await api.post(`/agents/${agentId}/fs-scan`, { rebuild: false });
-      if (!have) {
-        const deadline = Date.now() + 180000;  // first full-tree build can take a bit
-        while (Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 2500));
-          const res = await api.get<{ scan: FsIndex | null }>(`/agents/${agentId}/fs-scan`);
-          // The agent posts a "building" placeholder until the first index is ready.
-          setBuilding(!!(res.scan && !(res.scan.roots?.length)));
-          if (applyIndex(res.scan)) { have = true; break; }
-        }
-        if (!have) setErr("The agent hasn't reported a folder index yet. Make sure it's online and updated to the latest build (it indexes on start), then Rescan.");
+  async function loadChildren(node: FolderNode): Promise<FolderNode[]> {
+    const { request_id } = await api.post<{ request_id: string }>(`/agents/${agentId}/fs-expand`, { path: node.path });
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const { expansion } = await api.get<{ expansion: { request_id: string; ok: boolean; result?: { children?: FsNode[] } } | null }>(
+        `/agents/${agentId}/fs-expand?path=${encodeURIComponent(node.path)}`);
+      if (expansion && expansion.request_id === request_id) {
+        return (expansion.ok ? (expansion.result?.children || []) : []) as FolderNode[];
       }
-    } catch (e) { setErr((e as ApiError).message); }
-    setLoading(false);
-    setBuilding(false);
+    }
+    return [];
   }
-
-  useEffect(() => { void loadIndex(); // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   async function rescan() {
-    setRebuilding(true); setErr("");
-    const prev = index?.built_at || "";
-    try {
-      await api.post(`/agents/${agentId}/fs-scan`, { rebuild: true });
-      const deadline = Date.now() + 120000;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 3000));
-        const { scan } = await api.get<{ scan: FsIndex | null }>(`/agents/${agentId}/fs-scan`);
-        if (scan && scan.built_at && scan.built_at !== prev && scan.roots?.length) {
-          setIndex(scan);
-          break;
-        }
-      }
-    } catch (e) { setErr((e as ApiError).message); }
-    setRebuilding(false);
+    setRebuilding(true);
+    try { await api.post(`/agents/${agentId}/fs-scan`, { rebuild: true }); } catch { /* ignore */ }
+    // Give the agent a moment to rebuild, then remount the picker to re-poll.
+    setTimeout(() => { setRebuilding(false); setReloadKey((k) => k + 1); }, 4000);
   }
 
-  function toggleExpand(node: FsNode) {
-    const path = node.path;
-    const willExpand = !expanded.has(path);
-    setExpanded((cur) => { const n = new Set(cur); n.has(path) ? n.delete(path) : n.add(path); return n; });
-    // Lazily fetch children the pre-built index didn't fully include (truncated
-    // or depth-limited folders), so the operator can drill into anything.
-    if (willExpand && node.hasMore) void loadChildren(path);
-  }
-  async function loadChildren(path: string) {
-    if (lazyKids[path] || loadingPaths.has(path)) return;
-    setLoadingPaths((s) => new Set(s).add(path));
-    try {
-      const { request_id } = await api.post<{ request_id: string }>(`/agents/${agentId}/fs-expand`, { path });
-      const deadline = Date.now() + 60000;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 1500));
-        const { expansion } = await api.get<{ expansion: { request_id: string; ok: boolean; result?: { children?: FsNode[] } } | null }>(
-          `/agents/${agentId}/fs-expand?path=${encodeURIComponent(path)}`);
-        if (expansion && expansion.request_id === request_id) {
-          setLazyKids((m) => ({ ...m, [path]: expansion.ok ? (expansion.result?.children || []) : [] }));
-          break;
-        }
-      }
-    } catch { /* leave unexpanded on failure */ }
-    setLoadingPaths((s) => { const n = new Set(s); n.delete(path); return n; });
-  }
-  function toggleSelect(path: string) {
-    setSelected((cur) => { const n = new Set(cur); n.has(path) ? n.delete(path) : n.add(path); return n; });
+  async function onSave(roots: string[]) {
+    const config: FileConfig = {
+      roots,
+      excludeExts: excl.split(",").map((s) => s.trim().replace(/^\./, "").toLowerCase()).filter(Boolean),
+      maxSizeBytes: Math.max(1, maxMb) * 1024 * 1024,
+    };
+    await api.put(`/collections/${mappingId}`, { config });
+    onSaved();
+    onClose();
   }
 
-  async function save() {
-    setSaving(true);
-    try {
-      const config: FileConfig = {
-        roots: [...selected],
-        excludeExts: excl.split(",").map((s) => s.trim().replace(/^\./, "").toLowerCase()).filter(Boolean),
-        maxSizeBytes: Math.max(1, maxMb) * 1024 * 1024,
-      };
-      await api.put(`/collections/${mappingId}`, { config });
-      onSaved();
-      onClose();
-    } catch (e) { setErr((e as ApiError).message); setSaving(false); }
-  }
-
-  function renderNode(node: FsNode, depth: number) {
-    const isSel = selected.has(node.path);
-    const isExp = expanded.has(node.path);
-    // Prefer a freshly loaded child list (replaces a truncated indexed set).
-    const kids = lazyKids[node.path] ?? (node.children || []);
-    const isLoading = loadingPaths.has(node.path);
-    const canExpand = kids.length > 0 || node.hasMore;
-    return (
-      <div key={node.path}>
-        <div className="row" style={{ gap: 6, alignItems: "center", padding: "3px 0", paddingLeft: depth * 16 }}>
-          {canExpand ? (
-            <button className="btn ghost sm" style={{ padding: "0 4px", minWidth: 18 }} onClick={() => toggleExpand(node)}>
-              {isExp ? "▾" : "▸"}
-            </button>
-          ) : <span style={{ width: 18 }} />}
-          <input type="checkbox" checked={isSel} onChange={() => toggleSelect(node.path)} />
-          <Icon name="database" size={13} />
-          <span style={{ fontSize: 12.5 }}>{node.name}</span>
-          {(node.files || 0) > 0 && (
-            <span className="faint" style={{ fontSize: 10.5 }}>· {node.files} files{node.bytes ? ` · ${bytes(node.bytes)}` : ""}</span>
-          )}
-        </div>
-        {isExp && (
-          <div>
-            {kids.map((c) => renderNode(c, depth + 1))}
-            {kids.length === 0 && isLoading && (
-              <div className="faint" style={{ paddingLeft: (depth + 1) * 16 + 24, fontSize: 11 }}>
-                <span className="spinner-dot" /> loading subfolders…
-              </div>
-            )}
-            {kids.length === 0 && !isLoading && node.hasMore && (
-              <div className="faint" style={{ paddingLeft: (depth + 1) * 16 + 24, fontSize: 11 }}>
-                no more subfolders — selecting this folder still backs up everything beneath it
-              </div>
-            )}
-            {kids.length === 0 && !node.hasMore && (node.files || 0) === 0 && (
-              <div className="faint" style={{ paddingLeft: (depth + 1) * 16 + 24, fontSize: 11 }}>empty</div>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  const roots = index?.roots || [];
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-panel" style={{ maxWidth: 640 }} onClick={(e) => e.stopPropagation()}>
-        <div className="spread">
-          <div>
-            <h3 style={{ margin: 0 }}>Choose folders to back up</h3>
-            <div className="faint" style={{ fontSize: 12 }}>
-              Selecting a folder includes everything beneath it.
-              {index?.built_at ? ` · indexed ${timeAgo(index.built_at)}` : ""}
-            </div>
-          </div>
-          <button className="btn ghost sm" onClick={onClose}><Icon name="logout" size={14} /></button>
+    <FolderPicker
+      key={reloadKey}
+      title="Choose folders to back up"
+      note="Selecting a folder includes everything beneath it."
+      initialSelected={initial.roots || []}
+      loadingLabel="loading the agent's folder index…"
+      emptyLabel="No folder index yet. Make sure the agent is online and updated, then Rescan drives."
+      loadRoots={loadRoots}
+      loadChildren={loadChildren}
+      onClose={onClose}
+      onSave={onSave}
+      headerAction={
+        <button className="btn ghost sm" disabled={rebuilding} onClick={() => void rescan()}>
+          {rebuilding ? <><span className="spinner-dot" /> Rebuilding…</> : "Rescan drives"}
+        </button>
+      }
+      extra={
+        <div className="row" style={{ gap: 12, marginTop: 12, flexWrap: "wrap" }}>
+          <label className="stack" style={{ flex: 1, minWidth: 200 }}>
+            <span className="faint" style={{ fontSize: 11.5 }}>Exclude file types (comma-separated)</span>
+            <input className="input" value={excl} placeholder="mp4, iso, dmg" onChange={(e) => setExcl(e.target.value)} />
+          </label>
+          <label className="stack" style={{ width: 160 }}>
+            <span className="faint" style={{ fontSize: 11.5 }}>Max file size (MB)</span>
+            <input className="input" type="number" min={1} value={maxMb} onChange={(e) => setMaxMb(Number(e.target.value))} />
+          </label>
         </div>
-        <div className="modal-body">
-          {err && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 8 }}>{err}</div>}
-          <div style={{ maxHeight: "44vh", overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, padding: 8 }}>
-            {loading && roots.length === 0 && (
-              <div className="faint">
-                <span className="spinner-dot" /> {building ? "the agent is building its folder index (first run can take a minute)…" : "loading the agent's folder index…"}
-              </div>
-            )}
-            {roots.map((r) => renderNode(r, 0))}
-            {!loading && roots.length === 0 && <div className="muted">No folder index yet. Make sure the agent is online and updated, then use Rescan.</div>}
-          </div>
-          <div className="row" style={{ gap: 12, marginTop: 12, flexWrap: "wrap" }}>
-            <label className="stack" style={{ flex: 1, minWidth: 200 }}>
-              <span className="faint" style={{ fontSize: 11.5 }}>Exclude file types (comma-separated)</span>
-              <input className="input" value={excl} placeholder="mp4, iso, dmg" onChange={(e) => setExcl(e.target.value)} />
-            </label>
-            <label className="stack" style={{ width: 160 }}>
-              <span className="faint" style={{ fontSize: 11.5 }}>Max file size (MB)</span>
-              <input className="input" type="number" min={1} value={maxMb} onChange={(e) => setMaxMb(Number(e.target.value))} />
-            </label>
-          </div>
-          <div className="faint" style={{ fontSize: 11, marginTop: 8 }}>
-            {selected.size} folder(s) selected · each file is client-encrypted before upload.
-          </div>
-        </div>
-        <div className="modal-foot">
-          <button className="btn ghost sm" disabled={rebuilding} onClick={() => void rescan()}>
-            {rebuilding ? <><span className="spinner-dot" /> Rebuilding…</> : "Rescan drives"}
-          </button>
-          <div style={{ flex: 1 }} />
-          <button className="btn sm" onClick={onClose}>Cancel</button>
-          <button className="btn primary sm" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save selection"}</button>
-        </div>
-      </div>
-    </div>
+      }
+    />
   );
 }

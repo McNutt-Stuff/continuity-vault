@@ -144,6 +144,8 @@ def catalog(tenant: Tenant = Depends(security.get_tenant)):
             "setup": _setup_instructions(ctype),
             "capabilities": {
                 "incremental": caps.incremental,
+                "browsable": caps.browsable,
+                "delta": caps.delta,
                 "searchableFields": caps.searchable_fields,
                 "facetFields": caps.facet_fields,
                 "filterCategories": caps.filter_categories,
@@ -155,6 +157,31 @@ def catalog(tenant: Tenant = Depends(security.get_tenant)):
 class ConnectRequest(BaseModel):
     account_label: str | None = None
     account_id: str | None = None  # set to re-authorize an existing source
+
+
+@router.get("/accounts/{account_id}/folders")
+def list_account_folders(account_id: str, path: str = "",
+                         principal: security.Principal = Depends(security.get_principal),
+                         tenant: Tenant = Depends(security.get_tenant),
+                         db: Session = Depends(get_db)):
+    """Immediate child folders of ``path`` for a browsable cloud source, powering
+    the Data Map folder picker. Scoped to the caller's own linked source."""
+    account = db.get(ConnectorAccount, account_id)
+    if (not account or account.tenant_id != tenant.id
+            or (account.owner_user_id and account.owner_user_id != principal.user_id)):
+        raise HTTPException(404, "source not found")
+    connector = get_connector(account.connector_type)
+    if not connector or not connector.capabilities().browsable:
+        raise HTTPException(400, "this source doesn't support folder browsing")
+    from ..workers.sync_worker import access_token_for_account
+    token = access_token_for_account(db, account)
+    if not token:
+        raise HTTPException(400, "reconnect this source to browse its folders")
+    try:
+        folders = connector.list_folders({"access_token": token}, path or "")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"couldn't list folders: {exc}")
+    return {"folders": folders}
 
 
 @router.post("/{connector_type}/connect")

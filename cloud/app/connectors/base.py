@@ -101,6 +101,10 @@ class ConnectorCapabilities:
     # Media-heavy source whose items are downloaded — ingest lazily in bounded
     # batches so a large library can't materialize into memory and OOM the box.
     streaming: bool = False
+    # Source exposes a browsable folder tree the operator can select from (the
+    # Data Map folder picker). Chosen folder paths arrive as config["roots"];
+    # empty selection = back up everything.
+    browsable: bool = False
     # Metadata keys promoted into the searchable index blob.
     searchable_fields: List[str] = field(default_factory=list)
     # Metadata keys exposed as filter facets in the UI.
@@ -165,6 +169,12 @@ class Connector:
     def fetch_objects(self, account_label: str, since: Optional[datetime] = None,
                       config: Optional[dict] = None) -> Iterable[SourceObject]:
         raise NotImplementedError
+
+    def list_folders(self, config: Optional[dict], path: str = "") -> List[dict]:
+        """List the immediate child folders of ``path`` for the folder picker.
+        Returns ``[{"path", "name", "hasMore"}]``. Browsable connectors override;
+        the default has nothing to browse."""
+        return []
 
 
 # --- Extensible registry ----------------------------------------------------
