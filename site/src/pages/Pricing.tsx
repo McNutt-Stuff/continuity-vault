@@ -86,7 +86,7 @@ export default function Pricing() {
 
       {/* Hardware */}
       <Section className="tight">
-        <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 40, alignItems: "center" }}>
+        <div className="two-col">
           <ApplianceImage />
           <div>
             <div className="eyebrow"><span className="dot" /> Secure hardware</div>

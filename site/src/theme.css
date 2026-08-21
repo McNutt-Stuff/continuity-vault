@@ -157,6 +157,26 @@ p { color: var(--muted); margin: 0 0 16px; }
   color: var(--muted);
 }
 
+/* Responsive two-column split (e.g. hardware feature + image) */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; }
+
+/* Scenario cards (Use cases — prime protection stories) */
+.scenario-grid { gap: 22px; }
+.scenario { padding: 30px; position: relative; overflow: hidden; }
+.scenario::before {
+  content: ""; position: absolute; inset: 0 auto 0 0; width: 3px;
+  background: linear-gradient(180deg, var(--brand), var(--brand-2));
+}
+.scenario-head { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+.scenario-ico {
+  width: 54px; height: 54px; border-radius: 14px; display: grid; place-items: center; font-size: 26px; flex: none;
+  background: linear-gradient(135deg, rgba(79,124,255,.24), rgba(53,208,165,.16));
+  border: 1px solid var(--border-strong);
+}
+.scenario h3 { font-size: 22px; margin-bottom: 10px; }
+.scenario-points { display: grid; gap: 10px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--border); }
+.scenario-point { display: flex; gap: 10px; font-size: 14px; color: var(--muted); }
+
 /* Section header */
 .section-head { max-width: 680px; margin: 0 auto 48px; text-align: center; }
 .section-head.left { margin-left: 0; text-align: left; }
@@ -224,12 +244,29 @@ p { color: var(--muted); margin: 0 0 16px; }
 
 /* Responsive */
 @media (max-width: 900px) {
-  .grid-3, .grid-4, .price-grid, .stat-strip, .hero-visual .stage { grid-template-columns: 1fr; }
+  .grid-3, .grid-4, .price-grid, .stat-strip, .hero-visual .stage, .two-col { grid-template-columns: 1fr; }
   .grid-2, .footer-grid { grid-template-columns: 1fr; }
   .nav-links { display: none; }
+  .nav-cta { display: none; }
   .menu-btn { display: inline-flex; margin-left: auto; }
   .nav-inner.open + .mobile-menu { display: block; }
   .section { padding: 64px 0; }
+  .scenario-grid { gap: 18px; }
+}
+
+@media (max-width: 560px) {
+  .wrap { padding: 0 16px; }
+  .section { padding: 48px 0; }
+  .section.tight { padding: 40px 0; }
+  .hero { padding: 52px 0 44px; }
+  .hero-cta { flex-direction: column; align-items: stretch; }
+  .hero-cta .btn { justify-content: center; }
+  .hero-badges { gap: 12px; }
+  .cta-band { padding: 40px 22px; border-radius: 20px; }
+  .card, .scenario { padding: 22px; }
+  .scenario-head { gap: 12px; }
+  .scenario-ico { width: 46px; height: 46px; font-size: 22px; }
+  .footer-bottom { flex-direction: column; align-items: flex-start; }
 }
 
 .mobile-menu { display: none; border-bottom: 1px solid var(--border); background: var(--bg-2); }

@@ -82,8 +82,56 @@ export const features = {
 };
 
 export const useCases = {
-  h1: "Built for the moments that matter.",
-  lead: "Whether it's your family's memories or your company's continuity, Arkive keeps the important things safe, private, and recoverable.",
+  h1: "Protection for the moments that matter most.",
+  lead: "The threats to your digital life are real — ransomware, account takeovers, cloud failures, and the unexpected. Here's exactly how Arkive keeps you safe, recoverable, and in control.",
+  scenarios: [
+    {
+      ico: "🛡️", tag: "Ransomware",
+      h: "Protection from ransomware",
+      p: "One click on the wrong link and your files are encrypted, deleted, or held for ransom. Arkive keeps immutable, offline copies that attackers can't reach or alter — so you roll back to the moment before the attack and restore clean data in hours, never paying a ransom.",
+      points: [
+        "Immutable, object-locked recovery points",
+        "Offline, air-gapped copies beyond an attacker's reach",
+        "Point-in-time restore to before the infection",
+        "Tamper-evident proof your recovery is clean",
+      ],
+    },
+    {
+      ico: "🔑", tag: "Account takeover",
+      h: "Recovery from account hacks",
+      p: "A hijacked email or cloud login can lock you out of your entire digital life in minutes — and wipe years of it on the way out. Because Arkive continuously archives your accounts to storage you control, everything stays safe and recoverable even if you lose access to the account itself.",
+      points: [
+        "Continuous archive of email, files, photos & accounts",
+        "Recover your data even when you're locked out",
+        "Full version history to undo malicious deletions",
+        "An independent copy outside the compromised provider",
+      ],
+    },
+    {
+      ico: "☁️", tag: "Provider risk",
+      h: "Insurance against cloud failures",
+      p: "Cloud providers suffer outages, suspend accounts without warning, and occasionally lose data outright — and their terms of service leave you with little recourse. Arkive keeps an independent, provider-agnostic copy across storage you control, so one outage or closed account never becomes permanent loss.",
+      points: [
+        "An independent copy across a cloud you control",
+        "Survive outages, account bans & provider shutdowns",
+        "No lock-in — hybrid cloud plus offline hardware",
+        "Always-verifiable, always-recoverable copies",
+      ],
+    },
+    {
+      ico: "🕊️", tag: "Digital legacy",
+      h: "Peace of mind for the unexpected",
+      p: "The hardest moment for your family shouldn't also mean losing your digital life. Arkive preserves your accounts, memories, and records — and releases them to the people you choose, with a clear plan and guided recovery, so nothing important is ever lost with you.",
+      points: [
+        "Designate trusted recovery contacts",
+        "Preserve memories, records & credentials for loved ones",
+        "Guided legacy & recovery planning",
+        "Access released only under your rules",
+      ],
+    },
+  ],
+  whoTitle: "Who it's for",
+  whoLead: "From families to regulated enterprises, Arkive protects the people and organizations who can't afford to lose what matters.",
   cases: [
     { ico: "👨‍👩‍👧", h: "Families & individuals", p: "Protect a lifetime of email, photos, documents and accounts. Plan for the unexpected with recovery your loved ones can rely on.", points: ["Everything in one secure place", "Simple, guided protection setup", "Legacy & recovery planning"] },
     { ico: "🏢", h: "Small & mid-size business", p: "Keep the business running through ransomware, departures, and outages with verifiable, policy-driven recovery.", points: ["Per-source retention & routing", "Role-based access & approvals", "Compliance-ready audit trail"] },
