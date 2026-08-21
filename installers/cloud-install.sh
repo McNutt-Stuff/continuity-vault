@@ -28,7 +28,8 @@ export DEBIAN_FRONTEND=noninteractive
 # --- node role --------------------------------------------------------------
 # Which node role this host runs. Only the components for that role are deployed:
 #   control-plane   full stack: control plane API, workers, web admin, CMS
-#   customer-tenant data-plane control plane app + web portal; heartbeats to CP
+#   customer-tenant data-plane node: API + workers only, NO portal; the control
+#                   plane talks to it over /api. Customers use the CP's UI.
 #   public-web      marketing website only (no API/DB); heartbeats to CP
 # Non-control-plane roles register with the control plane using a shared secret.
 # Values are resolved (in order): explicit env > persisted config > interactive
@@ -45,7 +46,8 @@ CV_CONTROL_PLANE_URL="${CV_CONTROL_PLANE_URL:-$(_persisted CV_CONTROL_PLANE_URL)
 # refines it for other roles.
 [[ -n "$(_persisted CV_DOMAIN)" && "$CV_DOMAIN" == "vault.arkive.life" ]] && CV_DOMAIN="$(_persisted CV_DOMAIN)"
 
-# Roles that run the Python control-plane application (API + web portal).
+# Roles that run the Python app (API + workers). Only control-plane also builds
+# and serves the customer portal; customer-tenant is API-only.
 _runs_app() { [[ "$CV_NODE_ROLE" != "public-web" ]]; }
 
 # Resolve node settings non-interactively. The installer NEVER prompts — a
@@ -262,6 +264,14 @@ configure_caddy() {
   systemctl reload caddy 2>/dev/null || systemctl restart caddy
 }
 
+# API-only reverse proxy for a customer-tenant (data-plane) node: proxies /api
+# to the local app for control-plane communication, serves NO public portal.
+configure_caddy_node() {
+  sed "s/{{DOMAIN}}/${CV_DOMAIN}/g" \
+    "$INSTALL_DIR/infra/Caddyfile.node" > /etc/caddy/Caddyfile
+  systemctl reload caddy 2>/dev/null || systemctl restart caddy
+}
+
 # TLS reverse proxy for a public-web node: serves the static marketing site,
 # no /api proxy.
 configure_caddy_site() {
@@ -356,22 +366,33 @@ step_if_changed "Installing Python control plane" \
 step_if_changed "Building quantum-safe crypto (liboqs)" \
   "$INSTALL_DIR/shared $INSTALL_DIR/.venv/.pq-ok" \
   build_pqcrypto
-step_if_changed "Building web portal" \
-  "$INSTALL_DIR/web/src $INSTALL_DIR/web/package.json $INSTALL_DIR/web/index.html $INSTALL_DIR/web/vite.config.ts $INSTALL_DIR/web/tsconfig.json $INSTALL_DIR/web/tsconfig.node.json $INSTALL_DIR/web/dist/index.html" \
-  build_web
+# Only the control plane serves the customer portal. A customer-tenant
+# (data-plane) node runs the API + workers and talks to the control plane only.
+if [[ "$CV_NODE_ROLE" == "control-plane" ]]; then
+  step_if_changed "Building web portal" \
+    "$INSTALL_DIR/web/src $INSTALL_DIR/web/package.json $INSTALL_DIR/web/index.html $INSTALL_DIR/web/vite.config.ts $INSTALL_DIR/web/tsconfig.json $INSTALL_DIR/web/tsconfig.node.json $INSTALL_DIR/web/dist/index.html" \
+    build_web
+fi
 step_always "Validating application"       validate_app
 step_always "Writing configuration"        write_env
 step_always "Recording node marker"        write_node_marker
 step_always "Starting control-plane service" install_service
-step_always "Configuring TLS reverse proxy" configure_caddy
-step_always "Verifying service health"     health_check
 if [[ "$CV_NODE_ROLE" == "customer-tenant" ]]; then
+  step_always "Configuring API-only reverse proxy" configure_caddy_node
   step_always "Installing fleet heartbeat"   install_heartbeat
   step_always "Installing self-update timer" install_node_update
+else
+  step_always "Configuring TLS reverse proxy" configure_caddy
 fi
+step_always "Verifying service health"     health_check
 
 finish
-printf "  Portal:  %shttps://%s%s\n" "$BOLD" "$CV_DOMAIN" "$RESET"
-printf "  API:     https://%s/api/health\n" "$CV_DOMAIN"
-printf "  Role:    %s\n" "$CV_NODE_ROLE"
-printf "  Sign in: owner@northwind.example (demo seed data enabled)\n\n"
+if [[ "$CV_NODE_ROLE" == "customer-tenant" ]]; then
+  printf "  API:     %shttps://%s/api/health%s (data-plane — no portal)\n" "$BOLD" "$CV_DOMAIN" "$RESET"
+  printf "  Role:    customer-tenant (reports to %s)\n\n" "${CV_CONTROL_PLANE_URL:-<control plane>}"
+else
+  printf "  Portal:  %shttps://%s%s\n" "$BOLD" "$CV_DOMAIN" "$RESET"
+  printf "  API:     https://%s/api/health\n" "$CV_DOMAIN"
+  printf "  Role:    %s\n" "$CV_NODE_ROLE"
+  printf "  Sign in: owner@northwind.example (demo seed data enabled)\n\n"
+fi

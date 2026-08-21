@@ -1,0 +1,25 @@
+# Arkive customer-tenant (data-plane) node.
+# Exposes ONLY the API for control-plane <-> node communication. No customer
+# portal is served here — customers always use the UI on the control plane; this
+# node just runs the tenant's workers, indexing, sync, and storage channels.
+
+{{DOMAIN}} {
+	encode zstd gzip
+
+	# API -> local control-plane application (workers/indexing/sync live here).
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# No public web interface on a data-plane node.
+	handle {
+		respond "Arkive data-plane node — no public interface" 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}

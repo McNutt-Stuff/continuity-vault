@@ -91,7 +91,7 @@ async function nodeOptions(): Promise<{ label: string; value: string }[]> {
   const base = [{ label: "Control plane (default — processed in-box)", value: "" }];
   try {
     const ns = await api.get<{ id: string; name: string; role: string }[]>("/admin/nodes");
-    const workers = ns.filter((n) => ["customer-tenant", "worker"].includes(n.role));
+    const workers = ns.filter((n) => n.role === "customer-tenant");
     return [...base, ...workers.map((n) => ({ label: `${n.name} (${n.role})`, value: n.id }))];
   } catch { return base; }
 }
@@ -431,7 +431,7 @@ function Nodes() {
         { name: "name", label: "Node name", required: true, placeholder: "us-west-storage-1" },
         { name: "region", label: "Region", placeholder: "us-west-2" },
         { name: "role", label: "Role", defaultValue: "control-plane",
-          options: ["control-plane", "customer-tenant", "public-web", "storage", "worker", "edge"].map((v) => ({ label: v, value: v })) },
+          options: ["control-plane", "customer-tenant", "public-web"].map((v) => ({ label: v, value: v })) },
         { name: "endpoint", label: "Endpoint", placeholder: "https://node.arkive.life" },
       ],
     });
@@ -445,7 +445,7 @@ function Nodes() {
         { name: "name", label: "Name", defaultValue: n.name },
         { name: "region", label: "Region", defaultValue: n.region },
         { name: "role", label: "Role", defaultValue: n.role,
-          options: ["control-plane", "customer-tenant", "public-web", "storage", "worker", "edge"].map((v) => ({ label: v, value: v })) },
+          options: ["control-plane", "customer-tenant", "public-web"].map((v) => ({ label: v, value: v })) },
         { name: "endpoint", label: "Endpoint", defaultValue: n.endpoint },
         { name: "status", label: "Status", defaultValue: n.status,
           options: ["active", "draining", "maintenance", "offline"].map((v) => ({ label: v, value: v })) },

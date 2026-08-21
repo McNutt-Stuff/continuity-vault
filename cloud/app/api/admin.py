@@ -891,7 +891,7 @@ def delete_node(nid: str,
 # Node blueprints — the role-specific config/version pushed to fleet nodes.    #
 # --------------------------------------------------------------------------- #
 
-NODE_ROLES = ["control-plane", "customer-tenant", "worker", "public-web"]
+NODE_ROLES = ["control-plane", "customer-tenant", "public-web"]
 
 
 def _blueprint_view(bp: NodeBlueprint) -> dict:
