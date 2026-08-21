@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models import Collection, ConnectorAccount, SyncJob
 from .sync_worker import (
+    JobCancelled,
     access_token_for_account,
     crawl_has_more,
     existing_object_ids,
@@ -25,6 +26,20 @@ from .sync_worker import (
 )
 
 logger = logging.getLogger("cv.jobs")
+
+# In-process set of job ids an operator asked to stop. The runner also checks the
+# DB status ("cancelling") so a cancel issued from another process is honoured.
+_CANCEL_REQUESTS: set = set()
+
+
+def request_cancel(job_id: str) -> None:
+    _CANCEL_REQUESTS.add(job_id)
+
+
+def _cancel_requested(db: Session, job_id: str) -> bool:
+    if job_id in _CANCEL_REQUESTS:
+        return True
+    return db.query(SyncJob.status).filter(SyncJob.id == job_id).scalar() == "cancelling"
 
 
 def _now() -> datetime:
@@ -64,6 +79,8 @@ def _run(job_id: str, destinations: Optional[List[str]]) -> None:
             return
 
         def progress(done: int, total: int, message: str) -> None:
+            if _cancel_requested(db, job.id):
+                raise JobCancelled()
             job.processed = base["n"] + int(done)
             job.total = max(int(job.total or 0), job.processed, base["n"] + int(total))
             job.message = (message or "")[:200]
@@ -78,6 +95,8 @@ def _run(job_id: str, destinations: Optional[List[str]]) -> None:
             # wall-clock and iteration cap so a runaway source can't loop forever.
             deadline = time.time() + 6 * 3600
             for _ in range(100000):
+                if _cancel_requested(db, job.id):
+                    raise JobCancelled()
                 receipt = run_backup(db, collection, destinations, progress=progress)
                 base["n"] = job.processed  # carry the running total into the next chunk
                 db.refresh(collection)
@@ -91,11 +110,23 @@ def _run(job_id: str, destinations: Optional[List[str]]) -> None:
             job.processed = max(job.processed, 0)
             job.status = "done"
             job.message = "Completed"
+        except JobCancelled:
+            db.rollback()
+            j = db.get(SyncJob, job_id)
+            if j is not None:
+                j.status = "cancelled"
+                j.message = "Stopped by operator"
+                j.finished_at = _now()
+                db.commit()
+            _CANCEL_REQUESTS.discard(job_id)
+            logger.info("backup job %s cancelled", job_id)
+            return
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI
             logger.exception("backup job %s failed", job_id)
             job.status = "failed"
             job.error = str(exc)[:400]
             job.message = "Failed"
+        _CANCEL_REQUESTS.discard(job_id)
         job.finished_at = _now()
         db.commit()
 

@@ -431,7 +431,11 @@ def stream_dropbox(access_token: str, cursor=None, config: Optional[dict] = None
     state = state if state is not None else {}
     roots = config.get("roots") or [""]
     cur = cursor if isinstance(cursor, dict) else {}
-    rmap: dict = dict(cur.get("roots") or {})
+    # Only keep cursors for the currently-selected folders so a narrowed selection
+    # never keeps delta-pulling a previously-wider scope (e.g. the whole drive).
+    rmap: dict = {r: c for r, c in (cur.get("roots") or {}).items() if r in roots}
+    logger.info("dropbox stream: crawling %d folder(s): %s", len(roots),
+                roots if roots != [""] else ["(whole Dropbox)"])
     emitted = 0
     stopped_early = False
     auth = {"Authorization": f"Bearer {access_token}"}
@@ -530,7 +534,10 @@ def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = Non
     state = state if state is not None else {}
     roots = config.get("roots") or [""]
     cur = cursor if isinstance(cursor, dict) else {}
-    rmap: dict = dict(cur.get("roots") or {})
+    # Only keep delta links for the currently-selected folders (see stream_dropbox).
+    rmap: dict = {r: c for r, c in (cur.get("roots") or {}).items() if r in roots}
+    logger.info("onedrive stream: crawling %d folder(s): %s", len(roots),
+                roots if roots != [""] else ["(whole drive)"])
     emitted = 0
     stopped_early = False
     headers = {"Authorization": f"Bearer {access_token}"}

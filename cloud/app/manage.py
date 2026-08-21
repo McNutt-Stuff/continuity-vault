@@ -16,7 +16,7 @@ import argparse
 import secrets
 
 from .db import SessionLocal
-from .models import Tenant, User
+from .models import Collection, ConnectorAccount, SyncJob, Tenant, User
 
 
 def _platform_tenant(db) -> Tenant:
@@ -79,6 +79,47 @@ def list_admins() -> None:
             print(f"{u.email:40} {u.display_name:24} status={u.status}")
 
 
+# -- Worker processes (background backup/sync jobs) --------------------------
+
+_ACTIVE_JOB = ("queued", "running", "cancelling")
+
+
+def list_jobs(all_jobs: bool = False) -> None:
+    with SessionLocal() as db:
+        q = db.query(SyncJob).order_by(SyncJob.created_at.desc())
+        if not all_jobs:
+            q = q.filter(SyncJob.status.in_(_ACTIVE_JOB))
+        rows = q.limit(100).all()
+        if not rows:
+            print("(no active jobs)" if not all_jobs else "(no jobs)")
+            return
+        tenants = {t.id: t.name for t in db.query(Tenant).all()}
+        colls = {c.id: c for c in db.query(Collection).all()}
+        print(f"{'JOB ID':38} {'STATUS':11} {'PROGRESS':>14}  {'TENANT':22} SOURCE")
+        for j in rows:
+            c = colls.get(j.collection_id)
+            src = (c.source_type if c else "?")
+            prog = f"{j.processed or 0}/{j.total or 0}"
+            print(f"{j.id:38} {j.status:11} {prog:>14}  "
+                  f"{(tenants.get(j.tenant_id) or '-')[:22]:22} {src}")
+
+
+def kill_job(job_id: str) -> None:
+    with SessionLocal() as db:
+        j = db.get(SyncJob, job_id)
+        if not j:
+            print(f"No job {job_id}")
+            return
+        if j.status in ("done", "failed", "cancelled"):
+            print(f"Job already {j.status}")
+            return
+        # The running worker polls its DB status and stops at the next checkpoint.
+        j.status = "cancelling"
+        j.message = "Cancelling (CLI)…"
+        db.commit()
+        print(f"Requested cancel for job {job_id}. It stops at its next checkpoint.")
+
+
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="app.manage")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -88,6 +129,10 @@ def main(argv=None) -> None:
     r = sub.add_parser("remove-admin", help="revoke platform admin")
     r.add_argument("--email", required=True)
     sub.add_parser("list-admins", help="list platform admins")
+    lj = sub.add_parser("list-jobs", help="list worker (backup/sync) jobs")
+    lj.add_argument("--all", action="store_true", help="include finished jobs")
+    kj = sub.add_parser("kill-job", help="cancel a running worker job")
+    kj.add_argument("job_id")
     args = p.parse_args(argv)
     if args.cmd == "add-admin":
         add_admin(args.email, args.name)
@@ -95,6 +140,10 @@ def main(argv=None) -> None:
         remove_admin(args.email)
     elif args.cmd == "list-admins":
         list_admins()
+    elif args.cmd == "list-jobs":
+        list_jobs(all_jobs=args.all)
+    elif args.cmd == "kill-job":
+        kill_job(args.job_id)
 
 
 if __name__ == "__main__":

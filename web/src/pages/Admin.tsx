@@ -593,9 +593,78 @@ function Nodes() {
           );
         })}
       </div>
+      <Workers />
       <NodeBlueprints flash={flash} />
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
+  );
+}
+
+function Workers() {
+  const [data, setData] = useState<{ active: number; jobs: any[] } | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  async function load() {
+    try {
+      setData(await api.get<{ active: number; jobs: any[] }>(
+        `/admin/jobs?active=${showAll ? "false" : "true"}&limit=${showAll ? 120 : 60}`));
+    } catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); const iv = setInterval(load, 4000); return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showAll]);
+
+  async function cancel(j: any) {
+    const ok = await confirmDialog({
+      title: "Stop worker?", tone: "danger", confirmLabel: "Stop worker",
+      message: `Cancel the ${j.source_type || j.kind} job for ${j.tenant}? It aborts at its next checkpoint; already-stored recovery points are kept.`,
+    });
+    if (!ok) return;
+    try { await api.post(`/admin/jobs/${j.id}/cancel`, {}); await load(); } catch { /* ignore */ }
+  }
+
+  const jobs = data?.jobs || [];
+  const active = data?.active ?? 0;
+  const isActive = (s: string) => ["queued", "running", "cancelling"].includes(s);
+  const tone = (s: string): "ok" | "info" | "warn" | "danger" =>
+    s === "running" ? "info" : s === "done" ? "ok" : s === "failed" ? "danger" : "warn";
+
+  return (
+    <Card style={{ marginTop: 16 }}>
+      <div className="spread" style={{ marginBottom: 8 }}>
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <h3 style={{ margin: 0 }}>Worker processes</h3>
+          <Pill tone={active > 0 ? "info" : "ok"}>{active} active</Pill>
+        </div>
+        <button className="btn ghost sm" onClick={() => setShowAll((v) => !v)}>
+          {showAll ? "Active only" : "Show recent"}
+        </button>
+      </div>
+      <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
+        Background backup / sync jobs across all tenants. Stopping a worker aborts it at its next chunk boundary.
+      </div>
+      <table className="table">
+        <thead><tr><th>Source</th><th>Tenant</th><th>Status</th><th>Progress</th><th></th></tr></thead>
+        <tbody>
+          {jobs.map((j) => (
+            <tr key={j.id}>
+              <td>
+                <div style={{ fontWeight: 600 }}>{j.source}</div>
+                <div className="faint" style={{ fontSize: 11 }}>{j.source_type || j.kind}{j.message ? ` · ${j.message}` : ""}</div>
+              </td>
+              <td className="faint">{j.tenant}</td>
+              <td><Pill tone={tone(j.status)}>{j.status}</Pill></td>
+              <td className="faint">{(j.processed || 0).toLocaleString()}{j.total ? ` / ${(j.total).toLocaleString()}` : ""}</td>
+              <td style={{ textAlign: "right" }}>
+                {isActive(j.status) && j.status !== "cancelling"
+                  ? <button className="btn danger sm" onClick={() => cancel(j)}>Stop</button>
+                  : <span className="faint" style={{ fontSize: 11 }}>{j.status === "cancelling" ? "stopping…" : ""}</span>}
+              </td>
+            </tr>
+          ))}
+          {jobs.length === 0 && <tr><td colSpan={5} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
+        </tbody>
+      </table>
+    </Card>
   );
 }
 

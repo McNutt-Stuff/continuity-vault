@@ -53,6 +53,11 @@ from ..config import get_settings
 logger = logging.getLogger("cv.sync")
 
 
+class JobCancelled(Exception):
+    """Raised (via the progress callback) when an operator cancels a running
+    backup job so it aborts cleanly without being recorded as a source failure."""
+
+
 def _is_auth_error(exc: Exception) -> bool:
     """Heuristic: does this failure mean the source needs re-authorization?"""
     resp = getattr(exc, "response", None)
@@ -323,6 +328,8 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
                 account.sync_cursor = result.cursor
             _record_sync_success(db, account, len(objects))
         return receipt
+    except JobCancelled:
+        raise  # operator cancellation — not a source failure
     except Exception as exc:
         _record_sync_error(db, account, collection, exc)
         raise

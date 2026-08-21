@@ -40,6 +40,7 @@ from ..models import (
     SnapshotReceipt,
     SoftwareRelease,
     SourceConfig,
+    SyncJob,
     Tenant,
     UpdateJob,
     User,
@@ -741,6 +742,71 @@ def _node_view(db: Session, n: Node) -> dict:
         "email_service": _svc_name(n.email_service_id),
         "last_heartbeat_at": n.last_heartbeat_at.isoformat() if n.last_heartbeat_at else None,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Worker processes — background backup/sync jobs (view + kill)                 #
+# --------------------------------------------------------------------------- #
+
+def _job_view(j, tenants, colls, accounts) -> dict:
+    c = colls.get(j.collection_id)
+    label = "—"
+    if c is not None:
+        acc = accounts.get(c.connector_account_id) if c.connector_account_id else None
+        label = acc.account_label if acc else c.name
+    return {
+        "id": j.id, "tenant_id": j.tenant_id, "tenant": tenants.get(j.tenant_id) or "—",
+        "collection_id": j.collection_id, "source": label,
+        "source_type": c.source_type if c else None,
+        "kind": j.kind, "status": j.status,
+        "processed": j.processed or 0, "total": j.total or 0,
+        "message": j.message or "", "error": j.error or "",
+        "started_at": j.started_at.isoformat() if j.started_at else None,
+        "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+        "created_at": j.created_at.isoformat() if j.created_at else None,
+    }
+
+
+@router.get("/jobs")
+def list_jobs(active: bool = False, limit: int = 100, db: Session = Depends(get_db)):
+    """Worker processes (background backup/sync jobs) across every tenant."""
+    _ACTIVE = ["queued", "running", "cancelling"]
+    q = db.query(SyncJob).order_by(SyncJob.created_at.desc())
+    if active:
+        q = q.filter(SyncJob.status.in_(_ACTIVE))
+    jobs = q.limit(max(1, min(limit, 500))).all()
+    tenants = {t.id: t.name for t in db.query(Tenant).all()}
+    cids = {j.collection_id for j in jobs if j.collection_id}
+    colls = ({c.id: c for c in db.query(Collection).filter(Collection.id.in_(cids)).all()}
+             if cids else {})
+    aids = {c.connector_account_id for c in colls.values() if c.connector_account_id}
+    accounts = ({a.id: a for a in db.query(ConnectorAccount).filter(ConnectorAccount.id.in_(aids)).all()}
+                if aids else {})
+    active_n = db.query(func.count(SyncJob.id)).filter(SyncJob.status.in_(_ACTIVE)).scalar()
+    return {"active": int(active_n or 0),
+            "jobs": [_job_view(j, tenants, colls, accounts) for j in jobs]}
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str,
+               principal: security.Principal = Depends(security.require_platform_admin),
+               db: Session = Depends(get_db)):
+    """Ask a running worker to stop. It aborts at its next checkpoint (chunk
+    boundary or progress tick) and is marked cancelled."""
+    from ..workers import jobs as jobs_mod
+    j = db.get(SyncJob, job_id)
+    if not j:
+        raise HTTPException(404, "job not found")
+    if j.status in ("done", "failed", "cancelled"):
+        return {"ok": True, "status": j.status}
+    j.status = "cancelling"
+    j.message = "Cancelling…"
+    db.commit()
+    jobs_mod.request_cancel(job_id)
+    audit.record(db, actor=principal.user_id, action="admin.job_cancelled",
+                 tenant_id=j.tenant_id, category="admin", severity="notice",
+                 detail={"job": job_id})
+    return {"ok": True, "status": "cancelling"}
 
 
 @router.get("/nodes")

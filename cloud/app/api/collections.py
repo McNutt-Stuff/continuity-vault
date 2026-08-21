@@ -116,12 +116,15 @@ def update_collection(collection_id: str, body: UpdateCollectionRequest,
         coll.backup_interval_minutes = (None if body.backup_interval_minutes < 0
                                         else body.backup_interval_minutes)
     if body.config is not None:
-        # Changing the "back up from" date must restart the crawl from scratch —
-        # drop the stored cursor so the next run re-scans with the new window.
+        # Changing the crawl scope (folder selection) or the "back up from" date
+        # must restart the crawl — drop the stored cursor so the next run re-scans
+        # with the new scope instead of delta-continuing the old (wider) one.
         prev_since = (coll.config or {}).get("sinceDate") or ""
         new_since = (body.config or {}).get("sinceDate") or ""
+        prev_roots = sorted((coll.config or {}).get("roots") or [])
+        new_roots = sorted((body.config or {}).get("roots") or [])
         coll.config = body.config
-        if new_since != prev_since and coll.connector_account_id:
+        if (new_since != prev_since or new_roots != prev_roots) and coll.connector_account_id:
             acct = db.get(ConnectorAccount, coll.connector_account_id)
             if acct is not None:
                 acct.sync_cursor = None
