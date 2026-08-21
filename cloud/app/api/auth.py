@@ -16,6 +16,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from cv_crypto.provider import get_provider
@@ -55,7 +56,12 @@ class LoginResponse(BaseModel):
     has_passkey: bool
 
 
-def _session_response(user: User, passkey_verified: bool) -> LoginResponse:
+def _session_response(user: User, passkey_verified: bool,
+                      db: Session | None = None) -> LoginResponse:
+    if db is not None:
+        from datetime import datetime, timezone
+        user.last_login_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.commit()
     return LoginResponse(
         token=security.create_session_token(user, passkey_verified=passkey_verified),
         user_id=user.id,
@@ -104,7 +110,7 @@ def signup(body: SignupRequest, db: Session = Depends(get_db)):
     if not settings.allow_signup:
         raise HTTPException(403, "self-service sign-up is disabled")
     email = body.email.strip().lower()
-    if db.query(User).filter(User.email == email).first():
+    if db.query(User).filter(func.lower(User.email) == email).first():
         raise HTTPException(409, "an account with this email already exists")
 
     tenant = Tenant(
@@ -183,7 +189,7 @@ def email_verify(body: EmailVerifyRequest, db: Session = Depends(get_db)):
         db.commit()
     audit.record(db, actor=email, action=f"auth.email.{purpose}", tenant_id=user.tenant_id)
     # Email proves identity but not hardware possession: not passkey-verified.
-    return _session_response(user, passkey_verified=False)
+    return _session_response(user, passkey_verified=False, db=db)
 
 
 # --- Passwordless passkey login (primary factor) -----------------------------
@@ -249,7 +255,7 @@ def login_passkey_verify(body: PasskeyLoginVerify, db: Session = Depends(get_db)
     pk.sign_count = verification.new_sign_count
     db.commit()
     audit.record(db, actor=user.email, action="auth.login.passkey", tenant_id=user.tenant_id)
-    return _session_response(user, passkey_verified=True)
+    return _session_response(user, passkey_verified=True, db=db)
 
 
 class ChallengeResponse(BaseModel):

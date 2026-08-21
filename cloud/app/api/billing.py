@@ -78,6 +78,7 @@ _DEFAULT_VALUE = {"email": 2, "credential": 50, "document": 15, "photo": 5,
 # Recurring license tiers. Each tenant is on one tier (Tenant.plan == id); the
 # tier sets the per-TB/month data-protection rate and the minimum licensed TB.
 _DEFAULT_PLANS = [
+    {"id": "personal", "name": "Personal", "price_per_tb_month": 10.0, "min_tb": 0},
     {"id": "consumer", "name": "Consumer", "price_per_tb_month": 8.0, "min_tb": 1},
     {"id": "family", "name": "Family", "price_per_tb_month": 6.0, "min_tb": 2},
     {"id": "business", "name": "Business", "price_per_tb_month": 5.0, "min_tb": 5},

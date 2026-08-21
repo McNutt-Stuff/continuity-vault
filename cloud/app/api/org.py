@@ -152,8 +152,9 @@ def create_user(body: CreateUserRequest,
     email = body.email.strip().lower()
     if not email or "@" not in email:
         raise HTTPException(400, "a valid email is required")
-    if db.query(User).filter(User.tenant_id == tenant.id, User.email == email).first():
-        raise HTTPException(409, "a member with this email already exists")
+    # One account per email address, platform-wide (case-insensitive).
+    if db.query(User).filter(func.lower(User.email) == email).first():
+        raise HTTPException(409, "a user with this email already exists")
     user = User(tenant_id=tenant.id, email=email,
                 display_name=body.display_name.strip() or email.split("@")[0],
                 role=role, status="active")

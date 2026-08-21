@@ -67,19 +67,29 @@ class Tenant(Base):
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (UniqueConstraint("tenant_id", "email", name="uq_tenant_email"),)
+    # Email is globally unique across the whole platform — one account per address.
+    __table_args__ = (UniqueConstraint("email", name="uq_user_email"),)
     id = Column(String, primary_key=True, default=_uuid)
     tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
     email = Column(String, nullable=False)
     display_name = Column(String, nullable=False)
+    first_name = Column(String, default="")
+    last_name = Column(String, default="")
+    phone = Column(String, default="")
     role = Column(String, default="member")  # owner | security-admin | member | support-admin
     is_platform_admin = Column(Boolean, default=False)  # backend admin console
     email_verified = Column(Boolean, default=False)
     status = Column(String, default="active")
+    last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 
     tenant = relationship("Tenant", back_populates="users")
     passkeys = relationship("Passkey", back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def full_name(self) -> str:
+        n = " ".join(p for p in [self.first_name, self.last_name] if p).strip()
+        return n or self.display_name or self.email
 
 
 class Passkey(Base):

@@ -80,6 +80,12 @@ def _apply_additive_migrations() -> None:
 
     statements = [
         "ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT false",
+        "ALTER TABLE users ADD COLUMN first_name VARCHAR DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN last_name VARCHAR DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN phone VARCHAR DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP",
+        # One account per email address, platform-wide.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_email ON users (email)",
         "ALTER TABLE search_documents ADD COLUMN category VARCHAR",
         "ALTER TABLE linking_codes ADD COLUMN kind VARCHAR DEFAULT 'appliance'",
         "ALTER TABLE desktop_agents ADD COLUMN agent_token_hash VARCHAR",

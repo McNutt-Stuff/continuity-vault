@@ -11,6 +11,7 @@ export interface AdminSection { key: string; label: string; icon: IconName; grou
 export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "overview", label: "Overview", icon: "grid", group: "" },
   { key: "tenants", label: "Tenants", icon: "user", group: "Customers" },
+  { key: "users", label: "Users", icon: "user", group: "Customers" },
   { key: "reports", label: "Reports", icon: "activity", group: "Customers" },
   { key: "config-objects", label: "Configuration objects", icon: "key", group: "Integrations" },
   { key: "sources", label: "Sources", icon: "link", group: "Integrations" },
@@ -32,6 +33,7 @@ export default function Admin() {
     <>
       {s === "overview" && <Overview />}
       {s === "tenants" && <Tenants />}
+      {s === "users" && <Users />}
       {s === "reports" && <Reports />}
       {s === "nodes" && <Nodes />}
       {s === "storage-usage" && <StorageUsageAdmin />}
@@ -201,6 +203,134 @@ function Tenants() {
   );
 }
 
+// Global, filterable directory of every account across all tenants.
+function Users() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [tenants, setTenants] = useState<any[]>([]);
+  const [plans, setPlans] = useState<any[]>([]);
+  const [q, setQ] = useState("");
+  const [tenantId, setTenantId] = useState("");
+  const [plan, setPlan] = useState("");
+  const [statusF, setStatusF] = useState("");
+  const [typeF, setTypeF] = useState("");
+  const [sort, setSort] = useState<{ key: string; dir: 1 | -1 }>({ key: "email", dir: 1 });
+  const [loading, setLoading] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    const qs = new URLSearchParams();
+    if (q.trim()) qs.set("q", q.trim());
+    if (tenantId) qs.set("tenant_id", tenantId);
+    if (plan) qs.set("plan", plan);
+    if (statusF) qs.set("status", statusF);
+    if (typeF) qs.set("tenant_type", typeF);
+    try { setRows(await api.get<any[]>(`/admin/users?${qs.toString()}`)); } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }
+  useEffect(() => {
+    api.get<any[]>("/admin/tenants").then(setTenants).catch(() => {});
+    api.get<any>("/admin/pricing").then((p) => setPlans(p.license_plans || [])).catch(() => {});
+  }, []);
+  useEffect(() => { const h = setTimeout(load, 250); return () => clearTimeout(h); },
+    [q, tenantId, plan, statusF, typeF]);
+
+  const money = (n: number) => "$" + (Math.round((n || 0) * 100) / 100)
+    .toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  const sorted = [...rows].sort((a, b) => {
+    const k = sort.key;
+    let av: string | number, bv: string | number;
+    if (k === "usage") { av = a.usage_bytes || 0; bv = b.usage_bytes || 0; }
+    else if (k === "billing") { av = a.billing_monthly || 0; bv = b.billing_monthly || 0; }
+    else if (k === "last_login") { av = a.last_login_at || ""; bv = b.last_login_at || ""; }
+    else if (k === "plan") { av = a.plan?.name || ""; bv = b.plan?.name || ""; }
+    else if (k === "name") { av = a.full_name || a.display_name || ""; bv = b.full_name || b.display_name || ""; }
+    else { av = (a[k] ?? "").toString(); bv = (b[k] ?? "").toString(); }
+    if (typeof av === "number" && typeof bv === "number") return (av - bv) * sort.dir;
+    return String(av).localeCompare(String(bv)) * sort.dir;
+  });
+  function th(key: string, label: string, align?: "right") {
+    const active = sort.key === key;
+    return (
+      <th style={{ cursor: "pointer", textAlign: align, whiteSpace: "nowrap" }}
+          onClick={() => setSort((s) => ({ key, dir: s.key === key && s.dir === 1 ? -1 : 1 }))}>
+        {label}{active ? (sort.dir === 1 ? " ▲" : " ▼") : ""}
+      </th>
+    );
+  }
+  const totalBilling = rows.reduce((s, u) => s + (u.billing_monthly || 0), 0);
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <h3 style={{ margin: 0 }}>Users</h3>
+        <span className="faint" style={{ fontSize: 12 }}>
+          {rows.length} account{rows.length === 1 ? "" : "s"} · {money(totalBilling)}/mo
+        </span>
+      </div>
+      <Card style={{ marginBottom: 14 }}>
+        <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <input className="input" placeholder="Search name, email, phone…" value={q}
+            onChange={(e) => setQ(e.target.value)} style={{ minWidth: 240, flex: 1 }} />
+          <select className="input" value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
+            <option value="">All tenants</option>
+            {tenants.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+          <select className="input" value={typeF} onChange={(e) => setTypeF(e.target.value)}>
+            <option value="">All types</option>
+            {["shared", "dedicated", "restricted", "internal"].map((v) =>
+              <option key={v} value={v}>{TENANT_TYPE_LABEL[v]}</option>)}
+          </select>
+          <select className="input" value={plan} onChange={(e) => setPlan(e.target.value)}>
+            <option value="">All plans</option>
+            {plans.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <select className="input" value={statusF} onChange={(e) => setStatusF(e.target.value)}>
+            <option value="">Any status</option>
+            {["active", "suspended"].map((v) => <option key={v} value={v}>{v}</option>)}
+          </select>
+        </div>
+      </Card>
+      <Card>
+        <table className="table">
+          <thead><tr>
+            {th("name", "Name")}
+            {th("email", "Email")}
+            <th>Phone</th>
+            {th("tenant_name", "Tenant")}
+            {th("plan", "Plan")}
+            {th("last_login", "Last login")}
+            {th("usage", "Usage", "right")}
+            {th("billing", "Billing", "right")}
+            {th("status", "Status")}
+          </tr></thead>
+          <tbody>
+            {sorted.map((u) => (
+              <tr key={u.id}>
+                <td>
+                  <div style={{ fontWeight: 600 }}>{u.full_name || u.display_name || u.email}</div>
+                  {u.is_platform_admin && <div className="faint" style={{ fontSize: 11 }}>platform admin</div>}
+                </td>
+                <td className="faint" style={{ fontSize: 12 }}>{u.email}</td>
+                <td className="faint" style={{ fontSize: 12 }}>{u.phone || "—"}</td>
+                <td>
+                  <div style={{ fontSize: 12.5 }}>{u.tenant_name || "—"}</div>
+                  <Pill tone={TENANT_TYPE_TONE[u.tenant_type] || "info"}>{TENANT_TYPE_LABEL[u.tenant_type] || u.tenant_type}</Pill>
+                </td>
+                <td><Pill tone="info">{u.plan?.name || "—"}</Pill></td>
+                <td className="faint" style={{ fontSize: 12 }}>{u.last_login_at ? timeAgo(u.last_login_at) : "Never"}</td>
+                <td style={{ textAlign: "right" }}>{bytes(u.usage_bytes || 0)}</td>
+                <td style={{ textAlign: "right" }}>{money(u.billing_monthly || 0)}/mo</td>
+                <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
+              </tr>
+            ))}
+            {sorted.length === 0 && <tr><td colSpan={9} className="muted">{loading ? "Loading…" : "No users match."}</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+    </>
+  );
+}
+
 function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [t, setT] = useState<any>(null);
   const [err, setErr] = useState("");
@@ -250,30 +380,52 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
   }
 
   async function newUser() {
+    const isShared = t.tenant_type === "shared";
+    // Shared tenants hold isolated 1:1 personal accounts — richer contact
+    // details, no roles. Org tenants keep the name + role flow.
+    const fields: any[] = isShared
+      ? [
+          { name: "first_name", label: "First name", required: true },
+          { name: "last_name", label: "Last name", required: true },
+          { name: "email", label: "Email", required: true },
+          { name: "phone", label: "Phone" },
+        ]
+      : [
+          { name: "email", label: "Email", required: true },
+          { name: "display_name", label: "Name" },
+          { name: "role", label: "Role", defaultValue: "member",
+            options: ["owner", "security-admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
+        ];
     const r = await formDialog({
-      title: "Add user", confirmLabel: "Create user",
-      fields: [
-        { name: "email", label: "Email", required: true },
-        { name: "display_name", label: "Name" },
-        { name: "role", label: "Role", defaultValue: "member",
-          options: ["owner", "security-admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
-      ],
+      title: isShared ? "Add account" : "Add user",
+      confirmLabel: isShared ? "Create account" : "Create user",
+      fields,
     });
     if (!r) return;
-    try { const res = await api.post<any>(`/admin/tenants/${id}/users`, r); flash(res.invite?.dev_code ? `Created · code ${res.invite.dev_code}` : "User created & invited"); await load(); }
-    catch (e) { flash((e as { message?: string }).message || "Could not create user"); }
+    try {
+      const res = await api.post<any>(`/admin/tenants/${id}/users`, r);
+      flash(res.invite?.dev_code
+        ? `Created · code ${res.invite.dev_code}`
+        : (isShared ? "Account created & welcome email sent" : "User created & invited"));
+      await load();
+    } catch (e) { flash((e as { message?: string }).message || "Could not create user"); }
   }
   async function editUser(u: any) {
-    const r = await formDialog({
-      title: `Edit ${u.email}`, confirmLabel: "Save",
-      fields: [
-        { name: "display_name", label: "Name", defaultValue: u.display_name },
-        { name: "role", label: "Role", defaultValue: u.role,
-          options: ["owner", "security-admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
-        { name: "status", label: "Status", defaultValue: u.status,
-          options: ["active", "suspended"].map((v) => ({ label: v, value: v })) },
-      ],
-    });
+    const isShared = t.tenant_type === "shared";
+    const fields: any[] = isShared
+      ? [
+          { name: "first_name", label: "First name", defaultValue: u.first_name || "" },
+          { name: "last_name", label: "Last name", defaultValue: u.last_name || "" },
+          { name: "phone", label: "Phone", defaultValue: u.phone || "" },
+        ]
+      : [
+          { name: "display_name", label: "Name", defaultValue: u.display_name },
+          { name: "role", label: "Role", defaultValue: u.role,
+            options: ["owner", "security-admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
+        ];
+    fields.push({ name: "status", label: "Status", defaultValue: u.status,
+      options: ["active", "suspended"].map((v) => ({ label: v, value: v })) });
+    const r = await formDialog({ title: `Edit ${u.email}`, confirmLabel: "Save", fields });
     if (!r) return;
     try { await api.put(`/admin/users/${u.id}`, r); flash("User updated"); await load(); } catch { flash("Update failed"); }
   }
@@ -399,27 +551,60 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
 
       <Card>
         <div className="spread" style={{ marginBottom: 10 }}>
-          <h3 style={{ margin: 0 }}>Users</h3>
-          <button className="btn primary sm" onClick={newUser}><Icon name="user" size={14} /> Add user</button>
+          <h3 style={{ margin: 0 }}>{t.tenant_type === "shared" ? "Accounts" : "Users"}</h3>
+          <button className="btn primary sm" onClick={newUser}>
+            <Icon name="user" size={14} /> {t.tenant_type === "shared" ? "Add account" : "Add user"}
+          </button>
         </div>
-        <table className="table">
-          <thead><tr><th>User</th><th>Role</th><th>Status</th><th></th></tr></thead>
-          <tbody>
-            {(t.members || []).map((u: any) => (
-              <tr key={u.id}>
-                <td><div style={{ fontWeight: 600 }}>{u.display_name || u.email}</div><div className="faint" style={{ fontSize: 11.5 }}>{u.email}{u.is_platform_admin ? " · platform admin" : ""}</div></td>
-                <td><Pill tone="info">{u.role}</Pill></td>
-                <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
-                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                  <button className="btn ghost sm" onClick={() => editUser(u)}>Edit</button>{" "}
-                  <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
-                  <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
-                </td>
-              </tr>
-            ))}
-            {(t.members || []).length === 0 && <tr><td colSpan={4} className="muted">No users.</td></tr>}
-          </tbody>
-        </table>
+        {t.tenant_type === "shared" ? (() => {
+          const money = (n: number) => "$" + (Math.round((n || 0) * 100) / 100)
+            .toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+          return (
+            <table className="table">
+              <thead><tr><th>Account</th><th>Contact</th><th>Last login</th><th>Usage</th><th>Billing</th><th>Status</th><th></th></tr></thead>
+              <tbody>
+                {(t.members || []).map((u: any) => (
+                  <tr key={u.id}>
+                    <td>
+                      <div style={{ fontWeight: 600 }}>{u.full_name || u.display_name || u.email}</div>
+                      <div className="faint" style={{ fontSize: 11.5 }}>{u.email}</div>
+                    </td>
+                    <td className="faint" style={{ fontSize: 12 }}>{u.phone || "—"}</td>
+                    <td className="faint" style={{ fontSize: 12 }}>{u.last_login_at ? timeAgo(u.last_login_at) : "Never"}</td>
+                    <td>{bytes(u.billing?.used_bytes || 0)}</td>
+                    <td>{money(u.billing?.total_monthly || 0)}/mo<div className="faint" style={{ fontSize: 11 }}>{u.billing?.plan?.name || "Personal"}</div></td>
+                    <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      <button className="btn ghost sm" onClick={() => editUser(u)}>Edit</button>{" "}
+                      <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
+                      <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+                {(t.members || []).length === 0 && <tr><td colSpan={7} className="muted">No accounts yet.</td></tr>}
+              </tbody>
+            </table>
+          );
+        })() : (
+          <table className="table">
+            <thead><tr><th>User</th><th>Role</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+              {(t.members || []).map((u: any) => (
+                <tr key={u.id}>
+                  <td><div style={{ fontWeight: 600 }}>{u.display_name || u.email}</div><div className="faint" style={{ fontSize: 11.5 }}>{u.email}{u.is_platform_admin ? " · platform admin" : ""}</div></td>
+                  <td><Pill tone="info">{u.role}</Pill></td>
+                  <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
+                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    <button className="btn ghost sm" onClick={() => editUser(u)}>Edit</button>{" "}
+                    <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
+                    <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+              {(t.members || []).length === 0 && <tr><td colSpan={4} className="muted">No users.</td></tr>}
+            </tbody>
+          </table>
+        )}
       </Card>
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>

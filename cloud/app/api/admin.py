@@ -137,14 +137,55 @@ def update_email_config(body: EmailConfigUpdate, db: Session = Depends(get_db)):
 
 
 @router.get("/users")
-def list_all_users(db: Session = Depends(get_db)):
-    """Every user across tenants, for choosing broadcast recipients."""
-    tenants = {t.id: t.name for t in db.query(Tenant).all()}
-    return [{
-        "id": u.id, "email": u.email, "display_name": u.display_name,
-        "role": u.role, "status": u.status,
-        "tenant_id": u.tenant_id, "tenant_name": tenants.get(u.tenant_id, ""),
-    } for u in db.query(User).order_by(User.email.asc()).all()]
+def list_all_users(q: str = "", tenant_id: str = "", plan: str = "",
+                   status: str = "", tenant_type: str = "",
+                   db: Session = Depends(get_db)):
+    """Global directory of every account across all tenants — filterable and
+    searchable, with the plan, tenant, last-login, usage and billing each
+    account rolls up to. Also backs the broadcast-recipient chooser."""
+    from .billing import get_pricing, effective_plan
+    pricing = get_pricing(db)
+    tenants = {t.id: t for t in db.query(Tenant).all()}
+    query = db.query(User)
+    if tenant_id:
+        query = query.filter(User.tenant_id == tenant_id)
+    if status:
+        query = query.filter(User.status == status)
+    needle = (q or "").strip().lower()
+    out = []
+    for u in query.order_by(User.email.asc()).all():
+        t = tenants.get(u.tenant_id)
+        ttype = (t.tenant_type if t else "dedicated") or "dedicated"
+        if tenant_type and ttype != tenant_type:
+            continue
+        plan_id = "personal" if ttype == "shared" else ((t.plan if t else None) or None)
+        pl = effective_plan(pricing, plan_id)
+        if plan and (pl.get("id") or "") != plan:
+            continue
+        if needle:
+            hay = " ".join([u.email or "", u.full_name or "", u.display_name or "",
+                            u.first_name or "", u.last_name or "", u.phone or "",
+                            (t.name if t else "")]).lower()
+            if needle not in hay:
+                continue
+        billing = _user_billing(db, u, t, pricing) if t else None
+        out.append({
+            "id": u.id, "email": u.email, "display_name": u.display_name,
+            "full_name": u.full_name, "first_name": u.first_name or "",
+            "last_name": u.last_name or "", "phone": u.phone or "",
+            "role": u.role, "status": u.status,
+            "is_platform_admin": bool(u.is_platform_admin),
+            "email_verified": bool(u.email_verified),
+            "tenant_id": u.tenant_id, "tenant_name": (t.name if t else ""),
+            "tenant_type": ttype,
+            "plan": {"id": pl.get("id"), "name": pl.get("name")},
+            "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "usage_bytes": (billing["used_bytes"] if billing else 0),
+            "billing_monthly": (billing["total_monthly"] if billing else 0),
+            "currency": pricing.currency,
+        })
+    return out
 
 
 class EmailTest(BaseModel):
@@ -322,6 +363,62 @@ def _storage_usage(db: Session, tid: str, pricing) -> dict:
     }
 
 
+def _user_usage(db: Session, u: User) -> dict:
+    """Physical footprint owned by a single account, split by storage channel,
+    across the vaults that account owns."""
+    vault_ids = [vid for (vid,) in
+                 db.query(Vault.id).filter(Vault.owner_user_id == u.id).all()]
+    cloud = appliance = customer = 0
+    objects = 0
+    if vault_ids:
+        rows = (db.query(SnapshotReceipt.destination,
+                         func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0))
+                .filter(SnapshotReceipt.vault_id.in_(vault_ids))
+                .group_by(SnapshotReceipt.destination).all())
+        for dest, b in rows:
+            b = int(b or 0)
+            d = dest or ""
+            if d == "customer-s3":
+                customer += b
+            elif d == "cv-cloud":
+                cloud += b
+            else:
+                appliance += b
+        objects = (db.query(func.count(distinct(SearchDocument.object_id)))
+                   .filter(SearchDocument.vault_id.in_(vault_ids)).scalar()) or 0
+    return {"cloud_bytes": cloud, "appliance_bytes": appliance,
+            "customer_bytes": customer, "total_bytes": cloud + appliance + customer,
+            "objects": int(objects)}
+
+
+def _user_billing(db: Session, u: User, tenant: Tenant, pricing) -> dict:
+    """Per-account monthly cost = a base plan rate (Personal for shared tenants,
+    otherwise the tenant's license plan) applied to what the account protects,
+    plus the storage channels it actually consumes."""
+    from .billing import effective_plan
+    usage = _user_usage(db, u)
+    ttype = (tenant.tenant_type or "dedicated") if tenant else "dedicated"
+    plan_id = "personal" if ttype == "shared" else ((tenant.plan if tenant else None) or None)
+    plan = effective_plan(pricing, plan_id)
+    used_tb = usage["total_bytes"] / _TB
+    billable_tb = max(used_tb, float(plan.get("min_tb", 0) or 0))
+    protection = round(billable_tb * float(plan.get("price_per_tb_month", 0) or 0), 2)
+    cloud_storage = round(usage["cloud_bytes"] / _TB * pricing.cloud_price_per_tb_month, 2)
+    customer_storage = round(usage["customer_bytes"] / _TB * pricing.s3_price_per_tb_month, 2)
+    total = round(protection + cloud_storage + customer_storage, 2)
+    return {
+        "plan": {"id": plan.get("id"), "name": plan.get("name"),
+                 "price_per_tb_month": plan.get("price_per_tb_month")},
+        "used_bytes": usage["total_bytes"], "used_tb": round(used_tb, 4),
+        "objects": usage["objects"],
+        "protection_monthly": protection,
+        "cloud_storage_monthly": cloud_storage,
+        "customer_storage_monthly": customer_storage,
+        "total_monthly": total,
+        "currency": pricing.currency,
+    }
+
+
 def _tenant_view(db: Session, t: Tenant, detail: bool = False) -> dict:
     v = {
         "id": t.id, "name": t.name, "plan": t.plan, "status": t.status,
@@ -339,8 +436,15 @@ def _tenant_view(db: Session, t: Tenant, detail: bool = False) -> dict:
                   "endpoint": n.endpoint, "status": n.status} if n else None)
     if detail:
         from .billing import _compute_plan, get_pricing
-        v["members"] = [_user_view(u) for u in
-                        db.query(User).filter(User.tenant_id == t.id).order_by(User.email.asc()).all()]
+        pricing = get_pricing(db)
+        shared = (t.tenant_type or "dedicated") == "shared"
+        members = []
+        for u in db.query(User).filter(User.tenant_id == t.id).order_by(User.email.asc()).all():
+            mv = _user_view(u)
+            if shared:
+                mv["billing"] = _user_billing(db, u, t, pricing)
+            members.append(mv)
+        v["members"] = members
         v["vaults"] = [{"id": vv.id, "name": vv.name,
                         "key_ownership_model": vv.key_ownership_model}
                        for vv in db.query(Vault).filter(Vault.tenant_id == t.id).all()]
@@ -469,16 +573,23 @@ def delete_tenant(tid: str,
 
 def _user_view(u: User) -> dict:
     return {"id": u.id, "email": u.email, "display_name": u.display_name,
+            "full_name": u.full_name,
+            "first_name": u.first_name or "", "last_name": u.last_name or "",
+            "phone": u.phone or "",
             "role": u.role, "status": u.status,
             "is_platform_admin": bool(u.is_platform_admin),
             "email_verified": bool(u.email_verified),
             "tenant_id": u.tenant_id,
+            "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
             "created_at": u.created_at.isoformat() if u.created_at else None}
 
 
 class UserCreate(BaseModel):
     email: str
     display_name: str = ""
+    first_name: str = ""
+    last_name: str = ""
+    phone: str = ""
     role: str = "member"
     send_invite: bool = True
 
@@ -491,25 +602,38 @@ def create_user(tid: str, body: UserCreate,
     if not t:
         raise HTTPException(404, "tenant not found")
     email = body.email.strip().lower()
-    if db.query(User).filter(User.email == email).first():
+    if not email:
+        raise HTTPException(400, "email is required")
+    # One account per email address, platform-wide (case-insensitive).
+    if db.query(User).filter(func.lower(User.email) == email).first():
         raise HTTPException(409, "a user with this email already exists")
-    u = User(tenant_id=tid, email=email, display_name=(body.display_name or email).strip(),
-             role=body.role, status="active")
+    first = (body.first_name or "").strip()
+    last = (body.last_name or "").strip()
+    display = ((body.display_name or "").strip()
+               or " ".join(p for p in [first, last] if p).strip()
+               or email)
+    shared = (t.tenant_type or "dedicated") == "shared"
+    # Shared tenants hold isolated 1:1 personal accounts — no roles.
+    role = "member" if shared else (body.role or "member")
+    u = User(tenant_id=tid, email=email, display_name=display,
+             first_name=first, last_name=last, phone=(body.phone or "").strip(),
+             role=role, status="active")
     db.add(u)
     db.commit()
     db.refresh(u)
     invited = None
     if body.send_invite:
-        invited = _send_access_email(db, u, "You've been added to Arkive",
-                                     f"An administrator added you to {t.name} on Arkive. "
-                                     f"Use the code below to sign in and set up your account.")
+        invited = _send_welcome_email(db, u, t)
     audit.record(db, actor=principal.user_id, action="admin.user_created",
-                 tenant_id=tid, category="admin", detail={"email": email, "role": body.role})
+                 tenant_id=tid, category="admin", detail={"email": email, "role": role})
     return {**_user_view(u), "invite": invited}
 
 
 class UserUpdate(BaseModel):
     display_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    phone: str | None = None
     role: str | None = None
     status: str | None = None
     is_platform_admin: bool | None = None
@@ -522,8 +646,18 @@ def update_user(uid: str, body: UserUpdate,
     u = db.get(User, uid)
     if not u:
         raise HTTPException(404, "user not found")
+    if body.first_name is not None:
+        u.first_name = body.first_name.strip()
+    if body.last_name is not None:
+        u.last_name = body.last_name.strip()
+    if body.phone is not None:
+        u.phone = body.phone.strip()
     if body.display_name is not None:
         u.display_name = body.display_name.strip()
+    elif body.first_name is not None or body.last_name is not None:
+        derived = " ".join(p for p in [u.first_name, u.last_name] if p).strip()
+        if derived:
+            u.display_name = derived
     if body.role is not None:
         u.role = body.role
     if body.status is not None:
@@ -581,6 +715,53 @@ def reset_user(uid: str,
                  tenant_id=u.tenant_id, category="security", severity="notice",
                  detail={"email": u.email, "passkeys_revoked": revoked})
     return {"ok": True, "passkeys_revoked": revoked, "invite": invite}
+
+
+def _send_welcome_email(db: Session, u: User, t: Tenant) -> dict:
+    """Welcome a brand-new account: greet them, explain Arkive, and hand them a
+    one-time code with clear sign-in instructions. Uses the branded template."""
+    from .. import emailer
+    try:
+        code = authcodes.issue_code(u.email, "login")
+    except Exception:
+        code = None
+    origin = get_settings().rp_origin
+    name = (u.first_name or u.display_name or "there").strip()
+    lines = [
+        f"Hi {name},",
+        "",
+        f"Welcome to Arkive — your account on {t.name} is ready to go.",
+        "Arkive keeps a secure, searchable, quantum-safe copy of the data that "
+        "matters most to you, so it's always recoverable.",
+        "",
+        "Here's how to sign in for the first time:",
+        f"  1. Open {origin}",
+        f"  2. Enter your email address: {u.email}",
+    ]
+    if code:
+        lines.append(f"  3. Enter this one-time sign-in code: {code}")
+    else:
+        lines.append("  3. Request a sign-in code and follow the emailed instructions.")
+    lines += [
+        "",
+        "On first sign-in you'll register this device with a passkey, so every "
+        "future login is a single secure tap — no passwords to remember.",
+        "",
+        "Welcome aboard,",
+        "The Arkive team",
+    ]
+    body = "\n".join(lines)
+    subject = "Welcome to Arkive"
+    channel = emailer.send(
+        u.email, subject,
+        html=emailer.render(subject, emailer.text_to_html(body),
+                            preheader="Your Arkive account is ready — here's how to sign in.",
+                            cta={"label": "Sign in to Arkive", "url": origin}),
+        text=body)
+    out = {"sent": channel in ("ses", "smtp", "log"), "channel": channel}
+    if code and get_settings().environment == "development":
+        out["dev_code"] = code
+    return out
 
 
 def _send_access_email(db: Session, u: User, subject: str, intro: str) -> dict:
