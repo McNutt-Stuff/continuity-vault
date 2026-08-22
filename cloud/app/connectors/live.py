@@ -407,6 +407,13 @@ def fetch_dropbox(access_token: str, limit: int = 1000,
 
 _FILE_CHUNK = 400  # files ingested per resumable crawl chunk
 
+# Selectable "root folder" token: back up the files directly in the account root
+# only (NOT its subfolders — those are selected separately). Kept in sync with
+# the frontend folder picker (web/src/pages/Mappings.tsx). Safe as a sentinel: it
+# can't collide with a real Dropbox path_lower ("/…"), OneDrive relative path, or
+# Google Drive folder id.
+ROOT_SENTINEL = "__root__"
+
 
 def dropbox_list_folders(access_token: str, path: str = "") -> List[dict]:
     """Immediate child folders of ``path`` (Dropbox path_lower, "" = root)."""
@@ -484,11 +491,16 @@ def stream_dropbox(access_token: str, cursor=None, config: Optional[dict] = None
             if emitted >= _FILE_CHUNK:
                 stopped_early = True
                 break
+            # The "root files only" sentinel lists the account root non-recursively
+            # so its top-level files are backed up without pulling every subfolder.
+            is_root_files = (root == ROOT_SENTINEL)
+            dbx_path = "" if is_root_files else root
+            recursive = not is_root_files
             dbx_cursor = rmap.get(root)
             while True:
                 if dbx_cursor is None:
                     r = c.post("https://api.dropboxapi.com/2/files/list_folder", headers=hdr,
-                               content=json.dumps({"path": root or "", "recursive": True,
+                               content=json.dumps({"path": dbx_path, "recursive": recursive,
                                                    "limit": 2000, "include_deleted": True}))
                 else:
                     r = c.post("https://api.dropboxapi.com/2/files/list_folder/continue",
@@ -589,6 +601,34 @@ def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = Non
                 stopped_early = True
                 break
             link = rmap.get(root)
+            # "Root files only" sentinel: list the drive root's immediate children
+            # (non-recursive) and keep only files — no delta, so re-list each run
+            # (cheap; content-hash dedup skips unchanged files).
+            if root == ROOT_SENTINEL:
+                url = link or "https://graph.microsoft.com/v1.0/me/drive/root/children"
+                params = None if link else {"$select": select, "$top": 200}
+                while url:
+                    r = c.get(url, headers=headers, params=params)
+                    if r.status_code >= 400:
+                        rmap[root] = None
+                        break
+                    body = r.json()
+                    for it in body.get("value", []):
+                        if it.get("folder") or it.get("deleted") or not it.get("file"):
+                            continue
+                        yield _onedrive_object(c, headers, it, content_cap)
+                        emitted += 1
+                    nxt = body.get("@odata.nextLink")
+                    if nxt:
+                        rmap[root] = nxt
+                        url, params = nxt, None
+                        if emitted >= _FILE_CHUNK:
+                            stopped_early = True
+                            break
+                        continue
+                    rmap[root] = None  # children listing has no delta token
+                    url = None
+                continue
             rel = (root or "").strip("/")
             if link is None:
                 url: Optional[str] = (f"https://graph.microsoft.com/v1.0/me/drive/root:/{rel}:/delta"
@@ -713,9 +753,19 @@ def stream_drive(access_token: str, cursor=None, config: Optional[dict] = None,
     modifiedTime high-water mark makes later runs fetch only changed files."""
     config = config or {}
     state = state if state is not None else {}
-    roots = config.get("roots") or ["root"]
+    roots_cfg = config.get("roots") or ["root"]
     cur = cursor if isinstance(cursor, dict) else {}
     since = cur.get("since")  # ISO modifiedTime high-water from the last full pass
+    # The "root files only" sentinel maps to My Drive root, walked non-recursively
+    # (its subfolders are never queued) so only top-level files are captured.
+    norecurse = set(cur.get("norecurse") or [])
+    roots: List[str] = []
+    for r in roots_cfg:
+        if r == ROOT_SENTINEL:
+            roots.append("root")
+            norecurse.add("root")
+        else:
+            roots.append(r)
     pending = cur.get("pending")
     if not isinstance(pending, list) or not pending:
         pending = list(roots)
@@ -749,7 +799,8 @@ def stream_drive(access_token: str, cursor=None, config: Optional[dict] = None,
                 body = r.json()
                 for f in body.get("files", []):
                     if f.get("mimeType") == "application/vnd.google-apps.folder":
-                        pending.append(f["id"])
+                        if folder_id not in norecurse:
+                            pending.append(f["id"])
                         continue
                     mt = f.get("modifiedTime")
                     if since and mt and mt <= since:
@@ -766,10 +817,12 @@ def stream_drive(access_token: str, cursor=None, config: Optional[dict] = None,
                     break
     if stopped_early:
         # Mid-walk: keep the old high-water so the resumed pass sees one snapshot.
-        state["cursor"] = {"since": since, "pending": pending, "has_more": True}
+        state["cursor"] = {"since": since, "pending": pending,
+                           "norecurse": list(norecurse), "has_more": True}
     else:
         # Full pass done — advance the high-water and clear the frontier.
-        state["cursor"] = {"since": new_high or since, "pending": [], "has_more": False}
+        state["cursor"] = {"since": new_high or since, "pending": [],
+                           "norecurse": list(norecurse), "has_more": False}
 
 
 

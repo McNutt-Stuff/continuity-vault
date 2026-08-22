@@ -82,7 +82,7 @@ export default function Mappings() {
   // Endpoint-files folder picker: which mapping/agent it's configuring.
   const [picker, setPicker] = useState<{ agentId: string; mappingId: string; initial: FileConfig } | null>(null);
   // Cloud folder picker (Dropbox / OneDrive / other browsable sources).
-  const [cloudPicker, setCloudPicker] = useState<{ accountId: string; mappingId: string; label: string; initial: FileConfig } | null>(null);
+  const [cloudPicker, setCloudPicker] = useState<{ accountId: string; mappingId: string; label: string; sourceType: string; initial: FileConfig } | null>(null);
   const [activity, setActivity] = useState<Activity | null>(null);
   // collection_id -> epoch ms when a sync was triggered (live indicator).
   const [syncing, setSyncing] = useState<Record<string, number>>({});
@@ -671,7 +671,7 @@ export default function Mappings() {
                           <button className="btn sm" disabled={!m.connector_account_id}
                                   onClick={() => m.connector_account_id && setCloudPicker({
                                     accountId: m.connector_account_id, mappingId: m.id,
-                                    label: m.source_display, initial: m.config || {} })}>
+                                    label: m.source_display, sourceType: m.source_type, initial: m.config || {} })}>
                             <Icon name="database" size={13} /> Choose folders…
                           </button>
                           <span className="faint" style={{ fontSize: 11 }}>
@@ -737,12 +737,19 @@ export default function Mappings() {
       {cloudPicker && (
         <FolderPicker
           title={`Choose folders — ${cloudPicker.label}`}
-          note="Only the folders you select are backed up. Nothing selected = everything."
+          note="Only the folders you select are backed up. Nothing selected = everything. Pick “Files in the root folder” to include top-level files without every subfolder."
           initialSelected={cloudPicker.initial.roots || []}
           loadingLabel="loading your folders…"
           emptyLabel="No subfolders here. Selecting nothing backs up the whole account."
-          loadRoots={() => api.get<{ folders: FolderNode[] }>(
-            `/connectors/accounts/${cloudPicker.accountId}/folders`).then((r) => r.folders)}
+          loadRoots={async () => {
+            const folders = await api.get<{ folders: FolderNode[] }>(
+              `/connectors/accounts/${cloudPicker.accountId}/folders`).then((r) => r.folders);
+            // File-storage sources have an addressable root: offer its top-level
+            // files as a selectable item ("__root__"), separate from subfolders.
+            const ROOT_TYPES = ["dropbox", "onedrive", "google_drive"];
+            if (!ROOT_TYPES.includes(cloudPicker.sourceType)) return folders;
+            return [{ path: "__root__", name: "Files in the root folder (not subfolders)", hasMore: false }, ...folders];
+          }}
           loadChildren={(node) => api.get<{ folders: FolderNode[] }>(
             `/connectors/accounts/${cloudPicker.accountId}/folders?path=${encodeURIComponent(node.path)}`).then((r) => r.folders)}
           onClose={() => setCloudPicker(null)}
