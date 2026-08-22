@@ -72,6 +72,10 @@ _PULL_EXCLUDE = {
     "desktop_agents": {"pending_commands", "last_scan", "fs_expansions"},
     "connector_accounts": {"sync_cursor", "last_sync_at", "last_object_count",
                            "last_error", "last_error_at", "auth_status"},
+    # The node's scheduler owns each mapping's run stamp; pulling the control
+    # plane's stale copy (NULL, since the node — not the CP — runs these tenants)
+    # would make every source look "due" again and re-back-up every tick.
+    "collections": {"last_backup_run_at"},
 }
 
 
