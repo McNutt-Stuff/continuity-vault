@@ -334,6 +334,17 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
         # connector config alongside the credentials.
         if collection.config:
             config = {**config, **collection.config}
+        # Backfill a missing account identity (e.g. Evernote email) so existing
+        # sources gain their label without needing a re-authorization.
+        if account is not None and not account.account_username and config.get("access_token"):
+            try:
+                from ..api.connectors import _fetch_account_label
+                ident = _fetch_account_label(collection.source_type, config)
+                if ident:
+                    account.account_username = ident
+                    db.commit()
+            except Exception:
+                db.rollback()
         caps = connector.capabilities()
         # Media-heavy sources (Facebook/Instagram photos, etc.) stream: ingest in
         # bounded batches so a large library can't materialize into memory and OOM.

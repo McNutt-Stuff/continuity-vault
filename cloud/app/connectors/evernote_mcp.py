@@ -30,6 +30,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from typing import Iterable, Optional, Tuple
@@ -136,12 +137,114 @@ def fetch_identity(tokens: dict) -> Optional[str]:
                 r = c.get(ui, headers={"Authorization": f"Bearer {at}"})
                 if r.status_code < 400:
                     d = r.json()
-                    return (d.get("email") or d.get("preferred_username")
-                            or d.get("name") or d.get("username"))
-                logger.warning("Evernote MCP: userinfo → HTTP %d", r.status_code)
+                    ident = (d.get("email") or d.get("preferred_username")
+                             or d.get("name") or d.get("username"))
+                    if ident:
+                        return ident
+                else:
+                    logger.warning("Evernote MCP: userinfo → HTTP %d", r.status_code)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Evernote MCP: userinfo failed: %s", exc)
+    # Evernote's MCP server doesn't expose OIDC — resolve the account from the MCP
+    # tools themselves (a user/account tool, or the author on a recent note).
+    if at:
+        return _identity_via_mcp(at)
     return None
+
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_USER_TOOL_HINTS = ("user", "account", "profile", "whoami", "identity", "getme", "get_me")
+
+
+def _looks_email(value) -> bool:
+    return isinstance(value, str) and bool(_EMAIL_RE.fullmatch(value.strip()))
+
+
+def _scan_identity(data, depth: int = 0) -> Tuple[Optional[str], Optional[str]]:
+    """Find an account ``(email, username)`` anywhere in an MCP payload. Any
+    email-looking value, or a value under an email/author key, becomes the email;
+    username-like keys provide a fallback label."""
+    email = username = None
+    if depth > 6 or data is None:
+        return None, None
+    if isinstance(data, dict):
+        for k, v in data.items():
+            kl = str(k).lower()
+            if isinstance(v, str) and v.strip():
+                if not email and (_looks_email(v) or "email" in kl or kl == "author"):
+                    if _looks_email(v):
+                        email = v.strip()
+                elif not username and kl in ("username", "preferred_username",
+                                             "login", "displayname", "name"):
+                    username = v.strip()
+            else:
+                e, u = _scan_identity(v, depth + 1)
+                email = email or e
+                username = username or u
+        return email, username
+    if isinstance(data, list):
+        for v in data:
+            e, u = _scan_identity(v, depth + 1)
+            email = email or e
+            username = username or u
+        return email, username
+    if isinstance(data, str) and _looks_email(data):
+        return data.strip(), None
+    return None, None
+
+
+def _identity_via_mcp(access_token: str) -> Optional[str]:
+    """Resolve the linked Evernote account label via the MCP tools: a dedicated
+    user/account tool if the server exposes one, else the author email on a
+    recent note (Evernote sets note ``attributes.author`` to the owner's email)."""
+    if not access_token:
+        return None
+    session = _McpSession(access_token)
+    try:
+        session.initialize()
+        try:
+            listed = session._call("tools/list")
+            tools = [t.get("name") for t in (listed.get("tools") or []) if t.get("name")]
+        except Exception:
+            tools = []
+        # 1) A user/account tool (called with no arguments).
+        for name in tools:
+            if any(h in name.lower() for h in _USER_TOOL_HINTS):
+                try:
+                    data = _tool_json(session.tool(name, {}))
+                except Exception:
+                    continue
+                email, username = _scan_identity(data)
+                if email or username:
+                    logger.warning("Evernote MCP: identity via tool %s → %s",
+                                   name, email or username)
+                    return email or username
+        # 2) The author on the most recent note — the account owner's email.
+        try:
+            data = _tool_json(session.tool("search_notes", {"query": ""}))
+            hits = _as_list(data, "hits", "notes", "results", "items", "matches")
+            for nm in hits[:1]:
+                note_id = (nm.get("noteId") or nm.get("guid") or nm.get("id")) \
+                    if isinstance(nm, dict) else None
+                if not note_id:
+                    continue
+                full = _tool_json(session.tool("get_note", {"noteId": note_id}))
+                if not isinstance(full, dict):
+                    continue
+                attrs = full.get("attributes") if isinstance(full.get("attributes"), dict) else {}
+                for cand in (attrs.get("author"), full.get("author"),
+                             attrs.get("sourceApplication")):
+                    if _looks_email(cand):
+                        logger.warning("Evernote MCP: identity via note author → %s", cand)
+                        return cand.strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Evernote MCP: identity via note failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Evernote MCP: identity via MCP failed: %s", exc)
+    finally:
+        session.close()
+    return None
+
 
 
 def _client_cache_path() -> str:
