@@ -106,10 +106,42 @@ def discover() -> dict:
         "authorization_endpoint": meta.get("authorization_endpoint"),
         "token_endpoint": meta.get("token_endpoint"),
         "registration_endpoint": meta.get("registration_endpoint"),
+        "userinfo_endpoint": meta.get("userinfo_endpoint"),
         "scopes_supported": meta.get("scopes_supported") or [],
         "resource": mcp,
     }
     return _discovery_cache
+
+
+def fetch_identity(tokens: dict) -> Optional[str]:
+    """Resolve the linked Evernote account's email/username: prefer the OIDC
+    id_token claims, then the discovered userinfo endpoint. None if unavailable."""
+    idt = tokens.get("id_token")
+    if idt and idt.count(".") >= 2:
+        try:
+            payload = idt.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload).decode())
+            ident = (claims.get("email") or claims.get("preferred_username")
+                     or claims.get("name"))
+            if ident:
+                return ident
+        except Exception:
+            pass
+    at = tokens.get("access_token")
+    ui = (discover() or {}).get("userinfo_endpoint")
+    if at and ui:
+        try:
+            with httpx.Client(timeout=15) as c:
+                r = c.get(ui, headers={"Authorization": f"Bearer {at}"})
+                if r.status_code < 400:
+                    d = r.json()
+                    return (d.get("email") or d.get("preferred_username")
+                            or d.get("name") or d.get("username"))
+                logger.warning("Evernote MCP: userinfo → HTTP %d", r.status_code)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Evernote MCP: userinfo failed: %s", exc)
+    return None
 
 
 def _client_cache_path() -> str:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import uuid
@@ -254,7 +256,9 @@ def oauth_callback(code: str | None = Query(default=None),
         except Exception as exc:
             logger.error("Evernote MCP token exchange failed: %s", exc)
             return RedirectResponse(f"{portal}/connectors?error=token_exchange")
-        _link_or_reauth(db, data, connector_type, tokens, "Evernote account")
+        identity = evernote_mcp.fetch_identity(tokens)
+        _link_or_reauth(db, data, connector_type, tokens,
+                        identity or "Evernote account", username=identity)
         return RedirectResponse(f"{portal}/connectors?connected={connector_type}")
     try:
         tokens = oauth.exchange_code(connector_type, code)
@@ -650,8 +654,14 @@ def _fetch_account_label(connector_type: str, tokens: dict) -> str | None:
                 name = d.get("name")
                 return f"u/{name}" if name else None
             if connector_type == "facebook":
-                d = _json(client, "GET", "https://graph.facebook.com/v19.0/me",
-                          params={"fields": "name,email", "access_token": at})
+                # Graph rejects server-side calls without appsecret_proof when the
+                # app enforces it; compute it from the app secret.
+                secret = get_settings().facebook_client_secret or ""
+                params = {"fields": "name,email", "access_token": at}
+                if secret:
+                    params["appsecret_proof"] = hmac.new(
+                        secret.encode(), at.encode(), hashlib.sha256).hexdigest()
+                d = _json(client, "GET", "https://graph.facebook.com/v19.0/me", params=params)
                 return d.get("email") or d.get("name")
             if connector_type == "instagram":
                 d = _json(client, "GET", "https://graph.instagram.com/me",

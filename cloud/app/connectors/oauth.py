@@ -130,7 +130,7 @@ def _providers() -> Dict[str, ProviderSpec]:
             connector_type="facebook",
             authorize_url="https://www.facebook.com/v19.0/dialog/oauth",
             token_url="https://graph.facebook.com/v19.0/oauth/access_token",
-            scopes=["public_profile", "user_posts", "user_photos"],
+            scopes=["public_profile", "email", "user_posts", "user_photos"],
             client_id=s.facebook_client_id,
             client_secret=s.facebook_client_secret,
             extra_auth_params={},
