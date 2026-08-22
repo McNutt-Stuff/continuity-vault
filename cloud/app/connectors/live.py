@@ -413,6 +413,9 @@ _FILE_CHUNK = 400  # files ingested per resumable crawl chunk
 # can't collide with a real Dropbox path_lower ("/…"), OneDrive relative path, or
 # Google Drive folder id.
 ROOT_SENTINEL = "__root__"
+# A selected folder prefixed with this is backed up non-recursively (its top-level
+# files only, not subfolders). ``ROOT_SENTINEL`` is the account-root shorthand.
+FLAT_PREFIX = "flat:"
 
 
 def dropbox_list_folders(access_token: str, path: str = "") -> List[dict]:
@@ -493,9 +496,13 @@ def stream_dropbox(access_token: str, cursor=None, config: Optional[dict] = None
                 break
             # The "root files only" sentinel lists the account root non-recursively
             # so its top-level files are backed up without pulling every subfolder.
-            is_root_files = (root == ROOT_SENTINEL)
-            dbx_path = "" if is_root_files else root
-            recursive = not is_root_files
+            # "flat:<path>" does the same for any specific folder.
+            if root == ROOT_SENTINEL:
+                dbx_path, recursive = "", False
+            elif root.startswith(FLAT_PREFIX):
+                dbx_path, recursive = root[len(FLAT_PREFIX):], False
+            else:
+                dbx_path, recursive = root, True
             dbx_cursor = rmap.get(root)
             while True:
                 if dbx_cursor is None:
@@ -601,11 +608,14 @@ def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = Non
                 stopped_early = True
                 break
             link = rmap.get(root)
-            # "Root files only" sentinel: list the drive root's immediate children
-            # (non-recursive) and keep only files — no delta, so re-list each run
-            # (cheap; content-hash dedup skips unchanged files).
-            if root == ROOT_SENTINEL:
-                url = link or "https://graph.microsoft.com/v1.0/me/drive/root/children"
+            # "Root files only" sentinel / "flat:<path>": list a folder's immediate
+            # children (non-recursive) and keep only files — no delta, so re-list
+            # each run (cheap; content-hash dedup skips unchanged files).
+            if root == ROOT_SENTINEL or root.startswith(FLAT_PREFIX):
+                rel = "" if root == ROOT_SENTINEL else root[len(FLAT_PREFIX):].strip("/")
+                base = (f"https://graph.microsoft.com/v1.0/me/drive/root:/{rel}:/children"
+                        if rel else "https://graph.microsoft.com/v1.0/me/drive/root/children")
+                url = link or base
                 params = None if link else {"$select": select, "$top": 200}
                 while url:
                     r = c.get(url, headers=headers, params=params)
@@ -757,13 +767,18 @@ def stream_drive(access_token: str, cursor=None, config: Optional[dict] = None,
     cur = cursor if isinstance(cursor, dict) else {}
     since = cur.get("since")  # ISO modifiedTime high-water from the last full pass
     # The "root files only" sentinel maps to My Drive root, walked non-recursively
-    # (its subfolders are never queued) so only top-level files are captured.
+    # (its subfolders are never queued) so only top-level files are captured;
+    # "flat:<folderid>" does the same for any specific folder.
     norecurse = set(cur.get("norecurse") or [])
     roots: List[str] = []
     for r in roots_cfg:
         if r == ROOT_SENTINEL:
             roots.append("root")
             norecurse.add("root")
+        elif r.startswith(FLAT_PREFIX):
+            fid = r[len(FLAT_PREFIX):]
+            roots.append(fid)
+            norecurse.add(fid)
         else:
             roots.append(r)
     pending = cur.get("pending")

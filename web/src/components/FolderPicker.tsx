@@ -28,7 +28,12 @@ interface Props {
   loadingLabel?: string;
   emptyLabel?: string;
   saveLabel?: string;
+  // When true, a folder with subfolders can be marked "files only" (back up its
+  // top-level files without recursing) — encoded as "flat:<path>" in the roots.
+  allowFilesOnly?: boolean;
 }
+
+const FLAT = "flat:";
 
 // A reusable folder-tree picker shared by every filesystem-style source (cloud
 // Dropbox/OneDrive and the desktop-agent endpoint files). The data source is
@@ -39,7 +44,10 @@ export function FolderPicker(props: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [lazyKids, setLazyKids] = useState<Record<string, FolderNode[]>>({});
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<Set<string>>(new Set(props.initialSelected || []));
+  const [selected, setSelected] = useState<Set<string>>(
+    new Set((props.initialSelected || []).filter((p) => !p.startsWith(FLAT))));
+  const [flatSel, setFlatSel] = useState<Set<string>>(
+    new Set((props.initialSelected || []).filter((p) => p.startsWith(FLAT)).map((p) => p.slice(FLAT.length))));
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -73,20 +81,38 @@ export function FolderPicker(props: Props) {
   }
 
   function toggleSelect(path: string) {
-    setSelected((cur) => { const n = new Set(cur); n.has(path) ? n.delete(path) : n.add(path); return n; });
+    const isSel = selected.has(path) || flatSel.has(path);
+    if (isSel) {
+      setSelected((cur) => { const n = new Set(cur); n.delete(path); return n; });
+      setFlatSel((cur) => { const n = new Set(cur); n.delete(path); return n; });
+    } else {
+      setSelected((cur) => new Set(cur).add(path));  // default: include subfolders
+    }
+  }
+
+  // Switch a selected folder between recursive (subfolders) and "files only".
+  function toggleFlat(path: string) {
+    if (flatSel.has(path)) {
+      setFlatSel((cur) => { const n = new Set(cur); n.delete(path); return n; });
+      setSelected((cur) => new Set(cur).add(path));
+    } else {
+      setSelected((cur) => { const n = new Set(cur); n.delete(path); return n; });
+      setFlatSel((cur) => new Set(cur).add(path));
+    }
   }
 
   async function save() {
     setSaving(true); setErr("");
     try {
-      await props.onSave([...selected]);
+      await props.onSave([...selected, ...[...flatSel].map((p) => FLAT + p)]);
     } catch (e) {
       setErr((e as Error)?.message || "Couldn't save"); setSaving(false);
     }
   }
 
   function renderNode(node: FolderNode, depth: number) {
-    const isSel = selected.has(node.path);
+    const isSel = selected.has(node.path) || flatSel.has(node.path);
+    const isFlat = flatSel.has(node.path);
     const isExp = expanded.has(node.path);
     const kids = lazyKids[node.path] ?? (node.children || []);
     const isLoading = loadingPaths.has(node.path);
@@ -102,6 +128,13 @@ export function FolderPicker(props: Props) {
           <input type="checkbox" checked={isSel} onChange={() => toggleSelect(node.path)} />
           <Icon name="database" size={13} />
           <span style={{ fontSize: 12.5 }}>{node.name}</span>
+          {isSel && canExpand && props.allowFilesOnly && (
+            <label className="row" style={{ gap: 3, marginLeft: 6, alignItems: "center", cursor: "pointer" }}
+                   title="Back up only the files directly in this folder, not its subfolders">
+              <input type="checkbox" checked={isFlat} onChange={() => toggleFlat(node.path)} />
+              <span className="faint" style={{ fontSize: 10.5 }}>files only</span>
+            </label>
+          )}
           {(node.files || 0) > 0 && (
             <span className="faint" style={{ fontSize: 10.5 }}>· {node.files} files{node.bytes ? ` · ${bytes(node.bytes)}` : ""}</span>
           )}
@@ -146,7 +179,7 @@ export function FolderPicker(props: Props) {
           </div>
           {props.extra}
           <div className="faint" style={{ fontSize: 11, marginTop: 8 }}>
-            {selected.size} folder(s) selected · nothing selected backs up everything. Each item is encrypted before upload.
+            {selected.size + flatSel.size} folder(s) selected · nothing selected backs up everything. Each item is encrypted before upload.
           </div>
         </div>
         <div className="modal-foot">

@@ -44,6 +44,9 @@ _INDEX_ROOT_DEPTH = 5      # the system root ("/") is indexed shallow (minus sys
 _INDEX_MAX_ENTRIES = 300   # subfolders indexed per directory (rest via lazy expand)
 _INDEX_MAX_NODES = 8000    # total folders across the whole up-front index
 _DEFAULT_MAX_FILES = 5000                # safety cap per collection run
+# A selected root prefixed with this backs up only the files directly in it
+# (non-recursive) — kept in sync with the folder picker / cloud connectors.
+_FLAT_PREFIX = "flat:"
 
 # Extension -> canonical kind (matches the server taxonomy KINDS).
 _EXT_KIND = {
@@ -247,9 +250,82 @@ def collect(config: dict, known: dict | None = None) -> tuple[List[dict], dict, 
     new_state: dict = dict(known)  # carry prior knowledge; overlay this run's files
     unchanged = 0
     objects: List[dict] = []
+
+    def handle(fp: Path) -> bool:
+        """Process one file into an object (incremental dedup). Returns True once
+        the max-files cap is reached so the caller can stop."""
+        nonlocal unchanged
+        try:
+            st = fp.stat()
+        except OSError:
+            return False
+        if st.st_size > max_bytes:
+            return False
+        if _excluded(fp, excl_ext, excl_glob):
+            return False
+        path_s = str(fp)
+        prior = known.get(path_s)
+        # Unchanged since the last backup (same size + mtime) → skip the read and
+        # the upload; the prior version at rest still stands.
+        if (prior and prior.get("size") == st.st_size
+                and abs(float(prior.get("mtime", 0)) - st.st_mtime) < 0.001):
+            unchanged += 1
+            return False
+        try:
+            data = fp.read_bytes()
+        except OSError:
+            return False
+        content_hash = hashlib.sha256(data).hexdigest()
+        # Content identical to what we already backed up (e.g. only mtime touched)
+        # → refresh state but don't re-upload.
+        if prior and prior.get("hash") == content_hash:
+            new_state[path_s] = {"size": st.st_size, "mtime": st.st_mtime, "hash": content_hash}
+            unchanged += 1
+            return False
+        new_state[path_s] = {"size": st.st_size, "mtime": st.st_mtime, "hash": content_hash}
+        oid = "endpoint_files:" + hashlib.sha256(str(fp).encode()).hexdigest()[:24]
+        mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+        objects.append({
+            "object_id": oid,
+            "kind": _kind_for(fp.name),
+            "title": fp.name,
+            "content_b64": base64.b64encode(data).decode(),
+            "content_hash": content_hash,  # stable plaintext hash for the pipeline
+            "preview": str(fp.parent),
+            "meta": {
+                "path": str(fp),
+                "folder": str(fp.parent),
+                "drive": _drive_of(fp),
+                "extension": fp.suffix.lstrip(".").lower(),
+                "bytes": len(data),
+                "modified": mtime,
+            },
+            "labels": [_drive_of(fp)],
+            "size_bytes": len(data),
+        })
+        return len(objects) >= max_files
+
     for root in roots:
-        rp = Path(root)
+        # "flat:<path>" backs up only the files directly in <path> (no subfolders).
+        flat = isinstance(root, str) and root.startswith(_FLAT_PREFIX)
+        rp = Path(root[len(_FLAT_PREFIX):] if flat else root)
         if not rp.exists():
+            continue
+        if flat:
+            try:
+                with os.scandir(rp) as it:
+                    for entry in it:
+                        if entry.name.startswith("."):
+                            continue
+                        try:
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+                        except OSError:
+                            continue
+                        if handle(Path(entry.path)):
+                            return objects, new_state, unchanged
+            except OSError:
+                continue
             continue
         for dirpath, dirnames, filenames in os.walk(rp):
             # Prune noise/system dirs in-place so os.walk doesn't descend them.
@@ -257,58 +333,7 @@ def collect(config: dict, known: dict | None = None) -> tuple[List[dict], dict, 
             for fn in filenames:
                 if fn.startswith("."):
                     continue
-                fp = Path(dirpath) / fn
-                try:
-                    st = fp.stat()
-                except OSError:
-                    continue
-                if st.st_size > max_bytes:
-                    continue
-                if _excluded(fp, excl_ext, excl_glob):
-                    continue
-                path_s = str(fp)
-                prior = known.get(path_s)
-                # Unchanged since the last backup (same size + mtime) → skip the
-                # read and the upload; the prior version at rest still stands.
-                if (prior and prior.get("size") == st.st_size
-                        and abs(float(prior.get("mtime", 0)) - st.st_mtime) < 0.001):
-                    unchanged += 1
-                    continue
-                try:
-                    data = fp.read_bytes()
-                except OSError:
-                    continue
-                content_hash = hashlib.sha256(data).hexdigest()
-                # Content identical to what we already backed up (e.g. only mtime
-                # touched) → refresh state but don't re-upload.
-                if prior and prior.get("hash") == content_hash:
-                    new_state[path_s] = {"size": st.st_size, "mtime": st.st_mtime,
-                                         "hash": content_hash}
-                    unchanged += 1
-                    continue
-                new_state[path_s] = {"size": st.st_size, "mtime": st.st_mtime,
-                                     "hash": content_hash}
-                oid = "endpoint_files:" + hashlib.sha256(str(fp).encode()).hexdigest()[:24]
-                mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
-                objects.append({
-                    "object_id": oid,
-                    "kind": _kind_for(fn),
-                    "title": fn,
-                    "content_b64": base64.b64encode(data).decode(),
-                    "content_hash": content_hash,  # stable plaintext hash for the pipeline
-                    "preview": str(fp.parent),
-                    "meta": {
-                        "path": str(fp),
-                        "folder": str(fp.parent),
-                        "drive": _drive_of(fp),
-                        "extension": fp.suffix.lstrip(".").lower(),
-                        "bytes": len(data),
-                        "modified": mtime,
-                    },
-                    "labels": [_drive_of(fp)],
-                    "size_bytes": len(data),
-                })
-                if len(objects) >= max_files:
+                if handle(Path(dirpath) / fn):
                     return objects, new_state, unchanged
     return objects, new_state, unchanged
 

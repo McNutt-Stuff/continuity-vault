@@ -737,8 +737,9 @@ export default function Mappings() {
       {cloudPicker && (
         <FolderPicker
           title={`Choose folders — ${cloudPicker.label}`}
-          note="Only the folders you select are backed up. Nothing selected = everything. Pick “Files in the root folder” to include top-level files without every subfolder."
+          note="Only the folders you select are backed up. Nothing selected = everything. Pick “Files in the root folder” or tick “files only” to include a folder’s top-level files without every subfolder."
           initialSelected={cloudPicker.initial.roots || []}
+          allowFilesOnly={["dropbox", "onedrive", "google_drive"].includes(cloudPicker.sourceType)}
           loadingLabel="loading your folders…"
           emptyLabel="No subfolders here. Selecting nothing backs up the whole account."
           loadRoots={async () => {
@@ -886,8 +887,9 @@ function FilePicker({ agentId, mappingId, initial, onClose, onSaved }: {
     <FolderPicker
       key={reloadKey}
       title="Choose folders to back up"
-      note="Selecting a folder includes everything beneath it."
+      note="Selecting a folder includes everything beneath it — tick “files only” to back up just a folder’s top-level files (no subfolders)."
       initialSelected={initial.roots || []}
+      allowFilesOnly
       loadingLabel="loading the agent's folder index…"
       emptyLabel="No folder index yet. Make sure the agent is online and updated, then Rescan drives."
       loadRoots={loadRoots}
