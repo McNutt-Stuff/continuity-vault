@@ -243,7 +243,8 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     # (scheduled backups, created only in the node's DB) don't — create those so
     # the admin worker view reflects scheduled runs too, attributed to the node.
     push_node = (db.query(Node)
-                 .filter(Node.name == body.node, Node.role == body.role).first())
+                 .filter(Node.name == body.node, Node.role == body.role).first()
+                 or db.query(Node).filter(Node.name == body.node).first())
     for j in body.jobs:
         job = db.get(SyncJob, j.get("id"))
         if job:
@@ -251,8 +252,10 @@ def push(body: PushPayload, authorization: str = Header(default=""),
         else:
             _upsert(db, SyncJob, j)
             job = db.get(SyncJob, j.get("id"))
-            if job is not None and push_node is not None and not job.node_id:
-                job.node_id = push_node.id
+        # Attribute any node-pushed job to the pushing node (fixes rows created
+        # with a null node_id before this, since node_id isn't in _JOB_FIELDS).
+        if job is not None and push_node is not None and not job.node_id:
+            job.node_id = push_node.id
         counts["jobs"] += 1
     for a in body.agents:
         ag = db.get(DesktopAgent, a.get("id"))

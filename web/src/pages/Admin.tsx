@@ -1303,8 +1303,9 @@ function Workers() {
   const jobs = data?.jobs || [];
   const active = data?.active ?? 0;
   const isActive = (s: string) => ["queued", "running", "cancelling"].includes(s);
-  const tone = (s: string): "ok" | "info" | "warn" | "danger" =>
-    s === "running" ? "info" : s === "done" ? "ok" : s === "failed" ? "danger" : "warn";
+  const statusColor = (s: string): string =>
+    s === "running" ? "#4f7cff" : s === "done" ? "#35d0a5" : s === "failed" ? "#f2545b"
+      : s === "cancelled" ? "#8a94a7" : "#f5a623";
 
   return (
     <Card style={{ marginTop: 16 }}>
@@ -1321,7 +1322,7 @@ function Workers() {
         Background backup / sync jobs across all tenants. Stopping a worker aborts it at its next chunk boundary.
       </div>
       <table className="table">
-        <thead><tr><th>Source</th><th>Tenant</th><th>Trigger</th><th>Node</th><th>Status</th><th>Progress</th><th>Time</th><th></th></tr></thead>
+        <thead><tr><th>Source</th><th>Tenant</th><th>Trigger</th><th>Node</th><th>Result</th><th>Time</th><th></th></tr></thead>
         <tbody>
           {jobs.map((j) => (
             <tr key={j.id}>
@@ -1331,9 +1332,13 @@ function Workers() {
               </td>
               <td className="faint">{j.tenant}</td>
               <td><Pill tone={j.trigger === "schedule" ? "info" : "ok"}>{j.trigger === "schedule" ? "Schedule" : "Manual"}</Pill></td>
-              <td><Pill tone={j.node_id ? "info" : "ok"}>{j.node || "Control plane"}</Pill></td>
-              <td><Pill tone={tone(j.status)}>{j.status}</Pill></td>
-              <td className="faint">{(j.processed || 0).toLocaleString()}{j.total ? ` / ${(j.total).toLocaleString()}` : ""}</td>
+              <td style={{ whiteSpace: "nowrap" }}>{j.node || "Control plane"}</td>
+              <td>
+                <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                  <span title={j.status} style={{ width: 9, height: 9, borderRadius: 999, background: statusColor(j.status), flexShrink: 0 }} />
+                  <span className="faint">{(j.processed || 0).toLocaleString()}{j.total ? ` / ${(j.total).toLocaleString()}` : ""}</span>
+                </div>
+              </td>
               <td className="faint" style={{ fontSize: 10.5, whiteSpace: "nowrap" }}>
                 {j.started_at && <div>started {fmtAbsolute(j.started_at)}</div>}
                 {j.finished_at
@@ -1350,7 +1355,7 @@ function Workers() {
               </td>
             </tr>
           ))}
-          {jobs.length === 0 && <tr><td colSpan={8} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
+          {jobs.length === 0 && <tr><td colSpan={7} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
         </tbody>
       </table>
       {logJob && (
