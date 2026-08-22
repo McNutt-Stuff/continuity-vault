@@ -12,7 +12,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
 from email.header import decode_header, make_header
 from typing import Iterable, List, Optional, Tuple
@@ -982,6 +982,24 @@ def fetch_google_contacts(access_token: str,
                 break
 
 
+def _event_object_date(ev: dict) -> Optional[datetime]:
+    """A sensible timeline date for a calendar event. Events that recur forever
+    can carry a far-future start sentinel (e.g. year 2099); when the start is
+    unreasonably far ahead, fall back to the original instance start, then the
+    event's updated/created time, so the event doesn't sort to the year 2099."""
+    cutoff = datetime.utcnow() + timedelta(days=400)
+    start = ev.get("start") or {}
+    dt = _parse_dt(start.get("dateTime") or start.get("date"))
+    if dt is not None and dt <= cutoff:
+        return dt
+    ost = ev.get("originalStartTime") or {}
+    for cand in (ost.get("dateTime") or ost.get("date"), ev.get("updated"), ev.get("created")):
+        alt = _parse_dt(cand)
+        if alt is not None and alt <= cutoff:
+            return alt
+    return dt  # nothing better — keep the real (possibly future) start
+
+
 def fetch_google_calendar(access_token: str,
                           content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -998,7 +1016,11 @@ def fetch_google_calendar(access_token: str,
             cal_name = cal.get("summary", "Calendar")
             token: Optional[str] = None
             while True:
-                params = {"singleEvents": "true", "maxResults": 2500, "orderBy": "startTime"}
+                # Don't expand recurring series into instances: a "repeats forever"
+                # event would otherwise explode into thousands of objects (and get
+                # dated at the expansion horizon). Store one event per series,
+                # dated at its first occurrence.
+                params = {"maxResults": 2500, "showDeleted": "false"}
                 if token:
                     params["pageToken"] = token
                 r = c.get(f"{base}/calendars/{cal_id}/events", headers=headers, params=params)
@@ -1015,11 +1037,12 @@ def fetch_google_calendar(access_token: str,
                         content=json.dumps(ev).encode(),
                         preview=f"{when} · {ev.get('location', '')}".strip(" ·"),
                         meta={"calendar": cal_name, "start": when,
+                              "recurring": bool(ev.get("recurrence")),
                               "location": ev.get("location"),
                               "organizer": (ev.get("organizer") or {}).get("email"),
                               "kind": "event"},
                         labels=[cal_name],
-                        modified_at=_parse_dt(when))
+                        modified_at=_event_object_date(ev))
                 token = body.get("nextPageToken")
                 if not token:
                     break

@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -176,6 +177,8 @@ def taxonomy(principal: security.Principal = Depends(security.get_principal)):
 def search(q: str = "", source_type: str | None = None, doc_type: str | None = None,
            category: str | None = None, label: str | None = None,
            attr: str | None = None, limit: int = 50, sort: str = "date",
+           direction: str = "desc", date_from: str | None = None,
+           date_to: str | None = None, date_field: str | None = None,
            principal: security.Principal = Depends(security.require_passkey),
            tenant: Tenant = Depends(security.get_tenant),
            db: Session = Depends(get_db)):
@@ -224,6 +227,50 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     # are corrected on read.
     ql = q.lower().strip() if q else ""
 
+    # Optional date-range filter, scoped to either the object's own date
+    # ("date") or its capture/ingest date ("captured").
+    def _parse_bound(val: str | None, end: bool) -> datetime | None:
+        if not val:
+            return None
+        try:
+            d = datetime.fromisoformat(val.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if d.tzinfo is not None:
+            d = d.astimezone(timezone.utc).replace(tzinfo=None)
+        # A bare date ("2026-08-22") covers the whole day.
+        if len(val.strip()) <= 10:
+            d = d.replace(hour=23, minute=59, second=59, microsecond=999999) if end \
+                else d.replace(hour=0, minute=0, second=0, microsecond=0)
+        return d
+
+    dt_from = _parse_bound(date_from, end=False)
+    dt_to = _parse_bound(date_to, end=True)
+    scope_captured = (date_field == "captured")
+
+    def _norm_dt(d):
+        if d is None:
+            return None
+        return d.astimezone(timezone.utc).replace(tzinfo=None) if getattr(d, "tzinfo", None) else d
+
+    def _scoped_date(r: SearchDocument):
+        key = (r.source_type, r.object_id)
+        if scope_captured:
+            return _norm_dt(first_ingested.get(key) or r.created_at)
+        return _norm_dt(r.modified_at or first_ingested.get(key) or r.created_at)
+
+    def _in_range(r: SearchDocument) -> bool:
+        if not dt_from and not dt_to:
+            return True
+        sd = _scoped_date(r)
+        if sd is None:
+            return False
+        if dt_from and sd < dt_from:
+            return False
+        if dt_to and sd > dt_to:
+            return False
+        return True
+
     def _cat(r: SearchDocument) -> str:
         return category_for_kind(r.doc_type)
 
@@ -245,6 +292,8 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         if skip != "label" and label and label not in (r.labels or []):
             return False
         if skip != "attr" and not _attr_match(r):
+            return False
+        if not _in_range(r):
             return False
         if ql:
             hay = " ".join([r.title or "", r.preview or "", r.search_blob or ""]).lower()
@@ -319,18 +368,19 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
 
     # Final rows: every active filter applied.
     filtered = [r for r in unique if _matches(r)]
-    # Sort newest-first. "date" (default) orders by the object's OWN timestamp
-    # (file/email/post date); "captured" orders by when we first ingested it.
+    # Order by the object's OWN timestamp ("date", default) or when we first
+    # ingested it ("captured"); direction defaults to newest-first ("desc").
+    _MIN = datetime.min
     if sort == "captured":
         def _sort_key(r: SearchDocument):
-            return (first_ingested.get((r.source_type, r.object_id))
-                    or r.created_at or r.modified_at)
+            return _norm_dt(first_ingested.get((r.source_type, r.object_id))
+                            or r.created_at or r.modified_at) or _MIN
     else:
         def _sort_key(r: SearchDocument):
-            return (r.modified_at
-                    or first_ingested.get((r.source_type, r.object_id))
-                    or r.created_at)
-    filtered.sort(key=_sort_key, reverse=True)
+            return _norm_dt(r.modified_at
+                            or first_ingested.get((r.source_type, r.object_id))
+                            or r.created_at) or _MIN
+    filtered.sort(key=_sort_key, reverse=(direction != "asc"))
     rows = filtered[:limit]
 
     # Map each result's object to every destination it is stored in (across all

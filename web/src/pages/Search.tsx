@@ -295,6 +295,11 @@ export default function Search() {
   const [attr, setAttr] = useState<string | null>(null);
   const [attrKey, setAttrKey] = useState("");
   const [sortBy, setSortBy] = useState<"date" | "captured">("date");
+  const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [dateField, setDateField] = useState<"date" | "captured">("date");
+  const [dateOpen, setDateOpen] = useState(false);
   const [data, setData] = useState<SearchResp | null>(null);
   const [locked, setLocked] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -494,6 +499,10 @@ export default function Search() {
       if (label) params.set("label", label);
       if (attr) params.set("attr", attr);
       params.set("sort", sortBy);
+      params.set("direction", sortDir);
+      if (dateFrom) params.set("date_from", dateFrom);
+      if (dateTo) params.set("date_to", dateTo);
+      if (dateFrom || dateTo) params.set("date_field", dateField);
       setData(await api.get<SearchResp>(`/search?${params.toString()}`));
       setLocked(false);
     } catch (e) {
@@ -512,7 +521,7 @@ export default function Search() {
   useEffect(() => {
     if (me?.passkey_verified) void run();
     else setLocked(true);
-  }, [me?.passkey_verified, source, category, label, attr, sortBy]);
+  }, [me?.passkey_verified, source, category, label, attr, sortBy, sortDir, dateFrom, dateTo, dateField]);
 
   if (locked) {
     return (
@@ -604,7 +613,12 @@ export default function Search() {
         const srcLabel = source ? (data.source_display?.[source] ?? SOURCE_META[source]?.label ?? source) : "";
         const catLabel = category ? (CATEGORY_META[category]?.label ?? category) : "";
         const hasFilters = !!(source || category || label || attr);
+        const hasDate = !!(dateFrom || dateTo);
         function clearAll() { setSource(null); setCategory(null); setLabel(null); setAttr(null); setAttrKey(""); }
+        const dateFieldLabel = dateField === "captured" ? "captured" : "object date";
+        const dateChip = hasDate
+          ? `${dateFrom || "…"} → ${dateTo || "…"} (${dateFieldLabel})`
+          : "";
         return (
           <>
             <div className="filter-bar">
@@ -659,21 +673,71 @@ export default function Search() {
               {hasFilters && (
                 <button className="btn ghost sm" style={{ alignSelf: "flex-end" }} onClick={clearAll}>Clear all</button>
               )}
-              <label className="filter-select" style={{ marginLeft: "auto" }}>
+              <div className="filter-select" style={{ marginLeft: "auto", position: "relative" }}>
+                <span>Date range</span>
+                <button className={`btn sm ${hasDate ? "primary" : "ghost"}`}
+                        title="Filter by a date range" onClick={() => setDateOpen((o) => !o)}>
+                  <Icon name="clock" size={14} />{hasDate ? " On" : ""}
+                </button>
+                {dateOpen && (
+                  <>
+                    <div style={{ position: "fixed", inset: 0, zIndex: 40 }} onClick={() => setDateOpen(false)} />
+                    <div style={{
+                      position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 50, width: 250,
+                      background: "var(--bg-elev-2)", border: "1px solid var(--border)",
+                      borderRadius: 10, padding: 12, boxShadow: "0 10px 30px rgba(0,0,0,0.28)",
+                    }}>
+                      <div className="stack" style={{ gap: 10 }}>
+                        <label className="stack" style={{ gap: 4 }}>
+                          <span className="faint" style={{ fontSize: 11 }}>Scope which date</span>
+                          <select className="input sm" value={dateField}
+                                  onChange={(e) => setDateField(e.target.value as "date" | "captured")}>
+                            <option value="date">Object date</option>
+                            <option value="captured">Date captured</option>
+                          </select>
+                        </label>
+                        <label className="stack" style={{ gap: 4 }}>
+                          <span className="faint" style={{ fontSize: 11 }}>From</span>
+                          <input className="input sm" type="date" value={dateFrom}
+                                 max={dateTo || undefined} onChange={(e) => setDateFrom(e.target.value)} />
+                        </label>
+                        <label className="stack" style={{ gap: 4 }}>
+                          <span className="faint" style={{ fontSize: 11 }}>To</span>
+                          <input className="input sm" type="date" value={dateTo}
+                                 min={dateFrom || undefined} onChange={(e) => setDateTo(e.target.value)} />
+                        </label>
+                        <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
+                          <button className="btn ghost sm" onClick={() => { setDateFrom(""); setDateTo(""); }}>Clear</button>
+                          <button className="btn primary sm" onClick={() => setDateOpen(false)}>Done</button>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+              <label className="filter-select">
                 <span>Sort by</span>
-                <select value={sortBy} onChange={(e) => setSortBy(e.target.value as "date" | "captured")}>
-                  <option value="date">Object date</option>
-                  <option value="captured">Date captured</option>
-                </select>
+                <div className="row" style={{ gap: 4, alignItems: "stretch" }}>
+                  <select value={sortBy} onChange={(e) => setSortBy(e.target.value as "date" | "captured")}>
+                    <option value="date">Object date</option>
+                    <option value="captured">Date captured</option>
+                  </select>
+                  <button className="btn ghost sm" style={{ minWidth: 32 }}
+                          title={sortDir === "desc" ? "Newest first (descending)" : "Oldest first (ascending)"}
+                          onClick={() => setSortDir((d) => (d === "desc" ? "asc" : "desc"))}>
+                    {sortDir === "desc" ? "↓" : "↑"}
+                  </button>
+                </div>
               </label>
             </div>
 
-            {hasFilters && (
+            {(hasFilters || hasDate) && (
               <div className="active-filters">
                 {source && <span className="filter-chip">{srcLabel}<button onClick={() => { setSource(null); setAttr(null); setAttrKey(""); }}>×</button></span>}
                 {category && <span className="filter-chip">{catLabel}<button onClick={() => setCategory(null)}>×</button></span>}
                 {label && <span className="filter-chip">Label: {label}<button onClick={() => setLabel(null)}>×</button></span>}
                 {attr && <span className="filter-chip">{attr.replace(":", ": ")}<button onClick={() => setAttr(null)}>×</button></span>}
+                {hasDate && <span className="filter-chip">{dateChip}<button onClick={() => { setDateFrom(""); setDateTo(""); }}>×</button></span>}
               </div>
             )}
           </>
