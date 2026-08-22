@@ -439,7 +439,9 @@ def fetch(access_token: str, content_cap: int = _DEFAULT_CAP,
     except Exception as exc:
         logger.warning("Evernote MCP: initialize failed: %s", exc)
         session.close()
-        return
+        # Surface the failure (e.g. a 401) so the sync worker records a real error
+        # / needs-reauth instead of a misleading 0-object success.
+        raise
 
     # Beta bring-up: the server's tool arg/response schemas aren't documented, so
     # log what it actually exposes and returns to guide the field mapping.
@@ -471,6 +473,8 @@ def fetch(access_token: str, content_cap: int = _DEFAULT_CAP,
                 res = session.tool("search_notes", args)
             except Exception as exc:
                 logger.warning("Evernote MCP: search_notes failed at start=%d: %s", start, exc)
+                if start == 0:
+                    raise  # first page failed → a real error, not an empty result
                 break
             if start == 0:
                 logger.warning("Evernote MCP: search_notes raw → %s", json.dumps(res)[:1000])

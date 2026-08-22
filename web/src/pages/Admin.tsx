@@ -1321,7 +1321,7 @@ function Workers() {
         Background backup / sync jobs across all tenants. Stopping a worker aborts it at its next chunk boundary.
       </div>
       <table className="table">
-        <thead><tr><th>Source</th><th>Tenant</th><th>Trigger</th><th>Node</th><th>Status</th><th>Progress</th><th></th></tr></thead>
+        <thead><tr><th>Source</th><th>Tenant</th><th>Trigger</th><th>Node</th><th>Status</th><th>Progress</th><th>Time</th><th></th></tr></thead>
         <tbody>
           {jobs.map((j) => (
             <tr key={j.id}>
@@ -1334,6 +1334,12 @@ function Workers() {
               <td><Pill tone={j.node_id ? "info" : "ok"}>{j.node || "Control plane"}</Pill></td>
               <td><Pill tone={tone(j.status)}>{j.status}</Pill></td>
               <td className="faint">{(j.processed || 0).toLocaleString()}{j.total ? ` / ${(j.total).toLocaleString()}` : ""}</td>
+              <td className="faint" style={{ fontSize: 10.5, whiteSpace: "nowrap" }}>
+                {j.started_at && <div>started {fmtAbsolute(j.started_at)}</div>}
+                {j.finished_at
+                  ? <div>finished {fmtAbsolute(j.finished_at)}</div>
+                  : (!j.started_at && <div>queued {fmtAbsolute(j.created_at)}</div>)}
+              </td>
               <td style={{ textAlign: "right" }}>
                 <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
                   {j.has_log && <button className="btn ghost sm" onClick={() => openLog(j)}><Icon name="note" size={12} /> Log</button>}
@@ -1344,7 +1350,7 @@ function Workers() {
               </td>
             </tr>
           ))}
-          {jobs.length === 0 && <tr><td colSpan={7} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
+          {jobs.length === 0 && <tr><td colSpan={8} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
         </tbody>
       </table>
       {logJob && (
