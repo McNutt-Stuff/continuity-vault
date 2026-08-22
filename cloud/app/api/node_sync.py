@@ -122,6 +122,23 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
     collections = db.query(Collection).filter(Collection.tenant_id.in_(tids)).all()
     accounts = db.query(ConnectorAccount).filter(ConnectorAccount.tenant_id.in_(tids)).all()
     agents = db.query(DesktopAgent).filter(DesktopAgent.tenant_id.in_(tids)).all()
+    # Forward-queue: hand the node any commands the portal queued for these
+    # agents (e.g. "Sync now" → collect), draining them here so they aren't sent
+    # again. The node appends them to its local agent queue and delivers them to
+    # the agent, which now reports to the node. (pending_commands is excluded from
+    # the row upsert on the node, so this is the only delivery path — no loop.)
+    agent_commands: dict = {}
+    for a in agents:
+        q = []
+        if a.pending_command:
+            q.append(a.pending_command)
+        q.extend(a.pending_commands or [])
+        if q:
+            agent_commands[a.id] = q
+            a.pending_command = None
+            a.pending_commands = []
+    if agent_commands:
+        db.commit()
     appliances = db.query(Appliance).filter(Appliance.tenant_id.in_(tids)).all()
     aids = [a.id for a in appliances]
     storages = (db.query(ApplianceStorage).filter(ApplianceStorage.appliance_id.in_(aids)).all()
@@ -150,6 +167,7 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "nodes": [_ser(n) for n in db.query(Node).all()],
         "pricing": _ser(pricing) if pricing else None,
         "pending_jobs": [_ser(j) for j in pending_jobs],
+        "agent_commands": agent_commands,
         "key_records": key_records,
     }
 

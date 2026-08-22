@@ -156,6 +156,23 @@ def _pull(s) -> int:
                 _upsert(db, model, row)
                 n += 1
         db.commit()
+    # Forwarded agent commands (portal "Sync now" for node-routed agents): append
+    # to the local agent queue so the node delivers them on the agent's next
+    # heartbeat. enqueue_command dedupes, so a re-forward is harmless.
+    agent_cmds = bundle.get("agent_commands") or {}
+    if agent_cmds:
+        with SessionLocal() as db:
+            forwarded = 0
+            for aid, cmds in agent_cmds.items():
+                ag = db.get(DesktopAgent, aid)
+                if ag is None:
+                    continue
+                for c in cmds or []:
+                    ag.enqueue_command(c)
+                    forwarded += 1
+            db.commit()
+        if forwarded:
+            logger.info("forwarded %d agent command(s) from control plane", forwarded)
     # Wrapped key records → local key store (fleet-shared KEK makes them usable).
     for vid, recs in (bundle.get("key_records") or {}).items():
         try:
@@ -269,7 +286,9 @@ def start_replication() -> None:
     if not s.control_plane_url or not s.node_secret:
         logger.warning("replication disabled: control_plane_url / node_secret not set")
         return
-    interval = max(30, s.sync_interval_minutes * 60 // 2 or 120)
+    # Poll frequently: this channel also delivers portal-initiated work (manual
+    # "Back up now" jobs + forwarded agent commands), so responsiveness matters.
+    interval = max(15, min(45, s.heartbeat_interval_seconds or 30))
 
     def loop() -> None:
         time.sleep(10)
