@@ -85,6 +85,29 @@ def _record_sync_success(db: Session, account: Optional[ConnectorAccount], count
                 getattr(account, "connector_type", "?"), account.account_label, count)
 
 
+def _try_refresh_token(db: Session, account: ConnectorAccount) -> bool:
+    """Force an OAuth token refresh (used after an auth failure). Returns True if a
+    new access token was minted — the next run then recovers without a full re-auth."""
+    if not account.encrypted_credentials:
+        return False
+    try:
+        creds = credstore.decrypt(account.tenant_id, account.encrypted_credentials)
+    except Exception:
+        return False
+    rt = creds.get("refresh_token")
+    if not rt:
+        return False
+    try:
+        creds.update(oauth.refresh_tokens(account.connector_type, rt))
+        account.encrypted_credentials = credstore.encrypt(account.tenant_id, creds)
+        account.auth_status = "linked"
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.info("token refresh after auth error failed for %s: %s",
+                    account.account_label, exc)
+        return False
+
+
 def _record_sync_error(db: Session, account: Optional[ConnectorAccount],
                        collection: Collection, exc: Exception) -> None:
     """Persist a source's failure + emit an audit event; flag re-auth needs so
@@ -93,6 +116,11 @@ def _record_sync_error(db: Session, account: Optional[ConnectorAccount],
         return
     msg = (str(exc)[:500] or exc.__class__.__name__)
     needs_auth = _is_auth_error(exc)
+    # A 401 can mean the access token was invalidated (re-consent, clock skew,
+    # a fresh grant on another node) while the refresh token still works — try a
+    # refresh before demanding a full re-authorization.
+    if needs_auth and _try_refresh_token(db, account):
+        needs_auth = False
     account.last_error = msg
     account.last_error_at = datetime.now(timezone.utc)
     if needs_auth:

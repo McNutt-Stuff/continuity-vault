@@ -1322,7 +1322,7 @@ function Workers() {
         Background backup / sync jobs across all tenants. Stopping a worker aborts it at its next chunk boundary.
       </div>
       <table className="table">
-        <thead><tr><th>Source</th><th>Tenant</th><th>Trigger</th><th>Node</th><th>Result</th><th>Time</th><th></th></tr></thead>
+        <thead><tr><th>Source</th><th>Tenant</th><th>Node</th><th>Result</th><th>Time</th><th></th></tr></thead>
         <tbody>
           {jobs.map((j) => (
             <tr key={j.id}>
@@ -1331,7 +1331,6 @@ function Workers() {
                 <div className="faint" style={{ fontSize: 11 }}>{j.source_type || j.kind}{j.message ? ` · ${j.message}` : ""}</div>
               </td>
               <td className="faint">{j.tenant}</td>
-              <td><Pill tone={j.trigger === "schedule" ? "info" : "ok"}>{j.trigger === "schedule" ? "Schedule" : "Manual"}</Pill></td>
               <td style={{ whiteSpace: "nowrap" }}>{j.node || "Control plane"}</td>
               <td>
                 <div className="row" style={{ gap: 8, alignItems: "center" }}>
@@ -1346,16 +1345,19 @@ function Workers() {
                   : (!j.started_at && <div>queued {fmtAbsolute(j.created_at)}</div>)}
               </td>
               <td style={{ textAlign: "right" }}>
-                <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
+                <div className="row" style={{ gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
                   {j.has_log && <button className="btn ghost sm" onClick={() => openLog(j)}><Icon name="note" size={12} /> Log</button>}
                   {isActive(j.status) && j.status !== "cancelling"
                     ? <button className="btn danger sm" onClick={() => cancel(j)}>Stop</button>
                     : <span className="faint" style={{ fontSize: 11 }}>{j.status === "cancelling" ? "stopping…" : ""}</span>}
+                  <span className="faint" title={j.trigger === "schedule" ? "Scheduled" : "Manual"} style={{ display: "inline-flex" }}>
+                    <Icon name={j.trigger === "schedule" ? "clock" : "user"} size={15} />
+                  </span>
                 </div>
               </td>
             </tr>
           ))}
-          {jobs.length === 0 && <tr><td colSpan={7} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
+          {jobs.length === 0 && <tr><td colSpan={6} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
         </tbody>
       </table>
       {logJob && (
@@ -1370,12 +1372,17 @@ function Workers() {
             </div>
             <div className="modal-body">
               {logJob.error && <div className="faint" style={{ color: "var(--danger)", fontSize: 12.5, marginBottom: 8 }}>{logJob.error}</div>}
-              <pre className="mono" style={{ fontSize: 11.5, whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0, maxHeight: "60vh", overflow: "auto" }}>
+              <div className="terminal-log">
                 {(logJob.log || []).length === 0
-                  ? "No log captured for this job."
-                  : (logJob.log || []).map((l: any) =>
-                      `${fmtAbsolute(l.ts)}  ${(l.level || "INFO").padEnd(7)} ${l.msg}`).join("\n")}
-              </pre>
+                  ? <div className="faint">No log captured for this job.</div>
+                  : (logJob.log || []).map((l: any, i: number) => (
+                      <div key={i} className={`tlog-line lvl-${(l.level || "INFO").toLowerCase()}`}>
+                        <span className="tlog-ts">{fmtAbsolute(l.ts)}</span>
+                        <span className="tlog-lvl">{(l.level || "INFO").padEnd(7)}</span>
+                        <span className="tlog-msg">{l.msg}</span>
+                      </div>
+                    ))}
+              </div>
             </div>
           </div>
         </div>

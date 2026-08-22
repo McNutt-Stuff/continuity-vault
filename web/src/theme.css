@@ -214,6 +214,19 @@ h3 { font-size: 15px; }
 .menu-item.danger:hover:not(:disabled) { background: rgba(242,84,91,.12); }
 .menu-item:disabled { opacity: .45; cursor: default; }
 .menu-divider { height: 1px; background: var(--border-soft); margin: 4px 2px; }
+
+/* Terminal-style process log */
+.terminal-log { background: #0a0d12; border: 1px solid #1b2431; border-radius: 8px;
+  padding: 12px 14px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px; line-height: 1.6; color: #c7d2e0; max-height: 62vh; overflow: auto; }
+.tlog-line { display: flex; gap: 10px; }
+.tlog-ts { color: #57647a; flex-shrink: 0; }
+.tlog-lvl { color: #7d8ba1; flex-shrink: 0; }
+.tlog-msg { flex: 1; white-space: pre-wrap; word-break: break-word; }
+.tlog-line.lvl-info .tlog-lvl { color: #4f9dff; }
+.tlog-line.lvl-warning .tlog-lvl, .tlog-line.lvl-warning .tlog-msg { color: #f0b429; }
+.tlog-line.lvl-error .tlog-lvl, .tlog-line.lvl-error .tlog-msg { color: #ff6b6b; }
+.tlog-line.lvl-critical .tlog-lvl, .tlog-line.lvl-critical .tlog-msg { color: #ff6b6b; font-weight: 600; }
 .result-row { display: flex; align-items: center; gap: 14px; padding: 13px 14px;
   border: 1px solid var(--border-soft); border-radius: 10px; margin-bottom: 8px; cursor: pointer;
   background: var(--bg-elev); }
