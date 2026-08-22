@@ -335,6 +335,7 @@ def list_accounts(principal: security.Principal = Depends(security.get_principal
         ConnectorAccount.owner_user_id == principal.user_id).all()
     return [{"id": a.id, "connector_type": a.connector_type,
              "account_label": a.account_label, "auth_status": a.auth_status,
+             "active": bool(a.active),
              "last_sync_at": a.last_sync_at.isoformat() if a.last_sync_at else None,
              "last_object_count": a.last_object_count,
              "last_error": a.last_error,
@@ -368,27 +369,105 @@ def rename_account(account_id: str, body: AccountRename,
 
 @router.delete("/accounts/{account_id}")
 def unlink(account_id: str,
-           principal: security.Principal = Depends(security.require_security_admin),
+           principal: security.Principal = Depends(security.get_principal),
            tenant: Tenant = Depends(security.get_tenant),
            db: Session = Depends(get_db)):
+    """Deactivate (unlink) a source. Once data is ingested a source is never
+    deleted — it identifies that data — so this stops sync and keeps the data,
+    with the option to re-link or purge. Truly removing data is a separate,
+    permission-gated purge."""
     account = db.get(ConnectorAccount, account_id)
-    if not account or account.tenant_id != tenant.id:
+    if not account or account.tenant_id != tenant.id or account.owner_user_id != principal.user_id:
         raise HTTPException(404, "account not found")
-    # A source can't be unlinked while a Data Map mapping still routes it (the
-    # mapping's snapshots/index reference it) — tell the user what to remove first.
-    mappings = (db.query(Collection)
-                .filter(Collection.connector_account_id == account_id).all())
-    if mappings:
-        names = ", ".join(f'“{m.name}”' for m in mappings[:3])
-        more = f" and {len(mappings) - 3} more" if len(mappings) > 3 else ""
-        raise HTTPException(409,
-            f"This source still has {len(mappings)} data mapping(s) ({names}{more}). "
-            f"Remove the mapping(s) in the Data Map first, then unlink the source.")
-    db.delete(account)
+    account.active = False
+    account.auth_status = "unlinked"
     db.commit()
-    audit.record(db, actor=principal.user_id, action="connector.unlinked",
+    audit.record(db, actor=principal.user_id, action="connector.deactivated",
                  tenant_id=tenant.id, resource=account_id)
-    return {"ok": True}
+    return {"ok": True, "active": False, "auth_status": "unlinked"}
+
+
+@router.post("/accounts/{account_id}/reactivate")
+def reactivate(account_id: str,
+               principal: security.Principal = Depends(security.get_principal),
+               tenant: Tenant = Depends(security.get_tenant),
+               db: Session = Depends(get_db)):
+    """Re-link a deactivated source so it resumes syncing into the same data."""
+    account = db.get(ConnectorAccount, account_id)
+    if not account or account.tenant_id != tenant.id or account.owner_user_id != principal.user_id:
+        raise HTTPException(404, "account not found")
+    account.active = True
+    # Keep needs-reauth if creds are gone; otherwise resume as linked.
+    account.auth_status = "linked" if account.encrypted_credentials else "needs-reauth"
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="connector.reactivated",
+                 tenant_id=tenant.id, resource=account_id)
+    return {"ok": True, "active": True, "auth_status": account.auth_status}
+
+
+def _purge_source_local(db: Session, account: ConnectorAccount) -> dict:
+    """Delete a source's local index + recovery points + mappings + the account
+    itself. Removing the index/receipts makes the ciphertext unfindable and
+    undecryptable (its snapshot keys can no longer be derived) — irreversible.
+    Physical ciphertext ages out under retention."""
+    from ..models import SearchDocument, SnapshotReceipt
+    coll_ids = [c.id for c in db.query(Collection)
+                .filter(Collection.connector_account_id == account.id).all()]
+    docs = receipts = 0
+    if coll_ids:
+        docs = db.query(SearchDocument).filter(
+            SearchDocument.collection_id.in_(coll_ids)).delete(synchronize_session=False)
+        receipts = db.query(SnapshotReceipt).filter(
+            SnapshotReceipt.collection_id.in_(coll_ids)).delete(synchronize_session=False)
+        db.query(Collection).filter(Collection.id.in_(coll_ids)).delete(synchronize_session=False)
+    db.delete(account)
+    return {"documents": int(docs or 0), "recovery_points": int(receipts or 0),
+            "collections": len(coll_ids)}
+
+
+def _node_purge(node, account_id: str, tenant_id: str) -> dict | None:
+    import httpx
+    from .site import _fleet_secret
+    url = (node.endpoint or "").rstrip("/") + "/nodes/sync/purge"
+    try:
+        with httpx.Client(timeout=30) as c:
+            r = c.post(url, json={"account_id": account_id, "tenant_id": tenant_id},
+                       headers={"Authorization": f"Bearer {_fleet_secret()}"})
+            r.raise_for_status()
+            return r.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("node purge failed: %s", exc)
+        return None
+
+
+@router.post("/accounts/{account_id}/purge")
+def purge(account_id: str,
+          principal: security.Principal = Depends(security.get_principal),
+          tenant: Tenant = Depends(security.get_tenant),
+          db: Session = Depends(get_db)):
+    """Permanently delete all data captured from a source. Irreversible. Gated by
+    the ``purge_enabled`` capability flag (an admin clears it for a legal hold)."""
+    from .. import features
+    from ..models import Node, User
+    account = db.get(ConnectorAccount, account_id)
+    if not account or account.tenant_id != tenant.id or account.owner_user_id != principal.user_id:
+        raise HTTPException(404, "account not found")
+    user = db.get(User, principal.user_id)
+    if not features.resolve(user, tenant, "purge_enabled"):
+        raise HTTPException(403, "Data purge is disabled for this account (legal hold).")
+    # Federated: purge the node's local data first, then the control-plane copies.
+    node_result = None
+    if get_settings().node_sync_scope and tenant.node_id:
+        node = db.get(Node, tenant.node_id)
+        if node and node.endpoint:
+            node_result = _node_purge(node, account_id, tenant.id)
+    label = account.account_label
+    counts = _purge_source_local(db, account)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="connector.purged",
+                 tenant_id=tenant.id, resource=account_id, category="security",
+                 severity="warning", detail={"label": label, **counts})
+    return {"ok": True, **counts, "node": node_result}
 
 
 def _fetch_account_label(connector_type: str, tokens: dict) -> str | None:

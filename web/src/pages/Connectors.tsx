@@ -26,6 +26,7 @@ interface Account {
   connector_type: string;
   account_label: string;
   auth_status: string;
+  active?: boolean;
   last_sync_at: string | null;
   last_object_count?: number | null;
   last_error?: string | null;
@@ -227,17 +228,49 @@ export default function Connectors() {
 
   async function unlink(a: Account) {
     const ok = await confirmDialog({
-      title: "Unlink source",
-      message: `Unlink ${a.account_label}? New backups will stop for this source. Existing recovery points are kept.`,
-      confirmLabel: "Unlink",
+      title: "Deactivate source",
+      message: `Deactivate ${a.account_label}? Syncing stops and no new data is captured. Your existing data is kept and searchable — you can re-link later, or purge it permanently.`,
+      confirmLabel: "Deactivate",
     });
     if (!ok) return;
     try {
       await api.del(`/connectors/accounts/${a.id}`);
-      flash("Unlinked");
+      flash("Source deactivated");
       await load();
     } catch (e) {
-      await notify({ title: "Couldn't unlink", message: (e as ApiError).message, tone: "danger" });
+      await notify({ title: "Couldn't deactivate", message: (e as ApiError).message, tone: "danger" });
+    }
+  }
+
+  async function reactivate(a: Account) {
+    try {
+      await api.post(`/connectors/accounts/${a.id}/reactivate`, {});
+      flash("Source re-linked");
+      await load();
+    } catch (e) {
+      await notify({ title: "Couldn't re-link", message: (e as ApiError).message, tone: "danger" });
+    }
+  }
+
+  async function purge(a: Account) {
+    const ok1 = await confirmDialog({
+      title: "Purge all data?",
+      message: `This permanently deletes ALL data captured from ${a.account_label} — every recovery point, indexed item and search result — and removes the source.`,
+      tone: "danger", confirmLabel: "Continue",
+    });
+    if (!ok1) return;
+    const ok2 = await confirmDialog({
+      title: "This cannot be undone",
+      message: `Once purged, ${a.account_label}'s data is NOT recoverable. There is no way to restore it. Are you absolutely sure?`,
+      tone: "danger", confirmLabel: "Purge permanently",
+    });
+    if (!ok2) return;
+    try {
+      const r = await api.post<{ documents?: number; recovery_points?: number }>(`/connectors/accounts/${a.id}/purge`, {});
+      flash(`Purged — ${(r.documents || 0).toLocaleString()} items, ${(r.recovery_points || 0).toLocaleString()} recovery points removed`);
+      await load();
+    } catch (e) {
+      await notify({ title: "Couldn't purge", message: (e as ApiError).message, tone: "danger" });
     }
   }
 
@@ -359,9 +392,11 @@ export default function Connectors() {
         {accounts.length === 0 && <div className="muted">No sources linked yet.</div>}
         {accounts.map((a) => {
           const c = catalog.find((x) => x.type === a.connector_type);
-          const err = !!(a.needs_reauth || a.has_error);
+          const inactive = a.active === false;
+          const err = !inactive && !!(a.needs_reauth || a.has_error);
+          const canPurge = me?.features?.purge_enabled !== false;
           return (
-            <div key={a.id} className="result-row" style={err ? { borderLeft: "3px solid var(--warn)" } : undefined}>
+            <div key={a.id} className="result-row" style={inactive ? { opacity: 0.72 } : err ? { borderLeft: "3px solid var(--warn)" } : undefined}>
               <div className="result-icon" style={{ background: brandForSource(a.connector_type) ? "var(--inset)" : (c?.color ?? "var(--bg-elev-2)") }}>
                 {brandForSource(a.connector_type)
                   ? <BrandIcon name={brandForSource(a.connector_type)!} size={18} />
@@ -382,14 +417,30 @@ export default function Connectors() {
                     {a.last_error ? ` — ${a.last_error.slice(0, 140)}` : ""}
                   </div>
                 )}
+                {inactive && (
+                  <div className="faint" style={{ fontSize: 12, marginTop: 3 }}>
+                    Deactivated — data retained. Re-link to resume syncing, or purge to delete it permanently.
+                  </div>
+                )}
               </div>
-              <Pill tone={err ? "warn" : "ok"}>{a.needs_reauth ? "Reconnect needed" : err ? "Issue" : "Healthy"}</Pill>
-              {a.needs_reauth
-                ? <button className="btn sm primary" onClick={() => reconnect(a)}><Icon name="key" size={13} /> Reconnect</button>
-                : (a.connector_type === "google_photos"
-                    ? <button className="btn sm primary" onClick={() => setPhotoPicker(a.id)}>Add photos</button>
-                    : <button className="btn sm primary" onClick={() => backup(a)}>Back up now</button>)}
-              <button className="btn sm ghost" onClick={() => unlink(a)}>Unlink</button>
+              {inactive ? (
+                <>
+                  <Pill tone="warn">Deactivated</Pill>
+                  <button className="btn sm primary" onClick={() => reactivate(a)}><Icon name="link" size={13} /> Re-link</button>
+                  {canPurge && <button className="btn sm danger" onClick={() => purge(a)}>Purge data</button>}
+                </>
+              ) : (
+                <>
+                  <Pill tone={err ? "warn" : "ok"}>{a.needs_reauth ? "Reconnect needed" : err ? "Issue" : "Healthy"}</Pill>
+                  {a.needs_reauth
+                    ? <button className="btn sm primary" onClick={() => reconnect(a)}><Icon name="key" size={13} /> Reconnect</button>
+                    : (a.connector_type === "google_photos"
+                        ? <button className="btn sm primary" onClick={() => setPhotoPicker(a.id)}>Add photos</button>
+                        : <button className="btn sm primary" onClick={() => backup(a)}>Back up now</button>)}
+                  <button className="btn sm ghost" onClick={() => unlink(a)}>Deactivate</button>
+                  {canPurge && <button className="btn sm ghost" style={{ color: "var(--danger-c,#f2545b)" }} onClick={() => purge(a)}>Purge</button>}
+                </>
+              )}
             </div>
           );
         })}

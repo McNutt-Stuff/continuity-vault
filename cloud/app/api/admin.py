@@ -393,6 +393,7 @@ def _tenant_view(db: Session, t: Tenant, detail: bool = False) -> dict:
         "licensed_bytes": int(t.licensed_bytes or 0),
         "protection_options": t.protection_options or [],
         "appliance_plan": t.appliance_plan or [],
+        "feature_flags": t.feature_flags or {},
         "created_at": t.created_at.isoformat() if t.created_at else None,
         **_tenant_counts(db, t.id),
     }
@@ -477,6 +478,60 @@ def tenant_detail(tid: str, db: Session = Depends(get_db)):
     return _tenant_view(db, t, detail=True)
 
 
+@router.get("/feature-flags")
+def feature_flag_catalog():
+    from .. import features
+    return [{"name": k, "label": features.LABELS.get(k, k), "default": v}
+            for k, v in features.FLAGS.items()]
+
+
+class FlagsUpdate(BaseModel):
+    feature_flags: dict  # {flag: true|false|null(=unset/inherit)}
+
+
+def _merge_flags(current: dict | None, incoming: dict) -> dict:
+    from .. import features
+    ff = dict(current or {})
+    for k, v in (incoming or {}).items():
+        if k not in features.FLAGS:
+            continue
+        if v is None:
+            ff.pop(k, None)  # revert to tenant/default
+        else:
+            ff[k] = bool(v)
+    return ff
+
+
+@router.put("/tenants/{tid}/flags")
+def set_tenant_flags(tid: str, body: FlagsUpdate,
+                     principal: security.Principal = Depends(security.require_platform_admin),
+                     db: Session = Depends(get_db)):
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    t.feature_flags = _merge_flags(t.feature_flags, body.feature_flags)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.tenant_flags_updated",
+                 tenant_id=t.id, category="security", severity="notice",
+                 detail={"flags": t.feature_flags})
+    return {"feature_flags": t.feature_flags}
+
+
+@router.put("/users/{uid}/flags")
+def set_user_flags(uid: str, body: FlagsUpdate,
+                   principal: security.Principal = Depends(security.require_platform_admin),
+                   db: Session = Depends(get_db)):
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "user not found")
+    u.feature_flags = _merge_flags(u.feature_flags, body.feature_flags)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.user_flags_updated",
+                 tenant_id=u.tenant_id, category="security", severity="notice",
+                 detail={"flags": u.feature_flags, "email": u.email})
+    return {"feature_flags": u.feature_flags}
+
+
 class TenantUpdate(BaseModel):
     name: str | None = None
     plan: str | None = None
@@ -547,6 +602,7 @@ def _user_view(u: User) -> dict:
             "is_platform_admin": bool(u.is_platform_admin),
             "email_verified": bool(u.email_verified),
             "tenant_id": u.tenant_id,
+            "feature_flags": u.feature_flags or {},
             "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
             "created_at": u.created_at.isoformat() if u.created_at else None}
 

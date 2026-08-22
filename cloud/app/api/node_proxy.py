@@ -38,7 +38,13 @@ def _cl() -> httpx.AsyncClient:
 
 
 def _should_proxy(method: str, path: str) -> bool:
-    """File-level operations that must run on the node, never the control plane."""
+    """File-level + tenant-data operations that must run on the node, not here.
+
+    Search (index + retrieval) is served from the node's live local index so the
+    portal never shows a stale control-plane copy; recovery, recovered-content
+    downloads, folder scans and source purges all execute on the node too."""
+    if path == "/api/search" or path == "/api/search/taxonomy":
+        return True
     if path == "/api/search/retrieve" and method == "POST":
         return True
     if path.startswith("/api/search/retrieve-status/"):

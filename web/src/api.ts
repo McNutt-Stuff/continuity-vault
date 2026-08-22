@@ -62,6 +62,7 @@ export interface Me {
   is_owner?: boolean;
   email_verified: boolean;
   passkey_verified: boolean;
+  features?: Record<string, boolean>;
   passkeys: { id: string; label: string; transport: string }[];
 }
 

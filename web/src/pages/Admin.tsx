@@ -366,14 +366,26 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
       fields.push(
         { name: "plan", label: "License plan", defaultValue: t.plan, options: planOpts },
         { name: "licensed_tb", label: "Licensed data (TB)", defaultValue: String(((t.licensed_bytes || 0) / (1024 ** 4)).toFixed(2)) },
+        { name: "purge", label: "Data purge (tenant-wide)",
+          defaultValue: t.feature_flags?.purge_enabled === false ? "false" : "true",
+          options: [
+            { label: "Allowed", value: "true" },
+            { label: "Blocked — legal hold (all users)", value: "false" },
+          ] },
       );
     }
     const r = await formDialog({ title: "Edit tenant", confirmLabel: "Save", fields });
     if (!r) return;
+    const purge = r.purge; delete r.purge;
     const payload: any = { ...r };
     if (r.licensed_tb !== undefined) payload.licensed_tb = Number(r.licensed_tb) || 0;
-    try { await api.put(`/admin/tenants/${id}`, payload); flash("Saved"); await load(); }
-    catch { flash("Save failed"); }
+    try {
+      await api.put(`/admin/tenants/${id}`, payload);
+      if (!isShared && purge !== undefined) {
+        await api.put(`/admin/tenants/${id}/flags`, { feature_flags: { purge_enabled: purge === "true" } });
+      }
+      flash("Saved"); await load();
+    } catch { flash("Save failed"); }
   }
   async function suspend() {
     if (!await confirmDialog({ title: "Suspend tenant?", message: `Freeze ${t.name} and deactivate all its users. This is reversible.`, tone: "danger", confirmLabel: "Suspend" })) return;
@@ -426,9 +438,22 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
         ];
     fields.push({ name: "status", label: "Status", defaultValue: u.status,
       options: ["active", "suspended"].map((v) => ({ label: v, value: v })) });
+    const curPurge = u.feature_flags?.purge_enabled;
+    fields.push({ name: "purge", label: "Data purge",
+      defaultValue: curPurge === false ? "false" : curPurge === true ? "true" : "inherit",
+      options: [
+        { label: "Inherit (allowed by default)", value: "inherit" },
+        { label: "Allowed", value: "true" },
+        { label: "Blocked — legal hold", value: "false" },
+      ] });
     const r = await formDialog({ title: `Edit ${u.email}`, confirmLabel: "Save", fields });
     if (!r) return;
-    try { await api.put(`/admin/users/${u.id}`, r); flash("User updated"); await load(); } catch { flash("Update failed"); }
+    const purge = r.purge; delete r.purge;
+    try {
+      await api.put(`/admin/users/${u.id}`, r);
+      await api.put(`/admin/users/${u.id}/flags`, { feature_flags: { purge_enabled: purge === "inherit" ? null : purge === "true" } });
+      flash("User updated"); await load();
+    } catch { flash("Update failed"); }
   }
   async function resetUser(u: any) {
     if (!await confirmDialog({ title: "Reset access?", message: `Revoke ${u.email}'s passkeys and email a fresh sign-in code.`, confirmLabel: "Reset" })) return;

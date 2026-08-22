@@ -147,6 +147,10 @@ def _process_collection(db, c: Collection, now: datetime, default_minutes: int) 
     # with no linked account can't be pulled. Neither is cloud-schedulable.
     if caps.requires_agent or not c.connector_account_id:
         return (0, 0, 0)
+    # Deactivated (unlinked) sources keep their data but don't sync.
+    acct = db.get(ConnectorAccount, c.connector_account_id)
+    if acct is not None and acct.active is False:
+        return (0, 0, 0)
     if not _is_due(c, interval, now):
         return (1, 0, 0)
     try:

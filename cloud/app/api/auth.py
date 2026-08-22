@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from cv_crypto.provider import get_provider
 
 from .. import audit, authcodes, security
+from .. import features as _features
 from ..config import get_settings
 from ..db import get_db
 from ..emailer import send_email
@@ -519,6 +520,7 @@ def me(principal: security.Principal = Depends(security.get_principal),
         "is_owner": security.is_owner(user.role),
         "email_verified": user.email_verified,
         "passkey_verified": principal.passkey_verified,
+        "features": _features.effective(user, tenant),
         "passkeys": [{"id": p.id, "label": p.label, "transport": p.transport}
                      for p in user.passkeys],
     }

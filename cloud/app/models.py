@@ -59,6 +59,9 @@ class Tenant(Base):
     # itself (single-box default). Assigning a node offloads tenant processing.
     node_id = Column(String, ForeignKey("nodes.id"), nullable=True, index=True)
     status = Column(String, default="active")
+    # Admin-controlled capability flags (e.g. purge_enabled=False for a legal hold
+    # / subpoena). Org tenants set them tenant-wide; personal accounts use user-level.
+    feature_flags = Column(JSON, default=dict)
     created_at = Column(DateTime, default=_now)
 
     users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
@@ -80,6 +83,7 @@ class User(Base):
     is_platform_admin = Column(Boolean, default=False)  # backend admin console
     email_verified = Column(Boolean, default=False)
     status = Column(String, default="active")
+    feature_flags = Column(JSON, default=dict)  # per-user capability flags (admin-set)
     last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 
@@ -166,6 +170,10 @@ class ConnectorAccount(Base):
     connector_type = Column(String, nullable=False)
     account_label = Column(String, nullable=False)
     auth_status = Column(String, default="linked")  # linked | needs-reauth | revoked
+    # Once data is ingested a source is never deleted (it identifies that data);
+    # "removing" deactivates it (active=False) — sync stops, data kept, can be
+    # re-linked or purged. Purge is the only true removal.
+    active = Column(Boolean, default=True)
     # Encrypted credential blob (never plaintext at rest).
     encrypted_credentials = Column(Text, nullable=True)
     scopes = Column(JSON, default=list)
