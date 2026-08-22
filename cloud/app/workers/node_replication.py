@@ -37,6 +37,7 @@ from ..models import (
     SearchDocument,
     ServiceObject,
     SnapshotReceipt,
+    SourceConfig,
     SyncJob,
     Tenant,
     User,
@@ -51,6 +52,7 @@ _running_jobs: set[str] = set()
 # Upsert in FK-dependency order so a strict database accepts the rows.
 _PULL_ORDER = [
     ("config_objects", ConfigObject),
+    ("source_configs", SourceConfig),
     ("service_objects", ServiceObject),
     ("nodes", Node),
     ("tenants", Tenant),
@@ -179,6 +181,13 @@ def _pull(s) -> int:
                 else:
                     skipped += 1
             db.commit()  # persist this table before dependent tables
+    # New Config Objects / source links just landed — drop the platform-config
+    # cache so OAuth client creds (needed to refresh tokens) resolve immediately.
+    try:
+        from .. import platform_config
+        platform_config.invalidate()
+    except Exception:
+        pass
     # Forwarded agent commands (portal "Sync now" for node-routed agents): append
     # to the local agent queue so the node delivers them on the agent's next
     # heartbeat. enqueue_command dedupes, so a re-forward is harmless.
