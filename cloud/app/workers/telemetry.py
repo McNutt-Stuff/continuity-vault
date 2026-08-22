@@ -12,7 +12,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from ..db import SessionLocal
+from ..db import WorkerSessionLocal as SessionLocal
 from ..models import Node, NodeMetric
 
 logger = logging.getLogger("cv.telemetry")

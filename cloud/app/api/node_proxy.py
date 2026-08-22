@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 
 import httpx
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 
@@ -66,8 +67,15 @@ def _node_for(request: Request) -> str | None:
         principal = security._decode(auth.split(" ", 1)[1])
     except Exception:
         return None
-    with SessionLocal() as db:
-        return services.tenant_node_url(db, principal.tenant_id)
+    # Never let a DB hiccup (e.g. transient pool pressure) 500 the request — fall
+    # back to handling it locally instead of taking the endpoint down.
+    try:
+        with SessionLocal() as db:
+            return services.tenant_node_url(db, principal.tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("node lookup failed (%s) — handling %s locally",
+                       exc, request.url.path)
+        return None
 
 
 async def middleware(request: Request, call_next):
@@ -77,7 +85,9 @@ async def middleware(request: Request, call_next):
         return await call_next(request)
     if not _should_proxy(request.method, request.url.path):
         return await call_next(request)
-    node_url = _node_for(request)
+    # Run the (synchronous) DB lookup off the event loop so it never blocks other
+    # requests while waiting on the connection pool.
+    node_url = await run_in_threadpool(_node_for, request)
     if not node_url:
         return await call_next(request)  # unassigned tenant → handled locally
 

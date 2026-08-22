@@ -16,7 +16,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..db import SessionLocal
+from ..db import WorkerSessionLocal as SessionLocal
 from ..models import Collection, ConnectorAccount, SyncJob, Tenant
 from .sync_worker import (
     JobCancelled,

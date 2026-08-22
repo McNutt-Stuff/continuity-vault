@@ -9,9 +9,38 @@ from .config import get_settings
 
 settings = get_settings()
 
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, connect_args=connect_args, future=True)
+_is_sqlite = settings.database_url.startswith("sqlite")
+connect_args = {"check_same_thread": False} if _is_sqlite else {}
+
+# Web-request engine/pool. Postgres gets an explicitly-sized pool with pre-ping
+# (drop dead connections) and recycling (avoid stale server-side timeouts).
+_pool_kw = {} if _is_sqlite else {
+    "pool_size": settings.db_pool_size,
+    "max_overflow": settings.db_max_overflow,
+    "pool_timeout": settings.db_pool_timeout,
+    "pool_recycle": 1800,
+    "pool_pre_ping": True,
+}
+engine = create_engine(settings.database_url, connect_args=connect_args, future=True, **_pool_kw)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+# Dedicated engine/pool for background workers (sync, scheduler, replication,
+# telemetry). Long-running backups hold a connection while they work, so routing
+# them through a SEPARATE pool guarantees they can never exhaust the web pool and
+# take the API down — worker overload only backs up other workers. SQLite (dev)
+# shares the single engine since a second pool to one file adds no isolation.
+if _is_sqlite:
+    worker_engine = engine
+    WorkerSessionLocal = SessionLocal
+else:
+    worker_engine = create_engine(
+        settings.database_url, connect_args=connect_args, future=True,
+        pool_size=settings.db_worker_pool_size,
+        max_overflow=settings.db_worker_max_overflow,
+        pool_timeout=settings.db_pool_timeout,
+        pool_recycle=1800, pool_pre_ping=True)
+    WorkerSessionLocal = sessionmaker(bind=worker_engine, autoflush=False,
+                                      autocommit=False, future=True)
 
 Base = declarative_base()
 

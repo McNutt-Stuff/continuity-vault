@@ -16,6 +16,13 @@ class Settings(BaseSettings):
 
     # Database. Postgres in production, SQLite for local prototype runs.
     database_url: str = "sqlite:///./continuity_cloud.db"
+    # Web-request connection pool (Postgres). Background sync workers use their
+    # OWN pool (below) so a burst of long backups can never starve the API.
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    db_pool_timeout: int = 30
+    db_worker_pool_size: int = 8
+    db_worker_max_overflow: int = 16
 
     # Session / control-plane signing.
     session_secret: str = "dev-insecure-change-me"

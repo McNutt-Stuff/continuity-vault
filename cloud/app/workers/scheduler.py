@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 from ..config import get_settings
 from ..connectors import get_connector
-from ..db import SessionLocal
+from ..db import WorkerSessionLocal as SessionLocal
 from ..models import Collection, ConnectorAccount, PendingAction, SyncJob, Tenant
 from .sync_worker import run_backup
 

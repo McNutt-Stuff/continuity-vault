@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .. import keybroker
 from ..config import get_settings
-from ..db import SessionLocal
+from ..db import WorkerSessionLocal as SessionLocal
 from ..models import (
     Appliance,
     ApplianceStorage,
