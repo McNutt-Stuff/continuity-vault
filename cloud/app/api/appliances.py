@@ -723,9 +723,11 @@ def heartbeat(body: HeartbeatRequest,
     if delivered:
         logger.info("delivered %d command(s) to appliance %s: %s",
                     len(delivered), appliance.id, delivered_types)
+    from .. import services
     return {"commands": delivered,
             "latest_version": _appliance_bundle_version(),
             "control_plane_key_id": fleet.cloud_public_bundle().get("keyId"),
+            "node_url": services.tenant_node_url(db, appliance.tenant_id),
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
 
 

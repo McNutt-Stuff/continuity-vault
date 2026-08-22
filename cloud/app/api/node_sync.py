@@ -28,6 +28,8 @@ from sqlalchemy.orm import Session
 from .. import keybroker
 from ..db import get_db
 from ..models import (
+    Appliance,
+    ApplianceStorage,
     Collection,
     ConfigObject,
     ConnectorAccount,
@@ -37,6 +39,7 @@ from ..models import (
     SearchDocument,
     ServiceObject,
     SnapshotReceipt,
+    SyncJob,
     Tenant,
     User,
     Vault,
@@ -119,6 +122,13 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
     collections = db.query(Collection).filter(Collection.tenant_id.in_(tids)).all()
     accounts = db.query(ConnectorAccount).filter(ConnectorAccount.tenant_id.in_(tids)).all()
     agents = db.query(DesktopAgent).filter(DesktopAgent.tenant_id.in_(tids)).all()
+    appliances = db.query(Appliance).filter(Appliance.tenant_id.in_(tids)).all()
+    aids = [a.id for a in appliances]
+    storages = (db.query(ApplianceStorage).filter(ApplianceStorage.appliance_id.in_(aids)).all()
+                if aids else [])
+    # Portal-initiated "Back up now" jobs waiting for this node to run them.
+    pending_jobs = (db.query(SyncJob)
+                    .filter(SyncJob.node_id == node.id, SyncJob.status == "queued").all())
 
     # Wrapped key material for each vault (fleet-shared KEK → usable on the node).
     key_records = {v.id: keybroker.export_key_records(v.id) for v in vaults}
@@ -131,12 +141,15 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "users": [_ser(u) for u in users],
         "vaults": [_ser(v) for v in vaults],
         "desktop_agents": [_ser(a) for a in agents],
+        "appliances": [_ser(a) for a in appliances],
+        "appliance_storages": [_ser(s) for s in storages],
         "collections": [_ser(c) for c in collections],
         "connector_accounts": [_ser(a) for a in accounts],
         "service_objects": [_ser(s) for s in db.query(ServiceObject).all()],
         "config_objects": [_ser(c) for c in db.query(ConfigObject).all()],
         "nodes": [_ser(n) for n in db.query(Node).all()],
         "pricing": _ser(pricing) if pricing else None,
+        "pending_jobs": [_ser(j) for j in pending_jobs],
         "key_records": key_records,
     }
 
@@ -147,6 +160,31 @@ class PushPayload(BaseModel):
     receipts: list[dict] = []
     documents: list[dict] = []
     connector_accounts: list[dict] = []
+    jobs: list[dict] = []
+    agents: list[dict] = []
+    appliances: list[dict] = []
+
+
+_JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
+               "started_at", "finished_at")
+_AGENT_FIELDS = ("state", "version", "telemetry", "last_heartbeat_at", "collectors")
+_APPLIANCE_FIELDS = ("state", "isolation_state", "software_version", "telemetry",
+                     "tamper_state", "attestation_ok", "last_heartbeat_at",
+                     "last_attestation_at")
+
+
+def _apply(obj, data: dict, fields: tuple) -> None:
+    for f in fields:
+        if f not in data:
+            continue
+        v = data[f]
+        if f.endswith("_at") and isinstance(v, str):
+            try:
+                dt = datetime.fromisoformat(v)
+                v = dt.replace(tzinfo=None) if dt.tzinfo else dt
+            except ValueError:
+                v = None
+        setattr(obj, f, v)
 
 
 @router.post("/push")
@@ -155,7 +193,8 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     """Ingest the results a node produced so the control-plane platform DB stays
     authoritative for the portal (search / recovery / billing / activity)."""
     _require_fleet(authorization)
-    counts = {"receipts": 0, "documents": 0, "connector_accounts": 0}
+    counts = {"receipts": 0, "documents": 0, "connector_accounts": 0,
+              "jobs": 0, "agents": 0, "appliances": 0}
     for r in body.receipts:
         _upsert(db, SnapshotReceipt, r)
         counts["receipts"] += 1
@@ -180,5 +219,21 @@ def push(body: PushPayload, authorization: str = Header(default=""),
                         val = None
                 setattr(acct, f, val)
         counts["connector_accounts"] += 1
+    # Progress of portal-initiated jobs the node ran, plus device liveness.
+    for j in body.jobs:
+        job = db.get(SyncJob, j.get("id"))
+        if job:
+            _apply(job, j, _JOB_FIELDS)
+            counts["jobs"] += 1
+    for a in body.agents:
+        ag = db.get(DesktopAgent, a.get("id"))
+        if ag:
+            _apply(ag, a, _AGENT_FIELDS)
+            counts["agents"] += 1
+    for a in body.appliances:
+        ap = db.get(Appliance, a.get("id"))
+        if ap:
+            _apply(ap, a, _APPLIANCE_FIELDS)
+            counts["appliances"] += 1
     db.commit()
     return {"ok": True, **counts}

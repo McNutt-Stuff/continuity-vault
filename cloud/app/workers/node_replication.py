@@ -26,6 +26,8 @@ from .. import keybroker
 from ..config import get_settings
 from ..db import SessionLocal
 from ..models import (
+    Appliance,
+    ApplianceStorage,
     Collection,
     ConfigObject,
     ConnectorAccount,
@@ -35,6 +37,7 @@ from ..models import (
     SearchDocument,
     ServiceObject,
     SnapshotReceipt,
+    SyncJob,
     Tenant,
     User,
     Vault,
@@ -43,6 +46,7 @@ from ..models import (
 logger = logging.getLogger("cv.replication")
 
 _thread: threading.Thread | None = None
+_running_jobs: set[str] = set()
 
 # Upsert in FK-dependency order so a strict database accepts the rows.
 _PULL_ORDER = [
@@ -53,9 +57,17 @@ _PULL_ORDER = [
     ("users", User),
     ("vaults", Vault),
     ("desktop_agents", DesktopAgent),
+    ("appliances", Appliance),
+    ("appliance_storages", ApplianceStorage),
     ("connector_accounts", ConnectorAccount),
     ("collections", Collection),
 ]
+
+# Fields owned by the NODE, never overwritten by a pull (agent command queue +
+# filesystem scan state live on the node the device reports to).
+_PULL_EXCLUDE = {
+    "desktop_agents": {"pending_commands", "last_scan", "fs_expansions"},
+}
 
 
 def _now_naive() -> datetime:
@@ -137,7 +149,10 @@ def _pull(s) -> int:
         if bundle.get("pricing"):
             _upsert(db, PricingConfig, bundle["pricing"])
         for key, model in _PULL_ORDER:
+            exclude = _PULL_EXCLUDE.get(key)
             for row in bundle.get(key, []) or []:
+                if exclude:
+                    row = {k: v for k, v in row.items() if k not in exclude}
                 _upsert(db, model, row)
                 n += 1
         db.commit()
@@ -147,9 +162,40 @@ def _pull(s) -> int:
             keybroker.import_key_records(vid, recs)
         except Exception:  # noqa: BLE001
             logger.debug("could not import key records for vault %s", vid, exc_info=True)
+    # Portal-initiated "Back up now" jobs the control plane assigned to us: mirror
+    # them locally and run them against the local DB.
+    for j in bundle.get("pending_jobs", []) or []:
+        _run_pending_job(j)
     logger.info("replication pull: %d assigned tenant(s), %d row(s) synced",
                 bundle.get("assigned", 0), n)
     return n
+
+
+def _run_pending_job(j: dict) -> None:
+    jid = j.get("id")
+    if not jid or jid in _running_jobs:
+        return
+    with SessionLocal() as db:
+        local = db.get(SyncJob, jid)
+        if local is None:
+            _upsert(db, SyncJob, j)
+            db.commit()
+        elif local.status != "queued":
+            return  # already run/running here; the next push syncs the CP
+    _running_jobs.add(jid)
+
+    def _go() -> None:
+        try:
+            from .jobs import _run
+            _run(jid, None)
+        finally:
+            _running_jobs.discard(jid)
+            try:
+                _push(get_settings())  # flush job status + receipts promptly
+            except Exception:  # noqa: BLE001
+                logger.debug("post-job push failed", exc_info=True)
+
+    threading.Thread(target=_go, name=f"cv-node-job-{jid[:8]}", daemon=True).start()
 
 
 def _push(s) -> int:
@@ -162,6 +208,7 @@ def _push(s) -> int:
             since = None
     high = since
     receipts, documents, accounts = [], [], []
+    jobs, agents, appliances = [], [], []
     with SessionLocal() as db:
         rq = db.query(SnapshotReceipt)
         if since is not None:
@@ -179,17 +226,28 @@ def _push(s) -> int:
                 high = d.created_at
         for a in db.query(ConnectorAccount).all():
             accounts.append(_row(a))
-    if not (receipts or documents or accounts):
+        # Job progress (so the portal's Activity reflects node-run backups) and
+        # device liveness (so the portal shows agents/appliances that now report
+        # to this node).
+        for j in db.query(SyncJob).filter(SyncJob.status != "queued").order_by(
+                SyncJob.created_at.desc()).limit(200).all():
+            jobs.append(_row(j))
+        for ag in db.query(DesktopAgent).all():
+            agents.append(_row(ag))
+        for ap in db.query(Appliance).all():
+            appliances.append(_row(ap))
+    if not (receipts or documents or accounts or jobs or agents or appliances):
         return 0
     res = _post("/nodes/sync/push", {
         "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
         "receipts": receipts, "documents": documents, "connector_accounts": accounts,
+        "jobs": jobs, "agents": agents, "appliances": appliances,
     })
     if res and res.get("ok"):
         if high is not None:
             _save_cursor(high.isoformat())
-        logger.info("replication push: receipts=%d documents=%d accounts=%d",
-                    len(receipts), len(documents), len(accounts))
+        logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d appliances=%d",
+                    len(receipts), len(documents), len(jobs), len(agents), len(appliances))
         return len(receipts) + len(documents)
     return 0
 

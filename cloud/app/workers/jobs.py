@@ -14,6 +14,7 @@ from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..db import SessionLocal
 from ..models import Collection, ConnectorAccount, SyncJob, Tenant
 from .sync_worker import (
@@ -49,18 +50,25 @@ def _now() -> datetime:
 def start_backup_job(db: Session, tenant_id: str, collection_id: str,
                      kind: str = "backup",
                      destinations: Optional[List[str]] = None) -> SyncJob:
-    """Create a tracked job and run the backup in a background thread. In
-    federated mode a customer node runs its own tenants' work against its local
-    DB; the control plane runs unassigned tenants (and portal-initiated jobs).
-    node_id records the tenant's assigned node for visibility."""
+    """Create a tracked job. If the tenant is assigned to a node (federated mode)
+    and we're the control plane, the job is left QUEUED for that node to pick up
+    on its next replication pull and run locally — a portal "Back up now" then
+    executes on the assigned node. Otherwise it runs inline in a background
+    thread (customer node running its own tenants, or an unassigned tenant)."""
+    s = get_settings()
     t = db.get(Tenant, tenant_id)
+    node_id = t.node_id if t else None
+    is_cp = (s.node_role or "control-plane") == "control-plane"
+    dispatch_to_node = bool(s.node_sync_scope and is_cp and node_id)
     job = SyncJob(tenant_id=tenant_id, collection_id=collection_id, kind=kind,
-                  node_id=(t.node_id if t else None), status="queued", message="Queued")
+                  node_id=node_id, status="queued",
+                  message="Queued for node" if dispatch_to_node else "Queued")
     db.add(job)
     db.commit()
     db.refresh(job)
-    threading.Thread(target=_run, args=(job.id, destinations),
-                     name=f"cv-job-{job.id[:8]}", daemon=True).start()
+    if not dispatch_to_node:
+        threading.Thread(target=_run, args=(job.id, destinations),
+                         name=f"cv-job-{job.id[:8]}", daemon=True).start()
     return job
 
 

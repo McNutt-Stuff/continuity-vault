@@ -483,18 +483,10 @@ def _agent_mappings(db: Session, agent: DesktopAgent) -> list[dict]:
 
 
 def _agent_ingest_url(db: Session, agent: DesktopAgent) -> str | None:
-    """When per-node scoping is on and this agent's tenant is pinned to a node
-    with a reachable API endpoint, the agent pushes ingest there so the heavy
-    store+index work runs on the assigned node, not the control plane."""
-    if not settings.node_sync_scope:
-        return None
-    t = db.get(Tenant, agent.tenant_id)
-    if not t or not t.node_id:
-        return None
-    n = db.get(Node, t.node_id)
-    if n and n.endpoint:
-        return n.endpoint.rstrip("/")
-    return None
+    """The API base URL of the tenant's assigned node (federated mode), so the
+    agent signals + ingests there instead of the control plane."""
+    from .. import services
+    return services.tenant_node_url(db, agent.tenant_id)
 
 
 @agent_router.post("/heartbeat")
@@ -527,12 +519,14 @@ def heartbeat(body: AgentHeartbeat, request: Request,
             break
         commands.append(c)
     db.commit()
+    node_url = _agent_ingest_url(db, agent)
     return {"config": agent.config,
             "command": commands[0] if commands else None,
             "commands": commands,
             "pending_more": agent.has_pending_command,
             "mappings": _agent_mappings(db, agent),
-            "ingest_url": _agent_ingest_url(db, agent),
+            "node_url": node_url,     # full control channel (heartbeat/commands/ingest)
+            "ingest_url": node_url,   # back-compat for older agents
             "latest_version": _agent_bundle_version(),
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
 

@@ -19,6 +19,23 @@ _at: float = 0.0
 _TTL = 20.0
 
 
+def tenant_node_url(db, tenant_id: str) -> Optional[str]:
+    """API base URL of the node a tenant is assigned to (federated mode), so its
+    agents/appliances signal, take commands, back up and ingest there instead of
+    the control plane. None when unassigned or federation is off."""
+    from .config import get_settings
+    from .models import Node, Tenant
+    if not get_settings().node_sync_scope:
+        return None
+    t = db.get(Tenant, tenant_id)
+    if not t or not t.node_id:
+        return None
+    n = db.get(Node, t.node_id)
+    if n and n.endpoint:
+        return n.endpoint.rstrip("/")
+    return None
+
+
 def _self_services() -> dict:
     global _cache, _at
     if _cache and time.time() - _at < _TTL:

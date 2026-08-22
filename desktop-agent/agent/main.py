@@ -68,6 +68,9 @@ class Agent:
         self.reg = self._load_registration()
         self._last_collect = 0.0
         self._last_heartbeat = 0.0
+        # Assigned customer node URL (federated fleets): once set, all signaling +
+        # ingest goes here instead of the control plane. Persisted in registration.
+        self._node_url: Optional[str] = (self.reg or {}).get("node_url")
         self._last_update_attempt = 0.0
         self._last_telemetry: dict = {}
         self._agent_key: Optional[bytes] = None
@@ -114,6 +117,23 @@ class Agent:
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.reg['agent_token']}"}
+
+    def _base(self) -> str:
+        """The API base for signaling/ingest — the assigned node when the fleet
+        has pinned this tenant to one, otherwise the control plane."""
+        return self._node_url or self.cfg.cloud_base_url
+
+    def _set_node_url(self, url: Optional[str]) -> None:
+        url = (url or "").rstrip("/") or None
+        if url == self._node_url:
+            return
+        self._node_url = url
+        if self.reg is not None:
+            if url:
+                self.reg["node_url"] = url
+            else:
+                self.reg.pop("node_url", None)
+        self.log.info("routing to %s", url or self.cfg.cloud_base_url)
 
     def activate(self, code: str) -> dict:
         body = {
@@ -212,14 +232,32 @@ class Agent:
         tel = self.telemetry()
         self._last_telemetry = tel
         body = {"state": "active", "version": self.cfg.version, "telemetry": tel}
-        r = httpx.post(f"{self.cfg.cloud_base_url}/agent/heartbeat",
-                       json=body, headers=self._headers(), timeout=30)
-        r.raise_for_status()
+        base = self._base()
+        try:
+            r = httpx.post(f"{base}/agent/heartbeat",
+                           json=body, headers=self._headers(), timeout=30)
+            r.raise_for_status()
+        except Exception:
+            # Assigned node unreachable → fall back to the control plane so the
+            # agent keeps reporting and can re-discover its node.
+            if self._node_url and base == self._node_url:
+                self.log.warning("assigned node %s unreachable; falling back to control plane",
+                                 self._node_url)
+                self._set_node_url(None)
+                r = httpx.post(f"{self.cfg.cloud_base_url}/agent/heartbeat",
+                               json=body, headers=self._headers(), timeout=30)
+                r.raise_for_status()
+            else:
+                raise
         self._last_heartbeat = time.time()
         data = r.json()
         self.reg["config"] = data.get("config", self.reg.get("config", {}))
         # Cloud-driven advanced setting: verbose (DEBUG) logging.
         agent_log.set_verbose(bool(self.reg.get("config", {}).get("verbose_logging")))
+        # Per-node routing: once the tenant is pinned to a customer node the cloud
+        # hands us that node's API base; from then on ALL signaling, commands and
+        # ingest go there instead of the control plane.
+        self._set_node_url(data.get("node_url") or data.get("ingest_url") or None)
         self.cfg.registration_file.write_text(json.dumps(self.reg))
         # Auto-update: pull a new bundle when the cloud advertises a newer version.
         self._maybe_self_update(data.get("latest_version"))
@@ -229,10 +267,6 @@ class Agent:
         mappings = data.get("mappings")
         if isinstance(mappings, list):
             self._mappings = mappings
-        # Per-node routing: when the tenant is pinned to a customer node the
-        # cloud hands us that node's API base; push ingest there so storage +
-        # indexing run on the assigned node instead of the control plane.
-        self._ingest_url = data.get("ingest_url") or None
         self._run_due_collects()
         # Handle every command the cloud drained this cycle (new agents), falling
         # back to the single `command` field for older payloads.
@@ -308,7 +342,7 @@ class Agent:
 
     def _post_command_result(self, ctype: str, ok: bool, detail: dict) -> None:
         try:
-            httpx.post(f"{self.cfg.cloud_base_url}/agent/command-result",
+            httpx.post(f"{self._base()}/agent/command-result",
                        json={"type": ctype, "ok": ok, "detail": detail},
                        headers=self._headers(), timeout=30)
         except Exception:
@@ -343,7 +377,7 @@ class Agent:
         except Exception as exc:
             result, ok, err = {"path": path, "children": []}, False, str(exc)
         try:
-            httpx.post(f"{self.cfg.cloud_base_url}/agent/fs-expand-result", json={
+            httpx.post(f"{self._base()}/agent/fs-expand-result", json={
                 "request_id": request_id, "path": path, "ok": ok, "error": err,
                 "result": result,
             }, headers=self._headers(), timeout=30)
@@ -353,7 +387,7 @@ class Agent:
     def _post_fs_index(self, index: dict, request_id: str = "auto-index",
                        ok: bool = True, err: Optional[str] = None) -> None:
         try:
-            httpx.post(f"{self.cfg.cloud_base_url}/agent/fs-scan-result", json={
+            httpx.post(f"{self._base()}/agent/fs-scan-result", json={
                 "request_id": request_id, "ok": ok, "error": err, "result": index,
             }, headers=self._headers(), timeout=60)
             self.log.info("fs-index reported (%d folders, req=%s)",
@@ -534,7 +568,7 @@ class Agent:
         return pushed
 
     def _push_batch(self, source_type: str, batch: list, destinations: list) -> int:
-        base = getattr(self, "_ingest_url", None) or self.cfg.cloud_base_url
+        base = self._base()
         r = httpx.post(f"{base}/agent/ingest", json={
             "source_type": source_type,
             "destinations": destinations,

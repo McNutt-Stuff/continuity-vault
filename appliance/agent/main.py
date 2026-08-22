@@ -59,6 +59,9 @@ class Agent:
         self.log = agent_log.setup_logging(_LOG_FILE)
         self._last_update_note = ""
         self._last_latency_ms: Optional[int] = None  # heartbeat round-trip
+        # Assigned customer node (federated fleets): once set, all signaling,
+        # commands and receipts go here instead of the control plane.
+        self._node_url: Optional[str] = None
         self._load_registration()
 
     # -- registration / activation ------------------------------------
@@ -71,6 +74,7 @@ class Agent:
             self.agent_token = d["agent_token"]
             self.cloud_bundle = d["cloud_public_bundle"]
             self.config = d.get("config", {})
+            self._node_url = d.get("node_url")
             self.sm.state = State.SEALED
 
     @property
@@ -105,6 +109,27 @@ class Agent:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.agent_token}"}
 
+    def _base(self) -> str:
+        """API base for signaling/commands/receipts — the assigned node when the
+        fleet has pinned this tenant to one, else the control plane."""
+        return self._node_url or settings.cloud_base_url
+
+    def _set_node_url(self, url: Optional[str]) -> None:
+        url = (url or "").rstrip("/") or None
+        if url == self._node_url:
+            return
+        self._node_url = url
+        try:
+            d = json.loads(_REG.read_text()) if _REG.exists() else {}
+            if url:
+                d["node_url"] = url
+            else:
+                d.pop("node_url", None)
+            _REG.write_text(json.dumps(d))
+        except Exception as exc:
+            self.log.warning("could not persist node url: %s", exc)
+        self.log.info("routing to %s", url or settings.cloud_base_url)
+
     async def heartbeat_once(self) -> None:
         body = {
             "state": self.sm.state.value,
@@ -114,15 +139,30 @@ class Agent:
             "telemetry": self._telemetry(),
             "tamper_state": self.tamper_state,
         }
+        base = self._base()
         async with httpx.AsyncClient(timeout=15) as client:
             t0 = time.perf_counter()
-            r = await client.post(f"{settings.cloud_base_url}/appliance/heartbeat",
-                                  json=body, headers=self._headers())
+            try:
+                r = await client.post(f"{base}/appliance/heartbeat",
+                                      json=body, headers=self._headers())
+            except Exception:
+                # Assigned node unreachable → fall back to the control plane.
+                if self._node_url and base == self._node_url:
+                    self.log.warning("assigned node %s unreachable; falling back to control plane",
+                                     self._node_url)
+                    self._set_node_url(None)
+                    base = settings.cloud_base_url
+                    r = await client.post(f"{base}/appliance/heartbeat",
+                                          json=body, headers=self._headers())
+                else:
+                    raise
             self._last_latency_ms = round((time.perf_counter() - t0) * 1000)
             if r.status_code != 200:
                 self.log.warning("heartbeat rejected: %s", r.status_code)
                 return
             data = r.json()
+            # Adopt the assigned node URL for all subsequent signaling.
+            self._set_node_url(data.get("node_url") or None)
             # Cloud advertises the current bundle version; the root self-update
             # timer applies it headlessly. Log when an update is pending.
             latest = data.get("latest_version")
@@ -149,7 +189,7 @@ class Agent:
         """Re-pin the cloud's current command-signing bundle after a key rotation,
         over the appliance's authenticated token channel, and persist it."""
         try:
-            r = await client.get(f"{settings.cloud_base_url}/appliance/control-plane-bundle",
+            r = await client.get(f"{self._base()}/appliance/control-plane-bundle",
                                  headers=self._headers())
             if r.status_code != 200:
                 self.log.warning("re-trust failed: %s", r.status_code)
@@ -303,7 +343,7 @@ class Agent:
                 if self.sm.storage_accessible:
                     self.sm.state = State.SEALED
 
-        resp = await client.post(f"{settings.cloud_base_url}/appliance/command-result",
+        resp = await client.post(f"{self._base()}/appliance/command-result",
                                  json={"command_id": cmd_id, "accepted": accepted,
                                        "result": result, "receipt": receipt},
                                  headers=self._headers())
@@ -342,7 +382,7 @@ class Agent:
 
     async def _report_seal(self, snapshot_id, params, manifest_hash, count, receipt):
         async with httpx.AsyncClient(timeout=15) as client:
-            await client.post(f"{settings.cloud_base_url}/appliance/seal-receipt", json={
+            await client.post(f"{self._base()}/appliance/seal-receipt", json={
                 "vault_id": params.get("vaultId", "local"),
                 "collection_id": params.get("collectionId", "local"),
                 "snapshot_id": snapshot_id,
