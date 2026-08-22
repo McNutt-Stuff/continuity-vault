@@ -28,7 +28,7 @@ from ..config import get_settings
 from ..connectors import get_connector
 from ..connectors.base import SourceObject
 from ..db import get_db
-from ..models import Collection, DesktopAgent, LinkingCode, Tenant, Vault
+from ..models import Collection, DesktopAgent, LinkingCode, Node, Tenant, Vault
 from ..workers.sync_worker import ingest_objects
 
 settings = get_settings()
@@ -482,6 +482,21 @@ def _agent_mappings(db: Session, agent: DesktopAgent) -> list[dict]:
     return out
 
 
+def _agent_ingest_url(db: Session, agent: DesktopAgent) -> str | None:
+    """When per-node scoping is on and this agent's tenant is pinned to a node
+    with a reachable API endpoint, the agent pushes ingest there so the heavy
+    store+index work runs on the assigned node, not the control plane."""
+    if not settings.node_sync_scope:
+        return None
+    t = db.get(Tenant, agent.tenant_id)
+    if not t or not t.node_id:
+        return None
+    n = db.get(Node, t.node_id)
+    if n and n.endpoint:
+        return n.endpoint.rstrip("/")
+    return None
+
+
 @agent_router.post("/heartbeat")
 def heartbeat(body: AgentHeartbeat, request: Request,
               agent: DesktopAgent = Depends(_auth_agent),
@@ -517,6 +532,7 @@ def heartbeat(body: AgentHeartbeat, request: Request,
             "commands": commands,
             "pending_more": agent.has_pending_command,
             "mappings": _agent_mappings(db, agent),
+            "ingest_url": _agent_ingest_url(db, agent),
             "latest_version": _agent_bundle_version(),
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
 

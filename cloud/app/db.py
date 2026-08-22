@@ -86,6 +86,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP",
         # One account per email address, platform-wide.
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_email ON users (email)",
+        "ALTER TABLE sync_jobs ADD COLUMN node_id VARCHAR",
         "ALTER TABLE search_documents ADD COLUMN category VARCHAR",
         "ALTER TABLE linking_codes ADD COLUMN kind VARCHAR DEFAULT 'appliance'",
         "ALTER TABLE desktop_agents ADD COLUMN agent_token_hash VARCHAR",

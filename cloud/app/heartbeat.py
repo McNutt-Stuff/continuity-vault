@@ -68,7 +68,7 @@ def send_heartbeat() -> dict | None:
         "name": s.node_name or "",
         "role": s.node_role,
         "version": _version(),
-        "endpoint": "",
+        "endpoint": s.api_base_url,
         "telemetry": _telemetry(),
         "cloud": cloud,
     }

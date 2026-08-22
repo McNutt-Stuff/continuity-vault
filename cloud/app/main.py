@@ -95,9 +95,18 @@ def startup() -> None:
 
         seed()
 
-    # Start the background delta-sync scheduler (cloud connectors).
+    # Background sync. In per-node mode only the control plane SCHEDULES (it
+    # enqueues due backups to each tenant's node); every node runs a worker loop
+    # that claims and executes the jobs assigned to it. Otherwise the single
+    # instance both schedules and runs inline.
+    from .workers.jobs import start_job_worker
     from .workers.scheduler import start_scheduler
-    start_scheduler()
+    if settings.node_sync_scope:
+        if (settings.node_role or "control-plane") == "control-plane":
+            start_scheduler()
+        start_job_worker()
+    else:
+        start_scheduler()
 
     # Verbose sync diagnostics when enabled (per-source fetch/ingest/errors).
     if settings.sync_debug:

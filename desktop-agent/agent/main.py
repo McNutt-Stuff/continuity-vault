@@ -229,6 +229,10 @@ class Agent:
         mappings = data.get("mappings")
         if isinstance(mappings, list):
             self._mappings = mappings
+        # Per-node routing: when the tenant is pinned to a customer node the
+        # cloud hands us that node's API base; push ingest there so storage +
+        # indexing run on the assigned node instead of the control plane.
+        self._ingest_url = data.get("ingest_url") or None
         self._run_due_collects()
         # Handle every command the cloud drained this cycle (new agents), falling
         # back to the single `command` field for older payloads.
@@ -530,14 +534,15 @@ class Agent:
         return pushed
 
     def _push_batch(self, source_type: str, batch: list, destinations: list) -> int:
-        r = httpx.post(f"{self.cfg.cloud_base_url}/agent/ingest", json={
+        base = getattr(self, "_ingest_url", None) or self.cfg.cloud_base_url
+        r = httpx.post(f"{base}/agent/ingest", json={
             "source_type": source_type,
             "destinations": destinations,
             "objects": batch,
         }, headers=self._headers(), timeout=180)
         r.raise_for_status()
-        self.log.info("pushed batch of %d (%s) -> snapshot %s", len(batch), source_type,
-                      r.json().get("snapshot_id", "?"))
+        self.log.info("pushed batch of %d (%s) -> %s snapshot %s", len(batch), source_type,
+                      base, r.json().get("snapshot_id", "?"))
         return len(batch)
 
     def _collect_files(self, file_config: dict) -> dict:

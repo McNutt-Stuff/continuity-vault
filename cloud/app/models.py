@@ -474,6 +474,7 @@ class SyncJob(Base):
     tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
     collection_id = Column(String, index=True)
     kind = Column(String, default="backup")  # backup | sync
+    node_id = Column(String, index=True, nullable=True)  # node that should execute it (per-node scoping)
     status = Column(String, default="queued")  # queued | running | done | failed
     processed = Column(Integer, default=0)
     total = Column(Integer, default=0)
