@@ -255,6 +255,22 @@ def crawl_has_more(db: Session, collection: Collection) -> bool:
     return bool(isinstance(cur, dict) and cur.get("has_more"))
 
 
+def crawl_resume_after(db: Session, collection: Collection) -> Optional[float]:
+    """Epoch time before which the next chunk should not run — set by a connector
+    that hit a rate limit (e.g. GitHub), so the job loop waits for the provider's
+    window to reset instead of hammering it. None when there's no backoff."""
+    if not collection.connector_account_id:
+        return None
+    acct = db.get(ConnectorAccount, collection.connector_account_id)
+    cur = acct.sync_cursor if acct else None
+    if isinstance(cur, dict) and cur.get("resume_after"):
+        try:
+            return float(cur["resume_after"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def access_token_for_account(db: Session, account: ConnectorAccount) -> Optional[str]:
     """Decrypt an account's OAuth credentials, refreshing an expired access token.
     Returns a usable access token (or None). Used by interactive flows (Picker)."""
@@ -392,6 +408,10 @@ def _run_backup_streaming(db: Session, collection: Collection,
         batch_bytes = 0
 
     cursor = account.sync_cursor if account else None
+    # Let the connector report throttle/waiting status into the live job message
+    # (e.g. GitHub rate-limit backoff) without changing the stream signature.
+    if progress:
+        config = {**config, "_status": lambda msg: progress(total, total, msg)}
     for obj in connector.fetch_stream(label, cursor=cursor, config=config, state=state):
         batch.append(obj)
         batch_bytes += len(getattr(obj, "content", b"") or b"")

@@ -22,6 +22,7 @@ from .sync_worker import (
     JobCancelled,
     access_token_for_account,
     crawl_has_more,
+    crawl_resume_after,
     existing_object_ids,
     ingest_objects,
     run_backup,
@@ -162,9 +163,24 @@ def _run(job_id: str, destinations: Optional[List[str]]) -> None:
                     db.refresh(collection)
                     if not crawl_has_more(db, collection) or time.time() > deadline:
                         break
-                    job.message = f"Crawling… {job.processed:,} items so far"
-                    db.commit()
-                    time.sleep(1)  # gentle pacing between chunks
+                    # A connector can ask us to wait before the next chunk (e.g. a
+                    # GitHub rate-limit backoff): sleep until its reset, keeping the
+                    # job "running" with a live countdown, bounded by the deadline.
+                    resume_at = crawl_resume_after(db, collection)
+                    if resume_at and resume_at > time.time():
+                        wait_end = min(resume_at + 2, deadline)
+                        while time.time() < wait_end:
+                            if _cancel_requested(db, job.id):
+                                raise JobCancelled()
+                            secs = int(wait_end - time.time())
+                            job.message = (f"Waiting {secs}s for the source's rate limit "
+                                           f"to reset… {job.processed:,} items so far")
+                            db.commit()
+                            time.sleep(min(15, max(1, wait_end - time.time())))
+                    else:
+                        job.message = f"Crawling… {job.processed:,} items so far"
+                        db.commit()
+                        time.sleep(1)  # gentle pacing between chunks
                 job.snapshot_id = getattr(receipt, "snapshot_id", None)
                 job.total = job.total or job.processed
                 job.processed = max(job.processed, 0)
