@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError, getToken } from "../api";
 import { useAuth } from "../auth";
-import { Card, Pill, bytes, timeAgo, fmtAbsolute, Loading } from "../components/ui";
+import { Card, Pill, bytes, fmtAbsolute, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { notify } from "../components/dialog";
@@ -557,8 +557,8 @@ export default function Search() {
                 </div>
                 <div className="faint" style={{ fontSize: 11.5 }}>
                   {it.location} · {bytes(it.size_bytes)}
-                  {it.object_modified_at ? ` · dated ${timeAgo(it.object_modified_at)}` : ""}
-                  {it.version_created_at ? ` · captured ${timeAgo(it.version_created_at)}` : ""}
+                  {it.object_modified_at ? ` · dated ${fmtAbsolute(it.object_modified_at)}` : ""}
+                  {it.version_created_at ? ` · captured ${fmtAbsolute(it.version_created_at)}` : ""}
                    · <span style={{ color: it.expires_in_seconds < 120 ? "var(--danger-c)" : undefined }}>expires in {fmtCountdown(it.expires_in_seconds)}</span>
                 </div>
               </div>
@@ -691,58 +691,61 @@ export default function Search() {
         const sm = SOURCE_META[r.source_type];
         const brand = brandForSource(r.source_type);
         return (
-          <div key={`${r.source_type}:${r.object_id}`} className="result-row">
-            <div className="result-icon" title={cm.label} style={{ background: cm.color }}>
-              <Icon name={cm.icon} size={18} />
-            </div>
-            <div className="flex1">
-              <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                <span style={{ fontWeight: 600 }}>{r.title}</span>
-                <span className="src-tag" style={{ borderColor: sm?.color ?? "var(--border)", color: sm?.color ?? "var(--faint)" }}>
-                  {brand ? <BrandIcon name={brand} size={11} /> : sm ? <Icon name={sm.icon} size={11} /> : null}
-                  {r.source_label || r.source_display || r.source_type}
-                  {r.source_username && r.source_username !== r.source_label ? ` (${r.source_username})` : ""}
-                </span>
+          <div key={`${r.source_type}:${r.object_id}`} className="result-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 10 }}>
+            <div className="row" style={{ gap: 14, alignItems: "flex-start" }}>
+              <div className="result-icon" title={cm.label} style={{ background: cm.color }}>
+                <Icon name={cm.icon} size={18} />
               </div>
-              <div className="faint" style={{ fontSize: 12.5 }}>
-                {r.preview || <span className="faint">no indexed metadata for this object</span>}
-              </div>
-              {r.labels && r.labels.length > 0 && (
-                <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                  {r.labels.slice(0, 4).map((l) => (
-                    <span
-                      key={l}
-                      className={`chip ${label === l ? "active" : ""}`}
-                      style={{ padding: "2px 8px", fontSize: 11 }}
-                      onClick={() => setLabel(l)}
-                    >
-                      {l}
-                    </span>
-                  ))}
+              <div className="flex1">
+                <div style={{ fontWeight: 600 }}>{r.title}</div>
+                <div className="faint" style={{ fontSize: 12.5 }}>
+                  {r.preview || <span className="faint">no indexed metadata for this object</span>}
                 </div>
-              )}
-            </div>
-            <div className="stack" style={{ alignItems: "flex-end", gap: 6 }}>
-              <div className="row" style={{ gap: 6 }}>
-                {r.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
-                {(r.version_count ?? 0) > 1 && (
-                  <button className="btn sm ghost" style={{ padding: "1px 8px", fontSize: 11 }}
-                          title="View version history" onClick={() => setVersionsFor(r)}>
-                    <Icon name="clock" size={11} /> {r.version_count} versions
-                  </button>
+                {r.labels && r.labels.length > 0 && (
+                  <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                    {r.labels.slice(0, 4).map((l) => (
+                      <span
+                        key={l}
+                        className={`chip ${label === l ? "active" : ""}`}
+                        style={{ padding: "2px 8px", fontSize: 11 }}
+                        onClick={() => setLabel(l)}
+                      >
+                        {l}
+                      </span>
+                    ))}
+                  </div>
                 )}
               </div>
-              <div className="faint" style={{ fontSize: 11, textAlign: "right", lineHeight: 1.5 }}>
-                {r.modified_at && <div title="The item's own date">Dated <b style={{ fontWeight: 600 }}>{fmtAbsolute(r.modified_at)}</b></div>}
-                <div title="When Arkive first captured it">Captured {fmtAbsolute(r.first_ingested_at)}</div>
-                <div>{bytes(r.size_bytes)}</div>
+              <div className="stack" style={{ alignItems: "flex-end", gap: 6 }}>
+                <div className="row" style={{ gap: 6 }}>
+                  {r.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
+                  {(r.version_count ?? 0) > 1 && (
+                    <button className="btn sm ghost" style={{ padding: "1px 8px", fontSize: 11 }}
+                            title="View version history" onClick={() => setVersionsFor(r)}>
+                      <Icon name="clock" size={11} /> {r.version_count} versions
+                    </button>
+                  )}
+                </div>
+                <div className="faint" style={{ fontSize: 11, textAlign: "right", lineHeight: 1.5 }}>
+                  {r.modified_at && <div title="The item's own date">Dated <b style={{ fontWeight: 600 }}>{fmtAbsolute(r.modified_at)}</b></div>}
+                  <div title="When Arkive first captured it">Captured {fmtAbsolute(r.first_ingested_at)}</div>
+                  <div>{bytes(r.size_bytes)}</div>
+                </div>
+                <button className="btn sm primary" style={{ padding: "3px 12px" }} onClick={() => recover(r)}>
+                  <Icon name="restore" size={13} /> Recover
+                </button>
               </div>
-              <button className="btn sm primary" style={{ padding: "3px 12px" }} onClick={() => recover(r)}>
-                <Icon name="restore" size={13} /> Recover
-              </button>
+            </div>
+            {/* Footer: source (left) aligned with storage locations (right). */}
+            <div className="spread" style={{ alignItems: "center", gap: 10, flexWrap: "wrap", paddingLeft: 48 }}>
+              <span className="src-tag" style={{ borderColor: sm?.color ?? "var(--border)", color: sm?.color ?? "var(--faint)" }}>
+                {brand ? <BrandIcon name={brand} size={11} /> : sm ? <Icon name={sm.icon} size={11} /> : null}
+                {r.source_label || r.source_display || r.source_type}
+                {r.source_username && r.source_username !== r.source_label ? ` (${r.source_username})` : ""}
+              </span>
               {r.locations && r.locations.length > 0 && (
                 <div className="row" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                  <span className="faint" style={{ fontSize: 10.5 }}>from</span>
+                  <span className="faint" style={{ fontSize: 10.5 }}>stored in</span>
                   {r.locations.map((loc) => (
                     <button
                       key={loc.destination}
@@ -774,6 +777,7 @@ export default function Search() {
                 <h3 style={{ margin: 0 }}>{viewing.item.title}</h3>
                 <div className="faint" style={{ fontSize: 12 }}>
                   {viewing.item.mime} · {bytes(viewing.item.size_bytes)} · from {viewing.item.location}
+                  {viewing.item.object_modified_at ? ` · dated ${fmtAbsolute(viewing.item.object_modified_at)}` : ""}
                 </div>
               </div>
               <button className="btn ghost sm" onClick={closeViewer}><Icon name="logout" size={14} /></button>
@@ -918,7 +922,7 @@ export default function Search() {
                       v{v.version}{v.is_current ? <span className="faint" style={{ fontWeight: 400 }}> · current</span> : ""}
                     </div>
                     <div className="faint" style={{ fontSize: 11.5 }} title={fmtAbsolute(v.created_at)}>
-                      {bytes(v.size_bytes)} · {timeAgo(v.created_at)}
+                      {bytes(v.size_bytes)} · captured {fmtAbsolute(v.created_at)}
                     </div>
                   </div>
                   <button className="btn sm primary" onClick={() => { const r = versionsFor; setVersionsFor(null); void retrieve(r, bestLocation(r), v.snapshot_id); }}>

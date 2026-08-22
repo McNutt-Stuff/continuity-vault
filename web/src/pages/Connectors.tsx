@@ -5,6 +5,7 @@ import { Card, Pill, timeAgo, Loading, bytes } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, formDialog, notify, promptDialog } from "../components/dialog";
+import { Menu, MenuEntry } from "../components/Menu";
 import { PhotoPickerModal } from "../components/PhotoPicker";
 
 interface CatalogItem {
@@ -460,10 +461,6 @@ export default function Connectors() {
                   {a.account_username && a.account_username !== a.account_label && (
                     <span className="faint" style={{ fontSize: 12 }}>({a.account_username})</span>
                   )}
-                  <button className="btn ghost sm" style={{ padding: "1px 6px", fontSize: 11 }}
-                          title="Rename this source" onClick={() => rename(a)}>
-                    <Icon name="key" size={11} /> Rename
-                  </button>
                 </div>
                 <div className="faint" style={{ fontSize: 12 }}>
                   {c?.displayName ?? a.connector_type} · last sync {timeAgo(a.last_sync_at)}
@@ -490,7 +487,11 @@ export default function Connectors() {
                 <>
                   <Pill tone="warn">Deactivated</Pill>
                   <button className="btn sm primary" onClick={() => reactivate(a)}><Icon name="link" size={13} /> Re-link</button>
-                  {canPurge && <button className="btn sm danger" onClick={() => purge(a)}>Purge data</button>}
+                  <Menu items={([
+                    { label: "Rename source", icon: "key", onClick: () => rename(a) },
+                    ...(c?.mode === "oauth" ? [{ label: "Re-authorize", icon: "key", onClick: () => reconnect(a) }] : []),
+                    ...(canPurge ? ["divider", { label: "Purge data", icon: "alert", danger: true, onClick: () => purge(a) }] : []),
+                  ] as MenuEntry[])} />
                 </>
               ) : (
                 <>
@@ -500,8 +501,12 @@ export default function Connectors() {
                     : (a.connector_type === "google_photos"
                         ? <button className="btn sm primary" onClick={() => setPhotoPicker(a.id)}>Add photos</button>
                         : <button className="btn sm primary" onClick={() => backup(a)}>Back up now</button>)}
-                  <button className="btn sm ghost" onClick={() => unlink(a)}>Deactivate</button>
-                  {canPurge && <button className="btn sm ghost" style={{ color: "var(--danger-c,#f2545b)" }} onClick={() => purge(a)}>Purge</button>}
+                  <Menu items={([
+                    { label: "Rename source", icon: "key", onClick: () => rename(a) },
+                    ...(c?.mode === "oauth" && !a.needs_reauth ? [{ label: "Re-authorize", icon: "key", onClick: () => reconnect(a) }] : []),
+                    { label: "Deactivate", icon: "link", onClick: () => unlink(a) },
+                    ...(canPurge ? ["divider", { label: "Purge data", icon: "alert", danger: true, onClick: () => purge(a) }] : []),
+                  ] as MenuEntry[])} />
                 </>
               )}
             </div>

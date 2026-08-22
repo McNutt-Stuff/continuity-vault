@@ -63,10 +63,13 @@ _PULL_ORDER = [
     ("collections", Collection),
 ]
 
-# Fields owned by the NODE, never overwritten by a pull (agent command queue +
-# filesystem scan state live on the node the device reports to).
+# Fields owned by the NODE, never overwritten by a pull (the node produces these
+# at runtime and pushes them UP; pulling the control plane's stale copy back down
+# would clobber a just-recorded sync error/cursor before it's ever pushed).
 _PULL_EXCLUDE = {
     "desktop_agents": {"pending_commands", "last_scan", "fs_expansions"},
+    "connector_accounts": {"sync_cursor", "last_sync_at", "last_object_count",
+                           "last_error", "last_error_at", "auth_status"},
 }
 
 

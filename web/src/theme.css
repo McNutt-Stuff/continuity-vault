@@ -196,6 +196,24 @@ h3 { font-size: 15px; }
 .filter-bar-clear { background: none; border: none; color: var(--faint); cursor: pointer;
   font-size: 18px; line-height: 1; padding: 0 2px; }
 .filter-bar-select { min-width: 130px; }
+
+/* Dropdown action menu */
+.menu-wrap { position: relative; display: inline-block; }
+.menu-trigger { padding: 4px 9px; }
+.menu-dots { font-size: 17px; line-height: 1; letter-spacing: 1px; }
+.menu-pop { position: absolute; top: calc(100% + 6px); z-index: 60; min-width: 200px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 14px 36px rgba(0,0,0,.4); padding: 6px; display: flex; flex-direction: column; gap: 1px; }
+.menu-pop.right { right: 0; }
+.menu-pop.left { left: 0; }
+.menu-item { display: flex; align-items: center; gap: 10px; width: 100%; background: none;
+  border: none; color: var(--text); text-align: left; padding: 8px 10px; border-radius: 7px;
+  cursor: pointer; font-size: 13px; white-space: nowrap; }
+.menu-item:hover:not(:disabled) { background: var(--inset); }
+.menu-item.danger { color: var(--danger); }
+.menu-item.danger:hover:not(:disabled) { background: rgba(242,84,91,.12); }
+.menu-item:disabled { opacity: .45; cursor: default; }
+.menu-divider { height: 1px; background: var(--border-soft); margin: 4px 2px; }
 .result-row { display: flex; align-items: center; gap: 14px; padding: 13px 14px;
   border: 1px solid var(--border-soft); border-radius: 10px; margin-bottom: 8px; cursor: pointer;
   background: var(--bg-elev); }
