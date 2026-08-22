@@ -238,12 +238,22 @@ def push(body: PushPayload, authorization: str = Header(default=""),
                         val = None
                 setattr(acct, f, val)
         counts["connector_accounts"] += 1
-    # Progress of portal-initiated jobs the node ran, plus device liveness.
+    # Progress of jobs the node ran. Portal-initiated "Back up now" jobs already
+    # exist here (created on the CP, dispatched to the node); node-originated jobs
+    # (scheduled backups, created only in the node's DB) don't — create those so
+    # the admin worker view reflects scheduled runs too, attributed to the node.
+    push_node = (db.query(Node)
+                 .filter(Node.name == body.node, Node.role == body.role).first())
     for j in body.jobs:
         job = db.get(SyncJob, j.get("id"))
         if job:
             _apply(job, j, _JOB_FIELDS)
-            counts["jobs"] += 1
+        else:
+            _upsert(db, SyncJob, j)
+            job = db.get(SyncJob, j.get("id"))
+            if job is not None and push_node is not None and not job.node_id:
+                job.node_id = push_node.id
+        counts["jobs"] += 1
     for a in body.agents:
         ag = db.get(DesktopAgent, a.get("id"))
         if ag:
