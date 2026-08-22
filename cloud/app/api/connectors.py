@@ -44,6 +44,13 @@ def _setup_instructions(connector_type: str) -> list[str]:
             f"Add delegated Microsoft Graph permissions: {perm} and offline_access.",
             "Set CV_MICROSOFT_CLIENT_ID and CV_MICROSOFT_CLIENT_SECRET, then restart.",
         ]
+    if connector_type == "google_drive":
+        return [
+            "In Google Cloud Console, create an OAuth 2.0 Client ID (type: Web application).",
+            f"Add this Authorized redirect URI: {redirect}",
+            "Enable the Google Drive API for the project.",
+            "Request the drive.readonly scope. Set CV_GOOGLE_CLIENT_ID and CV_GOOGLE_CLIENT_SECRET, then restart.",
+        ]
     if connector_type == "dropbox":
         return [
             "At dropbox.com/developers, create an app (scoped access, full dropbox).",
@@ -101,7 +108,7 @@ def _setup_instructions(connector_type: str) -> list[str]:
 # the Sources page into sections as the catalog grows.
 _SOURCE_FAMILY = {
     "gmail": "Google", "google_contacts": "Google", "google_calendar": "Google",
-    "google_photos": "Google",
+    "google_photos": "Google", "google_drive": "Google",
     "outlook": "Microsoft", "onedrive": "Microsoft",
     "icloud": "Apple",
     "dropbox": "Dropbox",
@@ -116,6 +123,7 @@ _SOURCE_TYPE = {
     "gmail": "Email", "outlook": "Email",
     "onedrive": "Files & Storage", "dropbox": "Files & Storage",
     "icloud": "Files & Storage", "endpoint_files": "Files & Storage",
+    "google_drive": "Files & Storage",
     "google_photos": "Photos",
     "google_contacts": "Contacts",
     "google_calendar": "Calendar",
@@ -646,7 +654,7 @@ def _resolve_identity(connector_type: str, tokens: dict) -> str | None:
 
     try:
         with httpx.Client(timeout=15) as client:
-            if connector_type in ("gmail", "google_contacts", "google_calendar", "google_photos"):
+            if connector_type in ("gmail", "google_contacts", "google_calendar", "google_photos", "google_drive"):
                 # OIDC userinfo (v3, then v2) works for any Google token with the
                 # openid/email scope; Gmail also exposes its own profile endpoint.
                 d = _json(client, "GET", "https://www.googleapis.com/oauth2/v3/userinfo",

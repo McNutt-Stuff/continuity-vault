@@ -387,6 +387,71 @@ class DropboxConnector(Connector):
 
 
 @register_connector
+class GoogleDriveConnector(Connector):
+    connector_type = "google_drive"
+    display_name = "Google Drive"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            incremental=True,
+            streaming=True,
+            delta=True,
+            historical=True,
+            browsable=True,
+            searchable_fields=["name", "mime"],
+            facet_fields=["mime"],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type,
+            display_name=self.display_name,
+            auth_type="oauth2",
+            authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+            token_url="https://oauth2.googleapis.com/token",
+            scopes=["openid", "https://www.googleapis.com/auth/userinfo.email",
+                    "https://www.googleapis.com/auth/drive.readonly"],
+            icon="cloud",
+            color="#1fa463",
+            doc_types=["file", "document"],
+        )
+
+    def list_folders(self, config, path=""):
+        token = (config or {}).get("access_token")
+        return live.drive_list_folders(token, path) if token else []
+
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.stream_drive(config["access_token"], cursor, config,
+                                         state if state is not None else {}, _content_cap())
+            return
+        yield from self.fetch_objects(account_label, config=config)
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            state: dict = {}
+            yield from live.stream_drive(config["access_token"], None, config, state, _content_cap())
+            return
+        files = [
+            ("Q3 Report.docx", 210_000, "application/vnd.google-apps.document", "Work"),
+            ("Budget.xlsx", 88_000, "application/vnd.google-apps.spreadsheet", "Finance"),
+            ("Vacation.jpg", 3_200_000, "image/jpeg", "Photos"),
+        ]
+        for i, (name, size, mime, folder) in enumerate(files):
+            _cat, _kind = ("document", "document") if mime.startswith(
+                "application/vnd.google-apps.") else ("document", "file")
+            yield SourceObject(
+                object_id=_oid(self.connector_type, account_label, i),
+                doc_type=_kind, category=_cat, title=name,
+                content=f"[binary {name}]".encode(),
+                preview=f"{mime} · {size // 1000} KB",
+                meta={"mime": mime, "name": name}, labels=[folder],
+                size_bytes=size, modified_at=_dt(i * 3))
+
+
+@register_connector
 class ICloudConnector(Connector):
     connector_type = "icloud"
     display_name = "iCloud"

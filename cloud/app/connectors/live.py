@@ -621,6 +621,157 @@ def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = Non
     state["cursor"] = {"roots": rmap, "has_more": stopped_early}
 
 
+GDRIVE_API = "https://www.googleapis.com/drive/v3"
+_GDRIVE_EXPORT = {
+    "application/vnd.google-apps.document":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.google-apps.spreadsheet":
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.google-apps.presentation":
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.google-apps.drawing": "image/png",
+}
+
+
+def drive_list_folders(access_token: str, path: str = "") -> List[dict]:
+    """Immediate child folders of ``path`` (a Drive folder id; "" = My Drive root).
+    Each returned ``path`` is the folder id the picker stores as a selected root."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    parent = path or "root"
+    out: List[dict] = []
+    with httpx.Client(timeout=30) as c:
+        page_token: Optional[str] = None
+        while True:
+            params = {
+                "q": (f"'{parent}' in parents and "
+                      "mimeType='application/vnd.google-apps.folder' and trashed=false"),
+                "fields": "nextPageToken,files(id,name)",
+                "pageSize": 200, "orderBy": "name",
+                "supportsAllDrives": "true", "includeItemsFromAllDrives": "true",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            r = c.get(f"{GDRIVE_API}/files", headers=headers, params=params)
+            if r.status_code >= 400:
+                logger.warning("drive folders %s: %s", r.status_code, r.text[:200])
+                break
+            body = r.json()
+            for f in body.get("files", []):
+                out.append({"path": f["id"], "name": f.get("name") or f["id"], "hasMore": True})
+            page_token = body.get("nextPageToken")
+            if not page_token:
+                break
+    return sorted(out, key=lambda f: f["name"].lower())
+
+
+def _drive_object(c: httpx.Client, headers: dict, f: dict, cap: int) -> SourceObject:
+    fid = f["id"]
+    name = f.get("name", "file")
+    mime = f.get("mimeType", "")
+    size = int(f.get("size", 0) or 0)
+    native = mime.startswith("application/vnd.google-apps.")
+    raw = b""
+    if native:
+        export = _GDRIVE_EXPORT.get(mime)
+        if export:
+            try:
+                er = c.get(f"{GDRIVE_API}/files/{fid}/export", headers=headers,
+                           params={"mimeType": export})
+                raw = er.content if er.status_code < 400 else b""
+            except Exception:
+                raw = b""
+    elif 0 < size <= cap:
+        try:
+            dr = c.get(f"{GDRIVE_API}/files/{fid}", headers=headers,
+                       params={"alt": "media", "supportsAllDrives": "true"})
+            raw = dr.content if dr.status_code < 400 else b""
+        except Exception:
+            raw = b""
+    content, backed = _capped(raw, cap) if raw else (
+        json.dumps({"_arkive": "content_exceeds_cap" if size > cap else "no_content",
+                    "bytes": size}).encode(), False)
+    if native:
+        _cat, _kind = "document", "document"
+    else:
+        _cat, _kind = classify_file(name, mime)
+    return SourceObject(
+        object_id=f"gdrive:{fid}", doc_type=_kind, category=_cat, title=name,
+        content=content, preview=f"{mime} · {size // 1000} KB" if size else mime,
+        meta={"mime": mime, "name": name, "native": native,
+              "content_backed_up": backed},
+        labels=[], size_bytes=size or None,  # type: ignore
+        modified_at=_parse_dt(f.get("modifiedTime")),
+        content_hash=f.get("md5Checksum"))
+
+
+def stream_drive(access_token: str, cursor=None, config: Optional[dict] = None,
+                 state: Optional[dict] = None, content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
+    """Chunked, resumable, delta Google Drive pull. Backs up only the selected
+    folders (``config['roots']`` of folder ids; empty = whole My Drive). Walks the
+    folder tree, persisting the pending frontier so large drives resume; a
+    modifiedTime high-water mark makes later runs fetch only changed files."""
+    config = config or {}
+    state = state if state is not None else {}
+    roots = config.get("roots") or ["root"]
+    cur = cursor if isinstance(cursor, dict) else {}
+    since = cur.get("since")  # ISO modifiedTime high-water from the last full pass
+    pending = cur.get("pending")
+    if not isinstance(pending, list) or not pending:
+        pending = list(roots)
+    headers = {"Authorization": f"Bearer {access_token}"}
+    logger.info("drive stream: crawling %d folder(s): %s (since=%s)",
+                len(roots), roots if roots != ["root"] else ["(whole My Drive)"], since)
+    emitted = 0
+    stopped_early = False
+    new_high = since
+    with httpx.Client(timeout=120) as c:
+        while pending:
+            if emitted >= _FILE_CHUNK:
+                stopped_early = True
+                break
+            folder_id = pending.pop(0)
+            page_token: Optional[str] = None
+            while True:
+                params = {
+                    "q": f"'{folder_id}' in parents and trashed=false",
+                    "fields": ("nextPageToken,files(id,name,mimeType,size,"
+                               "modifiedTime,md5Checksum)"),
+                    "pageSize": 200,
+                    "supportsAllDrives": "true", "includeItemsFromAllDrives": "true",
+                }
+                if page_token:
+                    params["pageToken"] = page_token
+                r = c.get(f"{GDRIVE_API}/files", headers=headers, params=params)
+                if r.status_code >= 400:
+                    logger.warning("drive list %s: %s", r.status_code, r.text[:200])
+                    break
+                body = r.json()
+                for f in body.get("files", []):
+                    if f.get("mimeType") == "application/vnd.google-apps.folder":
+                        pending.append(f["id"])
+                        continue
+                    mt = f.get("modifiedTime")
+                    if since and mt and mt <= since:
+                        continue  # delta: unchanged since the last full pass
+                    yield _drive_object(c, headers, f, content_cap)
+                    emitted += 1
+                    if mt and (new_high is None or mt > new_high):
+                        new_high = mt
+                page_token = body.get("nextPageToken")
+                if not page_token:
+                    break
+                if emitted >= _FILE_CHUNK:
+                    stopped_early = True
+                    break
+    if stopped_early:
+        # Mid-walk: keep the old high-water so the resumed pass sees one snapshot.
+        state["cursor"] = {"since": since, "pending": pending, "has_more": True}
+    else:
+        # Full pass done — advance the high-water and clear the frontier.
+        state["cursor"] = {"since": new_high or since, "pending": [], "has_more": False}
+
+
+
 def fetch_icloud(username: str, password: str,
                  content_cap: int = _DEFAULT_CAP,
                  options: Optional[dict] = None) -> Iterable[SourceObject]:

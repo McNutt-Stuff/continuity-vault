@@ -115,6 +115,16 @@ def _providers() -> Dict[str, ProviderSpec]:
             client_secret=s.google_client_secret,
             extra_auth_params={"access_type": "offline", "prompt": "consent"},
         ),
+        "google_drive": ProviderSpec(
+            connector_type="google_drive",
+            authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+            token_url="https://oauth2.googleapis.com/token",
+            scopes=["openid", "https://www.googleapis.com/auth/userinfo.email",
+                    "https://www.googleapis.com/auth/drive.readonly"],
+            client_id=s.google_client_id,
+            client_secret=s.google_client_secret,
+            extra_auth_params={"access_type": "offline", "prompt": "consent"},
+        ),
         "reddit": ProviderSpec(
             connector_type="reddit",
             authorize_url="https://www.reddit.com/api/v1/authorize",
