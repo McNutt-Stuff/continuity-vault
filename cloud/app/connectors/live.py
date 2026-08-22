@@ -8,8 +8,10 @@ small and the simulated fallbacks remain for local/demo use.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from email import message_from_bytes
 from email.header import decode_header, make_header
@@ -21,6 +23,27 @@ from .base import SourceObject
 from ..taxonomy import classify_file, map_1password
 
 logger = logging.getLogger("cv.connectors.live")
+
+
+def _parse_dt(val: object) -> Optional[datetime]:
+    """Best-effort parse of a provider timestamp into a UTC datetime: ISO 8601
+    (with Z or ±HHMM offsets) or epoch seconds/milliseconds. None when unknown."""
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        ts = float(val)
+        return datetime.fromtimestamp(ts / 1000.0 if ts > 1e12 else ts, tz=timezone.utc)
+    s = str(val).strip()
+    if s.isdigit():
+        ts = float(s)
+        return datetime.fromtimestamp(ts / 1000.0 if ts > 1e12 else ts, tz=timezone.utc)
+    s = s.replace("Z", "+00:00")
+    s = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", s)  # +0000 -> +00:00
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 _DEFAULT_CAP = 268435456  # 256 MiB
@@ -97,6 +120,7 @@ def _gmail_message(c: httpx.Client, headers: dict, mid: str,
               "labelIds": label_ids, "content_backed_up": backed},
         labels=[l for l in label_ids if not l.startswith("Label_")],
         size_bytes=len(raw) or int(m.get("sizeEstimate", 0)) or None,  # type: ignore
+        modified_at=_parse_dt(m.get("internalDate")),
     )
 
 
@@ -263,6 +287,7 @@ def fetch_graph_mail(access_token: str, limit: int = 40,
                           "content_backed_up": backed},
                     labels=["Inbox"],
                     size_bytes=len(raw) or None,  # type: ignore
+                    modified_at=_parse_dt(m.get("receivedDateTime")),
                 )
             url, params = body.get("@odata.nextLink"), None
 
@@ -309,6 +334,7 @@ def fetch_graph_files(access_token: str, limit: int = 500,
                           "content_backed_up": backed},
                     labels=[path.split(":")[-1] or "/"],
                     size_bytes=size or None,  # type: ignore
+                    modified_at=_parse_dt(it.get("lastModifiedDateTime")),
                 )
             url, params = body.get("@odata.nextLink"), None
 
@@ -354,6 +380,7 @@ def fetch_dropbox(access_token: str, limit: int = 1000,
                           "content_backed_up": backed},
                     labels=["/".join(it.get("path_display", "/").split("/")[:-1]) or "/"],
                     size_bytes=size or None,  # type: ignore
+                    modified_at=_parse_dt(it.get("server_modified") or it.get("client_modified")),
                 )
             if not body.get("has_more"):
                 break
@@ -899,7 +926,8 @@ def picker_item_to_object(item: dict, content_cap: int, access_token: str) -> So
         meta={"filename": mf.get("filename"), "mime": mime,
               "kind": "video" if is_video else "photo", "created": ct,
               "content_backed_up": backed},
-        labels=["Google Photos"], size_bytes=len(content) or 0)
+        labels=["Google Photos"], size_bytes=len(content) or 0,
+        modified_at=_parse_dt(ct))
 
 
 # --------------------------------------------------------------------------- #
@@ -935,14 +963,20 @@ def fetch_reddit(access_token: str, content_cap: int = _DEFAULT_CAP,
                 for child in data.get("children", []):
                     d = child.get("data", {})
                     title = d.get("title") or (d.get("body") or "")[:80] or "(reddit)"
+                    # Hash on durable fields only — score/comment counts mutate
+                    # over time and would otherwise re-ingest the same item.
+                    stable = f"{d.get('name') or d.get('id')}|{d.get('created_utc')}|" \
+                             f"{d.get('title') or ''}|{d.get('selftext') or d.get('body') or ''}"
                     yield SourceObject(
                         object_id=f"reddit:{d.get('name') or d.get('id')}",
                         doc_type=kind, category="social", title=title,
                         content=json.dumps(d).encode(),
+                        content_hash=hashlib.sha256(stable.encode()).hexdigest(),
                         preview=(d.get("selftext") or d.get("body") or d.get("url") or "")[:200],
                         meta={"subreddit": d.get("subreddit"), "score": d.get("score"),
                               "permalink": d.get("permalink"), "kind": kind},
-                        labels=[label] + ([f"r/{d.get('subreddit')}"] if d.get("subreddit") else []))
+                        labels=[label] + ([f"r/{d.get('subreddit')}"] if d.get("subreddit") else []),
+                        modified_at=_parse_dt(d.get("created_utc")))
                 after = data.get("after")
                 if not after:
                     break
@@ -986,22 +1020,33 @@ def fetch_facebook(access_token: str, content_cap: int = _DEFAULT_CAP,
                 p = None  # 'next' is a full URL
 
         if _want(options, "posts"):
-            for post in _page("/me/posts", {"fields": "id,message,created_time,permalink_url,full_picture"}):
+            for post in _page("/me/posts", {"fields": "id,message,created_time,permalink_url"}):
                 msg = post.get("message") or "(post)"
+                # Hash-stable content: only the post's own durable fields. (Graph
+                # CDN fields like full_picture carry a rotating token, so including
+                # them would re-create a "new version" of the same post every run.)
+                stable = {"id": post.get("id"), "message": post.get("message"),
+                          "created_time": post.get("created_time"),
+                          "permalink_url": post.get("permalink_url")}
                 yield SourceObject(
                     object_id=f"facebook:{post.get('id')}",
                     doc_type="post", category="social", title=msg[:80],
-                    content=json.dumps(post).encode(), preview=msg[:200],
+                    content=json.dumps(stable, sort_keys=True).encode(), preview=msg[:200],
                     meta={"created": post.get("created_time"),
                           "permalink": post.get("permalink_url"), "kind": "post"},
-                    labels=["Posts"])
+                    labels=["Posts"],
+                    modified_at=_parse_dt(post.get("created_time")))
         if _want(options, "photos"):
             for photo in _page("/me/photos", {"type": "uploaded",
                                               "fields": "id,name,created_time,images,link"}):
                 images = photo.get("images") or []
                 src = images[0].get("source") if images else None
+                # Downloaded image bytes are stable; the metadata fallback must be
+                # too (images/link URLs rotate), so hash only durable fields.
                 content, backed = _download(src, content_cap) if src else (
-                    json.dumps(photo).encode(), False)
+                    json.dumps({"id": photo.get("id"), "name": photo.get("name"),
+                                "created_time": photo.get("created_time")}, sort_keys=True).encode(),
+                    False)
                 yield SourceObject(
                     object_id=f"facebook:photo:{photo.get('id')}",
                     doc_type="image", category="image",
@@ -1009,7 +1054,8 @@ def fetch_facebook(access_token: str, content_cap: int = _DEFAULT_CAP,
                     content=content, preview=photo.get("link") or "photo",
                     meta={"created": photo.get("created_time"), "link": photo.get("link"),
                           "kind": "image", "content_backed_up": backed},
-                    labels=["Photos"])
+                    labels=["Photos"],
+                    modified_at=_parse_dt(photo.get("created_time")))
 
 
 def fetch_instagram(access_token: str, content_cap: int = _DEFAULT_CAP,
@@ -1039,7 +1085,8 @@ def fetch_instagram(access_token: str, content_cap: int = _DEFAULT_CAP,
                     content=content, preview=m.get("permalink") or "",
                     meta={"created": m.get("timestamp"), "permalink": m.get("permalink"),
                           "media_type": mtype, "kind": kind, "content_backed_up": backed},
-                    labels=["Instagram"])
+                    labels=["Instagram"],
+                    modified_at=_parse_dt(m.get("timestamp")))
             url = (body.get("paging") or {}).get("next")
             params = None
 

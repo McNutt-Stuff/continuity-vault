@@ -278,6 +278,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     # and connector display names for every collection referenced by results.
     coll_ids = {r.collection_id for r in unique if r.collection_id}
     coll_label: dict[str, str] = {}
+    coll_username: dict[str, str] = {}
     coll_display: dict[str, str] = {}
     if coll_ids:
         for c in (db.query(Collection)
@@ -285,6 +286,8 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
             account = (db.get(ConnectorAccount, c.connector_account_id)
                        if c.connector_account_id else None)
             coll_label[c.id] = account.account_label if account else c.name
+            if account and account.account_username:
+                coll_username[c.id] = account.account_username
             conn = get_connector(c.source_type)
             coll_display[c.id] = conn.display_name if conn else c.source_type
     source_display: dict[str, str] = {}
@@ -384,6 +387,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         "collection_id": r.collection_id,
         "source_type": r.source_type,
         "source_label": coll_label.get(r.collection_id, source_display.get(r.source_type, r.source_type)),
+        "source_username": coll_username.get(r.collection_id),
         "source_display": coll_display.get(r.collection_id, source_display.get(r.source_type, r.source_type)),
         "doc_type": r.doc_type,
         "category": _cat(r),

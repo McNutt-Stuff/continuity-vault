@@ -51,6 +51,7 @@ interface Result {
   snapshot_id: string;
   source_type: string;
   source_label: string;
+  source_username?: string | null;
   source_display: string;
   doc_type: string;
   category: string;
@@ -584,20 +585,6 @@ export default function Search() {
         <button className="btn primary sm" onClick={run}>Search</button>
       </div>
 
-      <div className="row" style={{ gap: 6, marginBottom: 14, alignItems: "center", justifyContent: "flex-end" }}>
-        <span className="faint" style={{ fontSize: 11 }}>Sort by</span>
-        <div className="row" style={{ gap: 0, border: "1px solid var(--border-soft)", borderRadius: 8, overflow: "hidden" }}>
-          <button className={`btn sm ${sortBy === "date" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }}
-                  onClick={() => setSortBy("date")} title="The item's own date (file / email / post date)">
-            Object date
-          </button>
-          <button className={`btn sm ${sortBy === "captured" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }}
-                  onClick={() => setSortBy("captured")} title="When Arkive first captured it">
-            Date captured
-          </button>
-        </div>
-      </div>
-
       {loading && <Loading label="Searching your protected data…" />}
       {!loading && data && data.results.length === 0 && (
         <Card><div className="loading-state muted">
@@ -672,6 +659,13 @@ export default function Search() {
               {hasFilters && (
                 <button className="btn ghost sm" style={{ alignSelf: "flex-end" }} onClick={clearAll}>Clear all</button>
               )}
+              <label className="filter-select" style={{ marginLeft: "auto" }}>
+                <span>Sort by</span>
+                <select value={sortBy} onChange={(e) => setSortBy(e.target.value as "date" | "captured")}>
+                  <option value="date">Object date</option>
+                  <option value="captured">Date captured</option>
+                </select>
+              </label>
             </div>
 
             {hasFilters && (
@@ -693,19 +687,21 @@ export default function Search() {
       )}
 
       {data?.results.map((r) => {
-        const sm = SOURCE_META[r.source_type] ?? { color: "var(--bg-elev-2)", icon: "database" as IconName, label: r.source_type };
+        const cm = CATEGORY_META[r.category] ?? { color: "var(--bg-elev-2)", icon: "database" as IconName, label: r.category };
+        const sm = SOURCE_META[r.source_type];
         const brand = brandForSource(r.source_type);
         return (
           <div key={`${r.source_type}:${r.object_id}`} className="result-row">
-            <div className="result-icon" style={{ background: brand ? "var(--inset)" : sm.color }}>
-              {brand ? <BrandIcon name={brand} size={20} /> : <Icon name={sm.icon} size={18} />}
+            <div className="result-icon" title={cm.label} style={{ background: cm.color }}>
+              <Icon name={cm.icon} size={18} />
             </div>
             <div className="flex1">
               <div className="row" style={{ gap: 8, alignItems: "center" }}>
                 <span style={{ fontWeight: 600 }}>{r.title}</span>
-                <span className="src-tag" style={{ borderColor: sm.color, color: sm.color }}>
-                  {brand ? <BrandIcon name={brand} size={11} /> : <Icon name={sm.icon} size={11} />}
-                  {r.source_label || r.source_display || sm.label}
+                <span className="src-tag" style={{ borderColor: sm?.color ?? "var(--border)", color: sm?.color ?? "var(--faint)" }}>
+                  {brand ? <BrandIcon name={brand} size={11} /> : sm ? <Icon name={sm.icon} size={11} /> : null}
+                  {r.source_label || r.source_display || r.source_type}
+                  {r.source_username && r.source_username !== r.source_label ? ` (${r.source_username})` : ""}
                 </span>
               </div>
               <div className="faint" style={{ fontSize: 12.5 }}>
@@ -735,14 +731,11 @@ export default function Search() {
                     <Icon name="clock" size={11} /> {r.version_count} versions
                   </button>
                 )}
-                <Pill tone="info">{CATEGORY_META[r.category]?.label ?? r.category}</Pill>
-                <span className="faint" style={{ fontSize: 11 }}>{r.doc_type}</span>
               </div>
-              <div className="faint" style={{ fontSize: 11 }}
-                   title={`${r.modified_at ? `Dated ${fmtAbsolute(r.modified_at)} · ` : ""}First captured ${fmtAbsolute(r.first_ingested_at)}`}>
-                {bytes(r.size_bytes)} · {r.modified_at
-                  ? `dated ${timeAgo(r.modified_at)}`
-                  : `captured ${timeAgo(r.first_ingested_at)}`}
+              <div className="faint" style={{ fontSize: 11, textAlign: "right", lineHeight: 1.5 }}>
+                {r.modified_at && <div title="The item's own date">Dated <b style={{ fontWeight: 600 }}>{fmtAbsolute(r.modified_at)}</b></div>}
+                <div title="When Arkive first captured it">Captured {fmtAbsolute(r.first_ingested_at)}</div>
+                <div>{bytes(r.size_bytes)}</div>
               </div>
               <button className="btn sm primary" style={{ padding: "3px 12px" }} onClick={() => recover(r)}>
                 <Icon name="restore" size={13} /> Recover
