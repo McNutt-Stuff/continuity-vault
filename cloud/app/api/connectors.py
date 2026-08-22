@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import uuid
 
@@ -281,7 +283,9 @@ def _link_or_reauth(db: Session, data: dict, connector_type: str,
         existing.auth_status = "linked"
         existing.last_error = None
         existing.last_error_at = None
-        if username and not existing.account_username:
+        # Refresh the linked identity on every successful re-auth (backfills sources
+        # linked before we captured it).
+        if username:
             existing.account_username = username
         db.commit()
         audit.record(db, actor=data["uid"], action="connector.reauthorized",
@@ -573,52 +577,91 @@ def purge(account_id: str, body: PurgeBody = PurgeBody(),
     return {"ok": True, **counts, "node": node_result}
 
 
+def _identity_from_id_token(tokens: dict) -> str | None:
+    """Extract email/username from an OIDC id_token (Google/Microsoft/LinkedIn).
+    The token came from the provider's token endpoint over TLS, so we read the
+    claims without re-verifying the signature."""
+    idt = tokens.get("id_token")
+    if not idt or idt.count(".") < 2:
+        return None
+    try:
+        payload = idt.split(".")[1]
+        payload += "=" * (-len(payload) % 4)  # pad base64url
+        claims = json.loads(base64.urlsafe_b64decode(payload).decode())
+        return (claims.get("email") or claims.get("preferred_username")
+                or claims.get("upn") or claims.get("name"))
+    except Exception:
+        return None
+
+
 def _fetch_account_label(connector_type: str, tokens: dict) -> str | None:
-    """Best-effort human label (email / name) from the provider."""
+    """Best-effort human label (email / username) from the provider. Prefers the
+    OIDC id_token, then a provider identity API."""
     import httpx
+
+    ident = _identity_from_id_token(tokens)
+    if ident:
+        return ident
 
     at = tokens.get("access_token")
     if not at:
         return None
     headers = {"Authorization": f"Bearer {at}"}
+
+    def _json(client: "httpx.Client", method: str, url: str, **kw) -> dict:
+        try:
+            r = client.request(method, url, **kw)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("identity fetch %s failed (%s): %s", connector_type, url, exc)
+            return {}
+        if r.status_code >= 400:
+            logger.warning("identity fetch %s → HTTP %d (%s): %s",
+                           connector_type, r.status_code, url, r.text[:200])
+            return {}
+        try:
+            return r.json()
+        except Exception:
+            return {}
+
     try:
         with httpx.Client(timeout=15) as client:
             if connector_type == "gmail":
-                r = client.get("https://gmail.googleapis.com/gmail/v1/users/me/profile",
-                               headers=headers)
-                return r.json().get("emailAddress")
+                d = _json(client, "GET", "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+                          headers=headers)
+                return d.get("emailAddress")
             if connector_type in ("google_contacts", "google_calendar", "google_photos"):
-                r = client.get("https://www.googleapis.com/oauth2/v3/userinfo",
-                               headers=headers)
-                return r.json().get("email")
+                d = _json(client, "GET", "https://www.googleapis.com/oauth2/v3/userinfo",
+                          headers=headers)
+                return d.get("email")
             if connector_type in ("outlook", "onedrive"):
-                r = client.get("https://graph.microsoft.com/v1.0/me", headers=headers)
-                d = r.json()
+                d = _json(client, "GET", "https://graph.microsoft.com/v1.0/me", headers=headers)
                 return d.get("userPrincipalName") or d.get("mail")
             if connector_type == "dropbox":
-                r = client.post("https://api.dropboxapi.com/2/users/get_current_account",
-                                headers=headers)
-                return r.json().get("email")
+                d = _json(client, "POST", "https://api.dropboxapi.com/2/users/get_current_account",
+                          headers=headers)
+                email = d.get("email")
+                if email:
+                    return email
+                nm = d.get("name") or {}
+                return nm.get("display_name") if isinstance(nm, dict) else None
             if connector_type == "reddit":
-                r = client.get("https://oauth.reddit.com/api/v1/me",
-                               headers={**headers, "User-Agent": "web:life.arkive:v1 (Arkive backup)"})
-                name = r.json().get("name")
+                d = _json(client, "GET", "https://oauth.reddit.com/api/v1/me",
+                          headers={**headers, "User-Agent": "web:life.arkive:v1 (Arkive backup)"})
+                name = d.get("name")
                 return f"u/{name}" if name else None
             if connector_type == "facebook":
-                r = client.get("https://graph.facebook.com/v19.0/me",
-                               params={"fields": "name,email", "access_token": at})
-                d = r.json()
+                d = _json(client, "GET", "https://graph.facebook.com/v19.0/me",
+                          params={"fields": "name,email", "access_token": at})
                 return d.get("email") or d.get("name")
             if connector_type == "instagram":
-                r = client.get("https://graph.instagram.com/me",
-                               params={"fields": "username", "access_token": at})
-                name = r.json().get("username")
+                d = _json(client, "GET", "https://graph.instagram.com/me",
+                          params={"fields": "username", "access_token": at})
+                name = d.get("username")
                 return f"@{name}" if name else None
             if connector_type == "linkedin":
-                r = client.get("https://api.linkedin.com/v2/userinfo", headers=headers)
-                d = r.json()
+                d = _json(client, "GET", "https://api.linkedin.com/v2/userinfo", headers=headers)
                 return d.get("email") or d.get("name")
-    except Exception:
-        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("identity fetch failed for %s: %s", connector_type, exc)
     return None
 

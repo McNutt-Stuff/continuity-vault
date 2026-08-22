@@ -52,7 +52,8 @@ def _providers() -> Dict[str, ProviderSpec]:
             connector_type="gmail",
             authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
             token_url="https://oauth2.googleapis.com/token",
-            scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+            scopes=["openid", "https://www.googleapis.com/auth/userinfo.email",
+                    "https://www.googleapis.com/auth/gmail.readonly"],
             client_id=s.google_client_id,
             client_secret=s.google_client_secret,
             extra_auth_params={"access_type": "offline", "prompt": "consent"},
@@ -61,7 +62,7 @@ def _providers() -> Dict[str, ProviderSpec]:
             connector_type="outlook",
             authorize_url=f"https://login.microsoftonline.com/{ms_tenant}/oauth2/v2.0/authorize",
             token_url=f"https://login.microsoftonline.com/{ms_tenant}/oauth2/v2.0/token",
-            scopes=["offline_access", "Mail.Read"],
+            scopes=["offline_access", "openid", "email", "profile", "User.Read", "Mail.Read"],
             client_id=s.microsoft_client_id,
             client_secret=s.microsoft_client_secret,
             extra_auth_params={},
@@ -70,7 +71,7 @@ def _providers() -> Dict[str, ProviderSpec]:
             connector_type="onedrive",
             authorize_url=f"https://login.microsoftonline.com/{ms_tenant}/oauth2/v2.0/authorize",
             token_url=f"https://login.microsoftonline.com/{ms_tenant}/oauth2/v2.0/token",
-            scopes=["offline_access", "Files.Read.All"],
+            scopes=["offline_access", "openid", "email", "profile", "User.Read", "Files.Read.All"],
             client_id=s.microsoft_client_id,
             client_secret=s.microsoft_client_secret,
             extra_auth_params={},
@@ -277,10 +278,15 @@ def refresh_tokens(connector_type: str, refresh_token: str) -> dict:
 
 def _normalize(tok: dict, spec: ProviderSpec) -> dict:
     expires_in = int(tok.get("expires_in", 3600))
-    return {
+    out = {
         "access_token": tok.get("access_token"),
         "refresh_token": tok.get("refresh_token"),
         "expires_at": time.time() + expires_in - 60,
         "scope": tok.get("scope", " ".join(spec.scopes)),
         "provider": spec.connector_type,
     }
+    # Preserve the OIDC id_token so the linked account's identity (email) can be
+    # read from it (most reliable, no extra scope-gated API call).
+    if tok.get("id_token"):
+        out["id_token"] = tok["id_token"]
+    return out
