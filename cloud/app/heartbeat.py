@@ -25,22 +25,27 @@ BLUEPRINT_PATH = "/etc/arkive/blueprint.json"
 
 
 def _telemetry() -> dict:
-    """Lightweight host telemetry (best-effort, no heavy deps)."""
-    tel: dict = {}
+    """Host telemetry for the heartbeat snapshot (best-effort). Rich live metrics
+    (per-process, net rates, services) come from the node's live endpoint."""
     try:
-        import shutil
-        usage = shutil.disk_usage("/")
-        tel["storage"] = {"total": usage.total, "used": usage.used, "free": usage.free}
+        from . import sysinfo
+        return sysinfo.snapshot()
     except Exception:
-        pass
-    try:
-        import os
-        load = os.getloadavg()
-        tel["load"] = [round(x, 2) for x in load]
-        tel["cpus"] = os.cpu_count()
-    except Exception:
-        pass
-    return tel
+        # Minimal fallback so a heartbeat never fails on telemetry.
+        tel: dict = {}
+        try:
+            import shutil
+            usage = shutil.disk_usage("/")
+            tel["storage"] = {"total": usage.total, "used": usage.used, "free": usage.free}
+        except Exception:
+            pass
+        try:
+            import os
+            tel["load"] = [round(x, 2) for x in os.getloadavg()]
+            tel["cpus"] = os.cpu_count()
+        except Exception:
+            pass
+        return tel
 
 
 def _version() -> str:

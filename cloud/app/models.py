@@ -594,6 +594,26 @@ class Node(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class NodeMetric(Base):
+    """Time-series health sample for a node (~1/min), retained 90 days on the
+    control plane so the admin can render CPU/memory/disk/network trend lines."""
+
+    __tablename__ = "node_metrics"
+    id = Column(String, primary_key=True, default=_uuid)
+    node_id = Column(String, index=True, nullable=False)
+    ts = Column(DateTime, default=_now, index=True)
+    cpu_pct = Column(Float, default=0)
+    mem_pct = Column(Float, default=0)
+    disk_pct = Column(Float, default=0)
+    mem_used = Column(BigInteger, default=0)
+    mem_total = Column(BigInteger, default=0)
+    disk_used = Column(BigInteger, default=0)
+    disk_total = Column(BigInteger, default=0)
+    net_sent_rate = Column(BigInteger, default=0)
+    net_recv_rate = Column(BigInteger, default=0)
+    load1 = Column(Float, default=0)
+
+
 class NodeBlueprint(Base):
     """Per-role configuration + update target managed by platform admins. Nodes
     heartbeat to the control plane and receive their role's blueprint so config,

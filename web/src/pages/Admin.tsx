@@ -1,9 +1,10 @@
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { promptDialog, formDialog, confirmDialog, notify } from "../components/dialog";
+import { Ring, Sparkline, AreaChart } from "../components/charts";
 
 export interface AdminSection { key: string; label: string; icon: IconName; group: string; }
 
@@ -664,6 +665,7 @@ function Nodes() {
   const [svcs, setSvcs] = useState<ServiceObj[]>([]);
   const [toast, setToast] = useState("");
   const [installCmd, setInstallCmd] = useState("");
+  const [sel, setSel] = useState<string | null>(null);
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
   async function load() {
     try { setNodes(await api.get<any[]>("/admin/nodes")); } catch { /* ignore */ }
@@ -735,10 +737,31 @@ function Nodes() {
   const storageSvcs = svcs.filter((x) => x.category === "storage");
   const emailSvcs = svcs.filter((x) => x.category === "email");
 
+  if (sel) return (
+    <NodeDetail id={sel} onBack={() => { setSel(null); void load(); }}
+                storageSvcs={storageSvcs} emailSvcs={emailSvcs}
+                onEdit={editNode} onService={setNodeService} onRemove={removeNode} />
+  );
+
+  const CATS = ["Control Plane", "Customer Nodes", "Public Web", "Other"];
+  const hbar = (label: string, v: number | null | undefined) => {
+    const val = Math.round(v || 0);
+    const col = v == null ? "var(--border-soft)"
+      : val >= 90 ? "#f2545b" : val >= 75 ? "#f5a623" : "linear-gradient(90deg,#4f7cff,#35d0a5)";
+    return (
+      <div style={{ flex: 1 }}>
+        <div className="spread faint" style={{ fontSize: 10, marginBottom: 3 }}><span>{label}</span><span>{v == null ? "—" : `${val}%`}</span></div>
+        <div style={{ height: 5, borderRadius: 999, background: "var(--inset)", overflow: "hidden" }}>
+          <div style={{ width: `${val}%`, height: "100%", background: col }} />
+        </div>
+      </div>
+    );
+  };
+
   return (
     <>
       <div className="spread" style={{ marginBottom: 12 }}>
-        <h3 style={{ margin: 0 }}>Node fleet</h3>
+        <h3 style={{ margin: 0 }}>Node fleet <span className="faint" style={{ fontSize: 12, fontWeight: 400 }}>· {nodes.length} node{nodes.length === 1 ? "" : "s"}</span></h3>
         <div className="row" style={{ gap: 8 }}>
           <button className="btn sm" onClick={newInstaller}><Icon name="logout" size={14} /> Install a node</button>
           <button className="btn primary sm" onClick={registerNode}><Icon name="server" size={14} /> Register node</button>
@@ -758,92 +781,418 @@ function Nodes() {
           <pre className="mono" style={{ fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0 }}>{installCmd}</pre>
         </Card>
       )}
-      <div className="grid grid-2">
-        {nodes.map((n) => {
-          const st = n.telemetry?.storage;
-          const mem = n.telemetry?.memory;
-          const pct = (u: any) => u && u.total ? Math.round((u.used / u.total) * 100) : 0;
-          return (
-            <Card key={n.id}>
-              <div className="spread" style={{ marginBottom: 10 }}>
-                <div className="row" style={{ gap: 10 }}>
-                  <div className="result-icon" style={{ width: 34, height: 34, background: "var(--inset)", color: n.online ? "#35d0a5" : "#8a94a7" }}>
-                    <Icon name="server" size={18} />
+      {CATS.map((cat) => {
+        const list = nodes.filter((n) => (n.category || "Other") === cat);
+        if (!list.length) return null;
+        return (
+          <div key={cat} style={{ marginBottom: 18 }}>
+            <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>{cat} · {list.length}</div>
+            <div className="grid grid-3">
+              {list.map((n) => (
+                <Card key={n.id} onClick={() => setSel(n.id)} style={{ cursor: "pointer", padding: 14 }}>
+                  <div className="spread" style={{ marginBottom: 10 }}>
+                    <div className="row" style={{ gap: 9 }}>
+                      <div className="result-icon" style={{ width: 30, height: 30, background: "var(--inset)", color: n.online ? "#35d0a5" : "#8a94a7" }}>
+                        <Icon name="server" size={16} />
+                      </div>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 13.5 }}>{n.name}{n.is_self && <span className="faint" style={{ fontWeight: 400, fontSize: 10 }}> · this</span>}</div>
+                        <div className="faint" style={{ fontSize: 11 }}>{n.region || n.cloud?.region || "—"}{n.version ? ` · v${n.version}` : ""}</div>
+                      </div>
+                    </div>
+                    <span title={n.online ? "Online" : "Offline"} style={{ width: 8, height: 8, borderRadius: 999, background: n.online ? "#35d0a5" : "#8a94a7", flexShrink: 0 }} />
                   </div>
-                  <div>
-                    <div style={{ fontWeight: 700 }}>{n.name} {n.is_self && <span className="faint" style={{ fontWeight: 400, fontSize: 11 }}>· this node</span>}</div>
-                    <div className="faint" style={{ fontSize: 11.5 }}>{n.role}{n.region ? ` · ${n.region}` : ""}</div>
+                  <div className="row" style={{ gap: 8, marginBottom: 10 }}>
+                    {hbar("CPU", n.health?.cpu_pct)}
+                    {hbar("MEM", n.health?.mem_pct)}
+                    {hbar("DISK", n.health?.disk_pct)}
                   </div>
-                </div>
-                <div className="row" style={{ gap: 6 }}>
-                  <Pill tone={n.online ? "ok" : "warn"}>{n.online ? "Online" : "Offline"}</Pill>
-                  <Pill tone={n.status === "active" ? "info" : "warn"}>{n.status}</Pill>
-                </div>
-              </div>
-              {n.cloud?.provider && n.cloud.provider !== "unknown" && (
-                <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                  <Pill tone="info"><Icon name="database" size={11} /> {String(n.cloud.provider).toUpperCase()}{n.cloud.region ? ` · ${n.cloud.region}` : ""}</Pill>
-                  {n.cloud.instance_type && <span className="faint" style={{ fontSize: 11.5 }}>{n.cloud.instance_type}</span>}
-                  {n.version && <span className="faint" style={{ fontSize: 11.5 }}>v{n.version}</span>}
-                </div>
-              )}
-              {st && (
-                <div style={{ marginBottom: 8 }}>
-                  <div className="spread faint" style={{ fontSize: 11.5, marginBottom: 4 }}>
-                    <span>Storage</span><span>{bytes(st.used)} / {bytes(st.total)} ({pct(st)}%)</span>
+                  <div className="spread faint" style={{ fontSize: 11 }}>
+                    <span>{n.tenants || 0} tenant{n.tenants === 1 ? "" : "s"}</span>
+                    <span>{n.status !== "active" ? n.status : uptimeShort(n.uptime_seconds)}</span>
                   </div>
-                  <div style={{ height: 6, borderRadius: 999, background: "var(--inset)", overflow: "hidden" }}>
-                    <div style={{ width: `${pct(st)}%`, height: "100%", background: pct(st) > 90 ? "var(--danger-c,#f2545b)" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
-                  </div>
-                </div>
-              )}
-              <div className="row" style={{ gap: 14, flexWrap: "wrap", fontSize: 11.5 }} >
-                {mem && <span className="faint">Mem {bytes(mem.used)}/{bytes(mem.total)}</span>}
-                {n.telemetry?.load && <span className="faint">Load {n.telemetry.load.join(" ")}{n.telemetry.cpus ? ` · ${n.telemetry.cpus} vCPU` : ""}</span>}
-                {n.telemetry?.recovery_points != null && <span className="faint">{n.telemetry.recovery_points.toLocaleString()} recovery pts</span>}
-                {n.endpoint && <span className="faint">{n.endpoint}</span>}
-              </div>
-              <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-                <Pill tone={n.storage_service ? "info" : "warn"}>
-                  <Icon name="database" size={11} /> {n.storage_service || "Storage: default"}
-                </Pill>
-                <Pill tone={n.email_service ? "info" : "warn"}>
-                  <Icon name="mail" size={11} /> {n.email_service || "Email: default"}
-                </Pill>
-              </div>
-              <div className="stack" style={{ gap: 8, marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
-                <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }}>Assigned services</div>
-                <label className="row" style={{ gap: 8, alignItems: "center" }}>
-                  <Icon name="database" size={13} />
-                  <span className="faint" style={{ fontSize: 12, width: 52 }}>Storage</span>
-                  <select className="input sm flex1" value={n.storage_service_id || ""}
-                          onChange={(e) => setNodeService(n, { storage_service_id: e.target.value })}>
-                    <option value="">Default (env / local)</option>
-                    {storageSvcs.map((x) => <option key={x.id} value={x.id}>{x.name}{x.configured ? "" : " (incomplete)"}</option>)}
-                  </select>
-                </label>
-                <label className="row" style={{ gap: 8, alignItems: "center" }}>
-                  <Icon name="mail" size={13} />
-                  <span className="faint" style={{ fontSize: 12, width: 52 }}>Email</span>
-                  <select className="input sm flex1" value={n.email_service_id || ""}
-                          onChange={(e) => setNodeService(n, { email_service_id: e.target.value })}>
-                    <option value="">Default</option>
-                    {emailSvcs.map((x) => <option key={x.id} value={x.id}>{x.name}{x.configured ? "" : " (incomplete)"}</option>)}
-                  </select>
-                </label>
-              </div>
-              <div className="row" style={{ gap: 8, marginTop: 12 }}>
-                <button className="btn ghost sm" onClick={() => editNode(n)}>Edit</button>
-                {!n.is_self && <button className="btn danger sm" onClick={() => removeNode(n)}>Remove</button>}
-              </div>
-            </Card>
-          );
-        })}
-      </div>
+                </Card>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      {nodes.length === 0 && <Card><div className="muted">No nodes registered.</div></Card>}
       <Workers />
       <NodeBlueprints flash={flash} />
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
+  );
+}
+
+function uptimeShort(s?: number | null): string {
+  if (!s || s <= 0) return "";
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d) return `up ${d}d ${h}h`;
+  if (h) return `up ${h}h ${m}m`;
+  return `up ${m}m`;
+}
+
+type NodeTab = "health" | "processes" | "keys" | "logs" | "tenants";
+const NODE_TABS: { key: NodeTab; label: string; icon: IconName }[] = [
+  { key: "health", label: "System health", icon: "activity" },
+  { key: "processes", label: "Processes & services", icon: "grid" },
+  { key: "keys", label: "Keys & certificates", icon: "lock" },
+  { key: "logs", label: "Logs", icon: "note" },
+  { key: "tenants", label: "Tenant usage", icon: "user" },
+];
+const HISTORY_WINDOWS = ["1h", "6h", "24h", "7d", "30d", "90d"];
+const MAX_LIVE = 60; // ~5 min of 5s live samples
+
+function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onRemove }: {
+  id: string; onBack: () => void; storageSvcs: ServiceObj[]; emailSvcs: ServiceObj[];
+  onEdit: (n: any) => Promise<void> | void;
+  onService: (n: any, patch: { storage_service_id?: string; email_service_id?: string }) => void;
+  onRemove: (n: any) => Promise<void> | void;
+}) {
+  const [node, setNode] = useState<any>(null);
+  const [live, setLive] = useState<any>(null);
+  const [tab, setTab] = useState<NodeTab>("health");
+  const [win, setWin] = useState("24h");
+  const [history, setHistory] = useState<any[]>([]);
+  const [keys, setKeys] = useState<any>(null);
+  const [tenants, setTenants] = useState<any>(null);
+  const [logs, setLogs] = useState<any[]>([]);
+  const [logSource, setLogSource] = useState("app");
+  const [logPaused, setLogPaused] = useState(false);
+  const [toast, setToast] = useState("");
+  const buf = useRef<Record<string, number[]>>({ cpu: [], mem: [], disk: [], net_sent: [], net_recv: [] });
+  const [, force] = useState(0);
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 2800); }
+
+  async function loadNode() { try { setNode(await api.get<any>(`/admin/nodes/${id}`)); } catch { /* ignore */ } }
+  async function loadLive() {
+    try {
+      const l = await api.get<any>(`/admin/nodes/${id}/live`);
+      setLive(l);
+      const push = (k: string, v: number) => {
+        const a = buf.current[k]; a.push(Number(v) || 0); if (a.length > MAX_LIVE) a.shift();
+      };
+      push("cpu", l.cpu_pct); push("mem", l.memory?.pct); push("disk", l.storage?.pct);
+      push("net_sent", l.net?.sent_rate); push("net_recv", l.net?.recv_rate);
+      force((x) => x + 1);
+    } catch { /* offline */ }
+  }
+  async function loadHistory(w: string) { try { setHistory((await api.get<any>(`/admin/nodes/${id}/history?window=${w}`)).series || []); } catch { /* ignore */ } }
+  async function loadKeys() { try { setKeys(await api.get<any>(`/admin/nodes/${id}/keys`)); } catch { /* ignore */ } }
+  async function loadTenants() { try { setTenants(await api.get<any>(`/admin/nodes/${id}/tenants`)); } catch { /* ignore */ } }
+  async function loadLogs() { try { setLogs((await api.get<any>(`/admin/nodes/${id}/logs?source=${logSource}&lines=250`)).lines || []); } catch { /* ignore */ } }
+
+  useEffect(() => { void loadNode(); void loadLive(); void loadKeys(); void loadTenants();
+    const iv = setInterval(loadLive, 5000); const nv = setInterval(loadNode, 15000);
+    return () => { clearInterval(iv); clearInterval(nv); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+  useEffect(() => { void loadHistory(win); const iv = setInterval(() => loadHistory(win), 30000); return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [win, id]);
+  useEffect(() => { if (tab !== "logs") return; void loadLogs();
+    const iv = setInterval(() => { if (!logPaused) void loadLogs(); }, 5000); return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, logSource, logPaused, id]);
+
+  async function ctl(action: string, unit: string, confirmMsg?: string) {
+    if (confirmMsg && !await confirmDialog({ title: "Confirm", message: confirmMsg, tone: "danger", confirmLabel: action })) return;
+    try {
+      const r = await api.post<any>(`/admin/nodes/${id}/control`, { action, unit });
+      flash(r.ok ? `${action} ${unit || ""} ok` : `Failed: ${r.error || "control error"}`);
+      setTimeout(loadLive, 1500);
+    } catch (e) { flash((e as { message?: string }).message || "Control failed"); }
+  }
+
+  if (!node) return (
+    <Card><button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 10 }}>← Nodes</button>
+      <div className="muted">Loading node…</div></Card>
+  );
+
+  const rate = (n?: number) => `${bytes(n || 0)}/s`;
+  const cert = live?.certificate || keys?.certificate;
+  const labels = history.map((p) => { const d = new Date(p.ts.endsWith("Z") ? p.ts : p.ts + "Z"); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; });
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <button className="btn ghost sm" onClick={onBack}>← Nodes</button>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn sm" onClick={async () => { await onEdit(node); await loadNode(); }}>Edit</button>
+          <button className="btn sm" onClick={() => ctl("update", "", "Trigger a software update on this node? It will pull the latest build and restart.")}>
+            <Icon name="clock" size={13} /> Update
+          </button>
+          <button className="btn sm" onClick={() => ctl("restart", "cv-cloud", "Restart the Arkive application on this node?")}>Restart app</button>
+          {!node.is_self && <button className="btn danger sm" onClick={async () => { await onRemove(node); onBack(); }}>Remove</button>}
+        </div>
+      </div>
+
+      <Card style={{ marginBottom: 14 }}>
+        <div className="spread">
+          <div className="row" style={{ gap: 12 }}>
+            <div className="result-icon" style={{ width: 40, height: 40, background: "var(--inset)", color: node.online ? "#35d0a5" : "#8a94a7" }}>
+              <Icon name="server" size={20} />
+            </div>
+            <div>
+              <h3 style={{ margin: 0 }}>{node.name} {node.is_self && <span className="faint" style={{ fontWeight: 400, fontSize: 12 }}>· this node</span>}</h3>
+              <div className="faint" style={{ fontSize: 12 }}>
+                {node.category} · {node.role}{node.region ? ` · ${node.region}` : ""}{node.version ? ` · v${node.version}` : ""}
+                {live?.uptime_seconds ? ` · ${uptimeShort(live.uptime_seconds)}` : ""}
+              </div>
+            </div>
+          </div>
+          <div className="row" style={{ gap: 6 }}>
+            <Pill tone={node.online ? "ok" : "warn"}>{node.online ? "Online" : "Offline"}</Pill>
+            <Pill tone={node.status === "active" ? "info" : "warn"}>{node.status}</Pill>
+            {live?.source === "heartbeat" && <Pill tone="warn">heartbeat only</Pill>}
+          </div>
+        </div>
+        {(node.cloud?.provider && node.cloud.provider !== "unknown") && (
+          <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+            <Pill tone="info"><Icon name="database" size={11} /> {String(node.cloud.provider).toUpperCase()}{node.cloud.region ? ` · ${node.cloud.region}` : ""}</Pill>
+            {node.cloud.instance_type && <span className="faint" style={{ fontSize: 11.5 }}>{node.cloud.instance_type}</span>}
+            {live?.hostname && <span className="faint" style={{ fontSize: 11.5 }}>{live.hostname}</span>}
+            {live?.os && <span className="faint" style={{ fontSize: 11.5 }}>{live.os}</span>}
+          </div>
+        )}
+      </Card>
+
+      <div className="row" style={{ gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+        {NODE_TABS.map((t) => (
+          <button key={t.key} className={`btn sm ${tab === t.key ? "primary" : "ghost"}`} onClick={() => setTab(t.key)}>
+            <Icon name={t.icon} size={13} /> {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "health" && (
+        <>
+          <div className="grid grid-4" style={{ marginBottom: 14 }}>
+            <Card><div style={{ display: "flex", justifyContent: "center" }}><Ring value={live?.cpu_pct} label="CPU" sub={`${live?.cpus || node.cpus || "—"} vCPU`} /></div>
+              <div style={{ marginTop: 6 }}><Sparkline data={buf.current.cpu} width={999} color="#4f7cff" max={100} /></div></Card>
+            <Card><div style={{ display: "flex", justifyContent: "center" }}><Ring value={live?.memory?.pct} label="Memory" sub={live?.memory ? `${bytes(live.memory.used)}/${bytes(live.memory.total)}` : ""} color="#35d0a5" /></div>
+              <div style={{ marginTop: 6 }}><Sparkline data={buf.current.mem} width={999} color="#35d0a5" max={100} /></div></Card>
+            <Card><div style={{ display: "flex", justifyContent: "center" }}><Ring value={live?.storage?.pct} label="Disk" sub={live?.storage ? `${bytes(live.storage.used)}/${bytes(live.storage.total)}` : ""} color="#f5a623" /></div>
+              <div style={{ marginTop: 6 }}><Sparkline data={buf.current.disk} width={999} color="#f5a623" max={100} /></div></Card>
+            <Card>
+              <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>Network</div>
+              <div style={{ fontWeight: 700 }}>↓ {rate(live?.net?.recv_rate)}</div>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>↑ {rate(live?.net?.sent_rate)}</div>
+              <Sparkline data={buf.current.net_recv} width={999} color="#4f7cff" />
+              <Sparkline data={buf.current.net_sent} width={999} color="#8a94a7" />
+              <div className="faint" style={{ fontSize: 10.5, marginTop: 4 }}>Load {(live?.load || node.telemetry?.load || []).join(" ") || "—"}</div>
+            </Card>
+          </div>
+          <Card>
+            <div className="spread" style={{ marginBottom: 10 }}>
+              <h3 style={{ margin: 0, fontSize: 15 }}>Trends</h3>
+              <div className="row" style={{ gap: 4 }}>
+                {HISTORY_WINDOWS.map((w) => (
+                  <button key={w} className={`btn sm ${win === w ? "primary" : "ghost"}`} onClick={() => setWin(w)}>{w}</button>
+                ))}
+              </div>
+            </div>
+            <div className="row" style={{ gap: 14, marginBottom: 6, fontSize: 11.5 }}>
+              <span className="faint"><span style={{ color: "#4f7cff" }}>■</span> CPU</span>
+              <span className="faint"><span style={{ color: "#35d0a5" }}>■</span> Memory</span>
+              <span className="faint"><span style={{ color: "#f5a623" }}>■</span> Disk</span>
+            </div>
+            {history.length ? (
+              <AreaChart height={200} max={100} labels={labels} series={[
+                { name: "cpu", color: "#4f7cff", data: history.map((p) => p.cpu) },
+                { name: "mem", color: "#35d0a5", data: history.map((p) => p.mem) },
+                { name: "disk", color: "#f5a623", data: history.map((p) => p.disk) },
+              ]} />
+            ) : <div className="muted" style={{ fontSize: 12, padding: "24px 0" }}>No history yet — samples accumulate every minute.</div>}
+            {history.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div className="faint" style={{ fontSize: 11.5, marginBottom: 4 }}>Network throughput (bytes/s)</div>
+                <AreaChart height={140} unit="" labels={labels} series={[
+                  { name: "recv", color: "#4f7cff", data: history.map((p) => p.net_recv) },
+                  { name: "sent", color: "#8a94a7", data: history.map((p) => p.net_sent) },
+                ]} />
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+
+      {tab === "processes" && (
+        <>
+          <Card style={{ marginBottom: 14 }}>
+            <h3 style={{ margin: "0 0 4px", fontSize: 15 }}>Managed services</h3>
+            <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>System processes and their state. Controls require the service account to have sudo for systemctl.</div>
+            <table className="table">
+              <thead><tr><th>Service</th><th>State</th><th>Memory</th><th>Startup</th><th></th></tr></thead>
+              <tbody>
+                {(live?.services || []).map((s: any) => (
+                  <tr key={s.unit}>
+                    <td><div style={{ fontWeight: 600 }}>{s.label || s.unit}</div><div className="faint mono" style={{ fontSize: 10.5 }}>{s.unit}</div></td>
+                    <td><Pill tone={s.active === "active" ? "ok" : s.active === "failed" ? "danger" : "warn"}>{s.active}{s.sub_state ? ` · ${s.sub_state}` : ""}</Pill></td>
+                    <td className="faint">{s.memory_bytes ? bytes(s.memory_bytes) : "—"}</td>
+                    <td><Pill tone={s.enabled === "enabled" ? "info" : "warn"}>{s.enabled}</Pill></td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      <button className="btn ghost sm" onClick={() => ctl("restart", s.unit)}>Restart</button>{" "}
+                      {s.active === "active"
+                        ? <button className="btn ghost sm" onClick={() => ctl("stop", s.unit, `Stop ${s.label || s.unit}?`)}>Stop</button>
+                        : <button className="btn ghost sm" onClick={() => ctl("start", s.unit)}>Start</button>}{" "}
+                      {s.enabled === "enabled"
+                        ? <button className="btn ghost sm" onClick={() => ctl("disable", s.unit, `Disable ${s.label || s.unit} at boot?`)}>Disable</button>
+                        : <button className="btn ghost sm" onClick={() => ctl("enable", s.unit)}>Enable</button>}
+                    </td>
+                  </tr>
+                ))}
+                {(!live?.services || live.services.length === 0) && <tr><td colSpan={5} className="muted">Service status unavailable{live?.source === "heartbeat" ? " (node reports via heartbeat only)" : ""}.</td></tr>}
+              </tbody>
+            </table>
+          </Card>
+          <div className="grid grid-2">
+            <Card>
+              <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Top processes</h3>
+              <table className="table">
+                <thead><tr><th>Process</th><th>CPU</th><th>Mem</th><th>RSS</th></tr></thead>
+                <tbody>
+                  {(live?.processes || []).map((p: any, i: number) => (
+                    <tr key={i}><td className="mono" style={{ fontSize: 12 }}>{p.name}</td>
+                      <td className="faint">{p.cpu_pct}%</td><td className="faint">{p.mem_pct}%</td><td className="faint">{bytes(p.rss_bytes)}</td></tr>
+                  ))}
+                  {(!live?.processes || live.processes.length === 0) && <tr><td colSpan={4} className="muted">—</td></tr>}
+                </tbody>
+              </table>
+            </Card>
+            <Card>
+              <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Database (PostgreSQL)</h3>
+              <div className="grid grid-2" style={{ gap: 10 }}>
+                <Mini label="Size on disk" value={live?.db?.size_bytes != null ? bytes(live.db.size_bytes) : "—"} />
+                <Mini label="Active connections" value={live?.db?.connections ?? "—"} />
+                <Mini label="Recovery points" value={(node.telemetry?.recovery_points ?? "—").toLocaleString?.() ?? "—"} />
+                <Mini label="Tenants on node" value={node.tenants} />
+              </div>
+              <div className="divider" />
+              <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>Assigned services</div>
+              <label className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8 }}>
+                <Icon name="database" size={13} /><span className="faint" style={{ fontSize: 12, width: 52 }}>Storage</span>
+                <select className="input sm flex1" value={node.storage_service_id || ""} onChange={(e) => { onService(node, { storage_service_id: e.target.value }); setTimeout(loadNode, 400); }}>
+                  <option value="">Default (env / local)</option>
+                  {storageSvcs.map((x) => <option key={x.id} value={x.id}>{x.name}{x.configured ? "" : " (incomplete)"}</option>)}
+                </select>
+              </label>
+              <label className="row" style={{ gap: 8, alignItems: "center" }}>
+                <Icon name="mail" size={13} /><span className="faint" style={{ fontSize: 12, width: 52 }}>Email</span>
+                <select className="input sm flex1" value={node.email_service_id || ""} onChange={(e) => { onService(node, { email_service_id: e.target.value }); setTimeout(loadNode, 400); }}>
+                  <option value="">Default</option>
+                  {emailSvcs.map((x) => <option key={x.id} value={x.id}>{x.name}{x.configured ? "" : " (incomplete)"}</option>)}
+                </select>
+              </label>
+            </Card>
+          </div>
+        </>
+      )}
+
+      {tab === "keys" && (
+        <div className="grid grid-2">
+          <Card>
+            <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>TLS certificate</h3>
+            {cert ? (cert.reachable ? (
+              <>
+                <div className="row" style={{ gap: 8, marginBottom: 10 }}>
+                  <Pill tone={cert.valid === false ? "danger" : (cert.days_left != null && cert.days_left < 14) ? "warn" : "ok"}>
+                    {cert.valid === false ? "Invalid" : "Valid"}
+                  </Pill>
+                  {cert.days_left != null && <Pill tone={cert.days_left < 14 ? "warn" : "info"}>{cert.days_left} days left</Pill>}
+                </div>
+                <Row2 label="Subject" value={cert.subject?.commonName || "—"} />
+                <Row2 label="Issuer" value={cert.issuer?.organizationName || cert.issuer?.commonName || "—"} />
+                <Row2 label="Expires" value={cert.expires_epoch ? new Date(cert.expires_epoch * 1000).toLocaleString() : "—"} />
+              </>
+            ) : <div className="muted" style={{ fontSize: 12.5 }}>Certificate not reachable{cert.error ? ` · ${cert.error}` : ""}.</div>)
+              : <div className="muted" style={{ fontSize: 12.5 }}>Loading…</div>}
+          </Card>
+          <Card>
+            <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Key integrity</h3>
+            <div className="grid grid-2" style={{ gap: 10 }}>
+              <Mini label="Vault keys" value={keys ? `${keys.vault_keys?.provisioned ?? 0} / ${keys.vault_keys?.total ?? 0}` : "—"} />
+              <Mini label="Post-quantum" value={keys?.pq_hybrid ? "Hybrid" : keys ? "Classical" : "—"} />
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <Row2 label="Command signer" value={keys?.signer_key_id ? String(keys.signer_key_id).slice(0, 20) + "…" : "—"} />
+              <Row2 label="Provisioned" value={keys ? `${keys.vault_keys?.total ? Math.round((keys.vault_keys.provisioned / keys.vault_keys.total) * 100) : 100}% of vaults` : "—"} />
+            </div>
+            <div className="row" style={{ gap: 6, marginTop: 12 }}>
+              <Pill tone={keys?.pq_hybrid ? "ok" : "info"}>{keys?.pq_hybrid ? "ML-KEM / ML-DSA active" : "classical fallback"}</Pill>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {tab === "logs" && (
+        <Card>
+          <div className="spread" style={{ marginBottom: 10 }}>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <h3 style={{ margin: 0, fontSize: 15 }}>Logs</h3>
+              <select className="input sm" value={logSource} onChange={(e) => setLogSource(e.target.value)}>
+                {[["app", "Application"], ["database", "PostgreSQL"], ["proxy", "Reverse proxy"], ["heartbeat", "Heartbeat"], ["system", "System"]].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+            </div>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn ghost sm" onClick={() => setLogPaused((p) => !p)}>{logPaused ? "Resume" : "Pause"}</button>
+              <button className="btn ghost sm" onClick={() => void loadLogs()}>Refresh</button>
+            </div>
+          </div>
+          <div className="mono" style={{ fontSize: 11, background: "var(--bg-elev-2,#0b0f17)", borderRadius: 8, padding: 12, maxHeight: 460, overflow: "auto", lineHeight: 1.5 }}>
+            {logs.length ? logs.map((l, i) => (
+              <div key={i} style={{ color: l.level === "error" ? "#f2545b" : l.level === "warn" ? "#f5a623" : "var(--muted-c,#8a94a7)", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{l.text}</div>
+            )) : <div className="muted">No log output{live?.source === "heartbeat" ? " (unavailable for this node type)" : ""}.</div>}
+          </div>
+        </Card>
+      )}
+
+      {tab === "tenants" && (
+        <Card>
+          <div className="spread" style={{ marginBottom: 8 }}>
+            <h3 style={{ margin: 0, fontSize: 15 }}>Tenant usage on this node</h3>
+            <span className="faint" style={{ fontSize: 12 }}>{tenants?.tenants?.length || 0} tenants · {bytes(tenants?.total_bytes || 0)} total</span>
+          </div>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>Heaviest tenants are highlighted — candidates to rebalance onto another node.</div>
+          <table className="table">
+            <thead><tr><th>Tenant</th><th>Share</th><th>Data</th><th>Objects</th><th>Users</th><th>Recovery pts</th><th>Last activity</th></tr></thead>
+            <tbody>
+              {(tenants?.tenants || []).map((t: any) => (
+                <tr key={t.id} style={t.heavy ? { background: "rgba(242,84,91,.06)" } : undefined}>
+                  <td>
+                    <div style={{ fontWeight: 600 }}>{t.name} {t.heavy && <Pill tone="danger">heavy</Pill>}</div>
+                    <div className="faint" style={{ fontSize: 11 }}>{t.tenant_type}</div>
+                  </td>
+                  <td style={{ minWidth: 90 }}>
+                    <div className="spread faint" style={{ fontSize: 10.5, marginBottom: 3 }}><span>{t.share}%</span></div>
+                    <div style={{ height: 5, borderRadius: 999, background: "var(--inset)", overflow: "hidden" }}>
+                      <div style={{ width: `${Math.min(100, t.share)}%`, height: "100%", background: t.heavy ? "#f2545b" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
+                    </div>
+                  </td>
+                  <td style={{ fontWeight: 600 }}>{bytes(t.bytes)}</td>
+                  <td className="faint">{t.objects.toLocaleString()}</td>
+                  <td className="faint">{t.users}</td>
+                  <td className="faint">{t.recovery_points}</td>
+                  <td className="faint">{t.last_activity ? timeAgo(t.last_activity) : "—"}</td>
+                </tr>
+              ))}
+              {(!tenants?.tenants || tenants.tenants.length === 0) && <tr><td colSpan={7} className="muted">No tenants on this node.</td></tr>}
+            </tbody>
+          </table>
+        </Card>
+      )}
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+}
+
+function Row2({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="spread" style={{ padding: "7px 0", borderBottom: "1px solid var(--border-soft)" }}>
+      <span className="faint" style={{ fontSize: 12 }}>{label}</span>
+      <span style={{ fontSize: 12.5, fontWeight: 500 }}>{value}</span>
+    </div>
   );
 }
 

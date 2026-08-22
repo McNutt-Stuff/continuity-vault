@@ -159,6 +159,20 @@ sync_code() {
   chmod +x "$INSTALL_DIR"/installers/*.sh "$INSTALL_DIR"/updater/*.sh 2>/dev/null || true
 }
 
+setup_node_control() {
+  # Let the service account control its managed units + read the journal so the
+  # admin node console can restart/stop services and stream logs (scoped, no pw).
+  local f=/etc/sudoers.d/cv-cloud
+  : > "$f"
+  for u in cv-cloud postgresql caddy cv-node-heartbeat.timer cv-node-update.timer cv-cloud-update.timer; do
+    for a in start stop restart enable disable; do
+      echo "${CV_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl ${a} ${u}" >> "$f"
+    done
+  done
+  chmod 440 "$f"
+  usermod -aG systemd-journal "${CV_USER}" 2>/dev/null || true
+}
+
 setup_database() {
   local exists
   exists=$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='cvault'")
@@ -413,6 +427,7 @@ fi
 step_always "Validating application"       validate_app
 step_always "Writing configuration"        write_env
 step_always "Recording node marker"        write_node_marker
+step_always "Enabling node control"        setup_node_control
 step_always "Starting control-plane service" install_service
 if [[ "$CV_NODE_ROLE" == "customer-tenant" ]]; then
   step_always "Configuring API-only reverse proxy" configure_caddy_node

@@ -831,20 +831,25 @@ def _mem_info() -> dict | None:
 
 def _self_health(db: Session) -> dict:
     health: dict = {"online": True}
-    path = os.environ.get("CV_OBJECT_STORE") or "/var/lib/continuity-vault"
     try:
-        du = shutil.disk_usage(path if os.path.exists(path) else "/")
-        health["storage"] = {"total": du.total, "used": du.used, "free": du.free}
+        from .. import sysinfo
+        health.update(sysinfo.snapshot())
     except Exception:
-        pass
-    try:
-        health["load"] = [round(x, 2) for x in os.getloadavg()]
-        health["cpus"] = os.cpu_count()
-    except Exception:
-        pass
-    mem = _mem_info()
-    if mem:
-        health["memory"] = mem
+        path = os.environ.get("CV_OBJECT_STORE") or "/var/lib/continuity-vault"
+        try:
+            du = shutil.disk_usage(path if os.path.exists(path) else "/")
+            health["storage"] = {"total": du.total, "used": du.used, "free": du.free,
+                                 "pct": round(du.used / du.total * 100, 1) if du.total else 0}
+        except Exception:
+            pass
+        try:
+            health["load"] = [round(x, 2) for x in os.getloadavg()]
+            health["cpus"] = os.cpu_count()
+        except Exception:
+            pass
+        mem = _mem_info()
+        if mem:
+            health["memory"] = mem
     health["recovery_points"] = db.query(func.count(SnapshotReceipt.id)).scalar()
     return health
 
@@ -872,6 +877,10 @@ def _ensure_self_node(db: Session) -> Node:
     return n
 
 
+_NODE_CATEGORY = {"control-plane": "Control Plane", "customer-tenant": "Customer Nodes",
+                  "public-web": "Public Web"}
+
+
 def _node_view(db: Session, n: Node) -> dict:
     if n.is_self:
         tel, online = _self_health(db), True
@@ -886,11 +895,23 @@ def _node_view(db: Session, n: Node) -> dict:
         s = db.get(ServiceObject, sid)
         return s.name if s else None
 
+    mem = tel.get("memory") or {}
+    stg = tel.get("storage") or {}
+    tenant_count = db.query(func.count(Tenant.id)).filter(Tenant.node_id == n.id).scalar()
     return {
         "id": n.id, "name": n.name, "region": n.region, "role": n.role,
+        "category": _NODE_CATEGORY.get(n.role, "Other"),
         "endpoint": n.endpoint, "status": n.status, "is_self": bool(n.is_self),
         "version": n.version, "online": online, "telemetry": tel,
         "cloud": n.cloud or {},
+        "health": {
+            "cpu_pct": tel.get("cpu_pct"),
+            "mem_pct": mem.get("pct"),
+            "disk_pct": stg.get("pct"),
+        },
+        "cpus": tel.get("cpus"),
+        "uptime_seconds": tel.get("uptime_seconds"),
+        "tenants": int(tenant_count or 0),
         "storage_service_id": n.storage_service_id,
         "email_service_id": n.email_service_id,
         "storage_service": _svc_name(n.storage_service_id),
@@ -1040,6 +1061,182 @@ def delete_node(nid: str,
     audit.record(db, actor=principal.user_id, action="admin.node_removed",
                  category="admin", severity="warning", detail={"name": n.name})
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Node telemetry drill-down: live metrics, history, logs, keys, controls,     #
+# per-tenant usage. Self node runs locally; remote nodes are fleet-proxied.   #
+# --------------------------------------------------------------------------- #
+
+def _node_call(node: Node, path: str, method: str = "GET",
+               params: dict | None = None, json: dict | None = None, timeout: float = 12):
+    import httpx
+    from .site import _fleet_secret
+    url = (node.endpoint or "").rstrip("/") + path
+    with httpx.Client(timeout=timeout) as c:
+        r = c.request(method, url, params=params, json=json,
+                      headers={"Authorization": f"Bearer {_fleet_secret()}"})
+        r.raise_for_status()
+        return r.json()
+
+
+def _remote_capable(n: Node) -> bool:
+    return n.role == "customer-tenant" and bool(n.endpoint)
+
+
+def _node_live(db: Session, n: Node) -> dict:
+    if n.is_self:
+        from .. import sysinfo
+        from .node_sync import _db_stats
+        out = sysinfo.live(cert_host=get_settings().domain)
+        out["db"] = _db_stats(db)
+        return out
+    if _remote_capable(n):
+        try:
+            return _node_call(n, "/nodes/sync/live")
+        except Exception:  # noqa: BLE001
+            pass
+    # public-web / unreachable → last heartbeat snapshot only.
+    tel = dict(n.telemetry or {})
+    tel["processes"] = tel.get("processes", [])
+    tel["services"] = tel.get("services", [])
+    tel["source"] = "heartbeat"
+    return tel
+
+
+@router.get("/nodes/{nid}")
+def node_detail(nid: str, db: Session = Depends(get_db)):
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    if n.is_self:
+        _ensure_self_node(db)
+    return _node_view(db, n)
+
+
+@router.get("/nodes/{nid}/live")
+def node_live_metrics(nid: str, db: Session = Depends(get_db)):
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    return _node_live(db, n)
+
+
+@router.get("/nodes/{nid}/history")
+def node_history(nid: str, window: str = "24h", db: Session = Depends(get_db)):
+    from datetime import timedelta
+    from ..models import NodeMetric
+    hours = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720, "90d": 2160}.get(window, 24)
+    since = _now() - timedelta(hours=hours)
+    rows = (db.query(NodeMetric)
+            .filter(NodeMetric.node_id == nid, NodeMetric.ts >= since)
+            .order_by(NodeMetric.ts.asc()).all())
+    step = max(1, len(rows) // 240)  # cap the payload at ~240 points
+    series = []
+    for i in range(0, len(rows), step):
+        r = rows[i]
+        series.append({"ts": r.ts.isoformat(), "cpu": r.cpu_pct, "mem": r.mem_pct,
+                       "disk": r.disk_pct, "net_sent": r.net_sent_rate,
+                       "net_recv": r.net_recv_rate, "load": r.load1})
+    return {"window": window, "points": len(series), "series": series}
+
+
+@router.get("/nodes/{nid}/logs")
+def node_logs(nid: str, source: str = "app", lines: int = 200, db: Session = Depends(get_db)):
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    if n.is_self:
+        from .. import sysinfo
+        return {"source": source, "lines": sysinfo.logs(source, lines)}
+    if _remote_capable(n):
+        try:
+            return _node_call(n, "/nodes/sync/logs", params={"source": source, "lines": lines})
+        except Exception:  # noqa: BLE001
+            raise HTTPException(502, "node unreachable")
+    raise HTTPException(400, "logs are not available for this node type")
+
+
+@router.get("/nodes/{nid}/keys")
+def node_keys(nid: str, db: Session = Depends(get_db)):
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    if n.is_self:
+        from .. import sysinfo
+        from .node_sync import keys_report
+        out = keys_report(db)
+        out["certificate"] = sysinfo.cert_info(get_settings().domain)
+        return out
+    if _remote_capable(n):
+        try:
+            return _node_call(n, "/nodes/sync/keys")
+        except Exception:  # noqa: BLE001
+            pass
+    return {"vault_keys": {"total": 0, "provisioned": 0}, "certificate": {"reachable": False}}
+
+
+class NodeControl(BaseModel):
+    action: str
+    unit: str = ""
+
+
+@router.post("/nodes/{nid}/control")
+def node_control(nid: str, body: NodeControl,
+                 principal: security.Principal = Depends(security.require_platform_admin),
+                 db: Session = Depends(get_db)):
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    audit.record(db, actor=principal.user_id, action="admin.node_control",
+                 category="admin", severity="warning",
+                 detail={"node": n.name, "action": body.action, "unit": body.unit})
+    if n.is_self:
+        from .. import sysinfo
+        return sysinfo.control(body.action, body.unit,
+                               get_settings().node_role or "control-plane")
+    if _remote_capable(n):
+        try:
+            return _node_call(n, "/nodes/sync/control", method="POST",
+                              json={"action": body.action, "unit": body.unit})
+        except Exception:  # noqa: BLE001
+            raise HTTPException(502, "node unreachable")
+    raise HTTPException(400, "controls are not available for this node type")
+
+
+@router.get("/nodes/{nid}/tenants")
+def node_tenants(nid: str, db: Session = Depends(get_db)):
+    """Per-tenant usage on a node — to spot the heaviest tenants (rebalancing)."""
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    tenants = db.query(Tenant).filter(Tenant.node_id == nid).all()
+    # The control-plane node also serves every tenant not pinned to a node.
+    if n.is_self and n.role == "control-plane":
+        tenants = tenants + db.query(Tenant).filter(Tenant.node_id.is_(None)).all()
+    rows = []
+    for t in tenants:
+        objects = db.query(func.count(distinct(SearchDocument.object_id))).filter(
+            SearchDocument.tenant_id == t.id).scalar() or 0
+        used = db.query(func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0)).filter(
+            SnapshotReceipt.tenant_id == t.id).scalar() or 0
+        users = db.query(func.count(User.id)).filter(User.tenant_id == t.id).scalar() or 0
+        rps = db.query(func.count(SnapshotReceipt.id)).filter(
+            SnapshotReceipt.tenant_id == t.id).scalar() or 0
+        last = db.query(func.max(SnapshotReceipt.created_at)).filter(
+            SnapshotReceipt.tenant_id == t.id).scalar()
+        rows.append({"id": t.id, "name": t.name, "tenant_type": t.tenant_type or "dedicated",
+                     "objects": int(objects), "bytes": int(used), "users": int(users),
+                     "recovery_points": int(rps),
+                     "last_activity": last.isoformat() if last else None})
+    total = sum(r["bytes"] for r in rows)
+    for r in rows:
+        r["share"] = round(r["bytes"] / total * 100, 1) if total else 0.0
+        # Heavy = a disproportionate share of the node's footprint.
+        r["heavy"] = bool(total and r["bytes"] and
+                          r["share"] >= max(30.0, (100.0 / max(1, len(rows))) * 2.5))
+    rows.sort(key=lambda r: -r["bytes"])
+    return {"node": n.name, "total_bytes": total, "tenants": rows}
 
 
 # --------------------------------------------------------------------------- #

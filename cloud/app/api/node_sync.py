@@ -26,6 +26,7 @@ from sqlalchemy import DateTime
 from sqlalchemy.orm import Session
 
 from .. import keybroker
+from ..config import get_settings
 from ..db import get_db
 from ..models import (
     Appliance,
@@ -255,3 +256,89 @@ def push(body: PushPayload, authorization: str = Header(default=""),
             counts["appliances"] += 1
     db.commit()
     return {"ok": True, **counts}
+
+
+# --------------------------------------------------------------------------- #
+# Node telemetry — live metrics, logs, controls, key/cert health.             #
+# The control plane calls these on remote nodes (fleet-authed) and runs the    #
+# same logic locally for its own (self) node.                                  #
+# --------------------------------------------------------------------------- #
+
+def _db_stats(db: Session) -> dict:
+    from sqlalchemy import text
+    out: dict = {}
+    try:
+        out["size_bytes"] = int(db.execute(
+            text("SELECT pg_database_size(current_database())")).scalar() or 0)
+        out["connections"] = int(db.execute(
+            text("SELECT count(*) FROM pg_stat_activity")).scalar() or 0)
+    except Exception:
+        pass  # sqlite dev / permission — best-effort
+    return out
+
+
+def keys_report(db: Session) -> dict:
+    """Key + crypto integrity for the tenants whose data lives on this node."""
+    from .. import fleet
+    from ..models import Vault
+    from cv_crypto.provider import get_provider
+    vaults = db.query(Vault).all()
+    provisioned = 0
+    for v in vaults:
+        try:
+            if keybroker.key_metadata(v.id).get("provisioned"):
+                provisioned += 1
+        except Exception:
+            pass
+    try:
+        signer_id = fleet.cloud_public_bundle().get("keyId")
+    except Exception:
+        signer_id = None
+    prov = get_provider()
+    return {
+        "vault_keys": {"total": len(vaults), "provisioned": provisioned},
+        "pq_hybrid": bool(getattr(prov, "pq_available", False)),
+        "signer_key_id": signer_id,
+    }
+
+
+@router.get("/live")
+def node_live(authorization: str = Header(default=""), db: Session = Depends(get_db)):
+    _require_fleet(authorization)
+    from .. import sysinfo
+    s = get_settings()
+    out = sysinfo.live(cert_host=s.domain)
+    out["db"] = _db_stats(db)
+    return out
+
+
+@router.get("/logs")
+def node_logs(source: str = "app", lines: int = 200,
+              authorization: str = Header(default="")):
+    _require_fleet(authorization)
+    from .. import sysinfo
+    return {"source": source, "lines": sysinfo.logs(source, lines)}
+
+
+@router.get("/keys")
+def node_keys(authorization: str = Header(default=""), db: Session = Depends(get_db)):
+    _require_fleet(authorization)
+    from .. import sysinfo
+    s = get_settings()
+    out = keys_report(db)
+    out["certificate"] = sysinfo.cert_info(s.domain)
+    return out
+
+
+class ControlReq(BaseModel):
+    action: str
+    unit: str = ""
+
+
+@router.post("/control")
+def node_control(body: ControlReq, authorization: str = Header(default="")):
+    _require_fleet(authorization)
+    from .. import sysinfo
+    s = get_settings()
+    return sysinfo.control(body.action, body.unit, s.node_role or "control-plane")
+

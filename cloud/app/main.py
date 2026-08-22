@@ -116,6 +116,11 @@ def startup() -> None:
     else:
         start_scheduler()
 
+    # The control plane samples the whole fleet's health into 90-day history.
+    if role == "control-plane":
+        from .workers.telemetry import start_telemetry_sampler
+        start_telemetry_sampler()
+
     # Verbose sync diagnostics when enabled (per-source fetch/ingest/errors).
     if settings.sync_debug:
         import logging
