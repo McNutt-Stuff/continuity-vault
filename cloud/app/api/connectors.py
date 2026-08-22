@@ -116,8 +116,13 @@ _SOURCE_TYPE = {
 
 
 @router.get("/catalog")
-def catalog(tenant: Tenant = Depends(security.get_tenant)):
+def catalog(tenant: Tenant = Depends(security.get_tenant),
+            db: Session = Depends(get_db)):
     from .. import platform_config
+    from ..models import SourceConfig
+    # Admin family overrides (Sources page) win over the built-in grouping.
+    fam_override = {sc.connector_type: sc.family
+                    for sc in db.query(SourceConfig).all() if sc.family}
     out = []
     for c in ALL_CONNECTORS:
         spec = c.oauth_spec()
@@ -135,7 +140,7 @@ def catalog(tenant: Tenant = Depends(security.get_tenant)):
             "authType": spec.auth_type,
             "icon": spec.icon,
             "color": spec.color,
-            "family": _SOURCE_FAMILY.get(ctype, "Other"),
+            "family": fam_override.get(ctype, _SOURCE_FAMILY.get(ctype, "Other")),
             "category": _SOURCE_TYPE.get(ctype, "Other"),
             "docTypes": spec.doc_types,
             "mode": mode,
@@ -329,15 +334,36 @@ def link_with_token(connector_type: str, body: TokenLinkRequest,
 def list_accounts(principal: security.Principal = Depends(security.get_principal),
                   tenant: Tenant = Depends(security.get_tenant),
                   db: Session = Depends(get_db)):
+    from ..models import SearchDocument
     # Data partitioning: a user only sees the sources they linked.
     accounts = db.query(ConnectorAccount).filter(
         ConnectorAccount.tenant_id == tenant.id,
         ConnectorAccount.owner_user_id == principal.user_id).all()
+    # Protected data size per account: sum of the latest version of each object in
+    # the account's collections (deduped by object_id so versions aren't double-counted).
+    coll_to_acct = {cid: aid for cid, aid in db.query(
+        Collection.id, Collection.connector_account_id).filter(
+        Collection.tenant_id == tenant.id).all()}
+    bytes_by_acct: dict[str, int] = {}
+    if coll_to_acct:
+        seen: set[tuple] = set()
+        rows = (db.query(SearchDocument.collection_id, SearchDocument.object_id,
+                         SearchDocument.size_bytes)
+                .filter(SearchDocument.tenant_id == tenant.id,
+                        SearchDocument.collection_id.in_(list(coll_to_acct.keys())))
+                .order_by(SearchDocument.created_at.desc()).all())
+        for cid, oid, sz in rows:
+            aid = coll_to_acct.get(cid)
+            if not aid or (aid, oid) in seen:
+                continue
+            seen.add((aid, oid))
+            bytes_by_acct[aid] = bytes_by_acct.get(aid, 0) + int(sz or 0)
     return [{"id": a.id, "connector_type": a.connector_type,
              "account_label": a.account_label, "auth_status": a.auth_status,
              "active": bool(a.active),
              "last_sync_at": a.last_sync_at.isoformat() if a.last_sync_at else None,
              "last_object_count": a.last_object_count,
+             "protected_bytes": bytes_by_acct.get(a.id, 0),
              "last_error": a.last_error,
              "last_error_at": a.last_error_at.isoformat() if a.last_error_at else None,
              "needs_reauth": a.auth_status == "needs-reauth",

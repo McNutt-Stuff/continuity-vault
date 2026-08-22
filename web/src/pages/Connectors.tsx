@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
-import { Card, Pill, timeAgo, Loading } from "../components/ui";
+import { Card, Pill, timeAgo, Loading, bytes } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, formDialog, notify } from "../components/dialog";
@@ -29,6 +29,7 @@ interface Account {
   active?: boolean;
   last_sync_at: string | null;
   last_object_count?: number | null;
+  protected_bytes?: number | null;
   last_error?: string | null;
   last_error_at?: string | null;
   needs_reauth?: boolean;
@@ -406,9 +407,11 @@ export default function Connectors() {
                 <div style={{ fontWeight: 600 }}>{a.account_label}</div>
                 <div className="faint" style={{ fontSize: 12 }}>
                   {c?.displayName ?? a.connector_type} · last sync {timeAgo(a.last_sync_at)}
-                  {a.last_object_count != null
-                    ? ` · ${a.last_object_count.toLocaleString()} object${a.last_object_count === 1 ? "" : "s"} collected`
-                    : ""}
+                  {a.protected_bytes != null && a.protected_bytes > 0
+                    ? ` · ${bytes(a.protected_bytes)} protected`
+                    : (a.last_object_count != null
+                        ? ` · ${a.last_object_count.toLocaleString()} object${a.last_object_count === 1 ? "" : "s"} collected`
+                        : "")}
                 </div>
                 {err && (
                   <div style={{ fontSize: 12, color: "var(--warn)", marginTop: 3, display: "flex", gap: 6, alignItems: "center" }}>

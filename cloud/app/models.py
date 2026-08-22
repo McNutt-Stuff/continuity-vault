@@ -84,6 +84,9 @@ class User(Base):
     email_verified = Column(Boolean, default=False)
     status = Column(String, default="active")
     feature_flags = Column(JSON, default=dict)  # per-user capability flags (admin-set)
+    # Shared-tenant personal accounts own their protection destinations here (the
+    # tenant is a pool of unrelated accounts); org tenants use Tenant.protection_options.
+    protection_options = Column(JSON, default=list)
     last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 
@@ -669,6 +672,7 @@ class SourceConfig(Base):
     connector_type = Column(String, primary_key=True)
     enabled = Column(Boolean, default=True)
     config_object_id = Column(String, nullable=True)
+    family = Column(String, nullable=True)  # admin override of the default source family grouping
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 

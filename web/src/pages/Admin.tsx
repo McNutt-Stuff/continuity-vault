@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { api } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
+import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { promptDialog, formDialog, confirmDialog, notify } from "../components/dialog";
 import { Ring, Sparkline, AreaChart } from "../components/charts";
 
@@ -1989,7 +1990,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 interface ConfigKey { secret: boolean; set: boolean; value: string }
 interface ConfigObj { id: string; name: string; kind: string; keys: Record<string, ConfigKey>; updated_at?: string }
-interface SourceSlot { type: string; label: string; kind: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean }
+interface SourceSlot { type: string; label: string; kind: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean; icon: string; color: string; family: string; category: string }
 interface DraftRow { key: string; value: string; secret: boolean; set: boolean }
 interface ServiceKind { kind: string; label: string; category: string; credential_keys: string[]; settings: string[]; setting_defaults?: Record<string, string>; required: string[] }
 interface ServiceObj { id: string; name: string; kind: string; kind_label: string; category: string; enabled: boolean; config_object_id: string | null; settings: Record<string, string>; setting_keys: string[]; credential_keys: string[]; configured: boolean; updated_at?: string }
@@ -2115,34 +2116,81 @@ function SourcesAdmin() {
   }
   useEffect(() => { void load(); }, []);
 
-  async function setSource(s: SourceSlot, patch: { enabled?: boolean; config_object_id?: string | null }) {
+  async function setSource(s: SourceSlot, patch: { enabled?: boolean; config_object_id?: string | null; family?: string }) {
     try { await api.put(`/admin/sources/${s.type}`, patch); await load(); } catch { flash("Update failed"); }
   }
+
+  async function editFamily(s: SourceSlot) {
+    const families = [...new Set(sources.map((x) => x.family).filter(Boolean))].sort();
+    const r = await formDialog({
+      title: `Family for ${s.label}`,
+      message: "Group this source under a family, or type a new family to create one.",
+      confirmLabel: "Save",
+      fields: [
+        { name: "family", label: "Family", defaultValue: s.family,
+          options: families.map((f) => ({ label: f, value: f })) },
+        { name: "new_family", label: "…or add a new family", placeholder: "e.g. Financial" },
+      ],
+    });
+    if (!r) return;
+    const family = (r.new_family || "").trim() || r.family;
+    if (family && family !== s.family) { await setSource(s, { family }); flash("Family updated"); }
+  }
+
+  // Group sources by family, families sorted, "Other" last.
+  const families = [...new Set(sources.map((s) => s.family || "Other"))]
+    .sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
 
   return (
     <>
       <Card>
         <h3 style={{ marginTop: 0 }}>Sources</h3>
-        <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>Enable each integration and link the configuration object that supplies its credentials.</div>
-        <table className="table">
-          <thead><tr><th>Source</th><th>Required keys</th><th>Enabled</th><th>Configuration</th><th>Status</th></tr></thead>
-          <tbody>
-            {sources.map((s) => (
-              <tr key={s.type}>
-                <td><div style={{ fontWeight: 600 }}>{s.label}</div><div className="faint" style={{ fontSize: 11 }}>{s.type} · {s.kind}</div></td>
-                <td className="faint" style={{ fontSize: 11.5 }}>{s.keys.join(", ")}</td>
-                <td><input type="checkbox" checked={s.enabled} onChange={(e) => setSource(s, { enabled: e.target.checked })} /></td>
-                <td>
-                  <select className="input sm" value={s.config_object_id || ""} onChange={(e) => setSource(s, { config_object_id: e.target.value })}>
-                    <option value="">— none —</option>
-                    {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-                  </select>
-                </td>
-                <td><Pill tone={s.configured ? "ok" : "warn"}>{s.configured ? "Configured" : "Not set"}</Pill></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 16 }}>
+          Enable each integration and link the configuration object that supplies its credentials.
+          Sources are grouped by family — change a source's family to regroup it (this also applies on the customer catalog).
+        </div>
+        <div className="stack" style={{ gap: 20 }}>
+          {families.map((fam) => (
+            <div key={fam}>
+              <div className="row" style={{ gap: 8, marginBottom: 8, alignItems: "center" }}>
+                <div className="nav-section" style={{ padding: 0 }}>{fam}</div>
+                <span className="faint" style={{ fontSize: 11 }}>{sources.filter((s) => (s.family || "Other") === fam).length}</span>
+              </div>
+              <table className="table">
+                <thead><tr><th>Source</th><th>Enabled</th><th>Configuration</th><th>Status</th><th></th></tr></thead>
+                <tbody>
+                  {sources.filter((s) => (s.family || "Other") === fam).map((s) => {
+                    const brand = brandForSource(s.type);
+                    return (
+                      <tr key={s.type}>
+                        <td>
+                          <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                            <div className="result-icon" style={{ width: 30, height: 30, background: brand ? "var(--inset)" : s.color }}>
+                              {brand ? <BrandIcon name={brand} size={16} /> : <Icon name={s.icon as IconName} size={15} />}
+                            </div>
+                            <div>
+                              <div style={{ fontWeight: 600 }}>{s.label}</div>
+                              <div className="faint" style={{ fontSize: 11 }}>{s.type} · {s.category}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td><input type="checkbox" checked={s.enabled} onChange={(e) => setSource(s, { enabled: e.target.checked })} /></td>
+                        <td>
+                          <select className="input sm" value={s.config_object_id || ""} onChange={(e) => setSource(s, { config_object_id: e.target.value })}>
+                            <option value="">— none —</option>
+                            {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                          </select>
+                        </td>
+                        <td><Pill tone={s.configured ? "ok" : "warn"}>{s.configured ? "Configured" : "Not set"}</Pill></td>
+                        <td><button className="btn ghost sm" onClick={() => editFamily(s)}>Change family</button></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
       </Card>
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>

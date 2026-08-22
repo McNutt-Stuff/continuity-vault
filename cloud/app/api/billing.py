@@ -9,13 +9,13 @@ license, and their desired appliances.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .. import audit, security
 from ..db import get_db
-from ..models import PricingConfig, SearchDocument, Tenant, Vault
+from ..models import PricingConfig, SearchDocument, Tenant, User, Vault
 from .dashboard import _OBJECT_BUCKETS, _bucket_for
 
 router = APIRouter(prefix="/billing", tags=["billing"])
@@ -297,6 +297,22 @@ def _user_usage(db: Session, user) -> tuple[int, int, dict]:
     return total, used_bytes, by_bucket
 
 
+def user_protection_options(user, tenant: Tenant) -> list[str]:
+    """Protection destinations for this account. Shared-tenant personal accounts
+    each own their selection (the tenant is a pool of unrelated accounts); org
+    tenants share the tenant-wide selection."""
+    if user is not None and (tenant.tenant_type or "dedicated") == "shared":
+        return list(user.protection_options or [])
+    return list(tenant.protection_options or [])
+
+
+def plan_view(db: Session, user, tenant: Tenant) -> dict:
+    """Shared accounts see their own per-account plan; org members see the tenant plan."""
+    if (tenant.tenant_type or "dedicated") == "shared":
+        return user_plan(db, user, tenant)
+    return _compute_plan(db, tenant)
+
+
 def user_plan(db: Session, user, tenant: Tenant) -> dict:
     """Per-account billing via the canonical pricing. Shared-tenant accounts are
     pay-as-you-go on the Personal base plan (charged on used data); members of an
@@ -308,7 +324,7 @@ def user_plan(db: Session, user, tenant: Tenant) -> dict:
     out = _price_breakdown(
         p, plan=plan,
         licensed_bytes=used_bytes if shared else int(tenant.licensed_bytes or 0),
-        options=list(tenant.protection_options or []),
+        options=list(user.protection_options or []) if shared else list(tenant.protection_options or []),
         appliance_plan=[] if shared else list(tenant.appliance_plan or []),
         used_bytes=used_bytes, by_bucket=by_bucket,
         charge_on="used" if shared else "licensed")
@@ -318,9 +334,10 @@ def user_plan(db: Session, user, tenant: Tenant) -> dict:
 
 
 @router.get("/plan")
-def get_plan(tenant: Tenant = Depends(security.get_tenant),
+def get_plan(principal: security.Principal = Depends(security.get_principal),
+             tenant: Tenant = Depends(security.get_tenant),
              db: Session = Depends(get_db)):
-    return _compute_plan(db, tenant)
+    return plan_view(db, db.get(User, principal.user_id), tenant)
 
 
 class PlanUpdate(BaseModel):
@@ -331,10 +348,23 @@ class PlanUpdate(BaseModel):
 
 @router.put("/plan")
 def update_plan(body: PlanUpdate,
-                principal: security.Principal = Depends(security.require_security_admin),
+                principal: security.Principal = Depends(security.get_principal),
                 tenant: Tenant = Depends(security.get_tenant),
                 db: Session = Depends(get_db)):
     valid = {t["id"] for t in STORAGE_TIERS}
+    user = db.get(User, principal.user_id)
+    # Shared-tenant personal accounts each manage their own protection destinations
+    # (no org role required); org tenants keep the security-admin-gated tenant-wide plan.
+    if (tenant.tenant_type or "dedicated") == "shared":
+        if body.options is not None:
+            user.protection_options = [o for o in body.options if o in valid]
+        db.commit()
+        audit.record(db, actor=principal.user_id, action="billing.plan_updated",
+                     tenant_id=tenant.id, resource=user.id,
+                     detail={"options": user.protection_options})
+        return plan_view(db, user, tenant)
+    if not (security.is_org_admin(principal.role) or principal.is_platform_admin):
+        raise HTTPException(403, "security-admin role required")
     if body.options is not None:
         tenant.protection_options = [o for o in body.options if o in valid]
     if body.licensed_tb is not None:
@@ -352,4 +382,4 @@ def update_plan(body: PlanUpdate,
                  tenant_id=tenant.id, resource=tenant.id,
                  detail={"options": tenant.protection_options,
                          "licensed_bytes": tenant.licensed_bytes})
-    return _compute_plan(db, tenant)
+    return plan_view(db, user, tenant)

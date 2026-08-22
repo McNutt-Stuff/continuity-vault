@@ -87,6 +87,7 @@ def _apply_additive_migrations() -> None:
         # One account per email address, platform-wide.
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_email ON users (email)",
         "ALTER TABLE users ADD COLUMN feature_flags JSON",
+        "ALTER TABLE users ADD COLUMN protection_options JSON",
         "ALTER TABLE tenants ADD COLUMN feature_flags JSON",
         "ALTER TABLE connector_accounts ADD COLUMN active BOOLEAN DEFAULT true",
         "ALTER TABLE sync_jobs ADD COLUMN node_id VARCHAR",
@@ -108,6 +109,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE tenants ADD COLUMN licensed_bytes BIGINT DEFAULT 0",
         "ALTER TABLE tenants ADD COLUMN protection_options JSON",
         "ALTER TABLE tenants ADD COLUMN appliance_plan JSON",
+        "ALTER TABLE source_configs ADD COLUMN family VARCHAR",
         "ALTER TABLE pricing_config ADD COLUMN license_plans JSON",
         "ALTER TABLE email_config ADD COLUMN aws_access_key_id VARCHAR",
         "ALTER TABLE email_config ADD COLUMN aws_secret_encrypted VARCHAR",

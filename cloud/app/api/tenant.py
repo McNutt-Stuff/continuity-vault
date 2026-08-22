@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from .. import audit, keybroker, security
 from ..config import get_settings
 from ..db import get_db
-from ..models import Appliance, ApplianceStorage, Collection, Tenant, Vault
+from ..models import Appliance, ApplianceStorage, Collection, Tenant, User, Vault
+from .billing import user_protection_options
 
 router = APIRouter(prefix="/tenant", tags=["tenant"])
 
@@ -86,7 +87,8 @@ def destination_options():
 
 
 @router.get("/storage-targets")
-def storage_targets(tenant: Tenant = Depends(security.get_tenant),
+def storage_targets(principal: security.Principal = Depends(security.get_principal),
+                    tenant: Tenant = Depends(security.get_tenant),
                     db: Session = Depends(get_db)):
     """Concrete, selectable storage objects for source→vault mappings.
 
@@ -95,9 +97,9 @@ def storage_targets(tenant: Tenant = Depends(security.get_tenant),
     (``store:<id>``, e.g. "My Home Appliance · Built-In Storage").
     """
     settings = get_settings()
-    # Feature gating: only offer the storage tiers the tenant has enabled in
-    # Protection Setup. A tenant that hasn't chosen yet (empty) sees everything.
-    enabled = set(tenant.protection_options or [])
+    # Feature gating: only offer the storage tiers the account has enabled in
+    # Protection Setup. Not chosen yet (empty) sees everything.
+    enabled = set(user_protection_options(db.get(User, principal.user_id), tenant))
     def _on(tier: str) -> bool:
         return not enabled or tier in enabled
     targets: list[dict] = []
@@ -139,6 +141,7 @@ def get_tenant_info(principal: security.Principal = Depends(security.get_princip
     vaults = (db.query(Vault)
               .filter(Vault.tenant_id == tenant.id,
                       Vault.owner_user_id == principal.user_id).all())
+    user = db.get(User, principal.user_id)
     return {
         "id": tenant.id,
         "name": tenant.name,
@@ -147,7 +150,7 @@ def get_tenant_info(principal: security.Principal = Depends(security.get_princip
         "tenant_type": tenant.tenant_type or "dedicated",
         "org_enabled": security.org_enabled(tenant.tenant_type or "dedicated"),
         "key_ownership_model": tenant.key_ownership_model,
-        "protection_options": tenant.protection_options or [],
+        "protection_options": user_protection_options(user, tenant),
         "licensed_bytes": int(tenant.licensed_bytes or 0),
         "role": principal.role,
         "can_admin": security.is_org_admin(principal.role) and security.org_enabled(tenant.tenant_type or "dedicated"),

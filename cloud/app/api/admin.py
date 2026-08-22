@@ -1463,18 +1463,26 @@ def delete_config_object(oid: str,
 
 
 def _source_slots() -> list[dict]:
-    """Every platform integration that can link to a Config Object."""
+    """Every OAuth platform integration that can link to a Config Object, enriched
+    with its brand icon/colour + default family/category for the admin Sources page.
+    (Amazon SES is a Service Object, not a source, so it is not listed here.)"""
     from ..connectors import get_connector, oauth
+    from .connectors import _SOURCE_FAMILY, _SOURCE_TYPE
     slots: list[dict] = []
     for ct in sorted(oauth.OAUTH_TYPES):
         conn = get_connector(ct)
-        label = conn.oauth_spec().display_name if conn else ct
-        slots.append({"type": ct, "label": label, "kind": "oauth",
-                      "keys": ["client_id", "client_secret"],
-                      "required": ["client_id", "client_secret"]})
-    slots.append({"type": "ses", "label": "Amazon SES (email delivery)", "kind": "ses",
-                  "keys": ["aws_access_key_id", "aws_secret_access_key", "region", "from_email"],
-                  "required": ["aws_access_key_id", "aws_secret_access_key"]})
+        spec = conn.oauth_spec() if conn else None
+        slots.append({
+            "type": ct,
+            "label": spec.display_name if spec else ct,
+            "kind": "oauth",
+            "icon": (spec.icon if spec else "link") or "link",
+            "color": (spec.color if spec else "#6b7280") or "#6b7280",
+            "family": _SOURCE_FAMILY.get(ct, "Other"),
+            "category": _SOURCE_TYPE.get(ct, "Other"),
+            "keys": ["client_id", "client_secret"],
+            "required": ["client_id", "client_secret"],
+        })
     return slots
 
 
@@ -1487,6 +1495,9 @@ def list_sources(db: Session = Depends(get_db)):
         vals = _decrypt_values(db.get(ConfigObject, sc.config_object_id)) if (sc and sc.config_object_id) else {}
         out.append({
             "type": slot["type"], "label": slot["label"], "kind": slot["kind"],
+            "icon": slot["icon"], "color": slot["color"], "category": slot["category"],
+            # Admin family override wins over the built-in default grouping.
+            "family": (sc.family if sc and sc.family else slot["family"]),
             "keys": slot["keys"],
             "enabled": True if sc is None else bool(sc.enabled),
             "config_object_id": sc.config_object_id if sc else None,
@@ -1498,6 +1509,7 @@ def list_sources(db: Session = Depends(get_db)):
 class SourceUpdate(BaseModel):
     enabled: bool | None = None
     config_object_id: str | None = None
+    family: str | None = None
 
 
 @router.put("/sources/{ctype}")
@@ -1516,6 +1528,8 @@ def update_source(ctype: str, body: SourceUpdate,
         sc.enabled = body.enabled
     if body.config_object_id is not None:
         sc.config_object_id = body.config_object_id or None
+    if body.family is not None:
+        sc.family = body.family.strip() or None
     db.commit()
     platform_config.invalidate()
     emailer.invalidate_config_cache()

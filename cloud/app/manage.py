@@ -120,6 +120,107 @@ def kill_job(job_id: str) -> None:
         print(f"Requested cancel for job {job_id}. It stops at its next checkpoint.")
 
 
+# -- Scheduled backup cadence (why a source does/doesn't auto-run) -----------
+
+
+def _fmt_delta(minutes: float) -> str:
+    m = int(round(minutes))
+    if m <= 0:
+        return "now"
+    if m < 60:
+        return f"{m}m"
+    if m < 1440:
+        return f"{m // 60}h{m % 60:02d}m" if m % 60 else f"{m // 60}h"
+    return f"{m // 1440}d{(m % 1440) // 60:02d}h" if (m % 1440) // 60 else f"{m // 1440}d"
+
+
+def list_schedule(all_rows: bool = False) -> None:
+    """Print the effective backup schedule the scheduler would act on, mirroring
+    its own decision logic, so you can see each mapping's cadence, last run,
+    next-due and — for anything that never runs — WHY it's skipped."""
+    from .config import get_settings
+    from .connectors import get_connector
+    from .workers.scheduler import _effective_interval, _now
+
+    settings = get_settings()
+    federated = settings.node_sync_scope
+    is_cp = (settings.node_role or "control-plane") == "control-plane"
+    skip_assigned = federated and is_cp
+    default_minutes = max(1, settings.sync_interval_minutes)
+    now = _now()
+
+    if not settings.sync_enabled:
+        print("!! scheduler DISABLED (CV_SYNC_ENABLED is false) — nothing auto-runs\n")
+
+    with SessionLocal() as db:
+        tenants = {t.id: t for t in db.query(Tenant).all()}
+        assigned = {tid for tid, t in tenants.items() if t.node_id}
+        rows = db.query(Collection).order_by(Collection.source_type).all()
+        if not rows:
+            print("(no mappings)")
+            return
+        print(f"{'SOURCE':16} {'TENANT':20} {'CADENCE':>8} {'LAST RUN':>10} "
+              f"{'NEXT':>8}  STATUS")
+        shown = 0
+        for c in rows:
+            tenant = tenants.get(c.tenant_id)
+            tname = (tenant.name if tenant else "-")[:20]
+            conn = get_connector(c.source_type)
+            caps = conn.capabilities() if conn else None
+
+            reason = None          # why it won't auto-run this cycle (or ever)
+            cadence = "-"
+            nxt = "-"
+            if conn is None:
+                reason = "unknown source"
+            elif skip_assigned and c.tenant_id in assigned:
+                reason = f"on node ({tenant.node_id[:8] if tenant else '?'})"
+            elif caps and caps.requires_agent:
+                reason = "agent push (endpoint cadence)"
+            elif caps and caps.picker:
+                reason = "picker (reminder only)"
+            elif not c.connector_account_id:
+                reason = "no linked account"
+            else:
+                acct = db.get(ConnectorAccount, c.connector_account_id)
+                if acct is not None and acct.active is False:
+                    reason = "account inactive"
+                else:
+                    interval = _effective_interval(c, default_minutes, caps)
+                    if interval <= 0:
+                        cadence = "manual"
+                        reason = "manual only (interval=0)"
+                    else:
+                        cadence = _fmt_delta(interval)
+                        if c.last_backup_run_at is None:
+                            nxt = "now"
+                        else:
+                            last = c.last_backup_run_at
+                            if last.tzinfo is not None:
+                                last = last.replace(tzinfo=None)
+                            due_in = interval - (now - last).total_seconds() / 60
+                            nxt = "now" if due_in <= 0 else _fmt_delta(due_in)
+
+            last_txt = "never"
+            if c.last_backup_run_at is not None:
+                last = c.last_backup_run_at
+                if last.tzinfo is not None:
+                    last = last.replace(tzinfo=None)
+                last_txt = _fmt_delta((now - last).total_seconds() / 60) + " ago"
+
+            runs = reason is None
+            status = "auto" if runs else reason
+            if runs or all_rows:
+                print(f"{c.source_type[:16]:16} {tname:20} {cadence:>8} "
+                      f"{last_txt:>10} {nxt:>8}  {status}")
+                shown += 1
+        if not all_rows:
+            hidden = len(rows) - shown
+            if hidden:
+                print(f"\n({hidden} mapping(s) not auto-scheduled — pass --all to "
+                      f"see them and the reason)")
+
+
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="app.manage")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -133,6 +234,10 @@ def main(argv=None) -> None:
     lj.add_argument("--all", action="store_true", help="include finished jobs")
     kj = sub.add_parser("kill-job", help="cancel a running worker job")
     kj.add_argument("job_id")
+    ls = sub.add_parser("list-schedule",
+                        help="show the backup cadence + why sources do/don't auto-run")
+    ls.add_argument("--all", action="store_true",
+                    help="include mappings that never auto-run (with the reason)")
     args = p.parse_args(argv)
     if args.cmd == "add-admin":
         add_admin(args.email, args.name)
@@ -144,6 +249,8 @@ def main(argv=None) -> None:
         list_jobs(all_jobs=args.all)
     elif args.cmd == "kill-job":
         kill_job(args.job_id)
+    elif args.cmd == "list-schedule":
+        list_schedule(all_rows=args.all)
 
 
 if __name__ == "__main__":
