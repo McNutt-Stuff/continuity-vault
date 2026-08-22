@@ -5,16 +5,16 @@ import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 
 interface Event {
-  kind: string; source: string; source_type?: string; destination?: string;
+  kind: string; source: string; source_username?: string | null; source_type?: string; destination?: string;
   destination_label?: string; object_count?: number; total_bytes?: number; status: string;
   snapshot_id?: string; at?: string; command?: string;
 }
 interface Job {
-  id: string; source: string; source_type?: string; kind: string;
+  id: string; source: string; source_username?: string | null; source_type?: string; kind: string;
   status: string; processed: number; total: number; message: string;
 }
 interface SourceError {
-  account_id: string; source: string; source_type?: string;
+  account_id: string; source: string; source_username?: string | null; source_type?: string;
   needs_reauth?: boolean; error?: string; at?: string | null;
 }
 interface Activity {
@@ -88,7 +88,7 @@ export default function ActivityPage() {
                 <SourceGlyph type={s.source_type} size={18} />
               </div>
               <div className="flex1">
-                <div style={{ fontWeight: 600 }}>{s.source}</div>
+                <div style={{ fontWeight: 600 }}>{s.source}{s.source_username && s.source_username !== s.source ? <span className="faint" style={{ fontWeight: 400 }}> ({s.source_username})</span> : null}</div>
                 <div className="faint" style={{ fontSize: 12 }}>
                   {s.needs_reauth ? "Needs re-authorization" : "Last sync failed"}
                   {s.error ? ` — ${s.error.slice(0, 160)}` : ""} {s.at ? `· ${ago(s.at)}` : ""}
@@ -111,7 +111,7 @@ export default function ActivityPage() {
                   <SourceGlyph type={j.source_type} size={18} />
                 </div>
                 <div className="flex1">
-                  <div style={{ fontWeight: 600 }}>{j.source}</div>
+                  <div style={{ fontWeight: 600 }}>{j.source}{j.source_username && j.source_username !== j.source ? <span className="faint" style={{ fontWeight: 400 }}> ({j.source_username})</span> : null}</div>
                   <div className="spread faint" style={{ fontSize: 12, margin: "4px 0" }}>
                     <span>{j.message || "Working…"}</span>
                     {j.total > 0 && <span>{j.processed}/{j.total}</span>}
@@ -154,7 +154,7 @@ export default function ActivityPage() {
               <SourceGlyph type={e.source_type} size={18} />
             </div>
             <div className="flex1">
-              <div style={{ fontWeight: 600 }}>{e.source}</div>
+              <div style={{ fontWeight: 600 }}>{e.source}{e.source_username && e.source_username !== e.source ? <span className="faint" style={{ fontWeight: 400 }}> ({e.source_username})</span> : null}</div>
               <div className="faint" style={{ fontSize: 12.5 }}>
                 <Icon name={isAppliance(e.destination) ? "server" : "cloud"} size={12} /> {destLabel(e)}
                 {" · "}{e.object_count ?? 0} objects · {bytes(e.total_bytes ?? 0)}

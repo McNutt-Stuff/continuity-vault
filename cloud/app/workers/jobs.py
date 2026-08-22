@@ -6,6 +6,7 @@ into a ``SyncJob`` row so the Activity view and Data Map can show them in flight
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -31,6 +32,49 @@ logger = logging.getLogger("cv.jobs")
 # In-process set of job ids an operator asked to stop. The runner also checks the
 # DB status ("cancelling") so a cancel issued from another process is honoured.
 _CANCEL_REQUESTS: set = set()
+
+_JOB_LOG_MAX = 800  # keep the tail; a full-library crawl can log a lot
+
+
+class _JobLogCapture(logging.Handler):
+    """Buffers THIS thread's ``cv.*`` log records so they can be attached to a
+    SyncJob as a verbose process log (success and failure)."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.INFO)
+        self._tid = threading.get_ident()
+        self.records: list[dict] = []
+        self.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.thread != self._tid:
+            return  # ignore other concurrent jobs sharing the cv logger
+        try:
+            self.records.append({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "level": record.levelname,
+                "msg": self.format(record)[:1000],
+            })
+            if len(self.records) > _JOB_LOG_MAX * 2:
+                del self.records[:_JOB_LOG_MAX]  # trim so memory stays bounded
+        except Exception:
+            pass
+
+
+@contextlib.contextmanager
+def capture_job_log():
+    """Attach a thread-scoped capture handler to the ``cv`` logger for the duration
+    of a job so all its INFO/WARN/ERROR records become the job's process log."""
+    cvlog = logging.getLogger("cv")
+    if cvlog.level == logging.NOTSET or cvlog.level > logging.INFO:
+        cvlog.setLevel(logging.INFO)  # ensure INFO records reach handlers
+    cap = _JobLogCapture()
+    cvlog.addHandler(cap)
+    try:
+        yield cap
+    finally:
+        cvlog.removeHandler(cap)
+
 
 
 def request_cancel(job_id: str) -> None:
@@ -99,46 +143,54 @@ def _run(job_id: str, destinations: Optional[List[str]]) -> None:
             db.commit()
 
         base = {"n": 0}
-        try:
-            receipt = None
-            # Big-history sources (e.g. Google Photos) crawl in resumable chunks:
-            # keep pulling while the persisted cursor reports more, so one job can
-            # span hours without holding the whole library in memory. Guarded by a
-            # wall-clock and iteration cap so a runaway source can't loop forever.
-            deadline = time.time() + 6 * 3600
-            for _ in range(100000):
-                if _cancel_requested(db, job.id):
-                    raise JobCancelled()
-                receipt = run_backup(db, collection, destinations, progress=progress)
-                base["n"] = job.processed  # carry the running total into the next chunk
-                db.refresh(collection)
-                if not crawl_has_more(db, collection) or time.time() > deadline:
-                    break
-                job.message = f"Crawling… {job.processed:,} items so far"
-                db.commit()
-                time.sleep(1)  # gentle pacing between chunks
-            job.snapshot_id = getattr(receipt, "snapshot_id", None)
-            job.total = job.total or job.processed
-            job.processed = max(job.processed, 0)
-            job.status = "done"
-            job.message = "Completed"
-        except JobCancelled:
-            db.rollback()
-            j = db.get(SyncJob, job_id)
-            if j is not None:
-                j.status = "cancelled"
-                j.message = "Stopped by operator"
-                j.finished_at = _now()
-                db.commit()
-            _CANCEL_REQUESTS.discard(job_id)
-            logger.info("backup job %s cancelled", job_id)
-            return
-        except Exception as exc:  # noqa: BLE001 - surfaced to the UI
-            logger.exception("backup job %s failed", job_id)
-            job.status = "failed"
-            job.error = str(exc)[:400]
-            job.message = "Failed"
+        with capture_job_log() as cap:
+            logger.info("backup job %s starting: %s (%s) → %s", job.id, collection.name,
+                        collection.source_type,
+                        destinations or collection.destinations or ["cv-cloud"])
+            try:
+                receipt = None
+                # Big-history sources (e.g. Google Photos) crawl in resumable chunks:
+                # keep pulling while the persisted cursor reports more, so one job can
+                # span hours without holding the whole library in memory. Guarded by a
+                # wall-clock and iteration cap so a runaway source can't loop forever.
+                deadline = time.time() + 6 * 3600
+                for _ in range(100000):
+                    if _cancel_requested(db, job.id):
+                        raise JobCancelled()
+                    receipt = run_backup(db, collection, destinations, progress=progress)
+                    base["n"] = job.processed  # carry the running total into the next chunk
+                    db.refresh(collection)
+                    if not crawl_has_more(db, collection) or time.time() > deadline:
+                        break
+                    job.message = f"Crawling… {job.processed:,} items so far"
+                    db.commit()
+                    time.sleep(1)  # gentle pacing between chunks
+                job.snapshot_id = getattr(receipt, "snapshot_id", None)
+                job.total = job.total or job.processed
+                job.processed = max(job.processed, 0)
+                job.status = "done"
+                job.message = "Completed"
+                logger.info("backup job %s complete: %d processed, snapshot=%s",
+                            job.id, job.processed, job.snapshot_id or "—")
+            except JobCancelled:
+                db.rollback()
+                j = db.get(SyncJob, job_id)
+                if j is not None:
+                    j.status = "cancelled"
+                    j.message = "Stopped by operator"
+                    j.log = (cap.records or [])[-_JOB_LOG_MAX:]
+                    j.finished_at = _now()
+                    db.commit()
+                _CANCEL_REQUESTS.discard(job_id)
+                logger.info("backup job %s cancelled", job_id)
+                return
+            except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+                logger.exception("backup job %s failed", job_id)
+                job.status = "failed"
+                job.error = str(exc)[:400]
+                job.message = "Failed"
         _CANCEL_REQUESTS.discard(job_id)
+        job.log = (cap.records or [])[-_JOB_LOG_MAX:]
         job.finished_at = _now()
         db.commit()
 

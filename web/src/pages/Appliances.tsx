@@ -22,7 +22,7 @@ interface StoredItem {
   object_count: number; total_bytes: number; recoverable: boolean; at: string;
 }
 interface SourceSummary {
-  source: string; vault: string; source_type: string;
+  source: string; source_username?: string | null; vault: string; source_type: string;
   recovery_points: number; objects: number; bytes: number;
   recoverable: number; storage: string; last_at: string;
 }
@@ -540,7 +540,7 @@ function StoredDataCard({ a }: { a: Appliance }) {
               {brand ? <BrandIcon name={brand} size={17} /> : <Icon name="database" size={16} />}
             </div>
             <div className="flex1">
-              <div style={{ fontWeight: 600 }}>{s.source}</div>
+              <div style={{ fontWeight: 600 }}>{s.source}{s.source_username && s.source_username !== s.source ? <span className="faint" style={{ fontWeight: 400 }}> ({s.source_username})</span> : null}</div>
               <div className="faint" style={{ fontSize: 11.5 }}>
                 Vault: {s.vault} · {s.storage} · updated {timeAgo(s.last_at)}
               </div>

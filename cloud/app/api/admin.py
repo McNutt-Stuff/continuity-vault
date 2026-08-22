@@ -998,6 +998,7 @@ def _job_view(j, tenants, colls, accounts, nodes) -> dict:
         "node": nodes.get(j.node_id) if j.node_id else "Control plane",
         "processed": j.processed or 0, "total": j.total or 0,
         "message": j.message or "", "error": j.error or "",
+        "has_log": bool(j.log),
         "started_at": j.started_at.isoformat() if j.started_at else None,
         "finished_at": j.finished_at.isoformat() if j.finished_at else None,
         "created_at": j.created_at.isoformat() if j.created_at else None,
@@ -1023,6 +1024,18 @@ def list_jobs(active: bool = False, limit: int = 100, db: Session = Depends(get_
     active_n = db.query(func.count(SyncJob.id)).filter(SyncJob.status.in_(_ACTIVE)).scalar()
     return {"active": int(active_n or 0),
             "jobs": [_job_view(j, tenants, colls, accounts, nodes) for j in jobs]}
+
+
+@router.get("/jobs/{job_id}/log")
+def job_log(job_id: str, db: Session = Depends(get_db)):
+    """Full verbose process log for one job (success or failure), including any
+    log shipped up from a customer node."""
+    j = db.get(SyncJob, job_id)
+    if not j:
+        raise HTTPException(404, "job not found")
+    return {"id": j.id, "status": j.status, "error": j.error or "",
+            "message": j.message or "", "trigger": j.trigger or "manual",
+            "log": j.log or []}
 
 
 @router.post("/jobs/{job_id}/cancel")

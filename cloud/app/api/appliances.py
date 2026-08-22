@@ -228,12 +228,21 @@ def _stored_data(db: Session, a: Appliance, allowed_vault_ids: list[str] | None 
                 return acc.account_label
         return c.name
 
+    def _srcuser(cid: str) -> str | None:
+        c = colls.get(cid)
+        if c and c.connector_account_id:
+            acc = db.get(ConnectorAccount, c.connector_account_id)
+            if acc:
+                return acc.account_username
+        return None
+
     # Each snapshot is committed to <data_path>/protected/<snapshot_id> on disk.
     base = (a.telemetry or {}).get("data_path") or ""
     protected = f"{base.rstrip('/')}/protected" if base else "protected"
     items = [{
         "snapshot_id": r.snapshot_id,
         "source": _src(r.collection_id),
+        "source_username": _srcuser(r.collection_id),
         "storage": stores.get(r.destination, "Built-In Storage"),
         "path": f"{protected}/{r.snapshot_id}",
         "object_count": r.object_count,
@@ -253,7 +262,8 @@ def _stored_data(db: Session, a: Appliance, allowed_vault_ids: list[str] | None 
         key = f"{source}\u241f{vault}"
         s = summary.get(key)
         if s is None:
-            s = {"source": source, "vault": vault, "source_type": source_type,
+            s = {"source": source, "source_username": _srcuser(r.collection_id),
+                 "vault": vault, "source_type": source_type,
                  "recovery_points": 0, "objects": 0, "bytes": 0,
                  "recoverable": 0, "storage": stores.get(r.destination, "Built-In Storage"),
                  "last_at": r.created_at.isoformat()}

@@ -199,36 +199,42 @@ def _process_collection(db, c: Collection, now: datetime, default_minutes: int) 
                   message="Scheduled backup", started_at=now)
     db.add(job)
     db.commit()
-    try:
-        run_backup(db, c)
-        logger.info("scheduled backup: collection=%s (%s) source=%s "
-                    "destinations=%s interval=%dmin", c.id, c.name,
-                    c.source_type, c.destinations, interval)
-        c.last_backup_run_at = now
-        acct = db.get(ConnectorAccount, c.connector_account_id)
-        job.status = "done"
-        job.processed = job.total = int((acct.last_object_count or 0) if acct else 0)
-        job.message = "Scheduled backup complete"
-        job.finished_at = _now()
-        db.commit()
-        return (1, 1, 1)
-    except Exception as exc:  # noqa: BLE001 - isolate per-source failures
-        db.rollback()
-        # run_backup already recorded the error on the source; still stamp the run
-        # time so a persistently-failing source doesn't retry every tick.
+    from .jobs import capture_job_log
+    with capture_job_log() as cap:
+        logger.info("scheduled backup starting: %s (%s) → %s interval=%dmin",
+                    c.name, c.source_type, c.destinations or ["cv-cloud"], interval)
         try:
+            run_backup(db, c)
+            logger.info("scheduled backup complete: collection=%s (%s) source=%s "
+                        "destinations=%s", c.id, c.name, c.source_type, c.destinations)
             c.last_backup_run_at = now
-            job = db.get(SyncJob, job.id)
-            if job is not None:
-                job.status = "failed"
-                job.error = str(exc)[:500]
-                job.finished_at = _now()
+            acct = db.get(ConnectorAccount, c.connector_account_id)
+            job.status = "done"
+            job.processed = job.total = int((acct.last_object_count or 0) if acct else 0)
+            job.message = "Scheduled backup complete"
+            job.log = (cap.records or [])[-800:]
+            job.finished_at = _now()
             db.commit()
-        except Exception:
+            return (1, 1, 1)
+        except Exception as exc:  # noqa: BLE001 - isolate per-source failures
+            logger.exception("scheduled backup failed for collection %s (%s)",
+                             c.id, c.source_type)
+            records = list(cap.records or [])
             db.rollback()
-        logger.warning("scheduled backup failed for collection %s (%s): %s",
-                       c.id, c.source_type, exc)
-        return (1, 1, 0)
+            # run_backup already recorded the error on the source; still stamp the run
+            # time so a persistently-failing source doesn't retry every tick.
+            try:
+                c.last_backup_run_at = now
+                job = db.get(SyncJob, job.id)
+                if job is not None:
+                    job.status = "failed"
+                    job.error = str(exc)[:500]
+                    job.log = records[-800:]
+                    job.finished_at = _now()
+                db.commit()
+            except Exception:
+                db.rollback()
+            return (1, 1, 0)
 
 
 def run_due() -> int:

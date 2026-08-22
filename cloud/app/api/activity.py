@@ -76,6 +76,14 @@ def activity(limit: int = 40,
                 return acc.account_label
         return c.name
 
+    def _source_username(collection_id: str) -> str | None:
+        c = colls.get(collection_id)
+        if c and c.connector_account_id:
+            acc = db.get(ConnectorAccount, c.connector_account_id)
+            if acc:
+                return acc.account_username
+        return None
+
     def _source_type(collection_id: str) -> str:
         c = colls.get(collection_id)
         return c.source_type if c else ""
@@ -91,6 +99,7 @@ def activity(limit: int = 40,
         "kind": "backup",
         "collection_id": rc.collection_id,
         "source": _source_label(rc.collection_id),
+        "source_username": _source_username(rc.collection_id),
         "source_type": _source_type(rc.collection_id),
         "destination": rc.destination,
         "destination_label": dest_label(rc.destination),
@@ -127,6 +136,7 @@ def activity(limit: int = 40,
         "id": j.id,
         "collection_id": j.collection_id,
         "source": _source_label(j.collection_id),
+        "source_username": _source_username(j.collection_id),
         "source_type": _source_type(j.collection_id),
         "kind": j.kind,
         "status": j.status,
@@ -143,6 +153,7 @@ def activity(limit: int = 40,
         "kind": "source-error",
         "account_id": a.id,
         "source": a.account_label,
+        "source_username": a.account_username,
         "source_type": a.connector_type,
         "needs_reauth": a.auth_status == "needs-reauth",
         "error": a.last_error,

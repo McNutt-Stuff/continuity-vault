@@ -1,7 +1,7 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api";
-import { Card, Pill, Stat, bytes, timeAgo } from "../components/ui";
+import { Card, Pill, Stat, bytes, timeAgo, fmtAbsolute } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { FilterBar } from "../components/FilterBar";
@@ -881,6 +881,9 @@ function Nodes() {
                     {hbar("MEM", n.health?.mem_pct)}
                     {hbar("DISK", n.health?.disk_pct)}
                   </div>
+                  <div className="faint" style={{ fontSize: 11, marginBottom: 6 }} title={n.last_heartbeat_at ? fmtAbsolute(n.last_heartbeat_at) : "never"}>
+                    <Icon name="clock" size={11} /> Last seen {n.last_heartbeat_at ? timeAgo(n.last_heartbeat_at) : "never"}
+                  </div>
                   <div className="spread faint" style={{ fontSize: 11 }}>
                     <span>{n.tenants || 0} tenant{n.tenants === 1 ? "" : "s"}</span>
                     <span>{n.status !== "active" ? n.status : uptimeShort(n.uptime_seconds)}</span>
@@ -1273,6 +1276,7 @@ function Row2({ label, value }: { label: string; value: ReactNode }) {
 function Workers() {
   const [data, setData] = useState<{ active: number; jobs: any[] } | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const [logJob, setLogJob] = useState<any | null>(null);
   async function load() {
     try {
       setData(await api.get<{ active: number; jobs: any[] }>(
@@ -1282,6 +1286,10 @@ function Workers() {
   useEffect(() => { void load(); const iv = setInterval(load, 4000); return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showAll]);
+
+  async function openLog(j: any) {
+    try { setLogJob(await api.get<any>(`/admin/jobs/${j.id}/log`)); } catch { /* ignore */ }
+  }
 
   async function cancel(j: any) {
     const ok = await confirmDialog({
@@ -1327,15 +1335,40 @@ function Workers() {
               <td><Pill tone={tone(j.status)}>{j.status}</Pill></td>
               <td className="faint">{(j.processed || 0).toLocaleString()}{j.total ? ` / ${(j.total).toLocaleString()}` : ""}</td>
               <td style={{ textAlign: "right" }}>
-                {isActive(j.status) && j.status !== "cancelling"
-                  ? <button className="btn danger sm" onClick={() => cancel(j)}>Stop</button>
-                  : <span className="faint" style={{ fontSize: 11 }}>{j.status === "cancelling" ? "stopping…" : ""}</span>}
+                <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
+                  {j.has_log && <button className="btn ghost sm" onClick={() => openLog(j)}><Icon name="note" size={12} /> Log</button>}
+                  {isActive(j.status) && j.status !== "cancelling"
+                    ? <button className="btn danger sm" onClick={() => cancel(j)}>Stop</button>
+                    : <span className="faint" style={{ fontSize: 11 }}>{j.status === "cancelling" ? "stopping…" : ""}</span>}
+                </div>
               </td>
             </tr>
           ))}
           {jobs.length === 0 && <tr><td colSpan={7} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
         </tbody>
       </table>
+      {logJob && (
+        <div className="modal-backdrop" onClick={() => setLogJob(null)}>
+          <div className="modal-panel" style={{ width: "min(860px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <div>
+                <h3 style={{ margin: 0 }}>Process log</h3>
+                <div className="faint" style={{ fontSize: 12 }}>{logJob.trigger === "schedule" ? "Scheduled" : "Manual"} · {logJob.status}</div>
+              </div>
+              <button className="btn ghost sm" onClick={() => setLogJob(null)}>Close</button>
+            </div>
+            <div className="modal-body">
+              {logJob.error && <div className="faint" style={{ color: "var(--danger)", fontSize: 12.5, marginBottom: 8 }}>{logJob.error}</div>}
+              <pre className="mono" style={{ fontSize: 11.5, whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0, maxHeight: "60vh", overflow: "auto" }}>
+                {(logJob.log || []).length === 0
+                  ? "No log captured for this job."
+                  : (logJob.log || []).map((l: any) =>
+                      `${fmtAbsolute(l.ts)}  ${(l.level || "INFO").padEnd(7)} ${l.msg}`).join("\n")}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }

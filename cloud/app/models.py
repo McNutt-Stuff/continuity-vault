@@ -500,6 +500,9 @@ class SyncJob(Base):
     total = Column(Integer, default=0)
     message = Column(String, default="")
     error = Column(String, default="")
+    # Verbose per-run process log (list of {ts, level, msg}) for success + failure,
+    # shipped node -> control plane with the rest of the job telemetry.
+    log = Column(JSON, default=list)
     snapshot_id = Column(String, nullable=True)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
