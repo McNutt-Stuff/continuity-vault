@@ -190,6 +190,12 @@ h3 { font-size: 15px; }
   border: 1px solid var(--border); border-radius: 10px; padding: 11px 15px; }
 .search-bar input { background: none; border: none; outline: none; color: var(--text);
   font-size: 15px; width: 100%; }
+.filter-bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+.filter-bar-search { flex: 1; min-width: 240px; padding: 8px 13px; }
+.filter-bar-search input { font-size: 14px; }
+.filter-bar-clear { background: none; border: none; color: var(--faint); cursor: pointer;
+  font-size: 18px; line-height: 1; padding: 0 2px; }
+.filter-bar-select { min-width: 130px; }
 .result-row { display: flex; align-items: center; gap: 14px; padding: 13px 14px;
   border: 1px solid var(--border-soft); border-radius: 10px; margin-bottom: 8px; cursor: pointer;
   background: var(--bg-elev); }
@@ -362,6 +368,7 @@ h3 { font-size: 15px; }
 
 /* Promise-based confirm/prompt/notify dialogs */
 .dialog-panel { width: min(460px, 100%); }
+.dialog-panel-wide { width: min(760px, 100%); }
 .dialog-head { display: flex; align-items: center; gap: 12px; padding: 18px 20px 4px; }
 .dialog-icon { display: inline-flex; align-items: center; justify-content: center;
   width: 34px; height: 34px; border-radius: 10px; flex: none; }

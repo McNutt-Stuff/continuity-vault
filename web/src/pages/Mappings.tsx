@@ -6,7 +6,7 @@ import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, notify } from "../components/dialog";
 import { FolderPicker, FolderNode } from "../components/FolderPicker";
 
-interface Account { id: string; connector_type: string; account_label: string; }
+interface Account { id: string; connector_type: string; account_label: string; account_username?: string | null; }
 interface Agent { id: string; name: string; hostname: string; collectors: string[]; }
 interface Vault { id: string; name: string; }
 interface StorageTarget {
@@ -26,7 +26,7 @@ interface Mapping {
   id: string; name: string; source_type: string; source_display: string;
   source_label: string; is_agent: boolean; vault_id: string; agent_id: string | null;
   vault_name: string | null; connector_account_id: string | null;
-  account_label: string | null; sensitivity: string; destinations: string[];
+  account_label: string | null; account_username?: string | null; sensitivity: string; destinations: string[];
   index_fields: string[]; available_fields: string[];
   last_backup_at: string | null; last_object_count: number; last_recoverable: boolean;
   offpolicy_points: number;
@@ -309,6 +309,22 @@ export default function Mappings() {
 
   return (
     <>
+      {loaded && targets.length === 0 && (
+        <Card style={{ marginBottom: 16, borderColor: "var(--warn)" }}>
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            <div className="result-icon" style={{ background: "var(--inset)", color: "var(--warn)" }}>
+              <Icon name="alert" size={18} />
+            </div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>Choose where to protect your data first</div>
+              <div className="faint" style={{ fontSize: 12.5 }}>
+                You haven't enabled any storage destinations. Pick one in <a href="/onboarding">Protection Setup</a> before mapping any data.
+              </div>
+            </div>
+            <a className="btn primary sm" href="/onboarding"><Icon name="grid" size={13} /> Protection Setup</a>
+          </div>
+        </Card>
+      )}
       <Card style={{ marginBottom: 16 }}>
         <h2 style={{ marginBottom: 4 }}>Map sources to vaults</h2>
         <div className="muted" style={{ fontSize: 13, marginBottom: 14 }}>
@@ -325,7 +341,7 @@ export default function Mappings() {
               {accounts.length > 0 && (
                 <optgroup label="Cloud connectors">
                   {accounts.map((a) => (
-                    <option key={a.id} value={`acct:${a.id}`}>{a.account_label} ({a.connector_type})</option>
+                    <option key={a.id} value={`acct:${a.id}`}>{a.account_label}{a.account_username && a.account_username !== a.account_label ? ` (${a.account_username})` : ""} · {a.connector_type}</option>
                   ))}
                 </optgroup>
               )}
@@ -395,7 +411,7 @@ export default function Mappings() {
               </div>
               <div className="flex1">
                 <div style={{ fontWeight: 600 }}>
-                  {m.source_label} <span className="faint">→</span> {m.vault_name ?? m.vault_id}
+                  {m.source_label}{m.account_username && m.account_username !== m.source_label ? <span className="faint" style={{ fontWeight: 400 }}> ({m.account_username})</span> : null} <span className="faint">→</span> {m.vault_name ?? m.vault_id}
                 </div>
                 <div className="faint" style={{ fontSize: 11.5, marginTop: 2 }}>
                   {m.source_display}{m.is_agent ? " · desktop agent" : ""}

@@ -4,6 +4,7 @@ import { api } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
+import { FilterBar } from "../components/FilterBar";
 import { promptDialog, formDialog, confirmDialog, notify } from "../components/dialog";
 import { Ring, Sparkline, AreaChart } from "../components/charts";
 
@@ -52,6 +53,34 @@ function extractFlags(r: Record<string, string>, cat: FlagDef[]): Record<string,
     out[fl.name] = v === "inherit" ? null : v === "true";
   }
   return out;
+}
+
+// Shared user-edit dialog (used from a tenant's Users list AND the global Users tab).
+// Returns true when a change was saved.
+async function editUserDialog(u: any, isShared: boolean): Promise<boolean> {
+  const fields: any[] = isShared
+    ? [
+        { name: "first_name", label: "First name", defaultValue: u.first_name || "" },
+        { name: "last_name", label: "Last name", defaultValue: u.last_name || "" },
+        { name: "phone", label: "Phone", defaultValue: u.phone || "" },
+      ]
+    : [
+        { name: "display_name", label: "Name", defaultValue: u.display_name },
+        { name: "role", label: "Role", defaultValue: u.role,
+          options: ["owner", "security-admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
+      ];
+  fields.push({ name: "status", label: "Status", defaultValue: u.status,
+    options: ["active", "suspended"].map((v) => ({ label: v, value: v })) });
+  // Per-account feature flags. A tenant-level block wins regardless of this.
+  fields.push(...flagFields(await flagCatalog(), u.feature_flags, "user"));
+  const r = await formDialog({ title: `Edit ${u.email}`, confirmLabel: "Save", fields, wide: true });
+  if (!r) return false;
+  const flags = extractFlags(r, await flagCatalog());
+  await api.put(`/admin/users/${u.id}`, r);
+  if (Object.keys(flags).length) {
+    await api.put(`/admin/users/${u.id}/flags`, { feature_flags: flags });
+  }
+  return true;
 }
 
 // Left-nav sections for the admin console (M365-style, grouped).
@@ -315,27 +344,27 @@ function Users() {
         </span>
       </div>
       <Card style={{ marginBottom: 14 }}>
-        <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <input className="input" placeholder="Search name, email, phone…" value={q}
-            onChange={(e) => setQ(e.target.value)} style={{ minWidth: 240, flex: 1 }} />
-          <select className="input" value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
-            <option value="">All tenants</option>
-            {tenants.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-          </select>
-          <select className="input" value={typeF} onChange={(e) => setTypeF(e.target.value)}>
-            <option value="">All types</option>
-            {["shared", "dedicated", "restricted", "internal"].map((v) =>
-              <option key={v} value={v}>{TENANT_TYPE_LABEL[v]}</option>)}
-          </select>
-          <select className="input" value={plan} onChange={(e) => setPlan(e.target.value)}>
-            <option value="">All plans</option>
-            {plans.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-          <select className="input" value={statusF} onChange={(e) => setStatusF(e.target.value)}>
-            <option value="">Any status</option>
-            {["active", "suspended"].map((v) => <option key={v} value={v}>{v}</option>)}
-          </select>
-        </div>
+        <FilterBar
+          query={q} onQuery={setQ} placeholder="Search name, email, phone…"
+          filters={[
+            { value: tenantId, onChange: setTenantId, options: [
+              { label: "All tenants", value: "" },
+              ...tenants.map((t) => ({ label: t.name, value: t.id })),
+            ] },
+            { value: typeF, onChange: setTypeF, options: [
+              { label: "All types", value: "" },
+              ...["shared", "dedicated", "restricted", "internal"].map((v) => ({ label: TENANT_TYPE_LABEL[v], value: v })),
+            ] },
+            { value: plan, onChange: setPlan, options: [
+              { label: "All plans", value: "" },
+              ...plans.map((p) => ({ label: p.name, value: p.id })),
+            ] },
+            { value: statusF, onChange: setStatusF, options: [
+              { label: "Any status", value: "" },
+              ...["active", "suspended"].map((v) => ({ label: v, value: v })),
+            ] },
+          ]}
+        />
       </Card>
       <Card>
         <table className="table">
@@ -349,6 +378,7 @@ function Users() {
             {th("usage", "Usage", "right")}
             {th("billing", "Billing", "right")}
             {th("status", "Status")}
+            <th></th>
           </tr></thead>
           <tbody>
             {sorted.map((u) => (
@@ -368,9 +398,12 @@ function Users() {
                 <td style={{ textAlign: "right" }}>{bytes(u.usage_bytes || 0)}</td>
                 <td style={{ textAlign: "right" }}>{money(u.billing_monthly || 0)}/mo</td>
                 <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
+                <td style={{ textAlign: "right" }}>
+                  <button className="btn ghost sm" onClick={async () => { try { if (await editUserDialog(u, u.tenant_type === "shared")) void load(); } catch { /* ignore */ } }}>Edit</button>
+                </td>
               </tr>
             ))}
-            {sorted.length === 0 && <tr><td colSpan={9} className="muted">{loading ? "Loading…" : "No users match."}</td></tr>}
+            {sorted.length === 0 && <tr><td colSpan={10} className="muted">{loading ? "Loading…" : "No users match."}</td></tr>}
           </tbody>
         </table>
       </Card>
@@ -417,7 +450,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
         ...flagFields(await flagCatalog(), t.feature_flags, "tenant"),
       );
     }
-    const r = await formDialog({ title: "Edit tenant", confirmLabel: "Save", fields });
+    const r = await formDialog({ title: "Edit tenant", confirmLabel: "Save", fields, wide: true });
     if (!r) return;
     const flags = extractFlags(r, await flagCatalog());
     const payload: any = { ...r };
@@ -467,32 +500,8 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
     } catch (e) { flash((e as { message?: string }).message || "Could not create user"); }
   }
   async function editUser(u: any) {
-    const isShared = t.tenant_type === "shared";
-    const fields: any[] = isShared
-      ? [
-          { name: "first_name", label: "First name", defaultValue: u.first_name || "" },
-          { name: "last_name", label: "Last name", defaultValue: u.last_name || "" },
-          { name: "phone", label: "Phone", defaultValue: u.phone || "" },
-        ]
-      : [
-          { name: "display_name", label: "Name", defaultValue: u.display_name },
-          { name: "role", label: "Role", defaultValue: u.role,
-            options: ["owner", "security-admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
-        ];
-    fields.push({ name: "status", label: "Status", defaultValue: u.status,
-      options: ["active", "suspended"].map((v) => ({ label: v, value: v })) });
-    // Per-account feature flags (personal accounts on shared tenants, or any user
-    // on a dedicated tenant). A tenant-level block wins regardless of this.
-    fields.push(...flagFields(await flagCatalog(), u.feature_flags, "user"));
-    const r = await formDialog({ title: `Edit ${u.email}`, confirmLabel: "Save", fields });
-    if (!r) return;
-    const flags = extractFlags(r, await flagCatalog());
     try {
-      await api.put(`/admin/users/${u.id}`, r);
-      if (Object.keys(flags).length) {
-        await api.put(`/admin/users/${u.id}/flags`, { feature_flags: flags });
-      }
-      flash("User updated"); await load();
+      if (await editUserDialog(u, t.tenant_type === "shared")) { flash("User updated"); await load(); }
     } catch { flash("Update failed"); }
   }
   async function resetUser(u: any) {
@@ -1304,15 +1313,16 @@ function Workers() {
         Background backup / sync jobs across all tenants. Stopping a worker aborts it at its next chunk boundary.
       </div>
       <table className="table">
-        <thead><tr><th>Source</th><th>Tenant</th><th>Node</th><th>Status</th><th>Progress</th><th></th></tr></thead>
+        <thead><tr><th>Source</th><th>Tenant</th><th>Trigger</th><th>Node</th><th>Status</th><th>Progress</th><th></th></tr></thead>
         <tbody>
           {jobs.map((j) => (
             <tr key={j.id}>
               <td>
-                <div style={{ fontWeight: 600 }}>{j.source}</div>
+                <div style={{ fontWeight: 600 }}>{j.source}{j.source_username && j.source_username !== j.source ? <span className="faint" style={{ fontWeight: 400 }}> ({j.source_username})</span> : null}</div>
                 <div className="faint" style={{ fontSize: 11 }}>{j.source_type || j.kind}{j.message ? ` · ${j.message}` : ""}</div>
               </td>
               <td className="faint">{j.tenant}</td>
+              <td><Pill tone={j.trigger === "schedule" ? "info" : "ok"}>{j.trigger === "schedule" ? "Schedule" : "Manual"}</Pill></td>
               <td><Pill tone={j.node_id ? "info" : "ok"}>{j.node || "Control plane"}</Pill></td>
               <td><Pill tone={tone(j.status)}>{j.status}</Pill></td>
               <td className="faint">{(j.processed || 0).toLocaleString()}{j.total ? ` / ${(j.total).toLocaleString()}` : ""}</td>
@@ -1323,7 +1333,7 @@ function Workers() {
               </td>
             </tr>
           ))}
-          {jobs.length === 0 && <tr><td colSpan={6} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
+          {jobs.length === 0 && <tr><td colSpan={7} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
         </tbody>
       </table>
     </Card>

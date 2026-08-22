@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from ..config import get_settings
 from ..connectors import get_connector
 from ..db import SessionLocal
-from ..models import Collection, ConnectorAccount, PendingAction, Tenant
+from ..models import Collection, ConnectorAccount, PendingAction, SyncJob, Tenant
 from .sync_worker import run_backup
 
 logger = logging.getLogger("cv.scheduler")
@@ -118,14 +118,11 @@ def _purge_recovered() -> None:
 
 
 def _effective_interval(c: Collection, default_minutes: int, caps=None) -> int:
-    """Resolve a mapping's cadence: NULL → global default; value as-is otherwise.
-    Full-refetch sources (streaming, no delta) re-pull the whole library each run,
-    so when the admin hasn't set a cadence they default to daily, not the global
-    (usually hourly) default."""
+    """Resolve a mapping's cadence: NULL → the global default; value as-is otherwise.
+    A mapping that wants a slower cadence (e.g. a full-refetch source) sets its own
+    ``backup_interval_minutes`` — "Default" always means the configured default."""
     if c.backup_interval_minutes is not None:
         return c.backup_interval_minutes
-    if caps is not None and caps.streaming and not caps.delta:
-        return max(default_minutes, 1440)
     return default_minutes
 
 
@@ -195,12 +192,24 @@ def _process_collection(db, c: Collection, now: datetime, default_minutes: int) 
         return (0, 0, 0)
     if not _is_due(c, interval, now):
         return (1, 0, 0)
+    # Track the scheduled run as a job so the admin worker view shows it (and that
+    # it was schedule-triggered, vs a manual "Back up now").
+    job = SyncJob(tenant_id=c.tenant_id, collection_id=c.id, kind="backup",
+                  trigger="schedule", node_id=None, status="running",
+                  message="Scheduled backup", started_at=now)
+    db.add(job)
+    db.commit()
     try:
         run_backup(db, c)
         logger.info("scheduled backup: collection=%s (%s) source=%s "
                     "destinations=%s interval=%dmin", c.id, c.name,
                     c.source_type, c.destinations, interval)
         c.last_backup_run_at = now
+        acct = db.get(ConnectorAccount, c.connector_account_id)
+        job.status = "done"
+        job.processed = job.total = int((acct.last_object_count or 0) if acct else 0)
+        job.message = "Scheduled backup complete"
+        job.finished_at = _now()
         db.commit()
         return (1, 1, 1)
     except Exception as exc:  # noqa: BLE001 - isolate per-source failures
@@ -209,6 +218,11 @@ def _process_collection(db, c: Collection, now: datetime, default_minutes: int) 
         # time so a persistently-failing source doesn't retry every tick.
         try:
             c.last_backup_run_at = now
+            job = db.get(SyncJob, job.id)
+            if job is not None:
+                job.status = "failed"
+                job.error = str(exc)[:500]
+                job.finished_at = _now()
             db.commit()
         except Exception:
             db.rollback()

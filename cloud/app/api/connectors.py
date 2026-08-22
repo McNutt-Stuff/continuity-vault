@@ -260,14 +260,15 @@ def oauth_callback(code: str | None = Query(default=None),
         logger.error("OAuth token exchange failed for %s: %s", connector_type, exc)
         return RedirectResponse(f"{portal}/connectors?error=token_exchange")
 
-    default_label = (_fetch_account_label(connector_type, tokens)
-                     or f"{connector_type} account")
-    _link_or_reauth(db, data, connector_type, tokens, default_label)
+    identity = _fetch_account_label(connector_type, tokens)
+    default_label = identity or f"{connector_type} account"
+    _link_or_reauth(db, data, connector_type, tokens, default_label, username=identity)
     return RedirectResponse(f"{portal}/connectors?connected={connector_type}")
 
 
 def _link_or_reauth(db: Session, data: dict, connector_type: str,
-                    tokens: dict, default_label: str) -> ConnectorAccount:
+                    tokens: dict, default_label: str,
+                    username: str | None = None) -> ConnectorAccount:
     """Create a new linked source, or — when re-authorizing (state carries the
     account id) — refresh the existing one and clear its error/reauth state."""
     creds = credstore.encrypt(data["tid"], tokens)
@@ -280,6 +281,8 @@ def _link_or_reauth(db: Session, data: dict, connector_type: str,
         existing.auth_status = "linked"
         existing.last_error = None
         existing.last_error_at = None
+        if username and not existing.account_username:
+            existing.account_username = username
         db.commit()
         audit.record(db, actor=data["uid"], action="connector.reauthorized",
                      tenant_id=data["tid"], resource=existing.id,
@@ -288,6 +291,7 @@ def _link_or_reauth(db: Session, data: dict, connector_type: str,
     account = ConnectorAccount(
         tenant_id=data["tid"], owner_user_id=data.get("uid"), connector_type=connector_type,
         account_label=data.get("label") or default_label, auth_status="linked",
+        account_username=username,
         encrypted_credentials=creds, scopes=scopes)
     db.add(account)
     db.commit()
@@ -316,6 +320,7 @@ def link_with_token(connector_type: str, body: TokenLinkRequest,
         owner_user_id=principal.user_id,
         connector_type=connector_type,
         account_label=body.account_label,
+        account_username=(body.username or None),
         auth_status="linked",
         encrypted_credentials=credstore.encrypt(tenant.id, creds),
         scopes=[],
@@ -359,7 +364,8 @@ def list_accounts(principal: security.Principal = Depends(security.get_principal
             seen.add((aid, oid))
             bytes_by_acct[aid] = bytes_by_acct.get(aid, 0) + int(sz or 0)
     return [{"id": a.id, "connector_type": a.connector_type,
-             "account_label": a.account_label, "auth_status": a.auth_status,
+             "account_label": a.account_label, "account_username": a.account_username,
+             "auth_status": a.auth_status,
              "active": bool(a.active),
              "last_sync_at": a.last_sync_at.isoformat() if a.last_sync_at else None,
              "last_object_count": a.last_object_count,
@@ -390,7 +396,8 @@ def rename_account(account_id: str, body: AccountRename,
     db.commit()
     audit.record(db, actor=principal.user_id, action="connector.renamed",
                  tenant_id=tenant.id, resource=account_id, detail={"label": label})
-    return {"id": account.id, "account_label": account.account_label}
+    return {"id": account.id, "account_label": account.account_label,
+            "account_username": account.account_username}
 
 
 @router.delete("/accounts/{account_id}")

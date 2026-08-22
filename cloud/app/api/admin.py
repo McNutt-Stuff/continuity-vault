@@ -176,6 +176,7 @@ def list_all_users(q: str = "", tenant_id: str = "", plan: str = "",
             "role": u.role, "status": u.status,
             "is_platform_admin": bool(u.is_platform_admin),
             "email_verified": bool(u.email_verified),
+            "feature_flags": u.feature_flags or {},
             "tenant_id": u.tenant_id, "tenant_name": (t.name if t else ""),
             "tenant_type": ttype,
             "plan": {"id": pl.get("id"), "name": pl.get("name")},
@@ -983,14 +984,16 @@ def _node_view(db: Session, n: Node) -> dict:
 def _job_view(j, tenants, colls, accounts, nodes) -> dict:
     c = colls.get(j.collection_id)
     label = "—"
+    username = None
     if c is not None:
         acc = accounts.get(c.connector_account_id) if c.connector_account_id else None
         label = acc.account_label if acc else c.name
+        username = acc.account_username if acc else None
     return {
         "id": j.id, "tenant_id": j.tenant_id, "tenant": tenants.get(j.tenant_id) or "—",
-        "collection_id": j.collection_id, "source": label,
+        "collection_id": j.collection_id, "source": label, "source_username": username,
         "source_type": c.source_type if c else None,
-        "kind": j.kind, "status": j.status,
+        "kind": j.kind, "status": j.status, "trigger": j.trigger or "manual",
         "node_id": j.node_id,
         "node": nodes.get(j.node_id) if j.node_id else "Control plane",
         "processed": j.processed or 0, "total": j.total or 0,

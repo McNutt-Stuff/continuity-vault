@@ -26,7 +26,7 @@ export interface FormField {
   section?: string;
   hint?: string;
 }
-interface FormOpts { title?: string; message?: string; description?: string; fields: FormField[]; confirmLabel?: string; }
+interface FormOpts { title?: string; message?: string; description?: string; fields: FormField[]; confirmLabel?: string; wide?: boolean; }
 
 type Kind = "notify" | "confirm" | "prompt" | "form";
 interface ActiveDialog {
@@ -115,9 +115,57 @@ export function DialogHost() {
     if (e.key === "Enter" && kind !== "form") { e.preventDefault(); submit(); }
   }
 
+  function renderFormField(f: FormField, autofocus: boolean) {
+    return (
+      <div key={f.name} className="stack" style={{ gap: 6 }}>
+        <label className="stack" style={{ gap: 6 }}>
+          <span className="faint" style={{ fontSize: 11.5 }}>
+            {f.label}{f.required && <span style={{ color: "var(--danger)" }}> *</span>}
+          </span>
+          {f.options ? (
+            <select
+              className="input"
+              value={form[f.name] ?? ""}
+              onChange={(e) => setForm((cur) => ({ ...cur, [f.name]: e.target.value }))}
+            >
+              {f.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          ) : f.type === "textarea" ? (
+            <textarea
+              className="input"
+              placeholder={f.placeholder}
+              value={form[f.name] ?? ""}
+              onChange={(e) => setForm((cur) => ({ ...cur, [f.name]: e.target.value }))}
+              style={{ minHeight: 120, fontFamily: "ui-monospace, monospace", fontSize: 12.5 }}
+            />
+          ) : (
+            <input
+              ref={autofocus ? firstInput : undefined}
+              className="input"
+              type={f.password ? "password" : "text"}
+              placeholder={f.placeholder}
+              value={form[f.name] ?? ""}
+              onChange={(e) => setForm((cur) => ({ ...cur, [f.name]: e.target.value }))}
+            />
+          )}
+        </label>
+        {f.hint && <span className="faint" style={{ fontSize: 11 }}>{f.hint}</span>}
+      </div>
+    );
+  }
+
+  // Two-column layout (opts.wide): sectioned fields (e.g. Feature flags) get their
+  // own column so the main form stays compact.
+  const formFields = opts.fields ?? [];
+  const sectioned = formFields.filter((f) => f.section);
+  const mainFields = formFields.filter((f) => !f.section);
+  const twoCol = kind === "form" && !!opts.wide && sectioned.length > 0;
+  const sectionName = sectioned[0]?.section;
+
   return (
     <div className="modal-backdrop" onClick={cancel}>
-      <div className="modal-panel dialog-panel" onClick={(e) => e.stopPropagation()} onKeyDown={onKeyDown}>
+      <div className={`modal-panel dialog-panel${twoCol ? " dialog-panel-wide" : ""}`}
+           onClick={(e) => e.stopPropagation()} onKeyDown={onKeyDown}>
         <div className="dialog-head">
           <span className={`dialog-icon ${tone}`}><Icon name={TONE_ICON[tone]} size={17} /></span>
           <div className="dialog-title">{opts.title ?? defaultTitle(kind, tone)}</div>
@@ -137,45 +185,25 @@ export function DialogHost() {
               />
             </label>
           )}
-          {kind === "form" && (
+          {kind === "form" && twoCol && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 22, marginTop: opts.message ? 12 : 0 }}>
+              <div className="stack" style={{ gap: 12 }}>
+                {mainFields.map((f, i) => renderFormField(f, i === 0))}
+              </div>
+              <div className="stack" style={{ gap: 12 }}>
+                <div className="nav-section" style={{ padding: 0 }}>{sectionName}</div>
+                {sectioned.map((f) => renderFormField(f, false))}
+              </div>
+            </div>
+          )}
+          {kind === "form" && !twoCol && (
             <div className="stack" style={{ gap: 12, marginTop: opts.message ? 12 : 0 }}>
-              {(opts.fields ?? []).map((f, i) => (
+              {formFields.map((f, i) => (
                 <div key={f.name} className="stack" style={{ gap: 6 }}>
-                  {f.section && (opts.fields ?? [])[i - 1]?.section !== f.section && (
+                  {f.section && formFields[i - 1]?.section !== f.section && (
                     <div className="nav-section" style={{ padding: "8px 0 0" }}>{f.section}</div>
                   )}
-                  <label className="stack" style={{ gap: 6 }}>
-                  <span className="faint" style={{ fontSize: 11.5 }}>
-                    {f.label}{f.required && <span style={{ color: "var(--danger)" }}> *</span>}
-                  </span>
-                  {f.options ? (
-                    <select
-                      className="input"
-                      value={form[f.name] ?? ""}
-                      onChange={(e) => setForm((cur) => ({ ...cur, [f.name]: e.target.value }))}
-                    >
-                      {f.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  ) : f.type === "textarea" ? (
-                    <textarea
-                      className="input"
-                      placeholder={f.placeholder}
-                      value={form[f.name] ?? ""}
-                      onChange={(e) => setForm((cur) => ({ ...cur, [f.name]: e.target.value }))}
-                      style={{ minHeight: 120, fontFamily: "ui-monospace, monospace", fontSize: 12.5 }}
-                    />
-                  ) : (
-                    <input
-                      ref={i === 0 ? firstInput : undefined}
-                      className="input"
-                      type={f.password ? "password" : "text"}
-                      placeholder={f.placeholder}
-                      value={form[f.name] ?? ""}
-                      onChange={(e) => setForm((cur) => ({ ...cur, [f.name]: e.target.value }))}
-                    />
-                  )}
-                  </label>
-                  {f.hint && <span className="faint" style={{ fontSize: 11 }}>{f.hint}</span>}
+                  {renderFormField(f, i === 0)}
                 </div>
               ))}
             </div>

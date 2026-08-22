@@ -98,10 +98,11 @@ def storage_targets(principal: security.Principal = Depends(security.get_princip
     """
     settings = get_settings()
     # Feature gating: only offer the storage tiers the account has enabled in
-    # Protection Setup. Not chosen yet (empty) sees everything.
+    # Protection Setup. Nothing chosen (empty) = no targets — the customer must
+    # pick a destination in Protection Setup before mapping any data.
     enabled = set(user_protection_options(db.get(User, principal.user_id), tenant))
     def _on(tier: str) -> bool:
-        return not enabled or tier in enabled
+        return tier in enabled
     targets: list[dict] = []
     if _on("cv-cloud"):
         targets.append({"id": "cv-cloud", "label": "Arkive Cloud", "kind": "cloud",

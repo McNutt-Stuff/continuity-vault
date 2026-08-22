@@ -1,6 +1,7 @@
 import { ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { useAuth } from "../auth";
 import { Card, Pill, bytes, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
@@ -24,7 +25,7 @@ interface Overview {
   scope?: "me" | "org";
   can_switch_scope?: boolean;
 }
-interface Tenant { name: string; plan: string; key_ownership_model: string; }
+interface Tenant { name: string; plan: string; key_ownership_model: string; tenant_type?: string; }
 interface PendingAction {
   id: string; kind: string; title: string; message: string;
   source_type: string; collection_id?: string | null; account_id?: string | null;
@@ -48,6 +49,7 @@ const iconName = (n: string) => (ICONS.includes(n) ? n : "database") as never;
 
 export default function Dashboard() {
   const nav = useNavigate();
+  const { me } = useAuth();
   const [ov, setOv] = useState<Overview | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [health, setHealth] = useState<{ pq_available?: boolean } | null>(null);
@@ -86,7 +88,12 @@ export default function Dashboard() {
     <>
       <div className="spread" style={{ marginBottom: 18 }}>
         <div className="stack">
-          <div className="muted">{tenant?.name ?? "—"} · {tenant?.plan}</div>
+          <h2 style={{ margin: 0 }}>
+            Welcome {me?.display_name || ""}
+            {tenant && ["family", "business", "enterprise"].includes(tenant.plan)
+              ? <span className="faint" style={{ fontWeight: 400 }}> ({tenant.name})</span>
+              : null}
+          </h2>
           <div className="row" style={{ gap: 8 }}>
             <Pill tone="info"><Icon name="key" size={12} /> Keys: {tenant?.key_ownership_model}</Pill>
             <Pill tone={health?.pq_available ? "ok" : "warn"}>

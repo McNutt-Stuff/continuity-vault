@@ -177,6 +177,9 @@ class ConnectorAccount(Base):
     owner_user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     connector_type = Column(String, nullable=False)
     account_label = Column(String, nullable=False)
+    # The provider identity used when linking (e.g. rob@outlook.com) — immutable and
+    # always shown alongside the (editable) account_label so a source stays identifiable.
+    account_username = Column(String, nullable=True)
     auth_status = Column(String, default="linked")  # linked | needs-reauth | revoked
     # Once data is ingested a source is never deleted (it identifies that data);
     # "removing" deactivates it (active=False) — sync stops, data kept, can be
@@ -490,6 +493,7 @@ class SyncJob(Base):
     tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
     collection_id = Column(String, index=True)
     kind = Column(String, default="backup")  # backup | sync
+    trigger = Column(String, default="manual")  # manual | schedule
     node_id = Column(String, index=True, nullable=True)  # node that should execute it (per-node scoping)
     status = Column(String, default="queued")  # queued | running | done | failed
     processed = Column(Integer, default=0)

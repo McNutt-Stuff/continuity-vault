@@ -39,6 +39,29 @@ class CreateCollectionRequest(BaseModel):
     config: dict | None = None  # source-specific settings (e.g. endpoint-files selection)
 
 
+def _dest_tier(dest: str) -> str:
+    """Map a storage-target id to its Protection Setup tier."""
+    if dest == "cv-cloud":
+        return "cv-cloud"
+    if dest == "customer-s3":
+        return "customer-cloud"
+    return "appliance"  # store:<id> / appliance*
+
+
+def _require_protection(db, principal, tenant, dests: list[str] | None) -> None:
+    """Gate mapping on Protection Setup: a destination can only be used if its tier
+    is enabled there. Nothing enabled ⇒ the customer must choose one first."""
+    from ..models import User
+    from .billing import user_protection_options
+    enabled = set(user_protection_options(db.get(User, principal.user_id), tenant))
+    if not enabled:
+        raise HTTPException(400, "Choose a protection destination in Protection Setup "
+                                 "before mapping any data.")
+    bad = [d for d in (dests or []) if _dest_tier(d) not in enabled]
+    if bad:
+        raise HTTPException(400, "That storage destination isn't enabled in Protection Setup.")
+
+
 @router.post("")
 def create_collection(body: CreateCollectionRequest,
                       principal: security.Principal = Depends(security.get_principal),
@@ -61,6 +84,7 @@ def create_collection(body: CreateCollectionRequest,
                             Collection.source_type == body.source_type).first())
         if existing:
             return _collection_view(db, existing)
+    _require_protection(db, principal, tenant, body.destinations or ["cv-cloud"])
     coll = Collection(
         tenant_id=tenant.id,
         vault_id=vault.id,
@@ -108,6 +132,7 @@ def update_collection(collection_id: str, body: UpdateCollectionRequest,
     if body.sensitivity is not None:
         coll.sensitivity = body.sensitivity
     if body.destinations is not None:
+        _require_protection(db, principal, tenant, body.destinations or ["cv-cloud"])
         coll.destinations = body.destinations or ["cv-cloud"]
     if body.index_fields is not None:
         coll.index_fields = body.index_fields
@@ -184,6 +209,7 @@ def _collection_view(db: Session, c: Collection) -> dict:
         "vault_id": c.vault_id, "vault_name": vault.name if vault else None,
         "connector_account_id": c.connector_account_id,
         "account_label": account.account_label if account else None,
+        "account_username": account.account_username if account else None,
         "sensitivity": c.sensitivity,
         "destinations": c.destinations or ["cv-cloud"],
         "index_fields": list(c.index_fields or []),
@@ -213,9 +239,11 @@ def list_collections(principal: security.Principal = Depends(security.get_princi
                      db: Session = Depends(get_db)):
     # Data partitioning: a member only ever sees mappings in vaults they own.
     allowed = security.content_vault_ids(db, principal)
+    # Stable order (oldest first) so the Data Map list never reshuffles on edits.
     colls = (db.query(Collection)
              .filter(Collection.tenant_id == tenant.id,
-                     Collection.vault_id.in_(allowed)).all()) if allowed else []
+                     Collection.vault_id.in_(allowed))
+             .order_by(Collection.created_at.asc(), Collection.id.asc()).all()) if allowed else []
     return [_collection_view(db, c) for c in colls]
 
 

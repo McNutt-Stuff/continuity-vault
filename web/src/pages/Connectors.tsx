@@ -4,7 +4,7 @@ import { useAuth } from "../auth";
 import { Card, Pill, timeAgo, Loading, bytes } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
-import { confirmDialog, formDialog, notify } from "../components/dialog";
+import { confirmDialog, formDialog, notify, promptDialog } from "../components/dialog";
 import { PhotoPickerModal } from "../components/PhotoPicker";
 
 interface CatalogItem {
@@ -25,6 +25,7 @@ interface Account {
   id: string;
   connector_type: string;
   account_label: string;
+  account_username?: string | null;
   auth_status: string;
   active?: boolean;
   last_sync_at: string | null;
@@ -253,6 +254,26 @@ export default function Connectors() {
     }
   }
 
+  async function rename(a: Account) {
+    const name = await promptDialog({
+      title: "Rename source",
+      label: "Display name",
+      message: a.account_username ? `Linked account: ${a.account_username}` : undefined,
+      defaultValue: a.account_label,
+      confirmLabel: "Save",
+    });
+    if (name == null) return;
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === a.account_label) return;
+    try {
+      await api.put(`/connectors/accounts/${a.id}`, { account_label: trimmed });
+      flash("Source renamed");
+      await load();
+    } catch (e) {
+      await notify({ title: "Couldn't rename", message: (e as ApiError).message, tone: "danger" });
+    }
+  }
+
   async function purge(a: Account) {
     let targets: { active: boolean; destinations: { id: string; label: string; recovery_points: number; bytes: number }[] };
     try {
@@ -434,7 +455,16 @@ export default function Connectors() {
                   : <Icon name={(c?.icon as IconName) ?? "database"} size={17} />}
               </div>
               <div className="flex1">
-                <div style={{ fontWeight: 600 }}>{a.account_label}</div>
+                <div className="row" style={{ gap: 6, alignItems: "baseline" }}>
+                  <span style={{ fontWeight: 600 }}>{a.account_label}</span>
+                  {a.account_username && a.account_username !== a.account_label && (
+                    <span className="faint" style={{ fontSize: 12 }}>({a.account_username})</span>
+                  )}
+                  <button className="btn ghost sm" style={{ padding: "1px 6px", fontSize: 11 }}
+                          title="Rename this source" onClick={() => rename(a)}>
+                    <Icon name="key" size={11} /> Rename
+                  </button>
+                </div>
                 <div className="faint" style={{ fontSize: 12 }}>
                   {c?.displayName ?? a.connector_type} · last sync {timeAgo(a.last_sync_at)}
                   {a.protected_bytes != null && a.protected_bytes > 0
