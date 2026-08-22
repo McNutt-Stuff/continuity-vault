@@ -46,6 +46,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Federated file-op proxy: on the control plane, forward retrieval / recovery /
+# folder-scan requests to the tenant's assigned node so no file operation runs
+# here. No-op when federation is off or on a node.
+from .api import node_proxy  # noqa: E402
+app.middleware("http")(node_proxy.middleware)
+
 API = "/api"
 app.include_router(auth.router, prefix=API)
 app.include_router(tenant.router, prefix=API)

@@ -216,8 +216,11 @@ write_env() {
   # Generate secrets only on first write so re-runs don't invalidate sessions.
   if [[ ! -f /etc/continuity-vault.env ]]; then
     local session_secret kek_secret
-    session_secret="$(openssl rand -hex 32)"
-    kek_secret="$(openssl rand -hex 32)"
+    # Fleet-shared for federation: a node must validate the control plane's
+    # session tokens (proxy auth) and use its wrapped keys/creds — provide the
+    # SAME CV_SESSION_SECRET + CV_KEK_SECRET across every node.
+    session_secret="${CV_SESSION_SECRET:-$(openssl rand -hex 32)}"
+    kek_secret="${CV_KEK_SECRET:-$(openssl rand -hex 32)}"
     cat > /etc/continuity-vault.env <<EOF
 CV_ENVIRONMENT=production
 CV_DOMAIN=${CV_DOMAIN}
