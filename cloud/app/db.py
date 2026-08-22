@@ -59,6 +59,34 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _apply_additive_migrations()
     _backfill_appliance_storage()
+    _clean_far_future_calendar()
+
+
+def _clean_far_future_calendar() -> None:
+    """Remove stale calendar index rows dated to an absurd far-future sentinel
+    (year >= 2100). An earlier build expanded recurring series into instances,
+    so 'repeats forever' events created artifact rows that sort to the year 2099;
+    the current build stores one correctly-dated event per series, so these old
+    rows are safe to drop (real future events are dated well before 2100)."""
+    import logging
+    from datetime import datetime
+    from .models import SearchDocument
+
+    try:
+        with SessionLocal() as db:
+            cutoff = datetime(2100, 1, 1)
+            n = (db.query(SearchDocument)
+                 .filter(SearchDocument.source_type == "google_calendar",
+                         SearchDocument.modified_at >= cutoff)
+                 .delete(synchronize_session=False))
+            if n:
+                db.commit()
+                logging.getLogger("cv.db").warning(
+                    "cleaned %d stale far-future (year>=2100) calendar index row(s)", n)
+            else:
+                db.rollback()
+    except Exception:
+        pass  # best-effort cleanup; never block startup
 
 
 def _backfill_appliance_storage() -> None:

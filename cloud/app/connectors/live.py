@@ -12,7 +12,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email import message_from_bytes
 from email.header import decode_header, make_header
 from typing import Iterable, List, Optional, Tuple
@@ -1052,19 +1052,21 @@ def fetch_google_contacts(access_token: str,
 
 
 def _event_object_date(ev: dict) -> Optional[datetime]:
-    """A sensible timeline date for a calendar event. Events that recur forever
-    can carry a far-future start sentinel (e.g. year 2099); when the start is
-    unreasonably far ahead, fall back to the original instance start, then the
-    event's updated/created time, so the event doesn't sort to the year 2099."""
-    cutoff = datetime.utcnow() + timedelta(days=400)
+    """A sensible timeline date for a calendar event. A "repeats forever" event
+    can carry an absurd far-future start sentinel (e.g. year 2099); only those
+    are clamped (to the original instance start, then updated/created) so the
+    event doesn't sort to the year 2099. Real future events keep their date."""
+    def _ok(d: Optional[datetime]) -> bool:
+        return d is not None and d.year < 2100
+
     start = ev.get("start") or {}
     dt = _parse_dt(start.get("dateTime") or start.get("date"))
-    if dt is not None and dt <= cutoff:
+    if _ok(dt):
         return dt
     ost = ev.get("originalStartTime") or {}
     for cand in (ost.get("dateTime") or ost.get("date"), ev.get("updated"), ev.get("created")):
         alt = _parse_dt(cand)
-        if alt is not None and alt <= cutoff:
+        if _ok(alt):
             return alt
     return dt  # nothing better — keep the real (possibly future) start
 
