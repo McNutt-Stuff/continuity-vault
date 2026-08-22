@@ -28,10 +28,17 @@ export interface FormField {
 }
 interface FormOpts { title?: string; message?: string; description?: string; fields: FormField[]; confirmLabel?: string; wide?: boolean; }
 
-type Kind = "notify" | "confirm" | "prompt" | "form";
+// Reusable informational steps dialog — e.g. post-connect setup like installing a
+// provider app. Optionally shows a primary button that opens a link in a new tab.
+interface StepsOpts {
+  title?: string; message?: string; steps: string[];
+  linkUrl?: string; linkLabel?: string; confirmLabel?: string;
+}
+
+type Kind = "notify" | "confirm" | "prompt" | "form" | "steps";
 interface ActiveDialog {
   kind: Kind;
-  opts: NotifyOpts & ConfirmOpts & PromptOpts & FormOpts;
+  opts: NotifyOpts & ConfirmOpts & PromptOpts & FormOpts & StepsOpts;
   resolve: (value: unknown) => void;
 }
 
@@ -56,6 +63,8 @@ export const promptDialog = (o: PromptOpts): Promise<string | null> =>
   open("prompt", o as ActiveDialog["opts"]) as Promise<string | null>;
 export const formDialog = (o: FormOpts): Promise<Record<string, string> | null> =>
   open("form", o as ActiveDialog["opts"]) as Promise<Record<string, string> | null>;
+export const stepsDialog = (o: StepsOpts): Promise<void> =>
+  open("steps", o as ActiveDialog["opts"]) as Promise<void>;
 
 const TONE_ICON: Record<Tone, IconName> = {
   info: "info", danger: "alert", ok: "check", warn: "alert",
@@ -96,11 +105,11 @@ export function DialogHost() {
   }
 
   function cancel() {
-    finish(kind === "confirm" ? false : kind === "notify" ? undefined : null);
+    finish(kind === "confirm" ? false : kind === "notify" || kind === "steps" ? undefined : null);
   }
 
   function submit() {
-    if (kind === "notify") return finish(undefined);
+    if (kind === "notify" || kind === "steps") return finish(undefined);
     if (kind === "confirm") return finish(true);
     if (kind === "prompt") return finish(text);
     if (kind === "form") {
@@ -208,13 +217,26 @@ export function DialogHost() {
               ))}
             </div>
           )}
+          {kind === "steps" && (
+            <div className="stack" style={{ gap: 12, marginTop: opts.message ? 12 : 0 }}>
+              <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.7 }}>
+                {(opts.steps ?? []).map((s, i) => <li key={i}>{s}</li>)}
+              </ol>
+              {opts.linkUrl && (
+                <button className="btn primary sm" style={{ alignSelf: "flex-start" }}
+                        onClick={() => window.open(opts.linkUrl, "_blank", "noopener,noreferrer")}>
+                  <Icon name="link" size={14} /> {opts.linkLabel ?? "Open"}
+                </button>
+              )}
+            </div>
+          )}
         </div>
         <div className="modal-foot dialog-foot">
-          {kind !== "notify" && (
+          {kind !== "notify" && kind !== "steps" && (
             <button className="btn ghost" onClick={cancel}>{opts.cancelLabel ?? "Cancel"}</button>
           )}
           <button className={`btn ${tone === "danger" ? "danger" : "primary"}`} onClick={submit}>
-            {opts.confirmLabel ?? opts.okLabel ?? (kind === "notify" ? "OK" : kind === "confirm" ? "Confirm" : "Save")}
+            {opts.confirmLabel ?? opts.okLabel ?? (kind === "notify" ? "OK" : kind === "confirm" ? "Confirm" : kind === "steps" ? "Done" : "Save")}
           </button>
         </div>
       </div>

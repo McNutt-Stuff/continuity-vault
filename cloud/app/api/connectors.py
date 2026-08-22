@@ -104,6 +104,32 @@ def _setup_instructions(connector_type: str) -> list[str]:
     return []
 
 
+def _post_connect(connector_type: str) -> dict | None:
+    """Reusable extra steps shown right after a source is linked (e.g. install a
+    provider app to grant additional access). Returns None when there's nothing
+    extra to do."""
+    if connector_type == "github":
+        from .. import platform_config
+        app_url = (platform_config.source_values("github") or {}).get("app_url")
+        if not app_url:
+            return None
+        return {
+            "title": "Install the GitHub App",
+            "message": ("To back up your private repositories, install the app on your "
+                        "GitHub account. Public repositories are already accessible."),
+            "steps": [
+                "Click “Open install page” to open the app on GitHub.",
+                "Choose your personal account or an organization to install it on.",
+                "Select “All repositories” (or pick specific private repos) and click Install.",
+                "Come back here — your private repositories are included on the next backup.",
+            ],
+            "appUrl": app_url,
+            "linkLabel": "Open install page",
+        }
+    return None
+
+
+
 # Source families (who provides the account) and functional types, used to group
 # the Sources page into sections as the catalog grows.
 _SOURCE_FAMILY = {
@@ -168,6 +194,7 @@ def catalog(tenant: Tenant = Depends(security.get_tenant),
             "configured": (True if is_ev else oauth.is_configured(ctype)),
             "requiresAgent": caps.requires_agent,
             "setup": _setup_instructions(ctype),
+            "postConnect": _post_connect(ctype),
             "capabilities": {
                 "incremental": caps.incremental,
                 "browsable": caps.browsable,
@@ -274,9 +301,10 @@ def oauth_callback(code: str | None = Query(default=None),
             logger.error("Evernote MCP token exchange failed: %s", exc)
             return RedirectResponse(f"{portal}/connectors?error=token_exchange")
         identity = evernote_mcp.fetch_identity(tokens)
-        _link_or_reauth(db, data, connector_type, tokens,
-                        identity or "Evernote account", username=identity)
-        return RedirectResponse(f"{portal}/connectors?connected={connector_type}")
+        account, created = _link_or_reauth(db, data, connector_type, tokens,
+                                           identity or "Evernote account", username=identity)
+        suffix = f"&account={account.id}&new=1" if created else ""
+        return RedirectResponse(f"{portal}/connectors?connected={connector_type}{suffix}")
     try:
         tokens = oauth.exchange_code(connector_type, code)
     except Exception as exc:
@@ -285,15 +313,17 @@ def oauth_callback(code: str | None = Query(default=None),
 
     identity = _fetch_account_label(connector_type, tokens)
     default_label = identity or f"{connector_type} account"
-    _link_or_reauth(db, data, connector_type, tokens, default_label, username=identity)
-    return RedirectResponse(f"{portal}/connectors?connected={connector_type}")
+    account, created = _link_or_reauth(db, data, connector_type, tokens, default_label, username=identity)
+    suffix = f"&account={account.id}&new=1" if created else ""
+    return RedirectResponse(f"{portal}/connectors?connected={connector_type}{suffix}")
 
 
 def _link_or_reauth(db: Session, data: dict, connector_type: str,
                     tokens: dict, default_label: str,
-                    username: str | None = None) -> ConnectorAccount:
+                    username: str | None = None) -> tuple[ConnectorAccount, bool]:
     """Create a new linked source, or — when re-authorizing (state carries the
-    account id) — refresh the existing one and clear its error/reauth state."""
+    account id) — refresh the existing one and clear its error/reauth state.
+    Returns ``(account, created_new)``."""
     creds = credstore.encrypt(data["tid"], tokens)
     scopes = (tokens.get("scope") or "").split()
     aid = data.get("aid")
@@ -312,7 +342,7 @@ def _link_or_reauth(db: Session, data: dict, connector_type: str,
         audit.record(db, actor=data["uid"], action="connector.reauthorized",
                      tenant_id=data["tid"], resource=existing.id,
                      category="connector", detail={"type": connector_type})
-        return existing
+        return existing, False
     account = ConnectorAccount(
         tenant_id=data["tid"], owner_user_id=data.get("uid"), connector_type=connector_type,
         account_label=data.get("label") or default_label, auth_status="linked",
@@ -322,7 +352,7 @@ def _link_or_reauth(db: Session, data: dict, connector_type: str,
     db.commit()
     audit.record(db, actor=data["uid"], action="connector.linked",
                  tenant_id=data["tid"], resource=account.id, detail={"type": connector_type})
-    return account
+    return account, True
 
 
 class TokenLinkRequest(BaseModel):

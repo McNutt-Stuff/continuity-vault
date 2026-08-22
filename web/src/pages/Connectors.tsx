@@ -4,10 +4,17 @@ import { useAuth } from "../auth";
 import { Card, Pill, timeAgo, Loading, bytes } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
-import { confirmDialog, formDialog, notify, promptDialog } from "../components/dialog";
+import { confirmDialog, formDialog, notify, promptDialog, stepsDialog } from "../components/dialog";
 import { Menu, MenuEntry } from "../components/Menu";
 import { PhotoPickerModal } from "../components/PhotoPicker";
 
+interface PostConnect {
+  title?: string;
+  message?: string;
+  steps: string[];
+  appUrl?: string;
+  linkLabel?: string;
+}
 interface CatalogItem {
   type: string;
   displayName: string;
@@ -21,6 +28,7 @@ interface CatalogItem {
   configured: boolean;
   requiresAgent?: boolean;
   setup: string[];
+  postConnect?: PostConnect | null;
 }
 interface Account {
   id: string;
@@ -70,9 +78,13 @@ export default function Connectors() {
     void load();
     // Handle the return from an OAuth consent redirect.
     const p = new URLSearchParams(window.location.search);
-    if (p.get("connected")) {
-      flash(`${p.get("connected")} connected`);
+    const connected = p.get("connected");
+    const acct = p.get("account");
+    const isNew = p.get("new") === "1";
+    if (connected) {
       window.history.replaceState({}, "", "/connectors");
+      if (acct && isNew) void postConnect(connected, acct);
+      else flash(`${connected} connected`);
     } else if (p.get("error")) {
       flash(`Connection failed: ${p.get("error")}`);
       window.history.replaceState({}, "", "/connectors");
@@ -82,6 +94,49 @@ export default function Connectors() {
   function flash(msg: string) {
     setToast(msg);
     setTimeout(() => setToast(""), 3500);
+  }
+
+  // After a fresh OAuth link: name the source, then run any reusable extra steps
+  // the source declares (e.g. GitHub app install for private-repo access).
+  async function postConnect(type: string, accountId: string) {
+    let item: CatalogItem | undefined;
+    let account: Account | undefined;
+    try {
+      const [cat, accts] = await Promise.all([
+        api.get<CatalogItem[]>("/connectors/catalog"),
+        api.get<Account[]>("/connectors/accounts"),
+      ]);
+      item = cat.find((c) => c.type === type);
+      account = accts.find((a) => a.id === accountId);
+    } catch { /* fall back to defaults below */ }
+    const displayName = item?.displayName ?? type;
+    const name = await promptDialog({
+      title: `Name your ${displayName} source`,
+      message: account?.account_username ? `Linked account: ${account.account_username}` : undefined,
+      label: "Display name",
+      defaultValue: account?.account_label ?? displayName,
+      confirmLabel: "Save",
+    });
+    const trimmed = name?.trim();
+    if (trimmed && trimmed !== account?.account_label) {
+      try {
+        await api.put(`/connectors/accounts/${accountId}`, { account_label: trimmed });
+      } catch (e) {
+        await notify({ title: "Couldn't rename", message: (e as ApiError).message, tone: "danger" });
+      }
+    }
+    if (item?.postConnect) {
+      await stepsDialog({
+        title: item.postConnect.title ?? `Finish setting up ${displayName}`,
+        message: item.postConnect.message,
+        steps: item.postConnect.steps,
+        linkUrl: item.postConnect.appUrl,
+        linkLabel: item.postConnect.linkLabel,
+        confirmLabel: "Done",
+      });
+    }
+    flash(`${displayName} connected`);
+    await load();
   }
 
   async function connect(c: CatalogItem) {
