@@ -1322,10 +1322,15 @@ function Workers() {
         Background backup / sync jobs across all tenants. Stopping a worker aborts it at its next chunk boundary.
       </div>
       <table className="table">
-        <thead><tr><th>Source</th><th>Tenant</th><th>Node</th><th>Result</th><th>Time</th><th></th></tr></thead>
+        <thead><tr><th></th><th>Source</th><th>Tenant</th><th>Node</th><th>Result</th><th>Time</th><th></th></tr></thead>
         <tbody>
           {jobs.map((j) => (
             <tr key={j.id}>
+              <td style={{ width: 24, textAlign: "center" }}>
+                <span className="faint" title={j.trigger === "schedule" ? "Scheduled" : "Manual"} style={{ display: "inline-flex" }}>
+                  <Icon name={j.trigger === "schedule" ? "clock" : "user"} size={15} />
+                </span>
+              </td>
               <td>
                 <div style={{ fontWeight: 600 }}>{j.source}{j.source_username && j.source_username !== j.source ? <span className="faint" style={{ fontWeight: 400 }}> ({j.source_username})</span> : null}</div>
                 <div className="faint" style={{ fontSize: 11 }}>{j.source_type || j.kind}{j.message ? ` · ${j.message}` : ""}</div>
@@ -1350,14 +1355,11 @@ function Workers() {
                   {isActive(j.status) && j.status !== "cancelling"
                     ? <button className="btn danger sm" onClick={() => cancel(j)}>Stop</button>
                     : <span className="faint" style={{ fontSize: 11 }}>{j.status === "cancelling" ? "stopping…" : ""}</span>}
-                  <span className="faint" title={j.trigger === "schedule" ? "Scheduled" : "Manual"} style={{ display: "inline-flex" }}>
-                    <Icon name={j.trigger === "schedule" ? "clock" : "user"} size={15} />
-                  </span>
                 </div>
               </td>
             </tr>
           ))}
-          {jobs.length === 0 && <tr><td colSpan={6} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
+          {jobs.length === 0 && <tr><td colSpan={7} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
         </tbody>
       </table>
       {logJob && (

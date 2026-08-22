@@ -52,6 +52,7 @@ export default function Connectors() {
   const [groupBy, setGroupBy] = useState<"category" | "family">("category");
   const [photoPicker, setPhotoPicker] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
 
   async function load() {
     try {
@@ -354,63 +355,82 @@ export default function Connectors() {
 
   return (
     <>
-      <Card style={{ marginBottom: 16 }}>
-        <div className="spread" style={{ marginBottom: 4, alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
-          <div>
-            <h2 style={{ marginBottom: 4 }}>Connect a source</h2>
-            <div className="muted" style={{ fontSize: 13, maxWidth: 520 }}>
-              You authorize each service through its own consent screen. Data is encrypted before
-              it leaves the connector environment. Tokens are stored encrypted at rest.
-            </div>
-          </div>
-          <div className="row" style={{ gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <input className="input sm" placeholder="Search sources…" value={query}
-                   onChange={(e) => setQuery(e.target.value)} style={{ width: 180 }} />
-            {(["category", "family"] as const).map((g) => (
-              <button key={g} className={`btn sm ${groupBy === g ? "primary" : "ghost"}`}
-                      onClick={() => setGroupBy(g)}>
-                {g === "category" ? "By type" : "By family"}
-              </button>
-            ))}
+      <div className="spread" style={{ marginBottom: 16, alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ margin: 0 }}>Sources</h2>
+          <div className="muted" style={{ fontSize: 13, maxWidth: 560 }}>
+            The services Arkive backs up. Add one, then route it to a vault in the <a href="/mappings">Data Map</a>.
           </div>
         </div>
-        <div className="stack" style={{ gap: 18, marginTop: 14 }}>
-          {groupKeys.map((gk) => (
-            <div key={gk}>
-              <div className="row" style={{ gap: 8, marginBottom: 10, alignItems: "center" }}>
-                <div className="nav-section" style={{ padding: 0 }}>{gk}</div>
-                <span className="faint" style={{ fontSize: 11 }}>{groups.get(gk)!.length}</span>
+        <button className="btn primary" onClick={() => { setQuery(""); setShowAdd(true); }}>
+          <Icon name="link" size={15} /> Add source
+        </button>
+      </div>
+
+      {showAdd && (
+        <div className="modal-backdrop" onClick={() => setShowAdd(false)}>
+          <div className="modal-panel" style={{ width: "min(920px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <div>
+                <h3 style={{ margin: 0 }}>Connect a source</h3>
+                <div className="faint" style={{ fontSize: 12, maxWidth: 520 }}>
+                  You authorize each service through its own consent screen. Data is encrypted before it
+                  leaves the connector environment; tokens are stored encrypted at rest.
+                </div>
               </div>
-              <div className="grid grid-3">
-                {groups.get(gk)!.map((c) => (
-                  <div key={c.type} className="dest-card" onClick={() => connect(c)}>
-                    <div className="spread" style={{ marginBottom: 10 }}>
-                      <div className="row">
-                        <div className="result-icon" style={{ background: brandForSource(c.type) ? "var(--inset)" : c.color, width: 34, height: 34 }}>
-                          {brandForSource(c.type)
-                            ? <BrandIcon name={brandForSource(c.type)!} size={19} />
-                            : <Icon name={c.icon as IconName} size={17} />}
-                        </div>
-                        <div>
-                          <div style={{ fontWeight: 650 }}>{c.displayName}</div>
-                          <div className="faint" style={{ fontSize: 11.5 }}>{groupBy === "category" ? c.family : c.category}</div>
-                        </div>
-                      </div>
-                      {c.requiresAgent
-                        ? <Pill tone="info">Desktop agent</Pill>
-                        : c.mode === "oauth" && !c.configured
-                        ? <Pill tone="warn">Needs setup</Pill>
-                        : <Pill tone="ok">Ready</Pill>}
-                    </div>
-                    <div className="faint" style={{ fontSize: 12 }}>{c.docTypes.join(" · ")}</div>
-                  </div>
+              <button className="btn ghost sm" onClick={() => setShowAdd(false)}>Close</button>
+            </div>
+            <div className="modal-body" style={{ maxHeight: "72vh", overflow: "auto" }}>
+              <div className="row" style={{ gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+                <input className="input sm" placeholder="Search sources…" value={query}
+                       onChange={(e) => setQuery(e.target.value)} style={{ flex: 1, minWidth: 180 }} />
+                {(["category", "family"] as const).map((g) => (
+                  <button key={g} className={`btn sm ${groupBy === g ? "primary" : "ghost"}`}
+                          onClick={() => setGroupBy(g)}>
+                    {g === "category" ? "By type" : "By family"}
+                  </button>
                 ))}
               </div>
+              <div className="stack" style={{ gap: 18 }}>
+                {groupKeys.map((gk) => (
+                  <div key={gk}>
+                    <div className="row" style={{ gap: 8, marginBottom: 10, alignItems: "center" }}>
+                      <div className="nav-section" style={{ padding: 0 }}>{gk}</div>
+                      <span className="faint" style={{ fontSize: 11 }}>{groups.get(gk)!.length}</span>
+                    </div>
+                    <div className="grid grid-3">
+                      {groups.get(gk)!.map((c) => (
+                        <div key={c.type} className="dest-card" onClick={() => { setShowAdd(false); void connect(c); }}>
+                          <div className="spread" style={{ marginBottom: 10 }}>
+                            <div className="row">
+                              <div className="result-icon" style={{ background: brandForSource(c.type) ? "var(--inset)" : c.color, width: 34, height: 34 }}>
+                                {brandForSource(c.type)
+                                  ? <BrandIcon name={brandForSource(c.type)!} size={19} />
+                                  : <Icon name={c.icon as IconName} size={17} />}
+                              </div>
+                              <div>
+                                <div style={{ fontWeight: 650 }}>{c.displayName}</div>
+                                <div className="faint" style={{ fontSize: 11.5 }}>{groupBy === "category" ? c.family : c.category}</div>
+                              </div>
+                            </div>
+                            {c.requiresAgent
+                              ? <Pill tone="info">Desktop agent</Pill>
+                              : c.mode === "oauth" && !c.configured
+                              ? <Pill tone="warn">Needs setup</Pill>
+                              : <Pill tone="ok">Ready</Pill>}
+                          </div>
+                          <div className="faint" style={{ fontSize: 12 }}>{c.docTypes.join(" · ")}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {groupKeys.length === 0 && <div className="muted">No sources match “{query}”.</div>}
+              </div>
             </div>
-          ))}
-          {groupKeys.length === 0 && <div className="muted">No sources match “{query}”.</div>}
+          </div>
         </div>
-      </Card>
+      )}
 
       {setup && (
         <Card style={{ marginBottom: 16, borderColor: "var(--warn)" }}>
