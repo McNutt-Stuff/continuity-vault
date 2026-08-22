@@ -18,8 +18,7 @@ from datetime import datetime, timedelta, timezone
 from ..config import get_settings
 from ..connectors import get_connector
 from ..db import SessionLocal
-from ..models import Collection, ConnectorAccount, PendingAction
-from .jobs import enqueue_backup
+from ..models import Collection, ConnectorAccount, PendingAction, Tenant
 from .sync_worker import run_backup
 
 logger = logging.getLogger("cv.scheduler")
@@ -60,11 +59,11 @@ def start_scheduler() -> None:
 
     _thread = threading.Thread(target=loop, name="cv-sync-scheduler", daemon=True)
     _thread.start()
-    logger.info("backup scheduler started (tick %ds, default cadence %d min, node=%s role=%s scope=%s)",
+    logger.info("backup scheduler started (tick %ds, default cadence %d min, node=%s role=%s mode=%s)",
                 tick, settings.sync_interval_minutes,
                 settings.node_name or settings.domain,
                 settings.node_role or "control-plane",
-                "per-node" if settings.node_sync_scope else "all-tenants")
+                "federated" if settings.node_sync_scope else "single")
 
 
 def _purge_recovered() -> None:
@@ -127,8 +126,7 @@ def _maybe_photo_reminder(db, collection, now: datetime) -> None:
     db.commit()
 
 
-def _process_collection(db, c: Collection, now: datetime, default_minutes: int,
-                        enqueue: bool = False) -> tuple[int, int, int]:
+def _process_collection(db, c: Collection, now: datetime, default_minutes: int) -> tuple[int, int, int]:
     """Handle one mapping for this cycle. Returns (eligible, due, ran) as 0/1
     counters. Raising is fine — the caller isolates it so one broken source can
     never abort the whole scheduling cycle."""
@@ -151,17 +149,6 @@ def _process_collection(db, c: Collection, now: datetime, default_minutes: int,
         return (0, 0, 0)
     if not _is_due(c, interval, now):
         return (1, 0, 0)
-    # Per-node mode: the control-plane scheduler only ENQUEUES; the tenant's
-    # assigned node claims and runs the job. Otherwise run it inline here.
-    if enqueue:
-        job = enqueue_backup(db, c.tenant_id, c.id, kind="backup")
-        if job is None:
-            return (1, 1, 0)  # a job is already active for this collection
-        c.last_backup_run_at = now
-        db.commit()
-        logger.info("enqueued backup: collection=%s (%s) source=%s node=%s interval=%dmin",
-                    c.id, c.name, c.source_type, job.node_id or "control-plane", interval)
-        return (1, 1, 1)
     try:
         run_backup(db, c)
         logger.info("scheduled backup: collection=%s (%s) source=%s "
@@ -185,23 +172,38 @@ def _process_collection(db, c: Collection, now: datetime, default_minutes: int,
 
 
 def run_due() -> int:
-    """Enqueue (per-node mode) or run (single-node mode) a backup for every
-    mapping whose cadence is due. Returns the count enqueued/run."""
+    """Run a backup for every mapping whose cadence is due. Returns count run.
+
+    In federated mode the control plane SKIPS tenants assigned to a node (that
+    node runs their sync against its own local database); a customer node only
+    has its own tenants locally, so it processes them all."""
     global _scope_logged
     settings = get_settings()
-    enqueue = settings.node_sync_scope
+    federated = settings.node_sync_scope
+    is_cp = (settings.node_role or "control-plane") == "control-plane"
+    skip_assigned = federated and is_cp
     default_minutes = max(1, settings.sync_interval_minutes)
     now = _now()
-    total = eligible = due = ran = 0
-    if enqueue and not _scope_logged:
-        logger.info("per-node scheduling ON: this control plane ENQUEUES due backups "
-                    "to each tenant's assigned node (unassigned run here)")
+    total = eligible = due = ran = skipped_node = 0
+    if federated and not _scope_logged:
+        logger.info("federated scheduling: role=%s node=%s — %s",
+                    settings.node_role or "control-plane",
+                    settings.node_name or settings.domain,
+                    "skipping tenants assigned to a node" if skip_assigned
+                    else "running this node's local tenants")
         _scope_logged = True
     with SessionLocal() as db:
+        assigned: set[str] = set()
+        if skip_assigned:
+            assigned = {tid for (tid,) in
+                        db.query(Tenant.id).filter(Tenant.node_id.isnot(None)).all()}
         for c in db.query(Collection).all():
             total += 1
+            if c.tenant_id in assigned:
+                skipped_node += 1
+                continue
             try:
-                e, d, r = _process_collection(db, c, now, default_minutes, enqueue)
+                e, d, r = _process_collection(db, c, now, default_minutes)
                 eligible += e
                 due += d
                 ran += r
@@ -209,8 +211,7 @@ def run_due() -> int:
                 db.rollback()
                 logger.warning("scheduler: skipping collection %s (%s): %s",
                                c.id, c.source_type, exc)
-    verb = "enqueued" if enqueue else "ran"
     log = logger.info if ran else logger.debug
-    log("scheduler cycle: mappings=%d cloud-eligible=%d due=%d %s=%d",
-        total, eligible, due, verb, ran)
+    log("scheduler cycle: mappings=%d cloud-eligible=%d due=%d ran=%d on-another-node=%d",
+        total, eligible, due, ran, skipped_node)
     return ran

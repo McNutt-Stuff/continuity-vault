@@ -104,6 +104,10 @@ else
   DB_URL="postgresql+psycopg://cvault:${DB_PASSWORD}@localhost/continuity"
 fi
 
+# Only the control plane seeds demo tenants; a customer-tenant node's tenant data
+# arrives by replication from the control plane, so it must not seed its own.
+if [[ "$CV_NODE_ROLE" == "control-plane" ]]; then SEED_DEMO=true; else SEED_DEMO=false; fi
+
 # Native liboqs version to build for real post-quantum crypto (ML-KEM / ML-DSA /
 # SLH-DSA). MUST match the liboqs-python binding version installed below so the
 # binding loads our system library instead of auto-building its own.
@@ -226,7 +230,7 @@ CV_KEK_SECRET=${kek_secret}
 CV_KEY_STORE=${DATA_DIR}/keystore
 CV_OBJECT_STORE=${DATA_DIR}/object_store
 CV_FLEET_SIGNER=${DATA_DIR}/fleet_signer.json
-CV_SEED_DEMO_DATA=true
+CV_SEED_DEMO_DATA=${SEED_DEMO}
 CV_ALLOW_SIGNUP=true
 # Node role & fleet membership. Non-control-plane nodes heartbeat to the CP.
 CV_NODE_ROLE=${CV_NODE_ROLE}

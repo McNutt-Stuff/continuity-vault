@@ -112,6 +112,27 @@ def release_recovery_private(vault_id: str) -> bytes:
         master, base64.b64decode(w["nonce"]), base64.b64decode(w["ct"]), b"recovery-priv")
 
 
+def export_key_records(vault_id: str) -> Dict[str, str]:
+    """Raw wrapped key records for replicating a vault's keys to its assigned
+    node. The fleet shares CV_KEK_SECRET, so the node can use them directly."""
+    out: Dict[str, str] = {}
+    p = _path(vault_id)
+    if p.exists():
+        out["root"] = p.read_text()
+    rp = _recovery_path(vault_id)
+    if rp.exists():
+        out["recovery"] = rp.read_text()
+    return out
+
+
+def import_key_records(vault_id: str, records: Dict[str, str]) -> None:
+    """Write replicated wrapped key records into this node's local key store."""
+    if records.get("root"):
+        _path(vault_id).write_text(records["root"])
+    if records.get("recovery"):
+        _recovery_path(vault_id).write_text(records["recovery"])
+
+
 def key_metadata(vault_id: str) -> Dict[str, object]:
     """Non-sensitive metadata about a vault's key material for the keys view.
 

@@ -18,6 +18,7 @@ from .api import (
     connectors,
     dashboard,
     org,
+    node_sync,
     photos,
     recovery,
     restore,
@@ -67,6 +68,7 @@ app.include_router(photos.router, prefix=API)
 app.include_router(photos.actions_router, prefix=API)
 app.include_router(site.public_router, prefix=API)
 app.include_router(site.admin_router, prefix=API)
+app.include_router(node_sync.router, prefix=API)
 app.include_router(updates.router, prefix=API)
 app.include_router(updates.public_router, prefix=API)
 
@@ -95,16 +97,16 @@ def startup() -> None:
 
         seed()
 
-    # Background sync. In per-node mode only the control plane SCHEDULES (it
-    # enqueues due backups to each tenant's node); every node runs a worker loop
-    # that claims and executes the jobs assigned to it. Otherwise the single
-    # instance both schedules and runs inline.
-    from .workers.jobs import start_job_worker
+    # Background sync. Federated mode (per-node data planes): a customer node
+    # replicates its assigned tenants' config from the control plane into its
+    # LOCAL database, runs its own scheduler over that data, and pushes results
+    # back. The control plane schedules only the tenants NOT assigned to a node.
     from .workers.scheduler import start_scheduler
-    if settings.node_sync_scope:
-        if (settings.node_role or "control-plane") == "control-plane":
-            start_scheduler()
-        start_job_worker()
+    role = settings.node_role or "control-plane"
+    if settings.node_sync_scope and role != "control-plane":
+        from .workers.node_replication import start_replication
+        start_replication()
+        start_scheduler()
     else:
         start_scheduler()
 

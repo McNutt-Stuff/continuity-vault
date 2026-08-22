@@ -9,15 +9,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
 from ..db import SessionLocal
-from ..models import Collection, ConnectorAccount, Node, SyncJob, Tenant
+from ..models import Collection, ConnectorAccount, SyncJob, Tenant
 from .sync_worker import (
     JobCancelled,
     access_token_for_account,
@@ -48,156 +46,21 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _now_naive() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def _target_node_id(db: Session, tenant_id: str) -> Optional[str]:
-    """The node a tenant's sync work should run on (its assigned node), or None
-    to run on the control plane."""
-    t = db.get(Tenant, tenant_id)
-    return (t.node_id if t else None) or None
-
-
 def start_backup_job(db: Session, tenant_id: str, collection_id: str,
                      kind: str = "backup",
                      destinations: Optional[List[str]] = None) -> SyncJob:
-    """Create a tracked job. With per-node scoping the assigned node's worker
-    loop claims and runs it; otherwise it runs inline in a background thread."""
-    s = get_settings()
-    node_id = _target_node_id(db, tenant_id) if s.node_sync_scope else None
+    """Create a tracked job and run the backup in a background thread. In
+    federated mode a customer node runs its own tenants' work against its local
+    DB; the control plane runs unassigned tenants (and portal-initiated jobs).
+    node_id records the tenant's assigned node for visibility."""
+    t = db.get(Tenant, tenant_id)
     job = SyncJob(tenant_id=tenant_id, collection_id=collection_id, kind=kind,
-                  node_id=node_id, status="queued", message="Queued")
+                  node_id=(t.node_id if t else None), status="queued", message="Queued")
     db.add(job)
     db.commit()
     db.refresh(job)
-    if not s.node_sync_scope:
-        threading.Thread(target=_run, args=(job.id, destinations),
-                         name=f"cv-job-{job.id[:8]}", daemon=True).start()
-    return job
-
-
-# --------------------------------------------------------------------------- #
-# Per-node job worker: each node claims and runs the jobs assigned to it        #
-# --------------------------------------------------------------------------- #
-
-_worker_thread: threading.Thread | None = None
-_JOB_CONCURRENCY = 4
-_STALE_MINUTES = 30
-
-
-def _resolve_self_node(db: Session) -> Node | None:
-    """The Node row for this running instance (by CV_NODE_NAME + role; the
-    control plane also has an is_self row)."""
-    s = get_settings()
-    role = s.node_role or "control-plane"
-    name = s.node_name or s.domain
-    n = db.query(Node).filter(Node.name == name, Node.role == role).first()
-    if n is None and role == "control-plane":
-        n = db.query(Node).filter(Node.is_self.is_(True)).first()
-    return n
-
-
-def _node_filter(query, my_id: str | None, is_cp: bool):
-    if is_cp:
-        return query.filter((SyncJob.node_id.is_(None)) | (SyncJob.node_id == my_id))
-    return query.filter(SyncJob.node_id == my_id)
-
-
-def _requeue_stale(db: Session, my_id: str | None, is_cp: bool) -> None:
-    """Return jobs orphaned by a crashed worker (running past the stale window)
-    to the queue so another worker picks them up."""
-    cutoff = _now_naive() - timedelta(minutes=_STALE_MINUTES)
-    q = _node_filter(
-        db.query(SyncJob).filter(SyncJob.status == "running",
-                                 SyncJob.started_at.isnot(None),
-                                 SyncJob.started_at < cutoff),
-        my_id, is_cp)
-    n = q.update({SyncJob.status: "queued", SyncJob.message: "Requeued (worker restarted)"},
-                 synchronize_session=False)
-    if n:
-        db.commit()
-        logger.warning("requeued %d stale job(s) on this node", n)
-
-
-def _claim_one(db: Session, my_id: str | None, is_cp: bool) -> str | None:
-    """Atomically claim the oldest queued backup/sync job for this node. The
-    guarded UPDATE (status queued→running) means exactly one node wins the race
-    on a shared database."""
-    if not is_cp and not my_id:
-        return None  # can't resolve our own node → don't poach other work
-    q = _node_filter(
-        db.query(SyncJob.id).filter(SyncJob.status == "queued",
-                                    SyncJob.kind.in_(("backup", "sync"))),
-        my_id, is_cp).order_by(SyncJob.created_at.asc()).limit(10)
-    for (jid,) in q.all():
-        won = (db.query(SyncJob)
-               .filter(SyncJob.id == jid, SyncJob.status == "queued")
-               .update({SyncJob.status: "running", SyncJob.started_at: _now(),
-                        SyncJob.message: "Starting…"}, synchronize_session=False))
-        db.commit()
-        if won == 1:
-            return jid
-    return None
-
-
-def _drain_jobs() -> None:
-    s = get_settings()
-    is_cp = (s.node_role or "control-plane") == "control-plane"
-    with SessionLocal() as db:
-        node = _resolve_self_node(db)
-        my_id = node.id if node else None
-        _requeue_stale(db, my_id, is_cp)
-        running = _node_filter(
-            db.query(func.count(SyncJob.id)).filter(SyncJob.status == "running"),
-            my_id, is_cp).scalar() or 0
-        slots = max(0, _JOB_CONCURRENCY - int(running))
-        for _ in range(slots):
-            jid = _claim_one(db, my_id, is_cp)
-            if not jid:
-                break
-            threading.Thread(target=_run, args=(jid, None),
-                             name=f"cv-job-{jid[:8]}", daemon=True).start()
-
-
-def start_job_worker() -> None:
-    """Start the per-node job worker loop (only when node scoping is enabled;
-    without it, jobs run inline via start_backup_job)."""
-    global _worker_thread
-    s = get_settings()
-    if not s.node_sync_scope or _worker_thread is not None:
-        return
-    interval = max(3, min(15, get_settings().scheduler_tick_seconds))
-
-    def loop() -> None:
-        time.sleep(5)
-        while True:
-            try:
-                _drain_jobs()
-            except Exception:  # noqa: BLE001 - never let the worker die
-                logger.exception("job worker cycle failed")
-            time.sleep(interval)
-
-    _worker_thread = threading.Thread(target=loop, name="cv-job-worker", daemon=True)
-    _worker_thread.start()
-    logger.info("job worker started (node=%s role=%s, claims jobs assigned to this node)",
-                s.node_name or s.domain, s.node_role or "control-plane")
-
-
-def enqueue_backup(db: Session, tenant_id: str, collection_id: str,
-                   kind: str = "backup") -> SyncJob | None:
-    """Queue a backup for a collection unless one is already active for it.
-    Used by the (control-plane) scheduler in per-node mode."""
-    active = (db.query(SyncJob.id)
-              .filter(SyncJob.collection_id == collection_id,
-                      SyncJob.status.in_(("queued", "running"))).first())
-    if active:
-        return None
-    job = SyncJob(tenant_id=tenant_id, collection_id=collection_id, kind=kind,
-                  node_id=_target_node_id(db, tenant_id), status="queued",
-                  message="Queued")
-    db.add(job)
-    db.commit()
+    threading.Thread(target=_run, args=(job.id, destinations),
+                     name=f"cv-job-{job.id[:8]}", daemon=True).start()
     return job
 
 

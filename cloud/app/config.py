@@ -109,11 +109,13 @@ class Settings(BaseSettings):
     node_secret: str | None = None         # shared secret for node heartbeat auth
     control_plane_url: str | None = None   # base URL of the control plane (for non-CP nodes)
     site_content_path: str = ""            # public-web: where to mirror CMS content (site.json)
-    # When true, this instance only runs sync/backup work for the tenants assigned
-    # to its node (Tenant.node_id). The control plane then handles only unassigned
-    # tenants. REQUIRES every node to share the control-plane database so each node
-    # sees the same tenants/sources and writes to the same search index.
-    node_sync_scope: bool = False          # CV_NODE_SYNC_SCOPE
+    # Federated data planes: a customer-tenant node keeps its OWN local database
+    # + search index for the tenants assigned to it, replicates their config from
+    # the control plane (which it cannot reach at the DB level), runs sync
+    # locally, and pushes results back. The control plane then skips tenants that
+    # are assigned to a node. REQUIRES the whole fleet to share CV_KEK_SECRET so a
+    # node can use the replicated vault keys + connector credentials.
+    node_sync_scope: bool = False          # CV_NODE_SYNC_SCOPE (enable federation)
 
 
 @lru_cache(maxsize=1)
