@@ -84,6 +84,31 @@ ensure_executable() {
 }
 ensure_executable
 
+# The node-management console runs systemctl + reads the journal as the service
+# account (cvault). Apply the scoped sudoers + journal-group membership here too
+# so an update ALWAYS fixes permissions — even a rollback that re-runs an older
+# installer without this step. Idempotent and safe on nodes without the user.
+ensure_control_perms() {
+  local user="${CV_USER:-cvault}" f=/etc/sudoers.d/cv-cloud
+  id -u "$user" >/dev/null 2>&1 || return 0
+  { : > "$f"; } 2>/dev/null || return 0
+  local unit act
+  for unit in cv-cloud postgresql caddy cv-node-heartbeat.timer cv-node-update.timer cv-cloud-update.timer; do
+    for act in start stop restart enable disable; do
+      echo "${user} ALL=(root) NOPASSWD: /usr/bin/systemctl ${act} ${unit}" >> "$f"
+    done
+  done
+  chmod 440 "$f" 2>/dev/null || true
+  # Journal-group membership only takes effect on a fresh process start, so
+  # restart the app when we just added it.
+  if ! id -nG "$user" 2>/dev/null | grep -qw systemd-journal; then
+    usermod -aG systemd-journal "$user" 2>/dev/null || true
+    systemctl restart cv-cloud 2>/dev/null || true
+  fi
+  # Code + data must stay owned by the service account after a root-run update.
+  chown -R "$user":"$user" /opt/continuity-vault /var/lib/continuity-vault 2>/dev/null || true
+}
+
 run_installer() {
   if [[ "$COMPONENT" == "cloud" ]]; then
     # Preserve this node's role across updates so only its components redeploy.
@@ -109,12 +134,14 @@ run_installer() {
 
 if run_installer; then
   echo "==> Update to ${TARGET:0:12} complete."
+  [[ "$COMPONENT" == "cloud" ]] && ensure_control_perms
 else
   echo "!! Update failed — rolling back to ${PREV:0:12}"
   git reset --hard --quiet "$PREV"
   ensure_executable
   if run_installer; then
     echo "==> Rolled back to ${PREV:0:12}."
+    [[ "$COMPONENT" == "cloud" ]] && ensure_control_perms
     exit 1
   fi
   echo "!! Rollback redeploy also failed; manual intervention required."

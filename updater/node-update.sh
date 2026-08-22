@@ -15,6 +15,26 @@ VERSION_FILE="/etc/arkive/bundle-version"
 
 log() { echo "[node-update] $*"; }
 
+# The node-management console runs systemctl + reads the journal as the service
+# account (cvault). Apply the scoped sudoers + journal-group membership on every
+# update so permissions are always correct. Idempotent; safe if the user absent.
+ensure_control_perms() {
+  local user=cvault f=/etc/sudoers.d/cv-cloud unit act
+  id -u "$user" >/dev/null 2>&1 || return 0
+  { : > "$f"; } 2>/dev/null || return 0
+  for unit in cv-cloud postgresql caddy cv-node-heartbeat.timer cv-node-update.timer cv-cloud-update.timer; do
+    for act in start stop restart enable disable; do
+      echo "${user} ALL=(root) NOPASSWD: /usr/bin/systemctl ${act} ${unit}" >> "$f"
+    done
+  done
+  chmod 440 "$f" 2>/dev/null || true
+  if ! id -nG "$user" 2>/dev/null | grep -qw systemd-journal; then
+    usermod -aG systemd-journal "$user" 2>/dev/null || true
+    systemctl restart cv-cloud 2>/dev/null || true
+  fi
+  chown -R "$user":"$user" /opt/continuity-vault /var/lib/continuity-vault 2>/dev/null || true
+}
+
 [[ -f "$ENV_FILE" ]] || { log "no env file; node not installed"; exit 0; }
 # shellcheck disable=SC1090
 set -a; source "$ENV_FILE"; set +a
@@ -50,6 +70,7 @@ chmod +x "$SRC_DIR"/installers/*.sh "$SRC_DIR"/updater/*.sh 2>/dev/null || true
 if REPO_SRC="$SRC_DIR" bash "$SRC_DIR/installers/cloud-install.sh"; then
   mkdir -p "$(dirname "$VERSION_FILE")"
   echo "$remote" > "$VERSION_FILE"
+  ensure_control_perms
   log "updated to ${remote}"
 else
   log "installer failed; leaving previous version marker in place"

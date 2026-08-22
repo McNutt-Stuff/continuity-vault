@@ -144,18 +144,38 @@ def _pull(s) -> int:
     if not bundle:
         return 0
     n = 0
+    skipped = 0
     with SessionLocal() as db:
-        # Pricing is a singleton row.
+        # Deterministic ordering: no autoflush surprises. Each row upserts inside
+        # a SAVEPOINT so a single orphan/bad row is skipped (logged) instead of
+        # aborting the whole pull, and we COMMIT after each table so a parent row
+        # is durably present before its children (FK safety across tables).
+        db.autoflush = False
+
+        def apply_one(model, row) -> bool:
+            try:
+                with db.begin_nested():
+                    _upsert(db, model, row)
+                    db.flush()
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("replication: skipped a %s row: %s",
+                               getattr(model, "__tablename__", model), str(exc)[:160])
+                return False
+
         if bundle.get("pricing"):
-            _upsert(db, PricingConfig, bundle["pricing"])
+            apply_one(PricingConfig, bundle["pricing"])
+            db.commit()
         for key, model in _PULL_ORDER:
             exclude = _PULL_EXCLUDE.get(key)
             for row in bundle.get(key, []) or []:
                 if exclude:
                     row = {k: v for k, v in row.items() if k not in exclude}
-                _upsert(db, model, row)
-                n += 1
-        db.commit()
+                if apply_one(model, row):
+                    n += 1
+                else:
+                    skipped += 1
+            db.commit()  # persist this table before dependent tables
     # Forwarded agent commands (portal "Sync now" for node-routed agents): append
     # to the local agent queue so the node delivers them on the agent's next
     # heartbeat. enqueue_command dedupes, so a re-forward is harmless.
@@ -183,8 +203,8 @@ def _pull(s) -> int:
     # them locally and run them against the local DB.
     for j in bundle.get("pending_jobs", []) or []:
         _run_pending_job(j)
-    logger.info("replication pull: %d assigned tenant(s), %d row(s) synced",
-                bundle.get("assigned", 0), n)
+    logger.info("replication pull: %d assigned tenant(s), %d row(s) synced%s",
+                bundle.get("assigned", 0), n, f", {skipped} skipped" if skipped else "")
     return n
 
 
