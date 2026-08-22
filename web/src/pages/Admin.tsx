@@ -8,6 +8,51 @@ import { Ring, Sparkline, AreaChart } from "../components/charts";
 
 export interface AdminSection { key: string; label: string; icon: IconName; group: string; }
 
+// ---- Feature flags (generic, catalog-driven) --------------------------------
+// The flag catalog (name/label/default) comes from GET /admin/feature-flags so new
+// flags surface automatically in the user/tenant edit dialogs without code changes.
+interface FlagDef { name: string; label: string; default: boolean }
+let _flagCatalog: FlagDef[] | null = null;
+async function flagCatalog(): Promise<FlagDef[]> {
+  if (!_flagCatalog) {
+    try { _flagCatalog = await api.get<FlagDef[]>("/admin/feature-flags"); }
+    catch { _flagCatalog = []; }
+  }
+  return _flagCatalog;
+}
+// Build a "Feature flags" section of form fields. User scope adds an Inherit option
+// (fall back to the tenant/default); tenant scope is a straight allow/block override.
+function flagFields(cat: FlagDef[], current: Record<string, boolean> | undefined, scope: "user" | "tenant") {
+  return cat.map((fl) => {
+    const cur = current?.[fl.name];
+    const options = scope === "user"
+      ? [
+          { label: `Inherit (${fl.default ? "allowed" : "blocked"} by default)`, value: "inherit" },
+          { label: "Allowed", value: "true" },
+          { label: "Blocked", value: "false" },
+        ]
+      : [
+          { label: "Allowed", value: "true" },
+          { label: "Blocked — all users (legal hold)", value: "false" },
+        ];
+    const defaultValue = cur === true ? "true" : cur === false ? "false"
+      : scope === "user" ? "inherit" : (fl.default ? "true" : "false");
+    return { name: `flag_${fl.name}`, label: fl.label, defaultValue, options, section: "Feature flags" };
+  });
+}
+// Pull flag_* keys out of a submitted form into a feature_flags patch. null = inherit/unset.
+function extractFlags(r: Record<string, string>, cat: FlagDef[]): Record<string, boolean | null> {
+  const out: Record<string, boolean | null> = {};
+  for (const fl of cat) {
+    const key = `flag_${fl.name}`;
+    const v = r[key];
+    delete r[key];
+    if (v === undefined) continue;
+    out[fl.name] = v === "inherit" ? null : v === "true";
+  }
+  return out;
+}
+
 // Left-nav sections for the admin console (M365-style, grouped).
 export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "overview", label: "Overview", icon: "grid", group: "" },
@@ -366,23 +411,20 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
       fields.push(
         { name: "plan", label: "License plan", defaultValue: t.plan, options: planOpts },
         { name: "licensed_tb", label: "Licensed data (TB)", defaultValue: String(((t.licensed_bytes || 0) / (1024 ** 4)).toFixed(2)) },
-        { name: "purge", label: "Data purge (tenant-wide)",
-          defaultValue: t.feature_flags?.purge_enabled === false ? "false" : "true",
-          options: [
-            { label: "Allowed", value: "true" },
-            { label: "Blocked — legal hold (all users)", value: "false" },
-          ] },
+        // Feature flags are tenant-wide only for dedicated tenants; shared tenants
+        // manage them per-account (per user) instead.
+        ...flagFields(await flagCatalog(), t.feature_flags, "tenant"),
       );
     }
     const r = await formDialog({ title: "Edit tenant", confirmLabel: "Save", fields });
     if (!r) return;
-    const purge = r.purge; delete r.purge;
+    const flags = extractFlags(r, await flagCatalog());
     const payload: any = { ...r };
     if (r.licensed_tb !== undefined) payload.licensed_tb = Number(r.licensed_tb) || 0;
     try {
       await api.put(`/admin/tenants/${id}`, payload);
-      if (!isShared && purge !== undefined) {
-        await api.put(`/admin/tenants/${id}/flags`, { feature_flags: { purge_enabled: purge === "true" } });
+      if (!isShared && Object.keys(flags).length) {
+        await api.put(`/admin/tenants/${id}/flags`, { feature_flags: flags });
       }
       flash("Saved"); await load();
     } catch { flash("Save failed"); }
@@ -438,20 +480,17 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
         ];
     fields.push({ name: "status", label: "Status", defaultValue: u.status,
       options: ["active", "suspended"].map((v) => ({ label: v, value: v })) });
-    const curPurge = u.feature_flags?.purge_enabled;
-    fields.push({ name: "purge", label: "Data purge",
-      defaultValue: curPurge === false ? "false" : curPurge === true ? "true" : "inherit",
-      options: [
-        { label: "Inherit (allowed by default)", value: "inherit" },
-        { label: "Allowed", value: "true" },
-        { label: "Blocked — legal hold", value: "false" },
-      ] });
+    // Per-account feature flags (personal accounts on shared tenants, or any user
+    // on a dedicated tenant). A tenant-level block wins regardless of this.
+    fields.push(...flagFields(await flagCatalog(), u.feature_flags, "user"));
     const r = await formDialog({ title: `Edit ${u.email}`, confirmLabel: "Save", fields });
     if (!r) return;
-    const purge = r.purge; delete r.purge;
+    const flags = extractFlags(r, await flagCatalog());
     try {
       await api.put(`/admin/users/${u.id}`, r);
-      await api.put(`/admin/users/${u.id}/flags`, { feature_flags: { purge_enabled: purge === "inherit" ? null : purge === "true" } });
+      if (Object.keys(flags).length) {
+        await api.put(`/admin/users/${u.id}/flags`, { feature_flags: flags });
+      }
       flash("User updated"); await load();
     } catch { flash("Update failed"); }
   }

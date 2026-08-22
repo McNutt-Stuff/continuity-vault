@@ -22,6 +22,9 @@ export interface FormField {
   placeholder?: string; password?: boolean; required?: boolean;
   type?: "textarea";
   options?: { label: string; value: string }[];
+  // Renders a small heading above this field when it differs from the prior field's section.
+  section?: string;
+  hint?: string;
 }
 interface FormOpts { title?: string; message?: string; description?: string; fields: FormField[]; confirmLabel?: string; }
 
@@ -137,7 +140,11 @@ export function DialogHost() {
           {kind === "form" && (
             <div className="stack" style={{ gap: 12, marginTop: opts.message ? 12 : 0 }}>
               {(opts.fields ?? []).map((f, i) => (
-                <label className="stack" key={f.name} style={{ gap: 6 }}>
+                <div key={f.name} className="stack" style={{ gap: 6 }}>
+                  {f.section && (opts.fields ?? [])[i - 1]?.section !== f.section && (
+                    <div className="nav-section" style={{ padding: "8px 0 0" }}>{f.section}</div>
+                  )}
+                  <label className="stack" style={{ gap: 6 }}>
                   <span className="faint" style={{ fontSize: 11.5 }}>
                     {f.label}{f.required && <span style={{ color: "var(--danger)" }}> *</span>}
                   </span>
@@ -167,7 +174,9 @@ export function DialogHost() {
                       onChange={(e) => setForm((cur) => ({ ...cur, [f.name]: e.target.value }))}
                     />
                   )}
-                </label>
+                  </label>
+                  {f.hint && <span className="faint" style={{ fontSize: 11 }}>{f.hint}</span>}
+                </div>
               ))}
             </div>
           )}
