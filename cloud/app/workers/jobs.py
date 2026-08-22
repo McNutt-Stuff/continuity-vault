@@ -95,16 +95,19 @@ def _now() -> datetime:
 def start_backup_job(db: Session, tenant_id: str, collection_id: str,
                      kind: str = "backup",
                      destinations: Optional[List[str]] = None) -> SyncJob:
-    """Create a tracked job. If the tenant is assigned to a node (federated mode)
-    and we're the control plane, the job is left QUEUED for that node to pick up
-    on its next replication pull and run locally — a portal "Back up now" then
-    executes on the assigned node. Otherwise it runs inline in a background
-    thread (customer node running its own tenants, or an unassigned tenant)."""
+    """Create a tracked job. If the tenant is assigned to a node and we're the
+    control plane, the job is left QUEUED for that node to pick up on its next
+    replication pull and run locally — a portal "Back up now" then executes on the
+    assigned node. Otherwise it runs inline in a background thread (customer node
+    running its own tenants, or an unassigned tenant)."""
     s = get_settings()
     t = db.get(Tenant, tenant_id)
     node_id = t.node_id if t else None
     is_cp = (s.node_role or "control-plane") == "control-plane"
-    dispatch_to_node = bool(s.node_sync_scope and is_cp and node_id)
+    # Ownership is authoritative: if the tenant is assigned to a node, the control
+    # plane must never run the job itself — queue it for the owning node regardless
+    # of the federation flag, so an assigned tenant is never double-run here.
+    dispatch_to_node = bool(is_cp and node_id)
     job = SyncJob(tenant_id=tenant_id, collection_id=collection_id, kind=kind,
                   node_id=node_id, status="queued",
                   message="Queued for node" if dispatch_to_node else "Queued")

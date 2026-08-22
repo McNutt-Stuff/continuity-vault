@@ -245,18 +245,19 @@ def run_due() -> int:
     has its own tenants locally, so it processes them all."""
     global _scope_logged
     settings = get_settings()
-    federated = settings.node_sync_scope
     is_cp = (settings.node_role or "control-plane") == "control-plane"
-    skip_assigned = federated and is_cp
+    # Ownership is authoritative: the control plane NEVER runs a tenant that is
+    # assigned to a node (node_id set) — that node owns its sync. This holds even
+    # if the federation flag isn't set on this box, so an assigned tenant can't be
+    # double-run. A customer node only has its own tenants locally, so it runs all.
+    skip_assigned = is_cp
     default_minutes = max(1, settings.sync_interval_minutes)
     now = _now()
     total = eligible = due = ran = skipped_node = 0
-    if federated and not _scope_logged:
-        logger.info("federated scheduling: role=%s node=%s — %s",
+    if skip_assigned and not _scope_logged:
+        logger.info("scheduling scope: role=%s node=%s — skipping tenants assigned to a node",
                     settings.node_role or "control-plane",
-                    settings.node_name or settings.domain,
-                    "skipping tenants assigned to a node" if skip_assigned
-                    else "running this node's local tenants")
+                    settings.node_name or settings.domain)
         _scope_logged = True
     with SessionLocal() as db:
         assigned: set[str] = set()

@@ -143,9 +143,8 @@ def list_schedule(all_rows: bool = False) -> None:
     from .workers.scheduler import _effective_interval, _now
 
     settings = get_settings()
-    federated = settings.node_sync_scope
     is_cp = (settings.node_role or "control-plane") == "control-plane"
-    skip_assigned = federated and is_cp
+    skip_assigned = is_cp  # the control plane never runs tenants assigned to a node
     default_minutes = max(1, settings.sync_interval_minutes)
     now = _now()
 
