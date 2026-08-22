@@ -600,7 +600,15 @@ def _identity_from_id_token(tokens: dict) -> str | None:
 
 def _fetch_account_label(connector_type: str, tokens: dict) -> str | None:
     """Best-effort human label (email / username) from the provider. Prefers the
-    OIDC id_token, then a provider identity API."""
+    OIDC id_token, then a provider identity API. Logs the outcome so a missing
+    identity is diagnosable."""
+    ident = _resolve_identity(connector_type, tokens)
+    logger.info("source identity for %s: %s (id_token=%s)",
+                connector_type, ident or "unresolved", bool(tokens.get("id_token")))
+    return ident
+
+
+def _resolve_identity(connector_type: str, tokens: dict) -> str | None:
     import httpx
 
     ident = _identity_from_id_token(tokens)
@@ -629,14 +637,23 @@ def _fetch_account_label(connector_type: str, tokens: dict) -> str | None:
 
     try:
         with httpx.Client(timeout=15) as client:
-            if connector_type == "gmail":
-                d = _json(client, "GET", "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-                          headers=headers)
-                return d.get("emailAddress")
-            if connector_type in ("google_contacts", "google_calendar", "google_photos"):
+            if connector_type in ("gmail", "google_contacts", "google_calendar", "google_photos"):
+                # OIDC userinfo (v3, then v2) works for any Google token with the
+                # openid/email scope; Gmail also exposes its own profile endpoint.
                 d = _json(client, "GET", "https://www.googleapis.com/oauth2/v3/userinfo",
                           headers=headers)
-                return d.get("email")
+                if d.get("email"):
+                    return d["email"]
+                d = _json(client, "GET", "https://www.googleapis.com/oauth2/v2/userinfo",
+                          headers=headers)
+                if d.get("email"):
+                    return d["email"]
+                if connector_type == "gmail":
+                    d = _json(client, "GET",
+                              "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+                              headers=headers)
+                    return d.get("emailAddress")
+                return None
             if connector_type in ("outlook", "onedrive"):
                 d = _json(client, "GET", "https://graph.microsoft.com/v1.0/me", headers=headers)
                 return d.get("userPrincipalName") or d.get("mail")
