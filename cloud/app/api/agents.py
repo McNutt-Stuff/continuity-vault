@@ -27,6 +27,7 @@ from .. import audit, fleet, keybroker, security
 from ..config import get_settings
 from ..connectors import get_connector
 from ..connectors.base import SourceObject
+from ..connectors.live import _parse_dt
 from ..db import get_db
 from ..models import Collection, DesktopAgent, LinkingCode, Node, Tenant, Vault
 from ..workers.sync_worker import ingest_objects
@@ -614,7 +615,11 @@ def ingest(body: AgentIngest, agent: DesktopAgent = Depends(_auth_agent),
                      content=base64.b64decode(o.content_b64), preview=o.preview,
                      meta={**o.meta, "client_encrypted": o.client_encrypted},
                      labels=o.labels, size_bytes=o.size_bytes,
-                     content_hash=o.content_hash)
+                     content_hash=o.content_hash,
+                     # The object's own date (e.g. a file's last-modified time) the
+                     # collector reported, so search/recovery show the real date.
+                     modified_at=_parse_dt(o.meta.get("modified") or o.meta.get("mtime")
+                                           or o.meta.get("updated") or o.meta.get("created")))
         for o in body.objects
     ]
     # The operator-created source→vault mapping drives routing; changing it in the

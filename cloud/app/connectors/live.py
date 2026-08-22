@@ -26,23 +26,33 @@ logger = logging.getLogger("cv.connectors.live")
 
 
 def _parse_dt(val: object) -> Optional[datetime]:
-    """Best-effort parse of a provider timestamp into a UTC datetime: ISO 8601
-    (with Z or ±HHMM offsets) or epoch seconds/milliseconds. None when unknown."""
+    """Best-effort parse of a provider timestamp into a NAIVE-UTC datetime: an
+    existing datetime, ISO 8601 (with Z or ±HHMM offsets), or epoch seconds/ms.
+    A date-only string ("2026-08-22") parses too. None when unknown. Naive-UTC so
+    it stores + displays consistently (the API/frontend treat bare times as UTC)."""
+    dt: Optional[datetime]
     if val is None or val == "":
         return None
-    if isinstance(val, (int, float)):
+    if isinstance(val, datetime):
+        dt = val
+    elif isinstance(val, (int, float)):
         ts = float(val)
-        return datetime.fromtimestamp(ts / 1000.0 if ts > 1e12 else ts, tz=timezone.utc)
-    s = str(val).strip()
-    if s.isdigit():
-        ts = float(s)
-        return datetime.fromtimestamp(ts / 1000.0 if ts > 1e12 else ts, tz=timezone.utc)
-    s = s.replace("Z", "+00:00")
-    s = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", s)  # +0000 -> +00:00
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        return None
+        dt = datetime.fromtimestamp(ts / 1000.0 if ts > 1e12 else ts, tz=timezone.utc)
+    else:
+        s = str(val).strip()
+        if s.isdigit():
+            ts = float(s)
+            dt = datetime.fromtimestamp(ts / 1000.0 if ts > 1e12 else ts, tz=timezone.utc)
+        else:
+            s = s.replace("Z", "+00:00")
+            s = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", s)  # +0000 -> +00:00
+            try:
+                dt = datetime.fromisoformat(s)
+            except ValueError:
+                return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -445,6 +455,7 @@ def _dropbox_object(c: httpx.Client, auth: dict, it: dict, cap: int) -> SourceOb
               "content_backed_up": backed},
         labels=["/".join(it.get("path_display", "/").split("/")[:-1]) or "/"],
         size_bytes=size or None,  # type: ignore
+        modified_at=_parse_dt(it.get("client_modified") or it.get("server_modified")),
         content_hash=it.get("content_hash"))
 
 
@@ -549,7 +560,8 @@ def _onedrive_object(c: httpx.Client, headers: dict, it: dict, cap: int) -> Sour
         title=it.get("name", "file"), content=content,
         preview=f"{mime} · {size // 1000} KB",
         meta={"mime": mime, "path": f"{path}/{it.get('name')}", "content_backed_up": backed},
-        labels=[path.split(":")[-1] or "/"], size_bytes=size or None)  # type: ignore
+        labels=[path.split(":")[-1] or "/"], size_bytes=size or None,  # type: ignore
+        modified_at=_parse_dt(it.get("lastModifiedDateTime")))
 
 
 def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = None,
@@ -657,7 +669,9 @@ def fetch_icloud(username: str, password: str,
                     doc_type=kind, category=kind if kind == "video" else "image",
                     title=name, content=content, preview=f"{size // 1000} KB",
                     meta={"album": "Photos", "kind": kind, "content_backed_up": backed},
-                    labels=["Photos"], size_bytes=size or None)  # type: ignore
+                    labels=["Photos"], size_bytes=size or None,  # type: ignore
+                    modified_at=_parse_dt(getattr(photo, "asset_date", None)
+                                          or getattr(photo, "created", None)))
         except Exception as exc:
             logger.info("iCloud Photos unavailable: %s", exc)
 
@@ -704,6 +718,7 @@ def fetch_icloud(username: str, password: str,
                         meta={"path": f"/{name}", "album": "iCloud Drive",
                               "kind": _kind, "content_backed_up": backed},
                         labels=["iCloud Drive"], size_bytes=size or None,  # type: ignore
+                        modified_at=_parse_dt(getattr(node, "date_modified", None)),
                     )
         except Exception as exc:
             logger.info("iCloud Drive unavailable: %s", exc)
@@ -756,6 +771,7 @@ def fetch_1password(creds: dict) -> Iterable[SourceObject]:
                           "kind": _kind, "tags": it.get("tags", []),
                           "url": urls[0] if urls else None, "username": username},
                     labels=[v.get("name"), *it.get("tags", [])],
+                    modified_at=_parse_dt(it.get("updated_at") or it.get("created_at")),
                 )
 
 
@@ -778,7 +794,7 @@ def _download(url: str, cap: int, headers: Optional[dict] = None) -> Tuple[bytes
 def fetch_google_contacts(access_token: str,
                           content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
     headers = {"Authorization": f"Bearer {access_token}"}
-    fields = "names,emailAddresses,phoneNumbers,organizations,addresses,birthdays,biographies"
+    fields = "names,emailAddresses,phoneNumbers,organizations,addresses,birthdays,biographies,metadata"
     url = "https://people.googleapis.com/v1/people/me/connections"
     with httpx.Client(timeout=60) as c:
         token: Optional[str] = None
@@ -799,13 +815,17 @@ def fetch_google_contacts(access_token: str,
                 phones = [ph.get("value") for ph in (p.get("phoneNumbers") or []) if ph.get("value")]
                 org = ((p.get("organizations") or [{}])[0]).get("name", "")
                 rid = (p.get("resourceName") or name).split("/")[-1]
+                # People API: the contact's last-updated time (its closest "date").
+                srcs = (p.get("metadata") or {}).get("sources") or []
+                updated = next((s.get("updateTime") for s in srcs if s.get("updateTime")), None)
                 yield SourceObject(
                     object_id=f"google_contacts:{rid}",
                     doc_type="person", category="contact", title=name,
                     content=json.dumps(p).encode(),
                     preview=", ".join(emails + phones)[:140] or org,
                     meta={"emails": emails, "phones": phones, "org": org, "kind": "contact"},
-                    labels=["Contacts"])
+                    labels=["Contacts"],
+                    modified_at=_parse_dt(updated))
             token = body.get("nextPageToken")
             if not token:
                 break
@@ -847,7 +867,8 @@ def fetch_google_calendar(access_token: str,
                               "location": ev.get("location"),
                               "organizer": (ev.get("organizer") or {}).get("email"),
                               "kind": "event"},
-                        labels=[cal_name])
+                        labels=[cal_name],
+                        modified_at=_parse_dt(when))
                 token = body.get("nextPageToken")
                 if not token:
                     break
@@ -1184,7 +1205,8 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                             doc_type="post", category="social", title=text[:80],
                             content=json.dumps(post).encode(), preview=text[:200],
                             meta={"created": (post.get("created") or {}).get("time"),
-                                  "kind": "post"}, labels=["Posts"])
+                                  "kind": "post"}, labels=["Posts"],
+                            modified_at=_parse_dt((post.get("created") or {}).get("time")))
             except Exception:
                 pass
 
@@ -1203,7 +1225,8 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                             title=(body[:80] or "LinkedIn message"),
                             content=json.dumps(msg).encode(), preview=body[:200],
                             meta={"created": msg.get("createdAt"), "kind": "message"},
-                            labels=["Messages"])
+                            labels=["Messages"],
+                            modified_at=_parse_dt(msg.get("createdAt")))
             except Exception:
                 pass
 

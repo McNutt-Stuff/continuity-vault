@@ -512,6 +512,18 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         # re-index). The existing version and its bytes stand.
         if prev is not None and prev.content_hash == content_hash:
             deduped += 1
+            # Backfill the corrected object timestamp onto the existing index rows
+            # without re-storing content — repairs rows that recorded the ingest
+            # time before per-source dates were parsed. Naive-UTC dates make this
+            # a no-op once corrected, so it doesn't churn on every run.
+            if src.modified_at is not None:
+                db.query(SearchDocument).filter(
+                    SearchDocument.tenant_id == collection.tenant_id,
+                    SearchDocument.collection_id == collection.id,
+                    SearchDocument.object_id == src.object_id,
+                    SearchDocument.modified_at != src.modified_at,
+                ).update({SearchDocument.modified_at: src.modified_at},
+                         synchronize_session=False)
             continue
 
         # New object, or content changed → record a new immutable version.
