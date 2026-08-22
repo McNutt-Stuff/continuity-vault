@@ -924,7 +924,7 @@ def _node_view(db: Session, n: Node) -> dict:
 # Worker processes — background backup/sync jobs (view + kill)                 #
 # --------------------------------------------------------------------------- #
 
-def _job_view(j, tenants, colls, accounts) -> dict:
+def _job_view(j, tenants, colls, accounts, nodes) -> dict:
     c = colls.get(j.collection_id)
     label = "—"
     if c is not None:
@@ -935,6 +935,8 @@ def _job_view(j, tenants, colls, accounts) -> dict:
         "collection_id": j.collection_id, "source": label,
         "source_type": c.source_type if c else None,
         "kind": j.kind, "status": j.status,
+        "node_id": j.node_id,
+        "node": nodes.get(j.node_id) if j.node_id else "Control plane",
         "processed": j.processed or 0, "total": j.total or 0,
         "message": j.message or "", "error": j.error or "",
         "started_at": j.started_at.isoformat() if j.started_at else None,
@@ -958,9 +960,10 @@ def list_jobs(active: bool = False, limit: int = 100, db: Session = Depends(get_
     aids = {c.connector_account_id for c in colls.values() if c.connector_account_id}
     accounts = ({a.id: a for a in db.query(ConnectorAccount).filter(ConnectorAccount.id.in_(aids)).all()}
                 if aids else {})
+    nodes = {n.id: n.name for n in db.query(Node).all()}
     active_n = db.query(func.count(SyncJob.id)).filter(SyncJob.status.in_(_ACTIVE)).scalar()
     return {"active": int(active_n or 0),
-            "jobs": [_job_view(j, tenants, colls, accounts) for j in jobs]}
+            "jobs": [_job_view(j, tenants, colls, accounts, nodes) for j in jobs]}
 
 
 @router.post("/jobs/{job_id}/cancel")

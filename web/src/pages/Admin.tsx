@@ -1239,7 +1239,7 @@ function Workers() {
         Background backup / sync jobs across all tenants. Stopping a worker aborts it at its next chunk boundary.
       </div>
       <table className="table">
-        <thead><tr><th>Source</th><th>Tenant</th><th>Status</th><th>Progress</th><th></th></tr></thead>
+        <thead><tr><th>Source</th><th>Tenant</th><th>Node</th><th>Status</th><th>Progress</th><th></th></tr></thead>
         <tbody>
           {jobs.map((j) => (
             <tr key={j.id}>
@@ -1248,6 +1248,7 @@ function Workers() {
                 <div className="faint" style={{ fontSize: 11 }}>{j.source_type || j.kind}{j.message ? ` · ${j.message}` : ""}</div>
               </td>
               <td className="faint">{j.tenant}</td>
+              <td><Pill tone={j.node_id ? "info" : "ok"}>{j.node || "Control plane"}</Pill></td>
               <td><Pill tone={tone(j.status)}>{j.status}</Pill></td>
               <td className="faint">{(j.processed || 0).toLocaleString()}{j.total ? ` / ${(j.total).toLocaleString()}` : ""}</td>
               <td style={{ textAlign: "right" }}>
@@ -1257,7 +1258,7 @@ function Workers() {
               </td>
             </tr>
           ))}
-          {jobs.length === 0 && <tr><td colSpan={5} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
+          {jobs.length === 0 && <tr><td colSpan={6} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
         </tbody>
       </table>
     </Card>
