@@ -12,7 +12,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
 from email.header import decode_header, make_header
 from typing import Iterable, List, Optional, Tuple
@@ -1051,24 +1051,63 @@ def fetch_google_contacts(access_token: str,
                 break
 
 
-def _event_object_date(ev: dict) -> Optional[datetime]:
-    """A sensible timeline date for a calendar event. A "repeats forever" event
-    can carry an absurd far-future start sentinel (e.g. year 2099); only those
-    are clamped (to the original instance start, then updated/created) so the
-    event doesn't sort to the year 2099. Real future events keep their date."""
-    def _ok(d: Optional[datetime]) -> bool:
-        return d is not None and d.year < 2100
+def _add_years(d: datetime, n: int) -> datetime:
+    try:
+        return d.replace(year=d.year + n)
+    except ValueError:  # Feb 29 in a non-leap year
+        return d.replace(year=d.year + n, day=28)
 
+
+def _add_months(d: datetime, n: int) -> datetime:
+    import calendar
+    m0 = d.month - 1 + n
+    y = d.year + m0 // 12
+    m = m0 % 12 + 1
+    return d.replace(year=y, month=m, day=min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def _next_occurrence(start: datetime, rrule: str, now: datetime) -> datetime:
+    """The recurring series' first occurrence on/after ``now`` — so a yearly/
+    monthly/weekly/daily event is dated at its upcoming instance, not the series'
+    far-future end (what made "every year until 2099" events sort to 2099)."""
+    fm = re.search(r"FREQ=([A-Z]+)", rrule or "", re.IGNORECASE)
+    freq = fm.group(1).upper() if fm else ""
+    im = re.search(r"INTERVAL=(\d+)", rrule or "", re.IGNORECASE)
+    interval = max(1, int(im.group(1))) if im else 1
+    if start >= now or freq not in ("YEARLY", "MONTHLY", "WEEKLY", "DAILY"):
+        return start
+    if freq in ("DAILY", "WEEKLY"):
+        step = timedelta(days=interval) if freq == "DAILY" else timedelta(weeks=interval)
+        d = start + step * ((now - start) // step)
+        while d < now:
+            d += step
+        return d
+    d = start
+    for _ in range(2400):  # bounded; ~200 years of monthly/yearly steps
+        if d >= now:
+            break
+        d = _add_years(d, interval) if freq == "YEARLY" else _add_months(d, interval)
+    return d
+
+
+def _event_object_date(ev: dict) -> Optional[datetime]:
+    """Timeline date for a calendar event. A recurring event is dated at its next
+    occurrence (never the series' far-future end, e.g. year 2099); a one-off event
+    keeps its own start. Falls back to updated/created when there's no start."""
+    now = datetime.utcnow()
     start = ev.get("start") or {}
     dt = _parse_dt(start.get("dateTime") or start.get("date"))
-    if _ok(dt):
+    rec = ev.get("recurrence") or []
+    if dt is not None and rec:
+        rrule = next((r for r in rec if isinstance(r, str) and r.upper().startswith("RRULE")), "")
+        return _next_occurrence(dt, rrule, now)
+    if dt is not None:
         return dt
-    ost = ev.get("originalStartTime") or {}
-    for cand in (ost.get("dateTime") or ost.get("date"), ev.get("updated"), ev.get("created")):
+    for cand in (ev.get("updated"), ev.get("created")):
         alt = _parse_dt(cand)
-        if _ok(alt):
+        if alt is not None:
             return alt
-    return dt  # nothing better — keep the real (possibly future) start
+    return None
 
 
 def fetch_google_calendar(access_token: str,

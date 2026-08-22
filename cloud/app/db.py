@@ -63,28 +63,34 @@ def init_db() -> None:
 
 
 def _clean_far_future_calendar() -> None:
-    """Remove stale calendar index rows dated to an absurd far-future sentinel
-    (year >= 2100). An earlier build expanded recurring series into instances,
-    so 'repeats forever' events created artifact rows that sort to the year 2099;
-    the current build stores one correctly-dated event per series, so these old
-    rows are safe to drop (real future events are dated well before 2100)."""
+    """Remove stale calendar index rows left by an earlier build that expanded
+    recurring series into per-occurrence instances (object ids ``…_YYYYMMDD`` /
+    ``…_YYYYMMDDTHHMMSSZ``). Those spread a yearly event across every year to its
+    UNTIL (e.g. 2099); the current build stores one event per series dated at its
+    next occurrence, so the instance rows are safe to drop."""
     import logging
-    from datetime import datetime
+    import re
     from .models import SearchDocument
 
+    inst_re = re.compile(r"_\d{8}(t\d{6}z)?$", re.IGNORECASE)  # Google instance-id suffix
     try:
         with SessionLocal() as db:
-            cutoff = datetime(2100, 1, 1)
-            n = (db.query(SearchDocument)
-                 .filter(SearchDocument.source_type == "google_calendar",
-                         SearchDocument.modified_at >= cutoff)
-                 .delete(synchronize_session=False))
-            if n:
-                db.commit()
-                logging.getLogger("cv.db").warning(
-                    "cleaned %d stale far-future (year>=2100) calendar index row(s)", n)
-            else:
-                db.rollback()
+            oids = [oid for (oid,) in
+                    db.query(SearchDocument.object_id)
+                    .filter(SearchDocument.source_type == "google_calendar")
+                    .distinct().all()
+                    if oid and inst_re.search(oid)]
+            if not oids:
+                return
+            n = 0
+            for i in range(0, len(oids), 400):  # bounded IN() for SQLite/PG limits
+                n += (db.query(SearchDocument)
+                      .filter(SearchDocument.source_type == "google_calendar",
+                              SearchDocument.object_id.in_(oids[i:i + 400]))
+                      .delete(synchronize_session=False))
+            db.commit()
+            logging.getLogger("cv.db").warning(
+                "cleaned %d stale recurring-calendar instance row(s)", n)
     except Exception:
         pass  # best-effort cleanup; never block startup
 
