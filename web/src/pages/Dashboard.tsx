@@ -20,6 +20,7 @@ interface Overview {
   };
   protection: { key_ownership_model: string; encrypted: boolean };
   connector_health?: { issues: number; needs_reauth: number };
+  cloud_deletion?: { pending: boolean; delete_at: string; days_left: number; object_count: number; bytes: number } | null;
   scope?: "me" | "org";
   can_switch_scope?: boolean;
 }
@@ -112,6 +113,26 @@ export default function Dashboard() {
           </button>
         </div>
       </div>
+
+      {ov?.cloud_deletion?.pending && (
+        <Card style={{ marginBottom: 16, borderColor: "var(--danger)", cursor: "pointer" }} onClick={() => nav("/onboarding")}>
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            <div className="result-icon" style={{ background: "var(--inset)", color: "var(--danger)" }}>
+              <Icon name="alert" size={18} />
+            </div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>
+                Arkive Cloud data pending deletion — {ov.cloud_deletion.days_left} day{ov.cloud_deletion.days_left === 1 ? "" : "s"} left
+              </div>
+              <div className="faint" style={{ fontSize: 12.5 }}>
+                {ov.cloud_deletion.object_count.toLocaleString()} object{ov.cloud_deletion.object_count === 1 ? "" : "s"} ({bytes(ov.cloud_deletion.bytes)}) will be permanently deleted from Arkive Cloud and cannot be recovered.
+                Re-subscribe in Protection Setup to cancel.
+              </div>
+            </div>
+            <Icon name="grid" size={16} />
+          </div>
+        </Card>
+      )}
 
       {ov?.connector_health && ov.connector_health.issues > 0 && (
         <Card style={{ marginBottom: 16, borderColor: "var(--warn)", cursor: "pointer" }} onClick={() => nav("/connectors")}>

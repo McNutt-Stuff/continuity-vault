@@ -175,7 +175,7 @@ def taxonomy(principal: security.Principal = Depends(security.get_principal)):
 @router.get("")
 def search(q: str = "", source_type: str | None = None, doc_type: str | None = None,
            category: str | None = None, label: str | None = None,
-           attr: str | None = None, limit: int = 50,
+           attr: str | None = None, limit: int = 50, sort: str = "date",
            principal: security.Principal = Depends(security.require_passkey),
            tenant: Tenant = Depends(security.get_tenant),
            db: Session = Depends(get_db)):
@@ -316,12 +316,18 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
 
     # Final rows: every active filter applied.
     filtered = [r for r in unique if _matches(r)]
-    # Order newest-first by when the entity was first ingested (matches what the
-    # UI shows), falling back to modified/created when unknown.
-    filtered.sort(
-        key=lambda r: (first_ingested.get((r.source_type, r.object_id))
-                       or r.modified_at or r.created_at),
-        reverse=True)
+    # Sort newest-first. "date" (default) orders by the object's OWN timestamp
+    # (file/email/post date); "captured" orders by when we first ingested it.
+    if sort == "captured":
+        def _sort_key(r: SearchDocument):
+            return (first_ingested.get((r.source_type, r.object_id))
+                    or r.created_at or r.modified_at)
+    else:
+        def _sort_key(r: SearchDocument):
+            return (r.modified_at
+                    or first_ingested.get((r.source_type, r.object_id))
+                    or r.created_at)
+    filtered.sort(key=_sort_key, reverse=True)
     rows = filtered[:limit]
 
     # Map each result's object to every destination it is stored in (across all
@@ -547,6 +553,7 @@ def retrieve(body: RetrieveRequest,
         "status": "recovered", "async": False, "location": label,
         "recovered_id": item.id, "title": item.title, "mime": item.mime,
         "size_bytes": item.size_bytes, "doc_type": item.doc_type,
+        "object_modified_at": item.object_modified_at.isoformat() if item.object_modified_at else None,
         "expires_in_seconds": recovery.get_settings().recovered_ttl_seconds,
         "message": f"Recovered {size_bytes} bytes from {label} — viewable until it expires.",
     }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { Card, Pill, bytes } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { confirmDialog } from "../components/dialog";
 
 interface Tier {
   id: string; title: string; tagline: string; icon: string; color: string;
@@ -89,6 +90,23 @@ export default function Onboarding() {
   }
 
   async function save() {
+    // Unsubscribing from Arkive Cloud schedules permanent deletion of stored data.
+    const hadCloud = (plan?.options || []).includes("cv-cloud");
+    if (hadCloud && !options.has("cv-cloud")) {
+      const ok1 = await confirmDialog({
+        title: "Unsubscribe from Arkive Cloud?", tone: "danger", confirmLabel: "Continue",
+        message: "Everything you've stored in Arkive Cloud will be scheduled for permanent "
+          + "deletion. You have 30 days to re-subscribe before it is erased \u2014 after that it "
+          + "is non-recoverable.",
+      });
+      if (!ok1) { setOptions((cur) => new Set([...cur, "cv-cloud"])); return; }
+      const ok2 = await confirmDialog({
+        title: "This cannot be undone", tone: "danger", confirmLabel: "Unsubscribe & schedule deletion",
+        message: "In 30 days we automatically purge all of your Arkive Cloud data. Re-subscribing "
+          + "before then cancels the deletion; once purged, the data cannot be recovered by anyone.",
+      });
+      if (!ok2) { setOptions((cur) => new Set([...cur, "cv-cloud"])); return; }
+    }
     setSaving(true); setSaved(false);
     try {
       const appliance_plan = Object.entries(qty).filter(([, q]) => q > 0)

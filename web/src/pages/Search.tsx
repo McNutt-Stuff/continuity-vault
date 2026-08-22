@@ -11,6 +11,7 @@ interface Recovered {
   source_type: string; mime: string; size_bytes: number; location: string;
   expires_in_seconds: number; viewed: boolean;
   version?: number | null; version_created_at?: string | null;
+  object_modified_at?: string | null;
 }
 interface RetrieveResp {
   status: string; message: string; recovered_id?: string; title?: string;
@@ -292,6 +293,7 @@ export default function Search() {
   const [label, setLabel] = useState<string | null>(null);
   const [attr, setAttr] = useState<string | null>(null);
   const [attrKey, setAttrKey] = useState("");
+  const [sortBy, setSortBy] = useState<"date" | "captured">("date");
   const [data, setData] = useState<SearchResp | null>(null);
   const [locked, setLocked] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -490,6 +492,7 @@ export default function Search() {
       if (category) params.set("category", category);
       if (label) params.set("label", label);
       if (attr) params.set("attr", attr);
+      params.set("sort", sortBy);
       setData(await api.get<SearchResp>(`/search?${params.toString()}`));
       setLocked(false);
     } catch (e) {
@@ -508,7 +511,7 @@ export default function Search() {
   useEffect(() => {
     if (me?.passkey_verified) void run();
     else setLocked(true);
-  }, [me?.passkey_verified, source, category, label, attr]);
+  }, [me?.passkey_verified, source, category, label, attr, sortBy]);
 
   if (locked) {
     return (
@@ -553,7 +556,8 @@ export default function Search() {
                 </div>
                 <div className="faint" style={{ fontSize: 11.5 }}>
                   {it.location} · {bytes(it.size_bytes)}
-                  {it.version_created_at ? ` · version from ${timeAgo(it.version_created_at)}` : ""}
+                  {it.object_modified_at ? ` · dated ${timeAgo(it.object_modified_at)}` : ""}
+                  {it.version_created_at ? ` · captured ${timeAgo(it.version_created_at)}` : ""}
                    · <span style={{ color: it.expires_in_seconds < 120 ? "var(--danger-c)" : undefined }}>expires in {fmtCountdown(it.expires_in_seconds)}</span>
                 </div>
               </div>
@@ -578,6 +582,20 @@ export default function Search() {
           onKeyDown={(e) => e.key === "Enter" && run()}
         />
         <button className="btn primary sm" onClick={run}>Search</button>
+      </div>
+
+      <div className="row" style={{ gap: 6, marginBottom: 14, alignItems: "center", justifyContent: "flex-end" }}>
+        <span className="faint" style={{ fontSize: 11 }}>Sort by</span>
+        <div className="row" style={{ gap: 0, border: "1px solid var(--border-soft)", borderRadius: 8, overflow: "hidden" }}>
+          <button className={`btn sm ${sortBy === "date" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }}
+                  onClick={() => setSortBy("date")} title="The item's own date (file / email / post date)">
+            Object date
+          </button>
+          <button className={`btn sm ${sortBy === "captured" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }}
+                  onClick={() => setSortBy("captured")} title="When Arkive first captured it">
+            Date captured
+          </button>
+        </div>
       </div>
 
       {loading && <Loading label="Searching your protected data…" />}
@@ -720,8 +738,11 @@ export default function Search() {
                 <Pill tone="info">{CATEGORY_META[r.category]?.label ?? r.category}</Pill>
                 <span className="faint" style={{ fontSize: 11 }}>{r.doc_type}</span>
               </div>
-              <div className="faint" style={{ fontSize: 11 }} title={`First ingested ${fmtAbsolute(r.first_ingested_at)}`}>
-                {bytes(r.size_bytes)} · ingested {timeAgo(r.first_ingested_at)}
+              <div className="faint" style={{ fontSize: 11 }}
+                   title={`${r.modified_at ? `Dated ${fmtAbsolute(r.modified_at)} · ` : ""}First captured ${fmtAbsolute(r.first_ingested_at)}`}>
+                {bytes(r.size_bytes)} · {r.modified_at
+                  ? `dated ${timeAgo(r.modified_at)}`
+                  : `captured ${timeAgo(r.first_ingested_at)}`}
               </div>
               <button className="btn sm primary" style={{ padding: "3px 12px" }} onClick={() => recover(r)}>
                 <Icon name="restore" size={13} /> Recover

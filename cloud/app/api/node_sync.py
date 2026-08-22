@@ -346,19 +346,25 @@ def node_control(body: ControlReq, authorization: str = Header(default="")):
 class PurgeReq(BaseModel):
     account_id: str
     tenant_id: str
+    destinations: list[str] | None = None
 
 
 @router.post("/purge")
 def node_purge(body: PurgeReq, authorization: str = Header(default=""),
                db: Session = Depends(get_db)):
     """Purge a source's local data on this node (index + recovery points +
-    mappings + account), called by the control plane during a source purge."""
+    mappings + account), called by the control plane during a source purge.
+    ``destinations`` limits the purge to specific stores; None/["all"] = everywhere."""
     _require_fleet(authorization)
     acct = db.get(ConnectorAccount, body.account_id)
     if not acct or acct.tenant_id != body.tenant_id:
         return {"ok": True, "documents": 0, "recovery_points": 0, "collections": 0}
-    from .connectors import _purge_source_local
-    counts = _purge_source_local(db, acct)
+    from .connectors import _purge_destinations, _purge_source_local
+    dests = body.destinations
+    if not dests or "all" in dests:
+        counts = _purge_source_local(db, acct)
+    else:
+        counts = _purge_destinations(db, acct, dests)
     db.commit()
     return {"ok": True, **counts}
 

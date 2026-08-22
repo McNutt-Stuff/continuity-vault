@@ -9,6 +9,8 @@ license, and their desired appliances.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -21,6 +23,9 @@ from .dashboard import _OBJECT_BUCKETS, _bucket_for
 router = APIRouter(prefix="/billing", tags=["billing"])
 
 TB = 1024 ** 4  # 1 TB (binary) — matches the byte sizes shown in the UI
+
+# Grace period between unsubscribing from Arkive Cloud and permanent deletion.
+CLOUD_DELETE_GRACE_DAYS = 30
 
 # Storage tiers the customer can enable (feature gating keys).
 STORAGE_TIERS = [
@@ -306,6 +311,54 @@ def user_protection_options(user, tenant: Tenant) -> list[str]:
     return list(tenant.protection_options or [])
 
 
+def cloud_delete_target(user, tenant: Tenant):
+    """The row that holds the pending Arkive Cloud deletion timer for this scope:
+    the user for shared/personal accounts, else the tenant."""
+    return user if (user is not None and (tenant.tenant_type or "dedicated") == "shared") else tenant
+
+
+def _apply_cloud_unsubscribe(target, prev: set[str], new: set[str]) -> None:
+    """Arm the 30-day deletion timer when Arkive Cloud is dropped; cancel it when re-added."""
+    if "cv-cloud" in prev and "cv-cloud" not in new:
+        if not target.cloud_delete_at:
+            target.cloud_delete_at = datetime.utcnow() + timedelta(days=CLOUD_DELETE_GRACE_DAYS)
+    elif "cv-cloud" in new and target.cloud_delete_at:
+        target.cloud_delete_at = None
+
+
+def cloud_stored_summary(db: Session, tenant: Tenant, vault_ids) -> tuple[int, int]:
+    """(object_count, bytes) currently stored in Arkive Cloud for the given vaults."""
+    from ..models import SearchDocument, SnapshotReceipt
+    if not vault_ids:
+        return (0, 0)
+    receipts = (db.query(SnapshotReceipt.snapshot_id, SnapshotReceipt.total_bytes)
+                .filter(SnapshotReceipt.tenant_id == tenant.id,
+                        SnapshotReceipt.vault_id.in_(vault_ids),
+                        SnapshotReceipt.destination == "cv-cloud").all())
+    cloud_snaps = {sid for sid, _ in receipts}
+    if not cloud_snaps:
+        return (0, 0)
+    total_bytes = sum(int(b or 0) for _, b in receipts)
+    seen = {(st, oid) for st, oid in
+            db.query(SearchDocument.source_type, SearchDocument.object_id)
+            .filter(SearchDocument.tenant_id == tenant.id,
+                    SearchDocument.snapshot_id.in_(list(cloud_snaps))).all()}
+    return (len(seen), total_bytes)
+
+
+def purge_cloud_data(db: Session, tenant: Tenant, vault_ids) -> dict:
+    """Permanently delete the scope's Arkive Cloud copies (their receipts, which
+    makes the ciphertext unfindable/undecryptable). Irreversible. Caller commits."""
+    from ..models import SnapshotReceipt
+    if not vault_ids:
+        return {"receipts": 0}
+    n = db.query(SnapshotReceipt).filter(
+        SnapshotReceipt.tenant_id == tenant.id,
+        SnapshotReceipt.vault_id.in_(vault_ids),
+        SnapshotReceipt.destination == "cv-cloud").delete(synchronize_session=False)
+    return {"receipts": int(n or 0)}
+
+
 def plan_view(db: Session, user, tenant: Tenant) -> dict:
     """Shared accounts see their own per-account plan; org members see the tenant plan."""
     if (tenant.tenant_type or "dedicated") == "shared":
@@ -357,7 +410,10 @@ def update_plan(body: PlanUpdate,
     # (no org role required); org tenants keep the security-admin-gated tenant-wide plan.
     if (tenant.tenant_type or "dedicated") == "shared":
         if body.options is not None:
-            user.protection_options = [o for o in body.options if o in valid]
+            prev = set(user.protection_options or [])
+            new = {o for o in body.options if o in valid}
+            user.protection_options = list(new)
+            _apply_cloud_unsubscribe(user, prev, new)
         db.commit()
         audit.record(db, actor=principal.user_id, action="billing.plan_updated",
                      tenant_id=tenant.id, resource=user.id,
@@ -366,7 +422,10 @@ def update_plan(body: PlanUpdate,
     if not (security.is_org_admin(principal.role) or principal.is_platform_admin):
         raise HTTPException(403, "security-admin role required")
     if body.options is not None:
-        tenant.protection_options = [o for o in body.options if o in valid]
+        prev = set(tenant.protection_options or [])
+        new = {o for o in body.options if o in valid}
+        tenant.protection_options = list(new)
+        _apply_cloud_unsubscribe(tenant, prev, new)
     if body.licensed_tb is not None:
         # Never allow licensing below the tenant's tier minimum.
         p = get_pricing(db)

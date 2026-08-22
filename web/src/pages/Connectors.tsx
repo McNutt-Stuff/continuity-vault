@@ -254,21 +254,51 @@ export default function Connectors() {
   }
 
   async function purge(a: Account) {
-    const ok1 = await confirmDialog({
-      title: "Purge all data?",
-      message: `This permanently deletes ALL data captured from ${a.account_label} — every recovery point, indexed item and search result — and removes the source.`,
-      tone: "danger", confirmLabel: "Continue",
+    let targets: { active: boolean; destinations: { id: string; label: string; recovery_points: number; bytes: number }[] };
+    try {
+      targets = await api.get(`/connectors/accounts/${a.id}/purge-targets`);
+    } catch (e) {
+      await notify({ title: "Couldn't load purge options", message: (e as ApiError).message, tone: "danger" });
+      return;
+    }
+    // The data mapping must be disabled/removed first.
+    if (targets.active) {
+      await notify({
+        title: "Deactivate the source first", tone: "warn",
+        message: `Disable ${a.account_label}'s data mapping by deactivating the source before you can purge its data.`,
+      });
+      return;
+    }
+    const opts = [
+      { label: "Everywhere — remove this source completely", value: "all" },
+      ...targets.destinations.map((d) => ({
+        label: `${d.label} — ${bytes(d.bytes)} · ${d.recovery_points} recovery point${d.recovery_points === 1 ? "" : "s"}`,
+        value: d.id,
+      })),
+    ];
+    const sel = await formDialog({
+      title: `Purge ${a.account_label}`,
+      message: "Choose where to permanently delete this source's data from. This is irreversible.",
+      confirmLabel: "Continue",
+      fields: [{ name: "where", label: "Purge from", defaultValue: "all", options: opts }],
     });
-    if (!ok1) return;
+    if (!sel) return;
+    const where = sel.where;
+    const scope = where === "all"
+      ? "everywhere — the source will be removed completely"
+      : (opts.find((o) => o.value === where)?.label ?? where);
     const ok2 = await confirmDialog({
       title: "This cannot be undone",
-      message: `Once purged, ${a.account_label}'s data is NOT recoverable. There is no way to restore it. Are you absolutely sure?`,
+      message: `Once purged, ${a.account_label}'s data is NOT recoverable. Purge from ${scope}?`,
       tone: "danger", confirmLabel: "Purge permanently",
     });
     if (!ok2) return;
     try {
-      const r = await api.post<{ documents?: number; recovery_points?: number }>(`/connectors/accounts/${a.id}/purge`, {});
-      flash(`Purged — ${(r.documents || 0).toLocaleString()} items, ${(r.recovery_points || 0).toLocaleString()} recovery points removed`);
+      const r = await api.post<{ documents?: number; recovery_points?: number; removed?: boolean }>(
+        `/connectors/accounts/${a.id}/purge`, { destinations: where === "all" ? ["all"] : [where] });
+      flash(r.removed
+        ? `Purged — source removed, ${(r.recovery_points || 0).toLocaleString()} recovery points deleted`
+        : `Purged ${(r.recovery_points || 0).toLocaleString()} recovery point${(r.recovery_points || 0) === 1 ? "" : "s"}`);
       await load();
     } catch (e) {
       await notify({ title: "Couldn't purge", message: (e as ApiError).message, tone: "danger" });

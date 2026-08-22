@@ -62,6 +62,9 @@ class Tenant(Base):
     # Admin-controlled capability flags (e.g. purge_enabled=False for a legal hold
     # / subpoena). Org tenants set them tenant-wide; personal accounts use user-level.
     feature_flags = Column(JSON, default=dict)
+    # When set, the tenant unsubscribed from Arkive Cloud; its cloud-stored data is
+    # scheduled for permanent deletion at this time (30-day grace). Cleared on re-subscribe.
+    cloud_delete_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 
     users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
@@ -87,6 +90,8 @@ class User(Base):
     # Shared-tenant personal accounts own their protection destinations here (the
     # tenant is a pool of unrelated accounts); org tenants use Tenant.protection_options.
     protection_options = Column(JSON, default=list)
+    # Shared/personal account's pending Arkive Cloud deletion (30-day grace, see Tenant).
+    cloud_delete_at = Column(DateTime, nullable=True)
     last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 
@@ -516,6 +521,7 @@ class RecoveredItem(Base):
     location = Column(String, default="")
     version = Column(Integer, nullable=True)  # which stored version was recovered
     version_created_at = Column(DateTime, nullable=True)  # when that version was captured
+    object_modified_at = Column(DateTime, nullable=True)  # the object's own native timestamp
     requested_by = Column(String, default="")
     created_at = Column(DateTime, default=_now)
     expires_at = Column(DateTime, nullable=False)

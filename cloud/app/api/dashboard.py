@@ -203,6 +203,25 @@ def overview(scope: str = "me",
                       SearchDocument.vault_id.in_(vault_ids),
                       SearchDocument.modified_at.isnot(None)).scalar()) if vault_ids else None
 
+    # --- Pending Arkive Cloud deletion (30-day grace after unsubscribe) -------
+    from .billing import cloud_delete_target, cloud_stored_summary
+    from ..models import User as _User
+    _user = db.get(_User, principal.user_id)
+    _target = cloud_delete_target(_user, tenant)
+    cloud_deletion = None
+    if _target is not None and getattr(_target, "cloud_delete_at", None):
+        from datetime import datetime as _dt
+        delete_at = _target.cloud_delete_at
+        secs = (delete_at - _dt.utcnow()).total_seconds()
+        cd_count, cd_bytes = cloud_stored_summary(db, tenant, vault_ids)
+        cloud_deletion = {
+            "pending": True,
+            "delete_at": delete_at.isoformat(),
+            "days_left": max(0, int(secs // 86400) + (1 if secs % 86400 else 0)),
+            "object_count": cd_count,
+            "bytes": cd_bytes,
+        }
+
     return {
         "sources": {"count": sum(type_counts.values()), "types": source_types},
         "objects": {"total": object_total, "breakdown": object_breakdown,
@@ -222,6 +241,7 @@ def overview(scope: str = "me",
         },
         "scope": eff_scope,
         "can_switch_scope": can_switch,
+        "cloud_deletion": cloud_deletion,
     }
 
 

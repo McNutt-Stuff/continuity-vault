@@ -25,6 +25,7 @@ logger = logging.getLogger("cv.scheduler")
 
 _thread: threading.Thread | None = None
 _scope_logged = False
+_last_cloud_purge: datetime | None = None
 
 
 def _now() -> datetime:
@@ -55,6 +56,10 @@ def start_scheduler() -> None:
                 _purge_recovered()
             except Exception:  # noqa: BLE001
                 logger.exception("recovery purge failed")
+            try:
+                _purge_cloud_unsubscribed()
+            except Exception:  # noqa: BLE001
+                logger.exception("cloud-unsubscribe purge failed")
             time.sleep(tick)
 
     _thread = threading.Thread(target=loop, name="cv-sync-scheduler", daemon=True)
@@ -64,6 +69,43 @@ def start_scheduler() -> None:
                 settings.node_name or settings.domain,
                 settings.node_role or "control-plane",
                 "federated" if settings.node_sync_scope else "single")
+
+
+def _purge_cloud_unsubscribed() -> None:
+    """Permanently delete Arkive Cloud data for tenants/accounts whose 30-day
+    unsubscribe grace has elapsed. Checked at most hourly."""
+    global _last_cloud_purge
+    now = datetime.utcnow()
+    if _last_cloud_purge and (now - _last_cloud_purge) < timedelta(hours=1):
+        return
+    _last_cloud_purge = now
+    from ..api.billing import purge_cloud_data
+    from ..models import User, Vault
+    with SessionLocal() as db:
+        # Org tenants: delete across all tenant vaults.
+        for t in (db.query(Tenant)
+                  .filter(Tenant.cloud_delete_at.isnot(None),
+                          Tenant.cloud_delete_at <= now).all()):
+            vids = [v.id for v in db.query(Vault).filter(Vault.tenant_id == t.id).all()]
+            res = purge_cloud_data(db, t, vids)
+            t.cloud_delete_at = None
+            db.commit()
+            logger.warning("cloud unsubscribe purge: tenant=%s receipts=%d", t.id, res["receipts"])
+        # Shared/personal accounts: delete across the user's own vaults.
+        for u in (db.query(User)
+                  .filter(User.cloud_delete_at.isnot(None),
+                          User.cloud_delete_at <= now).all()):
+            t = db.get(Tenant, u.tenant_id)
+            if t is None:
+                u.cloud_delete_at = None
+                db.commit()
+                continue
+            vids = [v.id for v in db.query(Vault).filter(
+                Vault.tenant_id == u.tenant_id, Vault.owner_user_id == u.id).all()]
+            res = purge_cloud_data(db, t, vids)
+            u.cloud_delete_at = None
+            db.commit()
+            logger.warning("cloud unsubscribe purge: user=%s receipts=%d", u.id, res["receipts"])
 
 
 def _purge_recovered() -> None:

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from .. import audit, security
 from ..config import get_settings
 from ..db import get_db
-from ..models import ObjectVersion, RecoveredItem, Tenant
+from ..models import ObjectVersion, RecoveredItem, SearchDocument, Tenant
 
 router = APIRouter(prefix="/recovered", tags=["recovery"])
 logger = logging.getLogger("cv.recovery")
@@ -58,6 +58,12 @@ def create_recovered(db: Session, tenant_id: str, actor: str, *, object_id: str,
           .filter(ObjectVersion.tenant_id == tenant_id,
                   ObjectVersion.object_id == object_id,
                   ObjectVersion.snapshot_id == snapshot_id).first())
+    # The object's OWN timestamp (file/email/post date), shown alongside capture time.
+    obj_modified = (db.query(SearchDocument.modified_at)
+                    .filter(SearchDocument.tenant_id == tenant_id,
+                            SearchDocument.object_id == object_id,
+                            SearchDocument.modified_at.isnot(None))
+                    .order_by(SearchDocument.created_at.desc()).first())
     item = RecoveredItem(
         tenant_id=tenant_id, object_id=object_id, snapshot_id=snapshot_id,
         title=title or object_id, doc_type=doc_type, source_type=source_type,
@@ -65,6 +71,7 @@ def create_recovered(db: Session, tenant_id: str, actor: str, *, object_id: str,
         location=location, requested_by=actor,
         version=ov.version if ov else None,
         version_created_at=ov.created_at if ov else None,
+        object_modified_at=obj_modified[0] if obj_modified else None,
         expires_at=_now().replace(tzinfo=None) + timedelta(seconds=ttl),
     )
     db.add(item)
@@ -105,6 +112,7 @@ def _view(item: RecoveredItem) -> dict:
         "mime": item.mime, "size_bytes": item.size_bytes, "location": item.location,
         "version": item.version,
         "version_created_at": item.version_created_at.isoformat() if item.version_created_at else None,
+        "object_modified_at": item.object_modified_at.isoformat() if item.object_modified_at else None,
         "created_at": item.created_at.isoformat(),
         "expires_at": item.expires_at.isoformat(),
         "expires_in_seconds": max(0, remaining),
