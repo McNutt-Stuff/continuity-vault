@@ -95,7 +95,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "pricing", label: "Pricing", icon: "database", group: "Integrations" },
   { key: "website", label: "Website", icon: "grid", group: "Integrations" },
   { key: "nodes", label: "Nodes", icon: "server", group: "Infrastructure" },
-  { key: "storage-usage", label: "Storage usage", icon: "database", group: "Infrastructure" },
+  { key: "storage-usage", label: "Arkive Cloud", icon: "database", group: "Infrastructure" },
   { key: "fleet", label: "Appliance fleet", icon: "server", group: "Infrastructure" },
   { key: "crypto", label: "Crypto", icon: "lock", group: "Infrastructure" },
   { key: "updates", label: "Updates", icon: "clock", group: "Infrastructure" },
@@ -1311,7 +1311,7 @@ function Workers() {
     <Card style={{ marginTop: 16 }}>
       <div className="spread" style={{ marginBottom: 8 }}>
         <div className="row" style={{ gap: 8, alignItems: "center" }}>
-          <h3 style={{ margin: 0 }}>Worker processes</h3>
+          <h3 style={{ margin: 0 }}>Source Sync Worker Processes</h3>
           <Pill tone={active > 0 ? "info" : "ok"}>{active} active</Pill>
         </div>
         <button className="btn ghost sm" onClick={() => setShowAll((v) => !v)}>
@@ -1322,7 +1322,7 @@ function Workers() {
         Background backup / sync jobs across all tenants. Stopping a worker aborts it at its next chunk boundary.
       </div>
       <table className="table">
-        <thead><tr><th></th><th>Source</th><th>Tenant</th><th>Node</th><th>Result</th><th>Time</th><th></th></tr></thead>
+        <thead><tr><th></th><th>Tenant / Source</th><th>Node</th><th>Result</th><th>Time</th><th></th></tr></thead>
         <tbody>
           {jobs.map((j) => (
             <tr key={j.id}>
@@ -1332,16 +1332,18 @@ function Workers() {
                 </span>
               </td>
               <td>
-                <div style={{ fontWeight: 600 }}>{j.source}{j.source_username && j.source_username !== j.source ? <span className="faint" style={{ fontWeight: 400 }}> ({j.source_username})</span> : null}</div>
-                <div className="faint" style={{ fontSize: 11 }}>{j.source_type || j.kind}{j.message ? ` · ${j.message}` : ""}</div>
+                <div style={{ fontWeight: 600 }}>{j.tenant}{j.owner ? ` → ${j.owner}` : ""}</div>
+                <div className="faint" style={{ fontSize: 11 }}>{j.source}{j.source_username && j.source_username !== j.source ? ` (${j.source_username})` : ""}</div>
               </td>
-              <td className="faint">{j.tenant}</td>
               <td style={{ whiteSpace: "nowrap" }}>{j.node || "Control plane"}</td>
               <td>
                 <div className="row" style={{ gap: 8, alignItems: "center" }}>
                   <span title={j.status} style={{ width: 9, height: 9, borderRadius: 999, background: statusColor(j.status), flexShrink: 0 }} />
                   <span className="faint">{(j.processed || 0).toLocaleString()}{j.total ? ` / ${(j.total).toLocaleString()}` : ""}</span>
                 </div>
+                {(j.source_type || j.message) && (
+                  <div className="faint" style={{ fontSize: 10.5 }}>{j.source_type || j.kind}{j.message ? ` · ${j.message}` : ""}</div>
+                )}
               </td>
               <td className="faint" style={{ fontSize: 10.5, whiteSpace: "nowrap" }}>
                 {j.started_at && <div>started {fmtAbsolute(j.started_at)}</div>}
@@ -1359,7 +1361,7 @@ function Workers() {
               </td>
             </tr>
           ))}
-          {jobs.length === 0 && <tr><td colSpan={7} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
+          {jobs.length === 0 && <tr><td colSpan={6} className="muted">{showAll ? "No jobs yet." : "No active workers."}</td></tr>}
         </tbody>
       </table>
       {logJob && (

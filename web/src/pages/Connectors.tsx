@@ -554,7 +554,7 @@ export default function Connectors() {
                 )}
                 {inactive && (
                   <div className="faint" style={{ fontSize: 12, marginTop: 3 }}>
-                    Deactivated — data retained. Re-link to resume syncing, or purge to delete it permanently.
+                    Deactivated — data retained. Re-link to resume syncing, or remove it to delete it permanently.
                   </div>
                 )}
               </div>
@@ -563,9 +563,9 @@ export default function Connectors() {
                   <Pill tone="warn">Deactivated</Pill>
                   <button className="btn sm primary" onClick={() => reactivate(a)}><Icon name="link" size={13} /> Re-link</button>
                   <Menu items={([
-                    { label: "Rename source", icon: "key", onClick: () => rename(a) },
+                    { label: "Rename source", icon: "edit", onClick: () => rename(a) },
                     ...(c?.mode === "oauth" ? [{ label: "Re-authorize", icon: "key", onClick: () => reconnect(a) }] : []),
-                    ...(canPurge ? ["divider", { label: "Purge data", icon: "alert", danger: true, onClick: () => purge(a) }] : []),
+                    ...(canPurge ? ["divider", { label: "Remove source", icon: "trash", danger: true, onClick: () => purge(a) }] : []),
                   ] as MenuEntry[])} />
                 </>
               ) : (
@@ -577,10 +577,10 @@ export default function Connectors() {
                         ? <button className="btn sm primary" onClick={() => setPhotoPicker(a.id)}>Add photos</button>
                         : <button className="btn sm primary" onClick={() => backup(a)}>Back up now</button>)}
                   <Menu items={([
-                    { label: "Rename source", icon: "key", onClick: () => rename(a) },
+                    { label: "Rename source", icon: "edit", onClick: () => rename(a) },
                     ...(c?.mode === "oauth" && !a.needs_reauth ? [{ label: "Re-authorize", icon: "key", onClick: () => reconnect(a) }] : []),
                     { label: "Deactivate", icon: "link", onClick: () => unlink(a) },
-                    ...(canPurge ? ["divider", { label: "Purge data", icon: "alert", danger: true, onClick: () => purge(a) }] : []),
+                    ...(canPurge ? ["divider", { label: "Remove source", icon: "trash", danger: true, disabled: true, onClick: () => purge(a) }] : []),
                   ] as MenuEntry[])} />
                 </>
               )}

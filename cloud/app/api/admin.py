@@ -981,16 +981,21 @@ def _node_view(db: Session, n: Node) -> dict:
 # Worker processes — background backup/sync jobs (view + kill)                 #
 # --------------------------------------------------------------------------- #
 
-def _job_view(j, tenants, colls, accounts, nodes) -> dict:
+def _job_view(j, tenants, colls, accounts, nodes, users=None) -> dict:
     c = colls.get(j.collection_id)
     label = "—"
     username = None
+    owner = None
     if c is not None:
         acc = accounts.get(c.connector_account_id) if c.connector_account_id else None
         label = acc.account_label if acc else c.name
         username = acc.account_username if acc else None
+        if acc and acc.owner_user_id and users:
+            u = users.get(acc.owner_user_id)
+            owner = (u.email or u.full_name) if u else None
     return {
         "id": j.id, "tenant_id": j.tenant_id, "tenant": tenants.get(j.tenant_id) or "—",
+        "owner": owner,
         "collection_id": j.collection_id, "source": label, "source_username": username,
         "source_type": c.source_type if c else None,
         "kind": j.kind, "status": j.status, "trigger": j.trigger or "manual",
@@ -1020,10 +1025,12 @@ def list_jobs(active: bool = False, limit: int = 100, db: Session = Depends(get_
     aids = {c.connector_account_id for c in colls.values() if c.connector_account_id}
     accounts = ({a.id: a for a in db.query(ConnectorAccount).filter(ConnectorAccount.id.in_(aids)).all()}
                 if aids else {})
+    uids = {a.owner_user_id for a in accounts.values() if a.owner_user_id}
+    users = ({u.id: u for u in db.query(User).filter(User.id.in_(uids)).all()} if uids else {})
     nodes = {n.id: n.name for n in db.query(Node).all()}
     active_n = db.query(func.count(SyncJob.id)).filter(SyncJob.status.in_(_ACTIVE)).scalar()
     return {"active": int(active_n or 0),
-            "jobs": [_job_view(j, tenants, colls, accounts, nodes) for j in jobs]}
+            "jobs": [_job_view(j, tenants, colls, accounts, nodes, users) for j in jobs]}
 
 
 @router.get("/jobs/{job_id}/log")
