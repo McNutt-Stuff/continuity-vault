@@ -724,6 +724,76 @@ class LinkedInConnector(Connector):
 
 
 @register_connector
+class GitHubConnector(Connector):
+    connector_type = "github"
+    display_name = "GitHub"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            incremental=True,
+            streaming=True,
+            delta=True,
+            historical=True,
+            browsable=True,  # the "folder" picker selects repositories
+            searchable_fields=["repo", "path", "language", "state", "author"],
+            facet_fields=["repo", "language", "state"],
+            filter_categories=[
+                {"id": "code", "label": "Repository files"},
+                {"id": "issues", "label": "Issues & pull requests"},
+            ],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="oauth2",
+            authorize_url="https://github.com/login/oauth/authorize",
+            token_url="https://github.com/login/oauth/access_token",
+            scopes=["read:user", "user:email", "repo"],
+            icon="database", color="#1f2328",
+            doc_types=["code", "text", "repository", "issue", "pull_request"],
+        )
+
+    def list_folders(self, config, path=""):
+        token = (config or {}).get("access_token")
+        return live.github_list_repos(token, path) if token else []
+
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.stream_github(config["access_token"], cursor, config,
+                                          state if state is not None else {}, _content_cap())
+            return
+        yield from self.fetch_objects(account_label, config=config)
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            state: dict = {}
+            yield from live.stream_github(config["access_token"], None, config, state, _content_cap())
+            return
+        # Simulated dataset (demo/local) — a repo with a file + an issue.
+        repo = f"{account_label}/example"
+        yield SourceObject(
+            object_id=_oid(self.connector_type, account_label, 0),
+            doc_type="repository", category="record", title=repo,
+            content=json.dumps({"full_name": repo, "language": "Python"}).encode(),
+            preview="Example repository", meta={"repo": repo, "kind": "repository"},
+            labels=[repo], modified_at=_dt(1))
+        yield SourceObject(
+            object_id=_oid(self.connector_type, account_label, 1),
+            doc_type="code", category="document", title="main.py",
+            content=b"print('hello world')\n", preview=f"{repo} \u00b7 main.py",
+            meta={"repo": repo, "path": "main.py"}, labels=[repo], modified_at=_dt(2))
+        yield SourceObject(
+            object_id=_oid(self.connector_type, account_label, 2),
+            doc_type="issue", category="record", title="#1 Sample issue",
+            content=json.dumps({"number": 1, "title": "Sample issue"}).encode(),
+            preview="A sample issue", meta={"repo": repo, "number": 1, "kind": "issue"},
+            labels=[repo, "open"], modified_at=_dt(3))
+
+
+@register_connector
 class EvernoteConnector(Connector):
     connector_type = "evernote"
     display_name = "Evernote"

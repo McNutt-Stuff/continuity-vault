@@ -87,6 +87,13 @@ def _setup_instructions(connector_type: str) -> list[str]:
             "Request scopes: openid, profile, email. Backing up member posts also needs LinkedIn's Community Management API (partner access).",
             "Set CV_LINKEDIN_CLIENT_ID and CV_LINKEDIN_CLIENT_SECRET on the server, then restart.",
         ]
+    if connector_type == "github":
+        return [
+            "At github.com/settings/developers, create an OAuth App (or a GitHub App).",
+            f"Set the Authorization callback URL to: {redirect}",
+            "The 'repo' scope backs up private repos too; 'read:user'/'user:email' identify the account.",
+            "Set CV_GITHUB_CLIENT_ID and CV_GITHUB_CLIENT_SECRET on the server, then restart.",
+        ]
     return []
 
 
@@ -100,6 +107,7 @@ _SOURCE_FAMILY = {
     "dropbox": "Dropbox",
     "reddit": "Reddit", "facebook": "Meta", "instagram": "Meta",
     "linkedin": "LinkedIn",
+    "github": "GitHub",
     "evernote": "Evernote",
     "onepassword": "Endpoint Collected", "endpoint_files": "Endpoint Collected",
     "custom": "Custom",
@@ -114,6 +122,7 @@ _SOURCE_TYPE = {
     "onepassword": "Passwords",
     "reddit": "Social", "facebook": "Social", "instagram": "Social",
     "linkedin": "Social",
+    "github": "Developer",
     "evernote": "Notes",
     "custom": "Other",
 }
@@ -688,6 +697,18 @@ def _resolve_identity(connector_type: str, tokens: dict) -> str | None:
             if connector_type == "linkedin":
                 d = _json(client, "GET", "https://api.linkedin.com/v2/userinfo", headers=headers)
                 return d.get("email") or d.get("name")
+            if connector_type == "github":
+                gh = {**headers, "Accept": "application/vnd.github+json",
+                      "User-Agent": "Arkive-backup"}
+                d = _json(client, "GET", "https://api.github.com/user", headers=gh)
+                login = d.get("login")
+                emails = _json(client, "GET", "https://api.github.com/user/emails", headers=gh)
+                if isinstance(emails, list):
+                    primary = next((e.get("email") for e in emails
+                                    if isinstance(e, dict) and e.get("primary")), None)
+                    if primary:
+                        return primary
+                return f"@{login}" if login else None
     except Exception as exc:  # noqa: BLE001
         logger.warning("identity fetch failed for %s: %s", connector_type, exc)
     return None

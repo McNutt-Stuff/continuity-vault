@@ -153,6 +153,15 @@ def _providers() -> Dict[str, ProviderSpec]:
             client_secret=s.linkedin_client_secret,
             extra_auth_params={},
         ),
+        "github": ProviderSpec(
+            connector_type="github",
+            authorize_url="https://github.com/login/oauth/authorize",
+            token_url="https://github.com/login/oauth/access_token",
+            scopes=["read:user", "user:email", "repo"],
+            client_id=s.github_client_id,
+            client_secret=s.github_client_secret,
+            extra_auth_params={},
+        ),
     }
 
 

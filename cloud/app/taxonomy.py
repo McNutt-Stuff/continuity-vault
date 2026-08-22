@@ -88,7 +88,7 @@ KINDS: Dict[Category, List[str]] = {
     Category.SOCIAL: ["post", "comment", "story", "reel", "tweet", "profile"],
     Category.CONTACT: ["person", "organization", "group", "contact"],
     Category.DOCUMENT: ["pdf", "text", "spreadsheet", "presentation", "form",
-                        "ebook", "code", "drawing", "resume"],
+                        "ebook", "code", "drawing", "resume", "gist"],
     Category.IMAGE: ["image", "photo"],
     Category.MEDIA: ["video", "audio"],
     Category.FILE: ["archive", "binary", "generic", "file"],
@@ -97,7 +97,8 @@ KINDS: Dict[Category, List[str]] = {
     Category.IDENTITY: ["passport", "drivers_license", "national_id", "ssn",
                         "birth_certificate", "visa", "tax_document", "legal_document",
                         "medical_record", "insurance_policy", "identity"],
-    Category.RECORD: ["database_row", "form_submission", "custom", "record"],
+    Category.RECORD: ["database_row", "form_submission", "custom", "record",
+                      "repository", "issue", "pull_request", "release"],
 }
 
 KIND_TO_CATEGORY: Dict[str, str] = {

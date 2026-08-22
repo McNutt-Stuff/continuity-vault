@@ -1265,3 +1265,191 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                 pass
 
 
+# --------------------------------------------------------------------------- #
+# GitHub (repositories: files + issues/PRs)                                    #
+# --------------------------------------------------------------------------- #
+GITHUB_API = "https://api.github.com"
+
+
+def _gh_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "Arkive-backup"}
+
+
+def github_list_repos(access_token: str, path: str = "") -> List[dict]:
+    """The repos a user can back up, returned as selectable 'folders' for the
+    picker (each repo is a leaf — pick whole repos)."""
+    headers = _gh_headers(access_token)
+    out: List[dict] = []
+    with httpx.Client(timeout=30) as c:
+        page = 1
+        while page <= 20:  # safety cap (~2000 repos)
+            r = c.get(f"{GITHUB_API}/user/repos", headers=headers, params={
+                "per_page": 100, "page": page, "sort": "full_name",
+                "affiliation": "owner,collaborator,organization_member"})
+            if r.status_code >= 400:
+                logger.warning("GitHub repos %s: %s", r.status_code, r.text[:200])
+                break
+            repos = r.json()
+            if not isinstance(repos, list) or not repos:
+                break
+            for repo in repos:
+                fn = repo.get("full_name")
+                if fn:
+                    out.append({"path": fn, "name": fn, "hasMore": False})
+            if len(repos) < 100:
+                break
+            page += 1
+    return sorted(out, key=lambda f: f["name"].lower())
+
+
+def _github_repos(c: httpx.Client, headers: dict, roots: List[str]) -> Iterable[dict]:
+    """Yield the repo objects to back up: the selected ones, or all accessible."""
+    if roots:
+        for fn in roots:
+            r = c.get(f"{GITHUB_API}/repos/{fn}", headers=headers)
+            if r.status_code < 400:
+                yield r.json()
+        return
+    page = 1
+    while page <= 20:
+        r = c.get(f"{GITHUB_API}/user/repos", headers=headers, params={
+            "per_page": 100, "page": page,
+            "affiliation": "owner,collaborator,organization_member"})
+        if r.status_code >= 400:
+            break
+        repos = r.json()
+        if not isinstance(repos, list) or not repos:
+            break
+        yield from repos
+        if len(repos) < 100:
+            break
+        page += 1
+
+
+def stream_github(access_token: str, cursor=None, config: Optional[dict] = None,
+                  state: Optional[dict] = None, content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
+    """Back up selected GitHub repos — their files (via the recursive git tree)
+    plus issues/PRs. ``config['roots']`` = selected repo full_names (empty = all).
+    A per-repo pushed_at cursor skips repos unchanged since the last sync."""
+    config = config or {}
+    state = state if state is not None else {}
+    roots = config.get("roots") or []
+    inc = config.get("includeCategories") or []
+    want_code = (not inc) or ("code" in inc)
+    want_issues = (not inc) or ("issues" in inc)
+    cur = cursor if isinstance(cursor, dict) else {}
+    seen_at: dict = dict(cur.get("repos") or {})
+    headers = _gh_headers(access_token)
+    emitted = 0
+    stopped_early = False
+    logger.info("github stream: %s (code=%s issues=%s)",
+                roots if roots else "(all repos)", want_code, want_issues)
+    with httpx.Client(timeout=120) as c:
+        for repo in _github_repos(c, headers, roots):
+            if stopped_early:
+                break
+            fn = repo.get("full_name")
+            pushed = repo.get("pushed_at") or ""
+            default_branch = repo.get("default_branch") or "main"
+            repo_mod = _parse_dt(pushed)
+            # Delta: skip a repo whose head hasn't moved since the last full sync.
+            if fn and seen_at.get(fn) == pushed:
+                continue
+
+            yield SourceObject(
+                object_id=f"github:repo:{fn}", doc_type="repository", category="record",
+                title=fn or "repository",
+                content=json.dumps({
+                    "full_name": fn, "description": repo.get("description"),
+                    "private": repo.get("private"), "html_url": repo.get("html_url"),
+                    "language": repo.get("language"), "default_branch": default_branch,
+                    "pushed_at": pushed}).encode(),
+                preview=repo.get("description") or fn or "",
+                meta={"repo": fn, "language": repo.get("language"),
+                      "private": repo.get("private"), "kind": "repository",
+                      "url": repo.get("html_url")},
+                labels=[fn] if fn else [], modified_at=repo_mod)
+            emitted += 1
+
+            if want_code and fn:
+                tr = c.get(f"{GITHUB_API}/repos/{fn}/git/trees/{default_branch}",
+                           headers=headers, params={"recursive": "1"})
+                if tr.status_code < 400:
+                    for node in (tr.json().get("tree") or []):
+                        if node.get("type") != "blob":
+                            continue
+                        if emitted >= _FILE_CHUNK:
+                            stopped_early = True
+                            break
+                        fp = node.get("path", "")
+                        size = int(node.get("size", 0) or 0)
+                        raw = b""
+                        if 0 < size <= content_cap:
+                            br = c.get(f"{GITHUB_API}/repos/{fn}/git/blobs/{node.get('sha')}",
+                                       headers=headers)
+                            if br.status_code < 400:
+                                b = br.json()
+                                try:
+                                    raw = (base64.b64decode(b.get("content", ""))
+                                           if b.get("encoding") == "base64"
+                                           else (b.get("content") or "").encode())
+                                except Exception:
+                                    raw = b""
+                        content, backed = _capped(raw, content_cap) if raw else (
+                            json.dumps({"_arkive": "content_exceeds_cap" if size > content_cap
+                                        else "no_content", "bytes": size}).encode(), False)
+                        _cat, _kind = classify_file(fp)
+                        yield SourceObject(
+                            object_id=f"github:{fn}:{fp}", doc_type=_kind, category=_cat,
+                            title=fp.split("/")[-1] or fp, content=content,
+                            preview=f"{fn} · {fp}",
+                            meta={"repo": fn, "path": fp, "branch": default_branch,
+                                  "content_backed_up": backed},
+                            labels=[fn], size_bytes=size or None,  # type: ignore
+                            content_hash=node.get("sha"), modified_at=repo_mod)
+                        emitted += 1
+
+            if want_issues and fn and not stopped_early:
+                ip = 1
+                while ip <= 10:
+                    if emitted >= _FILE_CHUNK:
+                        stopped_early = True
+                        break
+                    ir = c.get(f"{GITHUB_API}/repos/{fn}/issues", headers=headers,
+                               params={"state": "all", "per_page": 100, "page": ip})
+                    if ir.status_code >= 400:
+                        break
+                    issues = ir.json()
+                    if not isinstance(issues, list) or not issues:
+                        break
+                    for iss in issues:
+                        is_pr = "pull_request" in iss
+                        title = iss.get("title") or "(issue)"
+                        yield SourceObject(
+                            object_id=f"github:{'pr' if is_pr else 'issue'}:{fn}#{iss.get('number')}",
+                            doc_type="pull_request" if is_pr else "issue", category="record",
+                            title=f"#{iss.get('number')} {title}",
+                            content=json.dumps(iss).encode(),
+                            preview=(iss.get("body") or "")[:200],
+                            meta={"repo": fn, "number": iss.get("number"),
+                                  "state": iss.get("state"),
+                                  "author": (iss.get("user") or {}).get("login"),
+                                  "kind": "pull_request" if is_pr else "issue",
+                                  "url": iss.get("html_url")},
+                            labels=[fn, iss.get("state") or "open"],
+                            modified_at=_parse_dt(iss.get("updated_at") or iss.get("created_at")))
+                        emitted += 1
+                    if len(issues) < 100:
+                        break
+                    ip += 1
+
+            # Mark the repo done only when fully processed (so an early stop
+            # re-crawls it next run; dedup skips the unchanged files).
+            if fn and not stopped_early:
+                seen_at[fn] = pushed
+    state["cursor"] = {"repos": seen_at, "has_more": stopped_early}
+
+

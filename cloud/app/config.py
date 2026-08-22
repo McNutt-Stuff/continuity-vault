@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     instagram_client_secret: str | None = None
     linkedin_client_id: str | None = None
     linkedin_client_secret: str | None = None
+    # GitHub OAuth app (repos + issues). Set client id/secret to enable linking.
+    github_client_id: str | None = None
+    github_client_secret: str | None = None
     # LinkedIn scopes must match the products enabled on your LinkedIn app. The
     # "Sign In with LinkedIn using OpenID Connect" product grants these; legacy
     # apps may need "r_liteprofile r_emailaddress". Override via CV_LINKEDIN_SCOPES.
