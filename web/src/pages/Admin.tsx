@@ -1009,9 +1009,11 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
           <button className="btn sm" onClick={() => ctl("update", "", "Trigger a software update on this node? It will pull the latest build and restart.")}>
             <Icon name="clock" size={13} /> Update
           </button>
-          <button className="btn sm" onClick={backupNow}>
-            <Icon name="shield" size={13} /> Back up now
-          </button>
+          {node.role !== "public-web" && (
+            <button className="btn sm" onClick={backupNow}>
+              <Icon name="shield" size={13} /> Back up now
+            </button>
+          )}
           <button className="btn sm" onClick={() => ctl("restart", "cv-cloud", "Restart the Arkive application on this node?")}>Restart app</button>
           {!node.is_self && <button className="btn danger sm" onClick={async () => { await onRemove(node); onBack(); }}>Remove</button>}
         </div>

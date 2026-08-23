@@ -1332,6 +1332,9 @@ def node_backup_now(nid: str,
         ok = bool(res.get("ok"))
         return {"ok": ok, "message": (f"Backup started on {n.name}" if ok
                                       else res.get("error") or "could not start backup")}
+    if n.role == "public-web":
+        raise HTTPException(400, "public-web nodes serve the marketing site only — "
+                                 "they have no database or keys to back up")
     raise HTTPException(400, "backups can't be triggered remotely for this node type")
 
 
