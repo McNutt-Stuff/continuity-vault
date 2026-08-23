@@ -18,6 +18,7 @@ process) — see ``app.backup_worker``.
 
 from __future__ import annotations
 
+import gzip
 import io
 import logging
 import os
@@ -48,13 +49,36 @@ def _safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "-" for c in (name or "node"))[:80]
 
 
+def _work_dir() -> Optional[str]:
+    """Directory to stage the backup bundle in. Prefers CV_BACKUP_WORK_DIR, then
+    the data volume (next to the object store), so a large DB dump doesn't fill a
+    small root/``/tmp`` filesystem. Returns None (→ system temp) if none writable."""
+    candidates = [
+        get_settings().backup_work_dir,
+        os.path.dirname(os.environ.get("CV_OBJECT_STORE", "").rstrip("/")) or None,
+        "/var/lib/continuity-vault",
+    ]
+    for base in candidates:
+        if not base:
+            continue
+        path = os.path.join(base, "backup-tmp")
+        try:
+            os.makedirs(path, exist_ok=True)
+            if os.access(path, os.W_OK):
+                return path
+        except Exception:  # noqa: BLE001
+            continue
+    return None  # fall back to the system default temp dir
+
+
 # --------------------------------------------------------------------------- #
 # Bundle assembly                                                             #
 # --------------------------------------------------------------------------- #
 
 def _dump_database(dest_path: str) -> Tuple[bool, str]:
-    """Dump the node's database to ``dest_path``. Postgres → pg_dump (plain SQL);
-    SQLite → file copy. Returns (ok, note)."""
+    """Dump the node's database to ``dest_path`` (gzip-compressed). Postgres →
+    pg_dump piped through gzip (bounded memory, small on disk); SQLite → gzip copy.
+    Returns (ok, note)."""
     url = get_settings().database_url
     if url.startswith("sqlite"):
         # sqlite:///relative or sqlite:////absolute
@@ -63,8 +87,12 @@ def _dump_database(dest_path: str) -> Tuple[bool, str]:
             path = "/" + path
         if not os.path.exists(path):
             return False, "sqlite file not found"
-        shutil.copy2(path, dest_path)
-        return True, "sqlite copy"
+        try:
+            with open(path, "rb") as src, gzip.open(dest_path, "wb", compresslevel=6) as gz:
+                shutil.copyfileobj(src, gz, length=1024 * 1024)
+            return True, "sqlite.gz"
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)[:300]
     # Postgres — pg_dump/libpq only understand a bare postgres[ql]:// URI, so
     # strip any SQLAlchemy driver suffix (e.g. postgresql+psycopg:// → postgresql://).
     scheme, sep, rest = url.partition("://")
@@ -72,13 +100,22 @@ def _dump_database(dest_path: str) -> Tuple[bool, str]:
         url = scheme.split("+", 1)[0] + "://" + rest
     pg_dump = shutil.which("pg_dump") or "pg_dump"
     try:
-        with open(dest_path, "wb") as out:
-            proc = subprocess.run(
-                [pg_dump, "--no-owner", "--no-privileges", url],
-                stdout=out, stderr=subprocess.PIPE, timeout=1800, check=False)
+        # Stream pg_dump → gzip so the SQL is never fully buffered and the staged
+        # file stays small (a plain dump can be many GB and fill the disk).
+        proc = subprocess.Popen(
+            [pg_dump, "--no-owner", "--no-privileges", url],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        with gzip.open(dest_path, "wb", compresslevel=6) as gz:
+            shutil.copyfileobj(proc.stdout, gz, length=1024 * 1024)
+        proc.stdout.close()
+        try:
+            _, err = proc.communicate(timeout=1800)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return False, "pg_dump timed out"
         if proc.returncode != 0:
-            return False, (proc.stderr.decode(errors="replace")[:300] or "pg_dump failed")
-        return True, "pg_dump"
+            return False, (err.decode(errors="replace")[:300] or "pg_dump failed")
+        return True, "pg_dump.gz"
     except FileNotFoundError:
         return False, "pg_dump not installed"
     except Exception as exc:  # noqa: BLE001
@@ -105,12 +142,13 @@ def build_bundle(node_name: str, role: str, version: str) -> Tuple[bytes, List[s
     settings = get_settings()
     components: List[str] = []
     notes: List[str] = []
-    with tempfile.TemporaryDirectory(prefix="arkive-backup-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="arkive-backup-", dir=_work_dir()) as tmp:
         staging = os.path.join(tmp, "bundle")
         os.makedirs(staging, exist_ok=True)
 
         # 1) Database (config + tenants + receipts + search index all live here).
-        db_ok, db_note = _dump_database(os.path.join(staging, "database.dump"))
+        #    Gzipped so a large dump stays small on disk.
+        db_ok, db_note = _dump_database(os.path.join(staging, "database.sql.gz"))
         if db_ok:
             components.append("database")
         notes.append(f"db:{db_note}")
@@ -134,9 +172,10 @@ def build_bundle(node_name: str, role: str, version: str) -> Tuple[bytes, List[s
         with open(os.path.join(staging, "meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
 
-        # 4) Tar+gzip the staging tree into memory.
+        # 4) Tar the staging tree into memory (stored, not gzipped — the DB dump,
+        #    the dominant member, is already gzipped).
         buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        with tarfile.open(fileobj=buf, mode="w") as tar:
             tar.add(staging, arcname="arkive-backup")
         raw = buf.getvalue()
 

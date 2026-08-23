@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # Infrastructure backup worker cadence (minutes) — the cv-backup timer runs
     # daily by default; --loop mode uses this.
     backup_interval_minutes: int = 1440
+    # Where the backup bundle is staged before upload. Defaults to the data
+    # volume (next to the object store) so a large DB dump doesn't fill a small
+    # root/tmp filesystem. Set CV_BACKUP_WORK_DIR to override.
+    backup_work_dir: str | None = None
     sync_debug: bool = False
     # How often the scheduler wakes to check each mapping's per-mapping cadence.
     scheduler_tick_seconds: int = 60
