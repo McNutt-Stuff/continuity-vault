@@ -28,6 +28,7 @@ from ..db import get_db
 from ..models import (
     Appliance,
     AuditEvent,
+    BackupRun,
     Collection,
     ConfigObject,
     ConnectorAccount,
@@ -955,6 +956,7 @@ def _node_view(db: Session, n: Node) -> dict:
     mem = tel.get("memory") or {}
     stg = tel.get("storage") or {}
     tenant_count = db.query(func.count(Tenant.id)).filter(Tenant.node_id == n.id).scalar()
+    backup_ids = list(n.backup_service_ids or [])
     return {
         "id": n.id, "name": n.name, "region": n.region, "role": n.role,
         "category": _NODE_CATEGORY.get(n.role, "Other"),
@@ -973,6 +975,8 @@ def _node_view(db: Session, n: Node) -> dict:
         "email_service_id": n.email_service_id,
         "storage_service": _svc_name(n.storage_service_id),
         "email_service": _svc_name(n.email_service_id),
+        "backup_service_ids": backup_ids,
+        "backup_services": [nm for nm in (_svc_name(s) for s in backup_ids) if nm],
         "last_heartbeat_at": n.last_heartbeat_at.isoformat() if n.last_heartbeat_at else None,
     }
 
@@ -1104,6 +1108,7 @@ class NodeUpdate(BaseModel):
     status: str | None = None
     storage_service_id: str | None = None
     email_service_id: str | None = None
+    backup_service_ids: list[str] | None = None
 
 
 @router.put("/nodes/{nid}")
@@ -1120,6 +1125,13 @@ def update_node(nid: str, body: NodeUpdate,
         n.storage_service_id = None
     if not n.email_service_id:
         n.email_service_id = None
+    # De-dupe backup destinations (resiliency needs DIFFERENT services).
+    if body.backup_service_ids is not None:
+        seen: list[str] = []
+        for sid in body.backup_service_ids:
+            if sid and sid not in seen:
+                seen.append(sid)
+        n.backup_service_ids = seen
     db.commit()
     services.invalidate()
     from .. import emailer
@@ -1820,3 +1832,136 @@ def storage_usage(db: Session = Depends(get_db)):
         "by_tenant": tenant_rows,
         "services": services,
     }
+
+
+# =========================================================================== #
+# Infrastructure backups (node/CP core-state backups to storage services)     #
+# =========================================================================== #
+
+@router.get("/backups")
+def backups_overview(db: Session = Depends(get_db)):
+    """Fleet-wide infrastructure backup status: coverage, per-node last run,
+    storage totals per backup service, schedules and recent runs."""
+    _ensure_self_node(db)
+    nodes = db.query(Node).all()
+    svc_by_id = {s.id: s for s in db.query(ServiceObject).all()}
+
+    # Latest run per node (rows arrive newest-first).
+    runs = (db.query(BackupRun).order_by(BackupRun.created_at.desc()).limit(500).all())
+    latest: dict = {}
+    for r in runs:
+        key = r.node_id or r.node_name
+        if key not in latest:
+            latest[key] = r
+
+    def _run_row(r) -> dict:
+        return {
+            "id": r.id, "status": r.status,
+            "total_bytes": r.total_bytes or 0,
+            "components": r.components or [],
+            "destinations": r.destinations or [],
+            "message": r.message or "", "error": r.error or "",
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+
+    node_rows = []
+    protected = 0
+    for n in nodes:
+        r = latest.get(n.id)
+        ids = list(n.backup_service_ids or [])
+        if ids:
+            protected += 1
+        node_rows.append({
+            "id": n.id, "name": n.name, "role": n.role,
+            "category": _NODE_CATEGORY.get(n.role, "Other"),
+            "is_self": bool(n.is_self),
+            "backup_service_ids": ids,
+            "backup_services": [svc_by_id[s].name for s in ids if s in svc_by_id],
+            "last_backup": _run_row(r) if r else None,
+        })
+    node_rows.sort(key=lambda x: (not x["is_self"], x["name"] or ""))
+
+    # Storage totals per backup service (latest successful run per node counts once).
+    svc_totals: dict = {}
+    for key, r in latest.items():
+        if r.status not in ("success", "partial"):
+            continue
+        for d in (r.destinations or []):
+            if d.get("status") != "ok":
+                continue
+            sid = d.get("service_id")
+            agg = svc_totals.setdefault(sid, {"bytes": 0, "nodes": set()})
+            agg["bytes"] += int(d.get("bytes") or 0)
+            agg["nodes"].add(r.node_name)
+
+    svc_used: dict = {}  # which nodes ASSIGN each service for backup
+    for n in nodes:
+        for sid in (n.backup_service_ids or []):
+            svc_used.setdefault(sid, []).append(n.name)
+    services = []
+    for s in db.query(ServiceObject).filter(ServiceObject.kind.like("storage-%")).all():
+        tot = svc_totals.get(s.id, {"bytes": 0, "nodes": set()})
+        services.append({
+            "id": s.id, "name": s.name, "kind": s.kind,
+            "kind_label": _SERVICE_KINDS.get(s.kind, {}).get("label", s.kind),
+            "enabled": bool(s.enabled),
+            "settings": s.settings or {},
+            "nodes": svc_used.get(s.id, []),
+            "bytes": tot["bytes"], "backed_up_nodes": len(tot["nodes"]),
+        })
+
+    now = _now()
+    ok24 = fail24 = 0
+    for r in runs:
+        if r.created_at and (now - r.created_at).total_seconds() < 86400:
+            if r.status == "success":
+                ok24 += 1
+            elif r.status in ("failed", "partial"):
+                fail24 += 1
+    total_stored = sum(v["bytes"] for v in svc_totals.values())
+    last_run = runs[0] if runs else None
+
+    return {
+        "summary": {
+            "nodes_total": len(nodes),
+            "nodes_protected": protected,
+            "total_stored_bytes": total_stored,
+            "success_24h": ok24, "failed_24h": fail24,
+            "interval_minutes": get_settings().backup_interval_minutes,
+            "last_run_at": last_run.created_at.isoformat() if last_run and last_run.created_at else None,
+        },
+        "nodes": node_rows,
+        "services": services,
+        "recent": [{
+            "id": r.id, "node_name": r.node_name, "role": r.role, "status": r.status,
+            "total_bytes": r.total_bytes or 0, "message": r.message or "", "error": r.error or "",
+            "destinations": r.destinations or [], "components": r.components or [],
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+        } for r in runs[:30]],
+    }
+
+
+@router.post("/backups/run")
+def run_backup_now(principal: security.Principal = Depends(security.require_platform_admin),
+                   db: Session = Depends(get_db)):
+    """Trigger an infrastructure backup of the control plane now (runs in a
+    background thread). Remote nodes back up on their own cv-backup timer."""
+    import threading
+    from ..backup_service import run_backup_once
+
+    def _go():
+        from ..db import WorkerSessionLocal
+        try:
+            with WorkerSessionLocal() as wdb:
+                run_backup_once(wdb)
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger("cv.admin").exception("manual infrastructure backup failed")
+
+    threading.Thread(target=_go, name="cv-backup-manual", daemon=True).start()
+    audit.record(db, actor=principal.user_id, action="admin.backup_triggered",
+                 category="admin", detail={})
+    return {"ok": True, "message": "Control-plane backup started"}

@@ -1,0 +1,16 @@
+[Unit]
+Description=Arkive infrastructure backup (database + keys + config to backup storage)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=cvault
+Group=cvault
+EnvironmentFile=/etc/continuity-vault.env
+WorkingDirectory=/opt/continuity-vault/cloud
+Environment=CV_OBJECT_STORE=/var/lib/continuity-vault/object_store
+Environment=OQS_INSTALL_PATH=/usr/local
+ReadWritePaths=/var/lib/continuity-vault /etc/arkive
+ExecStart=/opt/continuity-vault/.venv/bin/python -m app.backup_worker
+NoNewPrivileges=true

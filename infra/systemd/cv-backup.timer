@@ -1,0 +1,11 @@
+[Unit]
+Description=Arkive infrastructure backup timer (daily)
+
+[Timer]
+# Daily, with a randomized delay so a large fleet doesn't upload all at once.
+OnCalendar=daily
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

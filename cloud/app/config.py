@@ -52,7 +52,9 @@ class Settings(BaseSettings):
     # Scheduled connector sync (background delta worker).
     sync_enabled: bool = True
     sync_interval_minutes: int = 30
-    # Verbose per-source sync logging (cv.sync / cv.scheduler at DEBUG).
+    # Infrastructure backup worker cadence (minutes) — the cv-backup timer runs
+    # daily by default; --loop mode uses this.
+    backup_interval_minutes: int = 1440
     sync_debug: bool = False
     # How often the scheduler wakes to check each mapping's per-mapping cadence.
     scheduler_tick_seconds: int = 60

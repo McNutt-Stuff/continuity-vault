@@ -239,6 +239,9 @@ class Appliance(Base):
     telemetry = Column(JSON, default=dict)  # capacity, drives, power, temp
     agent_token_hash = Column(String, nullable=True, index=True)  # sha256 of bearer token
     command_sequence = Column(Integer, default=0)
+    # Storage service objects this appliance replicates its sealed data to for
+    # off-site resiliency (multiple, distinct destinations).
+    backup_service_ids = Column(JSON, default=list)
     created_at = Column(DateTime, default=_now)
 
 
@@ -614,8 +617,37 @@ class Node(Base):
     # node's selections drive where cloud objects are stored and how mail sends.
     storage_service_id = Column(String, nullable=True)  # ServiceObject (storage-*)
     email_service_id = Column(String, nullable=True)    # ServiceObject (email-*)
+    # Storage service objects this node backs its own core state up to. A list so
+    # a node can replicate its infrastructure backup to MULTIPLE destinations for
+    # resiliency (use different services, not the same one twice).
+    backup_service_ids = Column(JSON, default=list)
     last_heartbeat_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
+
+
+class BackupRun(Base):
+    """One infrastructure-backup attempt of a node's (or the control plane's) core
+    state — database, search index, config and key material — to its assigned
+    backup storage service objects. The backup worker records one per run; nodes
+    push theirs to the control plane so the admin Backups page shows fleet-wide
+    success/failure, size and coverage."""
+
+    __tablename__ = "backup_runs"
+    id = Column(String, primary_key=True, default=_uuid)
+    node_id = Column(String, index=True, nullable=True)
+    node_name = Column(String, default="")
+    role = Column(String, default="")
+    kind = Column(String, default="node")     # node | appliance
+    status = Column(String, default="running")  # running | success | partial | failed | skipped
+    components = Column(JSON, default=list)   # ["database","keystore","config"]
+    destinations = Column(JSON, default=list)  # [{service_id,name,kind,status,bytes,key,error}]
+    total_bytes = Column(BigInteger, default=0)
+    message = Column(String, default="")
+    error = Column(Text, default="")
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now, index=True)
+
 
 
 class NodeMetric(Base):

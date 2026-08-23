@@ -181,6 +181,65 @@ def node_heartbeat(body: NodeHeartbeat,
             "heartbeat_interval_seconds": 60}
 
 
+class BackupReport(BaseModel):
+    id: str | None = None
+    node_id: str | None = None
+    node_name: str = ""
+    role: str = ""
+    kind: str = "node"
+    status: str = "success"
+    components: list = []
+    destinations: list = []
+    total_bytes: int = 0
+    message: str = ""
+    error: str = ""
+    started_at: str | None = None
+    finished_at: str | None = None
+    created_at: str | None = None
+
+
+@public_router.post("/nodes/backup-report")
+def node_backup_report(body: BackupReport,
+                       authorization: str = Header(default=""),
+                       db: Session = Depends(get_db)):
+    """A node reports the result of an infrastructure backup so the control plane
+    aggregates fleet-wide backup status. Auth = shared fleet secret (Bearer)."""
+    token = authorization.replace("Bearer ", "").strip()
+    if not token or token != _fleet_secret():
+        raise HTTPException(401, "invalid node credentials")
+    from ..models import BackupRun
+
+    def _dt(v):
+        if not v:
+            return None
+        try:
+            d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            return d.replace(tzinfo=None) if d.tzinfo else d
+        except ValueError:
+            return None
+
+    run = db.get(BackupRun, body.id) if body.id else None
+    if run is None:
+        run = BackupRun(id=body.id) if body.id else BackupRun()
+        db.add(run)
+    run.node_id = body.node_id
+    run.node_name = body.node_name
+    run.role = body.role
+    run.kind = body.kind or "node"
+    run.status = body.status
+    run.components = body.components or []
+    run.destinations = body.destinations or []
+    run.total_bytes = int(body.total_bytes or 0)
+    run.message = body.message or ""
+    run.error = body.error or ""
+    run.started_at = _dt(body.started_at)
+    run.finished_at = _dt(body.finished_at)
+    if body.created_at:
+        run.created_at = _dt(body.created_at)
+    db.commit()
+    return {"ok": True, "id": run.id}
+
+
 # --------------------------------------------------------------------------- #
 # Node installer — served from the control plane                              #
 # --------------------------------------------------------------------------- #

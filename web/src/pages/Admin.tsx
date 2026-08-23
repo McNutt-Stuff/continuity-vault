@@ -96,6 +96,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "website", label: "Website", icon: "grid", group: "Integrations" },
   { key: "nodes", label: "Nodes", icon: "server", group: "Infrastructure" },
   { key: "storage-usage", label: "Arkive Cloud", icon: "database", group: "Infrastructure" },
+  { key: "backups", label: "Backups", icon: "shield", group: "Infrastructure" },
   { key: "fleet", label: "Appliance fleet", icon: "server", group: "Infrastructure" },
   { key: "crypto", label: "Crypto", icon: "lock", group: "Infrastructure" },
   { key: "updates", label: "Updates", icon: "clock", group: "Infrastructure" },
@@ -113,6 +114,7 @@ export default function Admin() {
       {s === "reports" && <Reports />}
       {s === "nodes" && <Nodes />}
       {s === "storage-usage" && <StorageUsageAdmin />}
+      {s === "backups" && <BackupsAdmin />}
       {s === "config-objects" && <ConfigObjectsAdmin />}
       {s === "sources" && <SourcesAdmin />}
       {s === "service-objects" && <><ServiceObjectsAdmin /><EmailAdmin /></>}
@@ -2503,6 +2505,220 @@ function StorageUsageAdmin() {
           attribution follows each node's active storage target.
         </div>
       </Card>
+    </>
+  );
+}
+
+// --------------------------------------------------------------------------- //
+// Infrastructure Backups (node/CP core-state backups to storage services)     //
+// --------------------------------------------------------------------------- //
+interface BackupDest { service_id: string; name: string; kind: string; status: string; bytes: number; error?: string | null; }
+interface BackupRunView { id: string; status: string; total_bytes: number; components: string[]; destinations: BackupDest[]; message?: string; error?: string; created_at?: string | null; finished_at?: string | null; }
+interface BackupNode { id: string; name: string; role: string; category: string; is_self: boolean; backup_service_ids: string[]; backup_services: string[]; last_backup: BackupRunView | null; }
+interface BackupService { id: string; name: string; kind: string; kind_label: string; enabled: boolean; settings: Record<string, string>; nodes: string[]; bytes: number; backed_up_nodes: number; }
+interface BackupsData {
+  summary: { nodes_total: number; nodes_protected: number; total_stored_bytes: number; success_24h: number; failed_24h: number; interval_minutes: number; last_run_at: string | null };
+  nodes: BackupNode[];
+  services: BackupService[];
+  recent: { id: string; node_name: string; role: string; status: string; total_bytes: number; message?: string; error?: string; destinations: BackupDest[]; components: string[]; created_at?: string | null; finished_at?: string | null }[];
+}
+
+function backupTone(status: string): "ok" | "warn" | "danger" | "info" {
+  if (status === "success") return "ok";
+  if (status === "partial") return "warn";
+  if (status === "failed") return "danger";
+  return "info";  // running | skipped
+}
+
+function BackupsAdmin() {
+  const [d, setD] = useState<BackupsData | null>(null);
+  const [storeServices, setStoreServices] = useState<{ id: string; name: string; kind: string; enabled: boolean }[]>([]);
+  const [editNode, setEditNode] = useState<string | null>(null);
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState("");
+
+  async function load() {
+    try { setD(await api.get<BackupsData>("/admin/backups")); } catch { /* ignore */ }
+  }
+  useEffect(() => {
+    void load();
+    api.get<{ id: string; name: string; kind: string; enabled: boolean; category: string }[]>("/admin/service-objects")
+      .then((rows) => setStoreServices(rows.filter((r) => r.kind.startsWith("storage-"))))
+      .catch(() => {});
+    const iv = setInterval(load, 8000);
+    return () => clearInterval(iv);
+  }, []);
+
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3500); }
+
+  function startEdit(n: BackupNode) { setEditNode(n.id); setSel(new Set(n.backup_service_ids || [])); }
+  function toggleSel(id: string) { setSel((c) => { const s = new Set(c); s.has(id) ? s.delete(id) : s.add(id); return s; }); }
+  async function saveEdit(nodeId: string) {
+    try {
+      await api.put(`/admin/nodes/${nodeId}`, { backup_service_ids: [...sel] });
+      setEditNode(null); flash("Backup destinations updated"); await load();
+    } catch (e) { await notify({ title: "Couldn't save", message: (e as Error).message, tone: "danger" }); }
+  }
+  async function runNow() {
+    setBusy(true);
+    try { await api.post("/admin/backups/run", {}); flash("Control-plane backup started — refreshing…"); setTimeout(load, 3000); }
+    catch (e) { await notify({ title: "Couldn't start backup", message: (e as Error).message, tone: "danger" }); }
+    finally { setBusy(false); }
+  }
+
+  if (!d) return <Card><div className="muted">Loading backups…</div></Card>;
+  const sum = d.summary;
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 16, alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <h2 style={{ margin: 0 }}>Infrastructure backups</h2>
+          <div className="muted" style={{ fontSize: 12.5, maxWidth: 620 }}>
+            Each node and the control plane back up their core state — database (config, tenants,
+            recovery points, search index), key material and config — to their assigned backup storage
+            services. Backups are encrypted and replicated to every assigned destination for resiliency.
+          </div>
+        </div>
+        <button className="btn primary sm" disabled={busy} onClick={runNow}>
+          <Icon name="shield" size={14} /> {busy ? "Starting…" : "Back up control plane now"}
+        </button>
+      </div>
+
+      <div className="grid grid-4">
+        <Stat label="Nodes protected" value={`${sum.nodes_protected} / ${sum.nodes_total}`} />
+        <Stat label="Backup storage used" value={bytes(sum.total_stored_bytes)} />
+        <Stat label="Succeeded (24h)" value={sum.success_24h} />
+        <Stat label="Failed (24h)" value={sum.failed_24h} />
+      </div>
+
+      <Card style={{ marginTop: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Backup storage services</h3>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>
+          Storage backends holding infrastructure backups, and the nodes that write to each. Assign
+          destinations per node below — use different services so no single failure loses every copy.
+        </div>
+        <div className="grid grid-2">
+          {d.services.map((s) => (
+            <Card key={s.id}>
+              <div className="spread" style={{ marginBottom: 8 }}>
+                <div className="row" style={{ gap: 10 }}>
+                  <div className="result-icon" style={{ width: 32, height: 32, background: "var(--inset)" }}><Icon name="database" size={16} /></div>
+                  <div>
+                    <div style={{ fontWeight: 700 }}>{s.name}</div>
+                    <div className="faint" style={{ fontSize: 11.5 }}>{s.kind_label}</div>
+                  </div>
+                </div>
+                <Pill tone={s.nodes.length ? "ok" : "warn"}>{s.nodes.length ? `${bytes(s.bytes)} · ${s.backed_up_nodes} node(s)` : "Unused"}</Pill>
+              </div>
+              <div className="faint" style={{ fontSize: 12 }}>
+                {s.settings.bucket ? `bucket ${s.settings.bucket}` : s.settings.container ? `container ${s.settings.container}` : "—"}
+                {s.settings.region ? ` · ${s.settings.region}` : ""}
+              </div>
+              <div className="row" style={{ gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                {s.nodes.length
+                  ? s.nodes.map((n) => <Pill key={n} tone="info"><Icon name="server" size={11} /> {n}</Pill>)
+                  : <span className="faint" style={{ fontSize: 12 }}>No node backs up here yet</span>}
+              </div>
+            </Card>
+          ))}
+          {d.services.length === 0 && <div className="muted">No storage services configured. Create one under Service objects first.</div>}
+        </div>
+      </Card>
+
+      <Card style={{ marginTop: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Nodes</h3>
+        <table className="table">
+          <thead><tr><th>Node</th><th>Backup destinations</th><th>Last backup</th><th>Size</th><th></th></tr></thead>
+          <tbody>
+            {d.nodes.map((n) => {
+              const editing = editNode === n.id;
+              const lb = n.last_backup;
+              return (
+                <tr key={n.id}>
+                  <td>
+                    <div style={{ fontWeight: 600 }}>{n.name}{n.is_self && <span className="faint" style={{ fontWeight: 400 }}> · this node</span>}</div>
+                    <div className="faint" style={{ fontSize: 11 }}>{n.role}</div>
+                  </td>
+                  <td>
+                    {editing ? (
+                      <div className="stack" style={{ gap: 6 }}>
+                        {storeServices.length === 0 && <span className="faint" style={{ fontSize: 12 }}>No storage services yet.</span>}
+                        {storeServices.map((s) => (
+                          <label key={s.id} className="row" style={{ gap: 6, alignItems: "center", cursor: "pointer" }}>
+                            <input type="checkbox" checked={sel.has(s.id)} onChange={() => toggleSel(s.id)} />
+                            <span style={{ fontSize: 12.5 }}>{s.name}</span>
+                            <span className="faint" style={{ fontSize: 10.5 }}>{s.kind.replace("storage-", "")}</span>
+                          </label>
+                        ))}
+                        <div className="row" style={{ gap: 6, marginTop: 4 }}>
+                          <button className="btn primary sm" onClick={() => saveEdit(n.id)}>Save</button>
+                          <button className="btn ghost sm" onClick={() => setEditNode(null)}>Cancel</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                        {n.backup_services.length
+                          ? n.backup_services.map((nm) => <Pill key={nm} tone="info">{nm}</Pill>)
+                          : <span className="faint" style={{ fontSize: 12 }}>None assigned</span>}
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    {lb ? (
+                      <div className="stack" style={{ gap: 2 }}>
+                        <Pill tone={backupTone(lb.status)}>{lb.status}</Pill>
+                        <span className="faint" style={{ fontSize: 10.5 }} title={lb.created_at ? fmtAbsolute(lb.created_at) : ""}>
+                          {lb.created_at ? timeAgo(lb.created_at) : ""}
+                          {lb.error ? ` · ${lb.error.slice(0, 60)}` : ""}
+                        </span>
+                      </div>
+                    ) : <span className="faint" style={{ fontSize: 12 }}>Never</span>}
+                  </td>
+                  <td style={{ fontWeight: 600 }}>{lb && lb.total_bytes ? bytes(lb.total_bytes) : "—"}</td>
+                  <td style={{ textAlign: "right" }}>
+                    {!editing && <button className="btn ghost sm" onClick={() => startEdit(n)}><Icon name="gear" size={13} /> Destinations</button>}
+                  </td>
+                </tr>
+              );
+            })}
+            {d.nodes.length === 0 && <tr><td colSpan={5} className="muted">No nodes.</td></tr>}
+          </tbody>
+        </table>
+        <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+          Backups run on each node's <code>cv-backup</code> timer ({Math.round((sum.interval_minutes || 1440) / 60)}h cadence).
+          "Back up now" runs the control plane immediately; other nodes back up on their next timer.
+        </div>
+      </Card>
+
+      <Card style={{ marginTop: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Recent backup runs</h3>
+        <table className="table">
+          <thead><tr><th>Node</th><th>Status</th><th>Components</th><th>Destinations</th><th>Size</th><th>When</th></tr></thead>
+          <tbody>
+            {d.recent.map((r) => (
+              <tr key={r.id}>
+                <td style={{ fontWeight: 600 }}>{r.node_name}<div className="faint" style={{ fontSize: 11 }}>{r.role}</div></td>
+                <td><Pill tone={backupTone(r.status)}>{r.status}</Pill>{r.error && <div className="faint" style={{ fontSize: 10.5, color: "var(--warn)" }}>{r.error.slice(0, 80)}</div>}</td>
+                <td className="faint" style={{ fontSize: 12 }}>{(r.components || []).join(", ") || "—"}</td>
+                <td>
+                  <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+                    {(r.destinations || []).map((x, i) => (
+                      <Pill key={i} tone={x.status === "ok" ? "ok" : "danger"} >{x.name}</Pill>
+                    ))}
+                    {(r.destinations || []).length === 0 && <span className="faint" style={{ fontSize: 12 }}>—</span>}
+                  </div>
+                </td>
+                <td>{r.total_bytes ? bytes(r.total_bytes) : "—"}</td>
+                <td className="faint" style={{ fontSize: 11, whiteSpace: "nowrap" }} title={r.created_at ? fmtAbsolute(r.created_at) : ""}>{r.created_at ? timeAgo(r.created_at) : ""}</td>
+              </tr>
+            ))}
+            {d.recent.length === 0 && <tr><td colSpan={6} className="muted">No backup runs yet.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
 }

@@ -26,6 +26,7 @@ SERVICES = {
     "postgresql": "PostgreSQL database",
     "caddy": "TLS reverse proxy",
     "cv-node-heartbeat.timer": "Fleet heartbeat",
+    "cv-backup.timer": "Infrastructure backup",
     "cv-node-update.timer": "Self-update timer",
     "cv-cloud-update.timer": "Update timer",
 }

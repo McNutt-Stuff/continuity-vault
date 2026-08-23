@@ -164,7 +164,7 @@ setup_node_control() {
   # admin node console can restart/stop services and stream logs (scoped, no pw).
   local f=/etc/sudoers.d/cv-cloud
   : > "$f"
-  for u in cv-cloud postgresql caddy cv-node-heartbeat.timer cv-node-update.timer cv-cloud-update.timer; do
+  for u in cv-cloud postgresql caddy cv-node-heartbeat.timer cv-backup.timer cv-backup.service cv-node-update.timer cv-cloud-update.timer; do
     for a in start stop restart enable disable; do
       echo "${CV_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl ${a} ${u}" >> "$f"
     done
@@ -354,6 +354,15 @@ install_node_update() {
   systemctl enable --now cv-node-update.timer
 }
 
+# Install the infrastructure backup timer (database + keys + config → backup
+# storage services). Runs on every app node (control plane + customer-tenant).
+install_backup() {
+  cp "$INSTALL_DIR/infra/systemd/cv-backup.service" /etc/systemd/system/
+  cp "$INSTALL_DIR/infra/systemd/cv-backup.timer" /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable --now cv-backup.timer
+}
+
 health_check() {
   local i
   for i in $(seq 1 20); do
@@ -429,6 +438,7 @@ step_always "Writing configuration"        write_env
 step_always "Recording node marker"        write_node_marker
 step_always "Enabling node control"        setup_node_control
 step_always "Starting control-plane service" install_service
+step_always "Installing infrastructure backup timer" install_backup
 if [[ "$CV_NODE_ROLE" == "customer-tenant" ]]; then
   step_always "Configuring API-only reverse proxy" configure_caddy_node
   step_always "Installing fleet heartbeat"   install_heartbeat
