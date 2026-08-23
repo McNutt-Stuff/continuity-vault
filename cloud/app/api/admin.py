@@ -1326,8 +1326,7 @@ def node_backup_now(nid: str,
         return {"ok": True, "message": f"Backup started on {n.name}"}
     if _remote_capable(n):
         try:
-            res = _node_call(n, "/nodes/sync/control", method="POST",
-                             json={"action": "start", "unit": "cv-backup.service"})
+            res = _node_call(n, "/nodes/sync/backup", method="POST", json={})
         except Exception:  # noqa: BLE001
             raise HTTPException(502, "node unreachable")
         ok = bool(res.get("ok"))

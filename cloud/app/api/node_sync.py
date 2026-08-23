@@ -358,6 +358,27 @@ def node_control(body: ControlReq, authorization: str = Header(default="")):
     return sysinfo.control(body.action, body.unit, s.node_role or "control-plane")
 
 
+@router.post("/backup")
+def node_backup(authorization: str = Header(default="")):
+    """Run this node's infrastructure backup in-process now (no systemd/sudo, so
+    it works in containers). Called by the control plane's per-node backup button."""
+    _require_fleet(authorization)
+    import threading
+    from ..backup_service import run_backup_once
+
+    def _go():
+        from ..db import WorkerSessionLocal
+        try:
+            with WorkerSessionLocal() as wdb:
+                run_backup_once(wdb)
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger("cv.node").exception("remote node backup failed")
+
+    threading.Thread(target=_go, name="cv-backup-manual", daemon=True).start()
+    return {"ok": True, "message": "Backup started"}
+
+
 class PurgeReq(BaseModel):
     account_id: str
     tenant_id: str
