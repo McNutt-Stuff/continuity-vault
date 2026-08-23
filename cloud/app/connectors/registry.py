@@ -570,7 +570,7 @@ class GoogleCalendarConnector(Connector):
 
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
-            searchable_fields=["calendar", "location", "organizer"],
+            searchable_fields=["calendar", "location", "organizer", "recurring"],
             facet_fields=["calendar"],
         )
 

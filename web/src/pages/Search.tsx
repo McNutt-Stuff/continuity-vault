@@ -762,7 +762,14 @@ export default function Search() {
                 <Icon name={cm.icon} size={18} />
               </div>
               <div className="flex1">
-                <div style={{ fontWeight: 600 }}>{r.title}</div>
+                <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                  <span style={{ fontWeight: 600 }}>{r.title}</span>
+                  {r.category === "calendar" && r.meta?.recurring && (
+                    <span title="Recurring event" style={{ display: "inline-flex", color: "var(--text-dim)" }}>
+                      <Icon name="repeat" size={13} />
+                    </span>
+                  )}
+                </div>
                 <div className="faint" style={{ fontSize: 12.5 }}>
                   {r.preview || <span className="faint">no indexed metadata for this object</span>}
                 </div>

@@ -1216,56 +1216,14 @@ def fetch_google_contacts(access_token: str,
                 break
 
 
-def _add_years(d: datetime, n: int) -> datetime:
-    try:
-        return d.replace(year=d.year + n)
-    except ValueError:  # Feb 29 in a non-leap year
-        return d.replace(year=d.year + n, day=28)
-
-
-def _add_months(d: datetime, n: int) -> datetime:
-    import calendar
-    m0 = d.month - 1 + n
-    y = d.year + m0 // 12
-    m = m0 % 12 + 1
-    return d.replace(year=y, month=m, day=min(d.day, calendar.monthrange(y, m)[1]))
-
-
-def _next_occurrence(start: datetime, rrule: str, now: datetime) -> datetime:
-    """The recurring series' first occurrence on/after ``now`` — so a yearly/
-    monthly/weekly/daily event is dated at its upcoming instance, not the series'
-    far-future end (what made "every year until 2099" events sort to 2099)."""
-    fm = re.search(r"FREQ=([A-Z]+)", rrule or "", re.IGNORECASE)
-    freq = fm.group(1).upper() if fm else ""
-    im = re.search(r"INTERVAL=(\d+)", rrule or "", re.IGNORECASE)
-    interval = max(1, int(im.group(1))) if im else 1
-    if start >= now or freq not in ("YEARLY", "MONTHLY", "WEEKLY", "DAILY"):
-        return start
-    if freq in ("DAILY", "WEEKLY"):
-        step = timedelta(days=interval) if freq == "DAILY" else timedelta(weeks=interval)
-        d = start + step * ((now - start) // step)
-        while d < now:
-            d += step
-        return d
-    d = start
-    for _ in range(2400):  # bounded; ~200 years of monthly/yearly steps
-        if d >= now:
-            break
-        d = _add_years(d, interval) if freq == "YEARLY" else _add_months(d, interval)
-    return d
-
-
 def _event_object_date(ev: dict) -> Optional[datetime]:
-    """Timeline date for a calendar event. A recurring event is dated at its next
-    occurrence (never the series' far-future end, e.g. year 2099); a one-off event
-    keeps its own start. Falls back to updated/created when there's no start."""
-    now = datetime.utcnow()
+    """Timeline date for a calendar event = its ORIGINAL / first-occurrence start
+    (for a recurring series Google returns the master with start = first
+    occurrence). Dating at the first occurrence — not the next one — keeps
+    recurring events from dominating the top of search. Falls back to
+    updated/created when there's no start."""
     start = ev.get("start") or {}
     dt = _parse_dt(start.get("dateTime") or start.get("date"))
-    rec = ev.get("recurrence") or []
-    if dt is not None and rec:
-        rrule = next((r for r in rec if isinstance(r, str) and r.upper().startswith("RRULE")), "")
-        return _next_occurrence(dt, rrule, now)
     if dt is not None:
         return dt
     for cand in (ev.get("updated"), ev.get("created")):
@@ -1306,16 +1264,19 @@ def fetch_google_calendar(access_token: str,
                     start = (ev.get("start") or {})
                     when = start.get("dateTime") or start.get("date") or ""
                     summary = ev.get("summary") or "(no title)"
+                    recurring = bool(ev.get("recurrence"))
+                    meta = {"calendar": cal_name, "start": when,
+                            "location": ev.get("location"),
+                            "organizer": (ev.get("organizer") or {}).get("email"),
+                            "kind": "event"}
+                    if recurring:  # only when true, so non-recurring events add no facet
+                        meta["recurring"] = True
                     yield SourceObject(
                         object_id=f"google_calendar:{ev.get('id')}",
                         doc_type="event", category="calendar", title=summary,
                         content=json.dumps(ev).encode(),
                         preview=f"{when} · {ev.get('location', '')}".strip(" ·"),
-                        meta={"calendar": cal_name, "start": when,
-                              "recurring": bool(ev.get("recurrence")),
-                              "location": ev.get("location"),
-                              "organizer": (ev.get("organizer") or {}).get("email"),
-                              "kind": "event"},
+                        meta=meta,
                         labels=[cal_name],
                         modified_at=_event_object_date(ev))
                 token = body.get("nextPageToken")

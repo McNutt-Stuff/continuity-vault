@@ -26,6 +26,7 @@ type IconName =
   | "activity"
   | "bell"
   | "calendar"
+  | "repeat"
   | "edit"
   | "trash"
   | "sun"
@@ -136,6 +137,14 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <rect x="3" y="5" width="18" height="16" rx="2" />
       <path d="M3 9h18M8 3v4M16 3v4" />
+    </>
+  ),
+  repeat: (
+    <>
+      <path d="M17 2l4 4-4 4" />
+      <path d="M3 11V9a4 4 0 014-4h14" />
+      <path d="M7 22l-4-4 4-4" />
+      <path d="M21 13v2a4 4 0 01-4 4H3" />
     </>
   ),
   info: (
