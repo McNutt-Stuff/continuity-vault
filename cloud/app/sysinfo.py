@@ -27,6 +27,7 @@ SERVICES = {
     "caddy": "TLS reverse proxy",
     "cv-node-heartbeat.timer": "Fleet heartbeat",
     "cv-backup.timer": "Infrastructure backup",
+    "cv-backup.service": "Infrastructure backup (run now)",
     "cv-node-update.timer": "Self-update timer",
     "cv-cloud-update.timer": "Update timer",
 }

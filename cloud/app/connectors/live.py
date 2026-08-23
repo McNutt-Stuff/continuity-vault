@@ -235,37 +235,110 @@ def fetch_gmail(access_token: str, cursor: Optional[dict] = None,
     return objects, new_cursor
 
 
+def _gmail_since_query(since_date: str) -> str:
+    """Gmail ``after:YYYY/MM/DD`` search filter from an ISO date (empty if unset)."""
+    d = (since_date or "").strip()[:10]
+    if not d:
+        return ""
+    try:
+        y, m, day = d.split("-")
+        return f"after:{int(y)}/{int(m)}/{int(day)}"
+    except Exception:
+        return ""
+
+
+# Messages ingested per resumable full-backfill chunk (the job loop resumes the
+# next chunk from the saved pageToken until the whole mailbox is captured).
+_GMAIL_BACKFILL_CHUNK = 1000
+
+
 def stream_gmail(access_token: str, cursor: Optional[dict] = None,
                  max_messages: int = 5000, content_cap: int = _DEFAULT_CAP,
                  options: Optional[dict] = None, state: Optional[dict] = None):
-    """Lazy Gmail pull: yields one message at a time (so the caller can ingest in
-    bounded batches instead of holding the whole mailbox in RAM) and records the
-    new cursor in ``state['cursor']`` once done."""
+    """Lazy Gmail pull: yields one message at a time (so the caller ingests in
+    bounded batches instead of holding the whole mailbox in RAM).
+
+    Full history is captured by paging *backwards* through the mailbox in
+    resumable chunks — each chunk saves a ``pageToken`` and reports ``has_more``
+    so the job loop continues until every message is backed up; only then does it
+    switch to history-based deltas. An optional ``sinceDate`` limits the window.
+    """
     headers = {"Authorization": f"Bearer {access_token}"}
     cursor = cursor or {}
     options = options or {}
     exclude = {str(f).upper() for f in (options.get("excludeFolders") or [])}
     include_spam_trash = bool(options.get("includeSpamTrash")) and not (exclude & {"SPAM", "TRASH"})
-    query = " ".join(_GMAIL_EXCLUDE_QUERY[f] for f in exclude if f in _GMAIL_EXCLUDE_QUERY)
+    query_parts = [_GMAIL_EXCLUDE_QUERY[f] for f in exclude if f in _GMAIL_EXCLUDE_QUERY]
+    since_q = _gmail_since_query(options.get("sinceDate") or "")
+    if since_q:
+        query_parts.append(since_q)
+    query = " ".join(query_parts)
+
+    def _emit(mid: str):
+        o = _gmail_message(c, headers, mid, content_cap)
+        if not o:
+            return None
+        if exclude and (set(o.meta.get("labelIds", [])) & exclude):
+            return None
+        return o
+
     with httpx.Client(timeout=60) as c:
         history_id = cursor.get("history_id")
         if history_id:
+            # Delta sync from the last recorded history point.
             try:
                 ids = _gmail_history_ids(c, headers, str(history_id), max_messages)
             except _HistoryGone:
                 logger.info("gmail history %s expired; full resync", history_id)
-                ids = _gmail_list_ids(c, headers, max_messages, query, include_spam_trash)
-        else:
-            ids = _gmail_list_ids(c, headers, max_messages, query, include_spam_trash)
-        for mid in ids:
-            o = _gmail_message(c, headers, mid, content_cap)
-            if not o:
-                continue
-            if exclude and (set(o.meta.get("labelIds", [])) & exclude):
-                continue
-            yield o
+                ids = None
+            if ids is not None:
+                for mid in ids:
+                    o = _emit(mid)
+                    if o:
+                        yield o
+                if state is not None:
+                    state["cursor"] = {"history_id": _gmail_history_id(c, headers)}
+                return
+            # history gone → fall through to a fresh full backfill
+
+        # Full backfill (initial run, resuming a chunked backfill, or after a
+        # history-expiry resync). Capture the mailbox head once so deltas can
+        # resume cleanly after the whole history is ingested.
+        full = cursor.get("full") or {}
+        start_history_id = full.get("start_history_id") or _gmail_history_id(c, headers)
+        next_token = full.get("page_token")
+        emitted = 0
+        exhausted = False
+        while emitted < _GMAIL_BACKFILL_CHUNK:
+            params: dict = {"maxResults": 500}
+            if query:
+                params["q"] = query
+            if include_spam_trash:
+                params["includeSpamTrash"] = "true"
+            if next_token:
+                params["pageToken"] = next_token
+            r = c.get(f"{GMAIL}/messages", headers=headers, params=params)
+            r.raise_for_status()
+            data = r.json()
+            for ref in data.get("messages", []):
+                o = _emit(ref["id"])
+                if o:
+                    yield o
+                    emitted += 1
+            next_token = data.get("nextPageToken")
+            if not next_token:
+                exhausted = True
+                break
         if state is not None:
-            state["cursor"] = {"history_id": _gmail_history_id(c, headers)}
+            if exhausted:
+                # Whole mailbox captured → hand off to history-based deltas.
+                state["cursor"] = {"history_id": start_history_id}
+            else:
+                state["cursor"] = {
+                    "full": {"page_token": next_token,
+                             "start_history_id": start_history_id},
+                    "has_more": True,
+                }
 
 
 def fetch_graph_mail(access_token: str, limit: int = 40,
@@ -301,6 +374,98 @@ def fetch_graph_mail(access_token: str, limit: int = 40,
                     modified_at=_parse_dt(m.get("receivedDateTime")),
                 )
             url, params = body.get("@odata.nextLink"), None
+
+
+def _graph_iso(since_date: str) -> str:
+    """ISO-8601 instant for a Graph ``receivedDateTime`` filter from an ISO date."""
+    d = (since_date or "").strip()
+    if not d:
+        return ""
+    return d if len(d) > 10 else f"{d[:10]}T00:00:00Z"
+
+
+# Messages ingested per resumable Outlook chunk.
+_OUTLOOK_CHUNK = 200
+
+
+def stream_outlook(access_token: str, cursor: Optional[dict] = None,
+                   content_cap: int = _DEFAULT_CAP, options: Optional[dict] = None,
+                   state: Optional[dict] = None):
+    """Stream an Outlook/Graph mailbox, capturing the *whole* history by paging
+    backwards (newest-first) in resumable chunks, then incrementally picking up
+    new mail on later runs. Honors an optional ``sinceDate`` window.
+
+    Cursor shapes:
+      * ``{"scan": {"next_link", "head", "filter"}, "has_more": True}`` — a paged
+        scan in progress (resume from the saved ``@odata.nextLink``).
+      * ``{"backfilled": True, "last_seen": <iso>}`` — history captured; later
+        runs pull only messages newer than ``last_seen``.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    cursor = cursor or {}
+    options = options or {}
+    select = "id,subject,from,bodyPreview,receivedDateTime,parentFolderId,webLink"
+
+    scan = cursor.get("scan") or {}
+    if scan.get("next_link"):
+        url: Optional[str] = scan.get("next_link")
+        params: Optional[dict] = None
+        head = scan.get("head")
+    else:
+        last_seen = cursor.get("last_seen")
+        since_iso = _graph_iso(options.get("sinceDate") or "")
+        filters = []
+        if last_seen:  # incremental: only mail newer than the last full scan
+            filters.append(f"receivedDateTime gt {last_seen}")
+        elif since_iso:  # initial backfill limited to the chosen window
+            filters.append(f"receivedDateTime ge {since_iso}")
+        base_filter = " and ".join(filters)
+        url = "https://graph.microsoft.com/v1.0/me/messages"
+        params = {"$top": 50, "$select": select, "$orderby": "receivedDateTime desc"}
+        if base_filter:
+            params["$filter"] = base_filter
+        head = None
+
+    emitted = 0
+    exhausted = False
+    with httpx.Client(timeout=120) as c:
+        while emitted < _OUTLOOK_CHUNK and url:
+            r = c.get(url, headers=headers, params=params)
+            r.raise_for_status()
+            body = r.json()
+            vals = body.get("value", [])
+            if head is None and vals:
+                head = vals[0].get("receivedDateTime")  # newest message in this scan
+            for m in vals:
+                sender = (m.get("from") or {}).get("emailAddress", {}).get("address", "")
+                mime = c.get(f"https://graph.microsoft.com/v1.0/me/messages/{m['id']}/$value",
+                             headers=headers)
+                raw = mime.content if mime.status_code < 400 else b""
+                content, backed = _capped(raw, content_cap)
+                yield SourceObject(
+                    object_id=f"outlook:{m['id']}",
+                    doc_type="email",
+                    title=m.get("subject") or "(no subject)",
+                    content=content,
+                    preview=(m.get("bodyPreview") or "")[:200],
+                    meta={"from": sender, "folder": "Inbox", "webLink": m.get("webLink"),
+                          "content_backed_up": backed},
+                    labels=["Inbox"],
+                    size_bytes=len(raw) or None,  # type: ignore
+                    modified_at=_parse_dt(m.get("receivedDateTime")),
+                )
+                emitted += 1
+            url, params = body.get("@odata.nextLink"), None
+            if not url:
+                exhausted = True
+                break
+
+    if state is not None:
+        if exhausted or not url:
+            new_last = head or cursor.get("last_seen")
+            state["cursor"] = {"backfilled": True, "last_seen": new_last}
+        else:
+            state["cursor"] = {"scan": {"next_link": url, "head": head}, "has_more": True}
 
 
 def fetch_graph_files(access_token: str, limit: int = 500,
@@ -1658,6 +1823,10 @@ def stream_github(access_token: str, cursor=None, config: Optional[dict] = None,
     status = config.get("_status")  # job status reporter (optional)
     cur = cursor if isinstance(cursor, dict) else {}
     seen_at: dict = dict(cur.get("repos") or {})
+    # Per-repo resume progress: {full_name: {"files": <blobs done>, "issue_page": <next page>}}.
+    # Lets a repo with more files than one chunk continue where it left off instead
+    # of re-crawling (and re-throttling on) the same first files every chunk.
+    progress: dict = dict(cur.get("progress") or {})
     headers = _gh_headers(access_token)
     limiter = _gh_limiter()
     emitted = 0
@@ -1670,6 +1839,9 @@ def stream_github(access_token: str, cursor=None, config: Optional[dict] = None,
         return limiter.get(c, url, status=status, **kw)
 
     with httpx.Client(timeout=120) as c:
+        fn = None
+        current_done = 0
+        issue_page = 1
         try:
             for repo in _github_repos(c, headers, roots, limiter, status):
                 if stopped_early:
@@ -1681,6 +1853,12 @@ def stream_github(access_token: str, cursor=None, config: Optional[dict] = None,
                 # Delta: skip a repo whose head hasn't moved since the last full sync.
                 if fn and seen_at.get(fn) == pushed:
                     continue
+
+                # Resume point within this repo (0 files / page 1 on a fresh crawl).
+                rp = progress.get(fn) or {}
+                files_done = int(rp.get("files", 0) or 0)
+                issue_page = int(rp.get("issue_page", 1) or 1)
+                current_done = files_done
 
                 yield SourceObject(
                     object_id=f"github:repo:{fn}", doc_type="repository", category="developer",
@@ -1701,8 +1879,12 @@ def stream_github(access_token: str, cursor=None, config: Optional[dict] = None,
                     tr = gh_get(f"{GITHUB_API}/repos/{fn}/git/trees/{default_branch}",
                                 headers=headers, params={"recursive": "1"})
                     if tr.status_code < 400:
-                        for node in (tr.json().get("tree") or []):
-                            if node.get("type") != "blob":
+                        blobs = [n for n in (tr.json().get("tree") or [])
+                                 if n.get("type") == "blob"]
+                        # Skip files already ingested in a prior chunk (no re-fetch,
+                        # no quota spent) and continue from there.
+                        for idx, node in enumerate(blobs, start=1):
+                            if idx <= files_done:
                                 continue
                             if emitted >= _FILE_CHUNK:
                                 stopped_early = True
@@ -1734,15 +1916,15 @@ def stream_github(access_token: str, cursor=None, config: Optional[dict] = None,
                                 labels=[fn], size_bytes=size or None,  # type: ignore
                                 content_hash=node.get("sha"), modified_at=repo_mod)
                             emitted += 1
+                            current_done = idx
 
                 if want_issues and fn and not stopped_early:
-                    ip = 1
-                    while ip <= 10:
+                    while issue_page <= 10:
                         if emitted >= _FILE_CHUNK:
                             stopped_early = True
                             break
                         ir = gh_get(f"{GITHUB_API}/repos/{fn}/issues", headers=headers,
-                                    params={"state": "all", "per_page": 100, "page": ip})
+                                    params={"state": "all", "per_page": 100, "page": issue_page})
                         if ir.status_code >= 400:
                             break
                         issues = ir.json()
@@ -1767,22 +1949,31 @@ def stream_github(access_token: str, cursor=None, config: Optional[dict] = None,
                             emitted += 1
                         if len(issues) < 100:
                             break
-                        ip += 1
+                        issue_page += 1
 
-                # Mark the repo done only when fully processed (so an early stop
-                # re-crawls it next run; dedup skips the unchanged files).
-                if fn and not stopped_early:
-                    seen_at[fn] = pushed
+                # Persist per-repo progress: mark the repo fully done only when the
+                # crawl reached the end (so deltas skip it next time); otherwise
+                # remember where to resume so we advance instead of restarting.
+                if fn:
+                    if stopped_early:
+                        progress[fn] = {"files": current_done, "issue_page": issue_page}
+                    else:
+                        seen_at[fn] = pushed
+                        progress.pop(fn, None)
         except RateLimitExceeded as exc:
             # Hourly budget hit and the reset is further out than we'll wait inline:
             # stop this chunk, remember when the window resets, and let the job loop
             # wait + resume. Objects already yielded are ingested; not an error.
             throttled_reset = exc.reset_at or (datetime.now(timezone.utc).timestamp() + 60)
             stopped_early = True
+            # Keep the in-flight repo's resume point so it advances (not restarts)
+            # when the window reopens.
+            if fn:
+                progress[fn] = {"files": current_done, "issue_page": issue_page}
             logger.warning("github throttled — deferring rest of backup: %s", exc)
             if status:
                 status("Paused for GitHub rate limit — will resume automatically")
-    cursor_out = {"repos": seen_at, "has_more": stopped_early}
+    cursor_out = {"repos": seen_at, "progress": progress, "has_more": stopped_early}
     if throttled_reset:
         cursor_out["resume_after"] = throttled_reset
     state["cursor"] = cursor_out

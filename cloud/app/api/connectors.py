@@ -658,6 +658,15 @@ def _fetch_account_label(connector_type: str, tokens: dict) -> str | None:
 def _resolve_identity(connector_type: str, tokens: dict) -> str | None:
     import httpx
 
+    # Evernote's identity lives behind its MCP server (no OIDC id_token / userinfo),
+    # so resolve it through the MCP-aware helper rather than the OAuth paths below.
+    if connector_type == "evernote":
+        try:
+            return evernote_mcp.fetch_identity(tokens)
+        except Exception:  # noqa: BLE001
+            logger.warning("evernote identity resolution failed", exc_info=True)
+            return None
+
     ident = _identity_from_id_token(tokens)
     if ident:
         return ident

@@ -136,7 +136,7 @@ export default function Mappings() {
   }, [activity]);
 
   function eventsFor(collectionId: string): ActivityEvent[] {
-    return (activity?.events || []).filter((e) => e.collection_id === collectionId).slice(0, 4);
+    return (activity?.events || []).filter((e) => e.collection_id === collectionId).slice(0, 40);
   }
 
   function jobFor(collectionId: string): Job | undefined {
@@ -504,17 +504,26 @@ export default function Mappings() {
                           {!job && evs.length === 0 && !isSyncing && (
                             <span className="faint" style={{ fontSize: 12 }}>No activity yet.</span>
                           )}
-                          {evs.map((e, i) => (
-                            <div key={i} className="row" style={{ gap: 6, fontSize: 12, flexWrap: "wrap", alignItems: "center" }}>
-                              <Icon name={isApplianceDest(e.destination || "") ? "server" : "cloud"} size={12} />
-                              <span className="faint">{destLabel(e.destination || "cv-cloud")}</span>
-                              <span className="faint">· {e.object_count ?? 0} objects · {bytes(e.total_bytes ?? 0)}</span>
-                              <Pill tone={e.status === "recoverable" ? "ok" : "warn"}>
-                                {e.status === "recoverable" ? "recoverable" : "sealing"}
-                              </Pill>
-                              <span className="faint" style={{ marginLeft: "auto" }}>{fmtTime(e.at)}</span>
-                            </div>
-                          ))}
+                          {evs.length > 0 && (
+                            <>
+                              <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", margin: "2px 0 4px" }}>
+                                Recent recovery points{evs.length >= 40 ? " (latest 40)" : ` (${evs.length})`}
+                              </div>
+                              <div style={{ maxHeight: 200, overflowY: "auto" }} className="stack">
+                                {evs.map((e, i) => (
+                                  <div key={i} className="row" style={{ gap: 6, fontSize: 12, flexWrap: "wrap", alignItems: "center" }}>
+                                    <Icon name={isApplianceDest(e.destination || "") ? "server" : "cloud"} size={12} />
+                                    <span className="faint">{destLabel(e.destination || "cv-cloud")}</span>
+                                    <span className="faint">· {e.object_count ?? 0} objects · {bytes(e.total_bytes ?? 0)}</span>
+                                    <Pill tone={e.status === "recoverable" ? "ok" : "warn"}>
+                                      {e.status === "recoverable" ? "recoverable" : "sealing"}
+                                    </Pill>
+                                    <span className="faint" style={{ marginLeft: "auto" }}>{fmtTime(e.at)}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>

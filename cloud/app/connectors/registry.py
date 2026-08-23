@@ -137,6 +137,7 @@ class GmailConnector(Connector):
             supports_pagination=True,
             delta=True,
             streaming=True,
+            historical=True,
             searchable_fields=["from", "to", "folder", "labels"],
             facet_fields=["folder"],
         )
@@ -164,7 +165,8 @@ class GmailConnector(Connector):
                 config["access_token"], cursor=cursor,
                 max_messages=s.sync_max_items, content_cap=s.content_max_bytes,
                 options={"excludeFolders": config.get("excludeFolders"),
-                         "includeSpamTrash": config.get("includeSpamTrash")})
+                         "includeSpamTrash": config.get("includeSpamTrash"),
+                         "sinceDate": config.get("sinceDate")})
             return FetchResult(objects=objects, cursor=new_cursor, has_more=False)
         return FetchResult(objects=list(self.fetch_objects(account_label, config=config)))
 
@@ -179,7 +181,8 @@ class GmailConnector(Connector):
                 config["access_token"], cursor=cursor,
                 max_messages=s.sync_max_items, content_cap=s.content_max_bytes,
                 options={"excludeFolders": config.get("excludeFolders"),
-                         "includeSpamTrash": config.get("includeSpamTrash")}, state=state)
+                         "includeSpamTrash": config.get("includeSpamTrash"),
+                         "sinceDate": config.get("sinceDate")}, state=state)
         else:
             yield from self.fetch_objects(account_label, config=config)
 
@@ -215,6 +218,8 @@ class OutlookConnector(Connector):
         return ConnectorCapabilities(
             incremental=True,
             streaming=True,
+            delta=True,
+            historical=True,
             searchable_fields=["from", "to", "folder"],
             facet_fields=["folder"],
         )
@@ -231,6 +236,21 @@ class OutlookConnector(Connector):
             color="#0078d4",
             doc_types=["email"],
         )
+
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
+        # Stream the whole mailbox in bounded, resumable chunks (oldest history is
+        # captured by paging back through Graph), honoring a "since" window.
+        config = config or {}
+        if config.get("access_token"):
+            from ..config import get_settings
+            s = get_settings()
+            yield from live.stream_outlook(
+                config["access_token"], cursor=cursor,
+                content_cap=s.content_max_bytes,
+                options={"sinceDate": config.get("sinceDate")},
+                state=state if state is not None else {})
+            return
+        yield from self.fetch_objects(account_label, config=config)
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}

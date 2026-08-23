@@ -984,6 +984,13 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
     } catch (e) { flash((e as { message?: string }).message || "Control failed"); }
   }
 
+  async function backupNow() {
+    try {
+      const r = await api.post<{ ok: boolean; message?: string }>(`/admin/nodes/${id}/backup`, {});
+      flash(r.ok ? (r.message || "Backup started") : `Backup failed: ${r.message || "unknown error"}`);
+    } catch (e) { flash((e as { message?: string }).message || "Backup failed"); }
+  }
+
   if (!node) return (
     <Card><button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 10 }}>← Nodes</button>
       <div className="muted">Loading node…</div></Card>
@@ -1001,6 +1008,9 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
           <button className="btn sm" onClick={async () => { await onEdit(node); await loadNode(); }}>Edit</button>
           <button className="btn sm" onClick={() => ctl("update", "", "Trigger a software update on this node? It will pull the latest build and restart.")}>
             <Icon name="clock" size={13} /> Update
+          </button>
+          <button className="btn sm" onClick={backupNow}>
+            <Icon name="shield" size={13} /> Back up now
           </button>
           <button className="btn sm" onClick={() => ctl("restart", "cv-cloud", "Restart the Arkive application on this node?")}>Restart app</button>
           {!node.is_self && <button className="btn danger sm" onClick={async () => { await onRemove(node); onBack(); }}>Remove</button>}

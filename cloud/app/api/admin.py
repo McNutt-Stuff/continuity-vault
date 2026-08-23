@@ -1298,6 +1298,44 @@ def node_control(nid: str, body: NodeControl,
     raise HTTPException(400, "controls are not available for this node type")
 
 
+@router.post("/nodes/{nid}/backup")
+def node_backup_now(nid: str,
+                    principal: security.Principal = Depends(security.require_platform_admin),
+                    db: Session = Depends(get_db)):
+    """Trigger an infrastructure backup of a specific node now. The control-plane
+    node runs it in-process; a remote node starts its own ``cv-backup.service``."""
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    audit.record(db, actor=principal.user_id, action="admin.backup_triggered",
+                 category="admin", detail={"node": n.name})
+    if n.is_self:
+        import threading
+        from ..backup_service import run_backup_once
+
+        def _go():
+            from ..db import WorkerSessionLocal
+            try:
+                with WorkerSessionLocal() as wdb:
+                    run_backup_once(wdb)
+            except Exception:  # noqa: BLE001
+                import logging
+                logging.getLogger("cv.admin").exception("manual node backup failed")
+
+        threading.Thread(target=_go, name="cv-backup-manual", daemon=True).start()
+        return {"ok": True, "message": f"Backup started on {n.name}"}
+    if _remote_capable(n):
+        try:
+            res = _node_call(n, "/nodes/sync/control", method="POST",
+                             json={"action": "start", "unit": "cv-backup.service"})
+        except Exception:  # noqa: BLE001
+            raise HTTPException(502, "node unreachable")
+        ok = bool(res.get("ok"))
+        return {"ok": ok, "message": (f"Backup started on {n.name}" if ok
+                                      else res.get("error") or "could not start backup")}
+    raise HTTPException(400, "backups can't be triggered remotely for this node type")
+
+
 @router.get("/nodes/{nid}/tenants")
 def node_tenants(nid: str, db: Session = Depends(get_db)):
     """Per-tenant usage on a node — to spot the heaviest tenants (rebalancing)."""

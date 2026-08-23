@@ -89,11 +89,14 @@ def activity(limit: int = 40,
         return c.source_type if c else ""
 
     # Recently completed snapshot receipts (the concrete "data landed" events).
+    # Pull a deeper slice than the job/audit limit so the Data Map can show each
+    # source's history, not just its most recent run.
+    receipt_limit = min(max(limit * 6, 120), 400)
     receipts = (db.query(SnapshotReceipt)
                 .filter(SnapshotReceipt.tenant_id == tenant.id,
                         SnapshotReceipt.vault_id.in_(allowed))
                 .order_by(SnapshotReceipt.created_at.desc())
-                .limit(limit).all()) if allowed else []
+                .limit(receipt_limit).all()) if allowed else []
     dest_label = _dest_labeler(db, tenant.id)
     events = [{
         "kind": "backup",
