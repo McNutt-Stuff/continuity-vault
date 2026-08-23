@@ -26,7 +26,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from . import credstore
@@ -214,6 +214,32 @@ def _resolve_self_node(db):
     return n
 
 
+def reap_stale_runs(db, *, node_id=None, node_name=None, older_than_minutes: int = 0) -> int:
+    """Mark backup runs stuck in ``running`` as failed — a run only stays running
+    if the worker/process died mid-backup (restart, OOM, kill), which no in-thread
+    handler can catch. Scoped to a node when given; ``older_than_minutes`` guards
+    against reaping a genuinely in-flight run (0 = reap all for the node)."""
+    from .models import BackupRun
+    q = db.query(BackupRun).filter(BackupRun.status == "running")
+    if node_id:
+        q = q.filter(BackupRun.node_id == node_id)
+    elif node_name:
+        q = q.filter(BackupRun.node_name == node_name)
+    if older_than_minutes > 0:
+        cutoff = _now() - timedelta(minutes=older_than_minutes)
+        q = q.filter(BackupRun.started_at < cutoff)
+    reaped = 0
+    for run in q.all():
+        run.status = "failed"
+        run.error = "interrupted — the backup process stopped before finishing"
+        run.finished_at = _now()
+        reaped += 1
+    if reaped:
+        db.commit()
+        logger.warning("backup: reaped %d stale running run(s)", reaped)
+    return reaped
+
+
 def run_backup_once(db) -> Optional[dict]:
     """Run one infrastructure backup of this node to its assigned destinations.
     Records and returns a BackupRun view (dict). Returns a 'skipped' run when no
@@ -224,6 +250,10 @@ def run_backup_once(db) -> Optional[dict]:
     node_id = node.id if node else None
     node_name = (node.name if node else (s.node_name or s.domain)) or "node"
     role = (node.role if node else s.node_role) or "control-plane"
+
+    # A new run means any prior "running" run for this node is dead — reap it so
+    # the dashboard never shows a phantom in-progress backup.
+    reap_stale_runs(db, node_id=node_id, node_name=node_name)
 
     run = BackupRun(node_id=node_id, node_name=node_name, role=role, kind="node",
                     status="running", started_at=_now(), components=[], destinations=[])

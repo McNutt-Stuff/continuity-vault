@@ -1950,6 +1950,11 @@ def backups_overview(db: Session = Depends(get_db)):
     """Fleet-wide infrastructure backup status: coverage, per-node last run,
     storage totals per backup service, schedules and recent runs."""
     _ensure_self_node(db)
+    # Self-heal phantom "running" rows (worker/process died mid-backup) so the
+    # dashboard doesn't show a backup as in-progress forever. Only reap runs older
+    # than an hour so a genuinely in-flight backup is left alone.
+    from ..backup_service import reap_stale_runs
+    reap_stale_runs(db, older_than_minutes=60)
     nodes = db.query(Node).all()
     svc_by_id = {s.id: s for s in db.query(ServiceObject).all()}
 
