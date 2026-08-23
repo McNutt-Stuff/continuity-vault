@@ -65,7 +65,11 @@ def _dump_database(dest_path: str) -> Tuple[bool, str]:
             return False, "sqlite file not found"
         shutil.copy2(path, dest_path)
         return True, "sqlite copy"
-    # Postgres — pg_dump accepts the connection URI directly.
+    # Postgres — pg_dump/libpq only understand a bare postgres[ql]:// URI, so
+    # strip any SQLAlchemy driver suffix (e.g. postgresql+psycopg:// → postgresql://).
+    scheme, sep, rest = url.partition("://")
+    if sep and "+" in scheme:
+        url = scheme.split("+", 1)[0] + "://" + rest
     pg_dump = shutil.which("pg_dump") or "pg_dump"
     try:
         with open(dest_path, "wb") as out:
@@ -221,6 +225,9 @@ def run_backup_once(db) -> Optional[dict]:
 
     run.components = components
     run.message = note
+    # The database holds config, tenants, receipts and the search index — it is the
+    # critical component, so a bundle without it must never look like a clean success.
+    db_captured = "database" in components
     ts = _now().strftime("%Y%m%dT%H%M%SZ")
     key = f"node-backups/{_safe(node_name)}/{ts}.arkbak"
     size = len(encrypted)
@@ -246,11 +253,22 @@ def run_backup_once(db) -> Optional[dict]:
 
     run.destinations = results
     run.total_bytes = size if ok_count else 0
-    run.status = "success" if ok_count == len(services) else ("partial" if ok_count else "failed")
+    if not db_captured:
+        # Flag the missing database prominently so the operator can fix it (e.g.
+        # install pg_dump / a matching client version) rather than trusting a
+        # backup that can't actually restore the platform.
+        run.error = (f"database NOT captured — {note}")[:500]
+        logger.error("backup: %s produced NO database dump (%s)", node_name, note)
+    if ok_count == 0:
+        run.status = "failed"
+    elif ok_count == len(services) and db_captured:
+        run.status = "success"
+    else:
+        run.status = "partial"
     run.finished_at = _now()
     db.commit()
-    logger.info("backup: %s complete — %s (%d/%d destinations, %d bytes)",
-                node_name, run.status, ok_count, len(services), size)
+    logger.info("backup: %s complete — %s (%d/%d destinations, db=%s, %d bytes)",
+                node_name, run.status, ok_count, len(services), db_captured, size)
     return _run_view(run)
 
 

@@ -1,8 +1,18 @@
 # Arkive — cloud control plane image
 FROM python:3.12-slim
 
+# Install a PostgreSQL 16 client (matches the postgres:16 server) from the PGDG
+# repo so pg_dump can back up the database — the distro client (v15) refuses to
+# dump a newer server.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libssl-dev curl postgresql-client && rm -rf /var/lib/apt/lists/*
+      build-essential libssl-dev curl ca-certificates gnupg \
+ && install -d /usr/share/postgresql-common/pgdg \
+ && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update && apt-get install -y --no-install-recommends postgresql-client-16 \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY shared /app/shared

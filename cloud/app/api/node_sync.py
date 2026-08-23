@@ -361,16 +361,15 @@ def node_control(body: ControlReq, authorization: str = Header(default="")):
 @router.post("/backup")
 def node_backup(authorization: str = Header(default="")):
     """Run this node's infrastructure backup in-process now (no systemd/sudo, so
-    it works in containers). Called by the control plane's per-node backup button."""
+    it works in containers) and report the result to the control plane. Called by
+    the control plane's per-node backup button."""
     _require_fleet(authorization)
     import threading
-    from ..backup_service import run_backup_once
+    from .. import backup_worker
 
     def _go():
-        from ..db import WorkerSessionLocal
         try:
-            with WorkerSessionLocal() as wdb:
-                run_backup_once(wdb)
+            backup_worker.run_once()  # backs up AND reports centrally (success or failure)
         except Exception:  # noqa: BLE001
             import logging
             logging.getLogger("cv.node").exception("remote node backup failed")
