@@ -841,18 +841,18 @@ class GitHubConnector(Connector):
         repo = f"{account_label}/example"
         yield SourceObject(
             object_id=_oid(self.connector_type, account_label, 0),
-            doc_type="repository", category="record", title=repo,
+            doc_type="repository", category="developer", title=repo,
             content=json.dumps({"full_name": repo, "language": "Python"}).encode(),
             preview="Example repository", meta={"repo": repo, "kind": "repository"},
             labels=[repo], modified_at=_dt(1))
         yield SourceObject(
             object_id=_oid(self.connector_type, account_label, 1),
-            doc_type="code", category="document", title="main.py",
+            doc_type="code", category="developer", title="main.py",
             content=b"print('hello world')\n", preview=f"{repo} \u00b7 main.py",
             meta={"repo": repo, "path": "main.py"}, labels=[repo], modified_at=_dt(2))
         yield SourceObject(
             object_id=_oid(self.connector_type, account_label, 2),
-            doc_type="issue", category="record", title="#1 Sample issue",
+            doc_type="issue", category="developer", title="#1 Sample issue",
             content=json.dumps({"number": 1, "title": "Sample issue"}).encode(),
             preview="A sample issue", meta={"repo": repo, "number": 1, "kind": "issue"},
             labels=[repo, "open"], modified_at=_dt(3))

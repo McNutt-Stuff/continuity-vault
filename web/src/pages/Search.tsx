@@ -87,6 +87,7 @@ const CATEGORY_META: Record<string, { icon: IconName; label: string; color: stri
   social: { icon: "activity", label: "Social", color: "#c56cf0" },
   contact: { icon: "user", label: "Contacts", color: "#35d0a5" },
   document: { icon: "file", label: "Documents", color: "#4f7cff" },
+  developer: { icon: "code", label: "Developer", color: "#2dbe60" },
   image: { icon: "image", label: "Images", color: "#35d0a5" },
   media: { icon: "activity", label: "Video & Audio", color: "#7a5cff" },
   file: { icon: "database", label: "Files", color: "#9aa7bf" },

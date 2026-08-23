@@ -1588,6 +1588,7 @@ _SERVICE_KINDS: dict = {
         "settings": ["bucket", "region", "storage_class", "endpoint_url"],
         "setting_defaults": {"region": "us-east-1", "storage_class": "INTELLIGENT_TIERING"},
         "required": ["bucket"],
+        "capabilities": ["cloud", "backup"],
     },
     "storage-azure": {
         "label": "Azure Blob storage",
@@ -1596,6 +1597,7 @@ _SERVICE_KINDS: dict = {
         "settings": ["container", "access_tier", "account_url"],
         "setting_defaults": {"access_tier": "Cool"},
         "required": ["container"],
+        "capabilities": ["cloud", "backup"],
     },
     "email-ses": {
         "label": "Amazon SES email",
@@ -1632,6 +1634,8 @@ def _service_view(db: Session, svc: ServiceObject) -> dict:
         "settings": svc.settings or {},
         "setting_keys": spec.get("settings", []),
         "credential_keys": spec.get("credential_keys", []),
+        "capabilities": svc.storage_capabilities(),
+        "capability_options": spec.get("capabilities", []),
         "configured": configured,
         "updated_at": svc.updated_at.isoformat() if svc.updated_at else None,
     }
@@ -1649,10 +1653,20 @@ class ServiceObjectBody(BaseModel):
     enabled: bool = True
     config_object_id: str | None = None
     settings: dict = {}
+    capabilities: list[str] | None = None
 
 
 class ServiceTest(BaseModel):
     to: str | None = None  # recipient for an email-service test send
+
+
+def _clean_capabilities(kind: str, caps: list[str] | None) -> list[str]:
+    """Restrict a storage service's 'used for' list to the kind's allowed options;
+    non-storage kinds carry none. Empty means both (handled at read time)."""
+    allowed = _SERVICE_KINDS.get(kind, {}).get("capabilities", [])
+    if not allowed or caps is None:
+        return [] if caps is None else [c for c in caps if c in allowed]
+    return [c for c in allowed if c in caps]
 
 
 @router.post("/service-objects")
@@ -1663,7 +1677,8 @@ def create_service_object(body: ServiceObjectBody,
         raise HTTPException(400, "unknown service kind")
     svc = ServiceObject(name=body.name.strip() or "Service", kind=body.kind,
                         enabled=body.enabled, config_object_id=body.config_object_id or None,
-                        settings=body.settings or {})
+                        settings=body.settings or {},
+                        capabilities=_clean_capabilities(body.kind, body.capabilities))
     db.add(svc)
     db.commit()
     db.refresh(svc)
@@ -1678,6 +1693,7 @@ class ServiceObjectUpdate(BaseModel):
     enabled: bool | None = None
     config_object_id: str | None = None
     settings: dict | None = None
+    capabilities: list[str] | None = None
 
 
 @router.put("/service-objects/{sid}")
@@ -1696,6 +1712,8 @@ def update_service_object(sid: str, body: ServiceObjectUpdate,
         svc.config_object_id = body.config_object_id or None
     if body.settings is not None:
         svc.settings = body.settings
+    if body.capabilities is not None:
+        svc.capabilities = _clean_capabilities(svc.kind, body.capabilities)
     db.commit()
     services.invalidate()
     emailer.invalidate_config_cache()
@@ -1863,10 +1881,13 @@ def storage_usage(db: Session = Depends(get_db)):
             svc_nodes.setdefault(n.storage_service_id, []).append(n.name)
     services = []
     for s in db.query(ServiceObject).filter(ServiceObject.kind.like("storage-%")).all():
+        if "cloud" not in s.storage_capabilities():
+            continue
         services.append({
             "id": s.id, "name": s.name, "kind": s.kind,
             "kind_label": _SERVICE_KINDS.get(s.kind, {}).get("label", s.kind),
             "enabled": bool(s.enabled),
+            "capabilities": s.storage_capabilities(),
             "nodes": svc_nodes.get(s.id, []),
             "active": s.id in svc_nodes,
             "settings": s.settings or {},
@@ -1948,11 +1969,14 @@ def backups_overview(db: Session = Depends(get_db)):
             svc_used.setdefault(sid, []).append(n.name)
     services = []
     for s in db.query(ServiceObject).filter(ServiceObject.kind.like("storage-%")).all():
+        if "backup" not in s.storage_capabilities():
+            continue
         tot = svc_totals.get(s.id, {"bytes": 0, "nodes": set()})
         services.append({
             "id": s.id, "name": s.name, "kind": s.kind,
             "kind_label": _SERVICE_KINDS.get(s.kind, {}).get("label", s.kind),
             "enabled": bool(s.enabled),
+            "capabilities": s.storage_capabilities(),
             "settings": s.settings or {},
             "nodes": svc_used.get(s.id, []),
             "bytes": tot["bytes"], "backed_up_nodes": len(tot["nodes"]),

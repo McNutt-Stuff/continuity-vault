@@ -40,6 +40,8 @@ _OBJECT_BUCKETS: list[dict] = [
      "types": {"secret", "note", "password", "login"}},
     {"key": "document", "label": "Documents", "icon": "file", "color": "#4f7cff",
      "types": {"pdf", "text", "spreadsheet", "presentation", "record", "resume"}},
+    {"key": "developer", "label": "Developer", "icon": "code", "color": "#2dbe60",
+     "types": {"code", "gist", "repository", "issue", "pull_request", "release"}},
     {"key": "photo", "label": "Photos & images", "icon": "image", "color": "#35d0a5",
      "types": {"image", "photo"}},
     {"key": "media", "label": "Audio & video", "icon": "activity", "color": "#f5a623",

@@ -1683,7 +1683,7 @@ def stream_github(access_token: str, cursor=None, config: Optional[dict] = None,
                     continue
 
                 yield SourceObject(
-                    object_id=f"github:repo:{fn}", doc_type="repository", category="record",
+                    object_id=f"github:repo:{fn}", doc_type="repository", category="developer",
                     title=fn or "repository",
                     content=json.dumps({
                         "full_name": fn, "description": repo.get("description"),
@@ -1753,7 +1753,7 @@ def stream_github(access_token: str, cursor=None, config: Optional[dict] = None,
                             title = iss.get("title") or "(issue)"
                             yield SourceObject(
                                 object_id=f"github:{'pr' if is_pr else 'issue'}:{fn}#{iss.get('number')}",
-                                doc_type="pull_request" if is_pr else "issue", category="record",
+                                doc_type="pull_request" if is_pr else "issue", category="developer",
                                 title=f"#{iss.get('number')} {title}",
                                 content=json.dumps(iss).encode(),
                                 preview=(iss.get("body") or "")[:200],

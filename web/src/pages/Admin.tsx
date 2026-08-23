@@ -810,7 +810,7 @@ function Nodes() {
     } catch { flash("Failed"); }
   }
 
-  const storageSvcs = svcs.filter((x) => x.category === "storage");
+  const storageSvcs = svcs.filter((x) => x.category === "storage" && (x.capabilities || []).includes("cloud"));
   const emailSvcs = svcs.filter((x) => x.category === "email");
 
   if (sel) return (
@@ -2059,8 +2059,8 @@ interface ConfigKey { secret: boolean; set: boolean; value: string }
 interface ConfigObj { id: string; name: string; kind: string; keys: Record<string, ConfigKey>; updated_at?: string }
 interface SourceSlot { type: string; label: string; kind: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean; icon: string; color: string; family: string; category: string }
 interface DraftRow { key: string; value: string; secret: boolean; set: boolean }
-interface ServiceKind { kind: string; label: string; category: string; credential_keys: string[]; settings: string[]; setting_defaults?: Record<string, string>; required: string[] }
-interface ServiceObj { id: string; name: string; kind: string; kind_label: string; category: string; enabled: boolean; config_object_id: string | null; settings: Record<string, string>; setting_keys: string[]; credential_keys: string[]; configured: boolean; updated_at?: string }
+interface ServiceKind { kind: string; label: string; category: string; credential_keys: string[]; settings: string[]; setting_defaults?: Record<string, string>; required: string[]; capabilities?: string[] }
+interface ServiceObj { id: string; name: string; kind: string; kind_label: string; category: string; enabled: boolean; config_object_id: string | null; settings: Record<string, string>; setting_keys: string[]; credential_keys: string[]; capabilities?: string[]; capability_options?: string[]; configured: boolean; updated_at?: string }
 
 function ConfigObjectsAdmin() {
   const [objects, setObjects] = useState<ConfigObj[]>([]);
@@ -2267,11 +2267,13 @@ function SourcesAdmin() {
 const STORAGE_CLASS_OPTS = ["INTELLIGENT_TIERING", "STANDARD_IA", "ONEZONE_IA", "STANDARD", "GLACIER_IR"];
 const ACCESS_TIER_OPTS = ["Hot", "Cool", "Cold"];
 
+const CAPABILITY_LABELS: Record<string, string> = { cloud: "Arkive Cloud", backup: "Backup storage" };
+
 function prettyKey(k: string) {
   return k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-interface ServiceDraft { id?: string; name: string; kind: string; enabled: boolean; config_object_id: string; settings: Record<string, string> }
+interface ServiceDraft { id?: string; name: string; kind: string; enabled: boolean; config_object_id: string; settings: Record<string, string>; capabilities: string[] }
 
 interface TestCheck { name: string; ok: boolean; detail: string }
 
@@ -2312,14 +2314,17 @@ function ServiceObjectsAdmin() {
   function specFor(kind: string) { return kinds.find((k) => k.kind === kind); }
   function newDraft(kind: string) {
     const spec = specFor(kind);
-    setDraft({ name: "", kind, enabled: true, config_object_id: "", settings: { ...(spec?.setting_defaults || {}) } });
+    setDraft({ name: "", kind, enabled: true, config_object_id: "", settings: { ...(spec?.setting_defaults || {}) }, capabilities: [...(spec?.capabilities || [])] });
   }
   function editDraft(o: ServiceObj) {
-    setDraft({ id: o.id, name: o.name, kind: o.kind, enabled: o.enabled, config_object_id: o.config_object_id || "", settings: { ...(o.settings || {}) } });
+    const spec = specFor(o.kind);
+    setDraft({ id: o.id, name: o.name, kind: o.kind, enabled: o.enabled, config_object_id: o.config_object_id || "", settings: { ...(o.settings || {}) }, capabilities: [...(o.capabilities || spec?.capabilities || [])] });
   }
   async function saveDraft() {
     if (!draft) return;
-    const payload = { name: draft.name || "Service", enabled: draft.enabled, config_object_id: draft.config_object_id || null, settings: draft.settings };
+    const spec = specFor(draft.kind);
+    const payload: Record<string, unknown> = { name: draft.name || "Service", enabled: draft.enabled, config_object_id: draft.config_object_id || null, settings: draft.settings };
+    if ((spec?.capabilities || []).length) payload.capabilities = draft.capabilities;
     try {
       if (draft.id) await api.put(`/admin/service-objects/${draft.id}`, payload);
       else await api.post("/admin/service-objects", { ...payload, kind: draft.kind });
@@ -2403,6 +2408,28 @@ function ServiceObjectsAdmin() {
                 );
               })}
             </div>
+            {(draftSpec?.capabilities || []).length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 6 }}>Used for</div>
+                <div className="row" style={{ gap: 14 }}>
+                  {(draftSpec?.capabilities || []).map((cap) => (
+                    <label key={cap} className="row" style={{ gap: 6, fontSize: 12.5, alignItems: "center", cursor: "pointer" }}>
+                      <input type="checkbox" checked={draft.capabilities.includes(cap)}
+                             onChange={(e) => setDraft({
+                               ...draft,
+                               capabilities: e.target.checked
+                                 ? [...draft.capabilities, cap]
+                                 : draft.capabilities.filter((c) => c !== cap),
+                             })} />
+                      {CAPABILITY_LABELS[cap] || cap}
+                    </label>
+                  ))}
+                </div>
+                <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+                  Controls where this backend can be selected — Arkive Cloud object storage and/or infrastructure backups.
+                </div>
+              </div>
+            )}
             <div className="row" style={{ gap: 8, marginTop: 12 }}>
               <button className="btn primary sm" onClick={saveDraft}>Save</button>
               <button className="btn ghost sm" onClick={() => setDraft(null)}>Cancel</button>
@@ -2436,7 +2463,14 @@ function ServiceTable({ title, rows, onEdit, onDelete, onTest, testable }: {
           {rows.map((o) => (
             <tr key={o.id}>
               <td style={{ fontWeight: 600 }}>{o.name}</td>
-              <td><Pill tone="info">{o.kind_label}</Pill></td>
+              <td>
+                <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+                  <Pill tone="info">{o.kind_label}</Pill>
+                  {o.category === "storage" && (o.capabilities || []).map((c) => (
+                    <Pill key={c} tone="ok">{CAPABILITY_LABELS[c] || c}</Pill>
+                  ))}
+                </div>
+              </td>
               <td className="faint" style={{ fontSize: 11.5 }}>{o.setting_keys.map((k) => o.settings[k] ? `${k}=${o.settings[k]}` : null).filter(Boolean).join(" · ") || "—"}</td>
               <td>{o.enabled ? <Pill tone="ok">on</Pill> : <Pill tone="warn">off</Pill>}</td>
               <td><Pill tone={o.configured ? "ok" : "warn"}>{o.configured ? "Configured" : "Incomplete"}</Pill></td>
@@ -2569,8 +2603,8 @@ function BackupsAdmin() {
   }
   useEffect(() => {
     void load();
-    api.get<{ id: string; name: string; kind: string; enabled: boolean; category: string }[]>("/admin/service-objects")
-      .then((rows) => setStoreServices(rows.filter((r) => r.kind.startsWith("storage-"))))
+    api.get<{ id: string; name: string; kind: string; enabled: boolean; category: string; capabilities?: string[] }[]>("/admin/service-objects")
+      .then((rows) => setStoreServices(rows.filter((r) => r.kind.startsWith("storage-") && (r.capabilities || []).includes("backup"))))
       .catch(() => {});
     const iv = setInterval(load, 8000);
     return () => clearInterval(iv);

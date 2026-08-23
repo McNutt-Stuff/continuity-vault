@@ -740,6 +740,9 @@ class PendingAction(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+STORAGE_CAPABILITIES = ("cloud", "backup")  # what a storage service may be "used for"
+
+
 class ServiceObject(Base):
     """A named platform service instance configured on the Service Objects admin
     page: a storage backend (Amazon S3 / Azure Blob) or an email sender (SES).
@@ -747,7 +750,11 @@ class ServiceObject(Base):
     Credentials come from a linked ``ConfigObject``; non-secret routing (bucket,
     region, container, from address, storage tier…) lives in ``settings``. Each
     Node selects one storage service and one email service; the running node's
-    selections determine where cloud objects are stored and how mail is sent."""
+    selections determine where cloud objects are stored and how mail is sent.
+
+    ``capabilities`` (storage only) records what a backend may be *used for* —
+    ``cloud`` (Arkive Cloud object storage) and/or ``backup`` (infrastructure
+    backups). Empty/unset means both, so existing services keep working."""
 
     __tablename__ = "service_objects"
     id = Column(String, primary_key=True, default=_uuid)
@@ -756,6 +763,15 @@ class ServiceObject(Base):
     enabled = Column(Boolean, default=True)
     config_object_id = Column(String, nullable=True)  # linked credentials
     settings = Column(JSON, default=dict)             # non-secret routing
+    capabilities = Column(JSON, default=list)         # storage "used for": cloud | backup
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    def storage_capabilities(self) -> list[str]:
+        """Normalized 'used for' list for a storage service (defaults to both
+        when unset). Empty for non-storage services."""
+        if not (self.kind or "").startswith("storage-"):
+            return []
+        caps = [c for c in (self.capabilities or []) if c in STORAGE_CAPABILITIES]
+        return caps or list(STORAGE_CAPABILITIES)
 

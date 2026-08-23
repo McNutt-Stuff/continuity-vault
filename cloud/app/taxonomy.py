@@ -5,12 +5,13 @@ Every connector maps its provider-specific types into a two-level taxonomy —
 a top-level ``Category`` and a specific ``kind`` — so the platform can index,
 facet, classify sensitivity, and apply policy categorically regardless of source.
 
-    Category (10)        Example kinds
+    Category (13)        Example kinds
     ------------------   ----------------------------------------------------
     credential           login, password, api_key, ssh_key, credit_card, ...
     message              email, chat, sms, voicemail, comment
     contact              person, organization, group
-    document             pdf, text, spreadsheet, presentation, code, ebook
+    document             pdf, text, spreadsheet, presentation, ebook, resume
+    developer            code, gist, repository, issue, pull_request, release
     media                image, photo, video, audio
     file                 archive, binary, generic
     calendar             event, task, reminder
@@ -35,6 +36,7 @@ class Category(str, Enum):
     SOCIAL = "social"
     CONTACT = "contact"
     DOCUMENT = "document"
+    DEVELOPER = "developer"
     IMAGE = "image"
     MEDIA = "media"
     FILE = "file"
@@ -62,6 +64,8 @@ CATEGORY_META: Dict[Category, dict] = {
                        "sensitivity": Sensitivity.SENSITIVE, "index_preview": True},
     Category.DOCUMENT: {"display": "Documents", "icon": "file",
                         "sensitivity": Sensitivity.STANDARD, "index_preview": True},
+    Category.DEVELOPER: {"display": "Developer", "icon": "code",
+                         "sensitivity": Sensitivity.STANDARD, "index_preview": True},
     Category.IMAGE: {"display": "Images", "icon": "image",
                      "sensitivity": Sensitivity.STANDARD, "index_preview": True},
     Category.MEDIA: {"display": "Video & Audio", "icon": "activity",
@@ -88,7 +92,9 @@ KINDS: Dict[Category, List[str]] = {
     Category.SOCIAL: ["post", "comment", "story", "reel", "tweet", "profile"],
     Category.CONTACT: ["person", "organization", "group", "contact"],
     Category.DOCUMENT: ["pdf", "text", "spreadsheet", "presentation", "form",
-                        "ebook", "code", "drawing", "resume", "gist"],
+                        "ebook", "drawing", "resume"],
+    Category.DEVELOPER: ["code", "gist", "repository", "issue", "pull_request",
+                         "release"],
     Category.IMAGE: ["image", "photo"],
     Category.MEDIA: ["video", "audio"],
     Category.FILE: ["archive", "binary", "generic", "file"],
@@ -97,8 +103,7 @@ KINDS: Dict[Category, List[str]] = {
     Category.IDENTITY: ["passport", "drivers_license", "national_id", "ssn",
                         "birth_certificate", "visa", "tax_document", "legal_document",
                         "medical_record", "insurance_policy", "identity"],
-    Category.RECORD: ["database_row", "form_submission", "custom", "record",
-                      "repository", "issue", "pull_request", "release"],
+    Category.RECORD: ["database_row", "form_submission", "custom", "record"],
 }
 
 KIND_TO_CATEGORY: Dict[str, str] = {
@@ -149,7 +154,7 @@ def classify_file(name: str, mime: str = "") -> Tuple[str, str]:
     if ext in {"epub", "mobi", "azw3"}:
         return (Category.DOCUMENT.value, "ebook")
     if ext in _CODE_EXT:
-        return (Category.DOCUMENT.value, "code")
+        return (Category.DEVELOPER.value, "code")
     if m.startswith("text/") or ext in {"txt", "md", "log"}:
         return (Category.DOCUMENT.value, "text")
 

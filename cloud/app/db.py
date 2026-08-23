@@ -187,6 +187,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE nodes ADD COLUMN cloud JSON",
         "ALTER TABLE nodes ADD COLUMN backup_service_ids JSON",
         "ALTER TABLE appliances ADD COLUMN backup_service_ids JSON",
+        "ALTER TABLE service_objects ADD COLUMN capabilities JSON",
         "ALTER TABLE search_documents ADD COLUMN content_hash VARCHAR",
         "ALTER TABLE search_documents ADD COLUMN version INTEGER DEFAULT 1",
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",

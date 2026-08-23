@@ -18,6 +18,7 @@ type IconName =
   | "user"
   | "database"
   | "file"
+  | "code"
   | "image"
   | "note"
   | "info"
@@ -110,6 +111,12 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z" />
       <path d="M14 3v5h5" />
+    </>
+  ),
+  code: (
+    <>
+      <path d="M9 8l-4 4 4 4" />
+      <path d="M15 8l4 4-4 4" />
     </>
   ),
   image: (

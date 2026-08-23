@@ -191,7 +191,7 @@ def run_backup_once(db) -> Optional[dict]:
     services = []
     for sid in svc_ids:
         svc = db.get(ServiceObject, sid)
-        if svc and svc.enabled and svc.kind.startswith("storage-"):
+        if svc and svc.enabled and svc.kind.startswith("storage-") and "backup" in svc.storage_capabilities():
             services.append(svc)
     if not services:
         run.status = "skipped"
