@@ -2273,6 +2273,27 @@ function prettyKey(k: string) {
 
 interface ServiceDraft { id?: string; name: string; kind: string; enabled: boolean; config_object_id: string; settings: Record<string, string> }
 
+interface TestCheck { name: string; ok: boolean; detail: string }
+
+const TEST_CHECK_LABELS: Record<string, string> = {
+  configuration: "Configuration",
+  reachability: "Reachability",
+  writeability: "Writeability",
+};
+
+async function showStorageTestResult(o: ServiceObj, checks: TestCheck[], ok: boolean, error: string | null) {
+  const lines = checks.map((c) => {
+    const label = TEST_CHECK_LABELS[c.name] || c.name;
+    return `${c.ok ? "✓" : "✗"} ${label} — ${c.detail}`;
+  });
+  if (!checks.length) lines.push(error || "Test could not run.");
+  await notify({
+    title: `${o.name} · ${ok ? "storage test passed" : "storage test failed"}`,
+    message: lines.join("\n"),
+    tone: ok ? "ok" : "danger",
+  });
+}
+
 function ServiceObjectsAdmin() {
   const [items, setItems] = useState<ServiceObj[]>([]);
   const [kinds, setKinds] = useState<ServiceKind[]>([]);
@@ -2318,8 +2339,13 @@ function ServiceObjectsAdmin() {
     }
     flash("Testing…");
     try {
-      const r = await api.post<{ ok: boolean; error?: string | null }>(`/admin/service-objects/${o.id}/test`, payload);
-      flash(r.ok ? (o.category === "email" ? "Test email sent" : "Storage reachable — write/read OK") : `Test failed: ${r.error || "unknown error"}`);
+      const r = await api.post<{ ok: boolean; error?: string | null; checks?: TestCheck[] }>(`/admin/service-objects/${o.id}/test`, payload);
+      if (o.category === "storage") {
+        await showStorageTestResult(o, r.checks || [], r.ok, r.error || null);
+        flash(r.ok ? "Storage test passed" : "Storage test failed");
+      } else {
+        flash(r.ok ? "Test email sent" : `Test failed: ${r.error || "unknown error"}`);
+      }
     } catch { flash("Test failed"); }
   }
 

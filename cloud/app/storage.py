@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -46,6 +47,27 @@ class ProtectionDestination(ABC):
     def put_manifest(self, tenant_prefix: str, snapshot_id: str, manifest: dict) -> str:
         ...
 
+    def delete_object(self, tenant_prefix: str, key: str) -> None:
+        """Remove an object. Best-effort; overridden by concrete backends."""
+        raise NotImplementedError
+
+    def probe(self) -> str:
+        """Write, read back and remove a small probe object to prove the
+        destination is writable. Raises on any failure; returns a short
+        description of what was verified on success."""
+        token = secrets.token_hex(8)
+        key = f"healthcheck/{token}"
+        payload = b"arkive-storage-check-" + token.encode()
+        self.put_object("_platform", key, payload, immutable=False)
+        got = self.get_object("_platform", key)
+        if got != payload:
+            raise RuntimeError("read-back mismatch: stored bytes differ from what was written")
+        try:
+            self.delete_object("_platform", key)
+        except Exception:
+            pass  # cleanup is best-effort — the write + read already proved writeability
+        return "wrote, read back and removed a probe object"
+
 
 class LocalFsDestination(ProtectionDestination):
     name = "local-fs"
@@ -70,6 +92,14 @@ class LocalFsDestination(ProtectionDestination):
 
     def get_object(self, tenant_prefix, key) -> bytes:
         return self._p(tenant_prefix, key).read_bytes()
+
+    def delete_object(self, tenant_prefix, key) -> None:
+        path = self._p(tenant_prefix, key)
+        try:
+            os.chmod(path, 0o644)  # clear the emulated object-lock before unlink
+        except Exception:
+            pass
+        path.unlink(missing_ok=True)
 
     def put_manifest(self, tenant_prefix, snapshot_id, manifest) -> str:
         path = self._p(tenant_prefix, f"manifests/{snapshot_id}.json")
@@ -138,6 +168,9 @@ class _S3Base(ProtectionDestination):
         full = f"{tenant_prefix}/{key}"
         return self._s3.get_object(Bucket=self.bucket, Key=full)["Body"].read()
 
+    def delete_object(self, tenant_prefix, key) -> None:
+        self._s3.delete_object(Bucket=self.bucket, Key=f"{tenant_prefix}/{key}")
+
     def put_manifest(self, tenant_prefix, snapshot_id, manifest) -> str:
         return self.put_object(
             tenant_prefix, f"manifests/{snapshot_id}.json",
@@ -201,6 +234,9 @@ class AzureBlobDestination(ProtectionDestination):
 
     def get_object(self, tenant_prefix, key) -> bytes:
         return self._blob(tenant_prefix, key).download_blob().readall()
+
+    def delete_object(self, tenant_prefix, key) -> None:
+        self._blob(tenant_prefix, key).delete_blob()
 
     def put_manifest(self, tenant_prefix, snapshot_id, manifest) -> str:
         return self.put_object(

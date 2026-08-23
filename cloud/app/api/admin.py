@@ -1725,6 +1725,63 @@ def delete_service_object(sid: str,
     return {"ok": True}
 
 
+def _test_storage_service(db: Session, principal, svc: ServiceObject, cfg: dict) -> dict:
+    """Diagnose a storage service object across three stages — configuration,
+    reachability and writeability — returning a per-check breakdown so the admin
+    sees exactly where an S3 / Azure backend fails."""
+    from ..storage import destination_from_service
+
+    spec = _SERVICE_KINDS.get(svc.kind, {})
+    checks: list[dict] = []
+
+    def _finish() -> dict:
+        ok = all(c["ok"] for c in checks)
+        error = None if ok else next((c["detail"] for c in checks if not c["ok"]), "test failed")
+        audit.record(db, actor=principal.user_id, action="admin.service_object_test",
+                     category="admin", detail={"name": svc.name, "kind": svc.kind,
+                                               "ok": ok, "checks": checks})
+        return {"ok": ok, "error": error, "checks": checks}
+
+    # 1. Configuration — required routing settings and at least one credential present.
+    missing = [k for k in spec.get("required", []) if not str(cfg.get(k) or "").strip()]
+    cred_keys = spec.get("credential_keys", [])
+    has_creds = any(str(cfg.get(k) or "").strip() for k in cred_keys)
+    if missing:
+        checks.append({"name": "configuration", "ok": False,
+                       "detail": f"missing required setting(s): {', '.join(missing)}"})
+        return _finish()
+    if cred_keys and not has_creds:
+        checks.append({"name": "configuration", "ok": False,
+                       "detail": "no credentials set — link a configuration object providing "
+                                 + " or ".join(cred_keys)})
+        return _finish()
+    checks.append({"name": "configuration", "ok": True,
+                   "detail": "required settings and credentials are present"})
+
+    # 2. Reachability — build the destination, which connects, authenticates and
+    #    ensures the bucket/container exists (mirrors the first real write).
+    try:
+        dest = destination_from_service(svc.kind, cfg)
+        if dest is None:
+            checks.append({"name": "reachability", "ok": False,
+                           "detail": "could not build a storage destination from this config"})
+            return _finish()
+    except Exception as exc:  # bad creds, wrong region, unreachable endpoint, …
+        checks.append({"name": "reachability", "ok": False, "detail": str(exc)})
+        return _finish()
+    target = getattr(dest, "bucket", None) or getattr(dest, "container", None) or ""
+    checks.append({"name": "reachability", "ok": True,
+                   "detail": f"connected and reached {target}".strip()})
+
+    # 3. Writeability — write, read back and remove a probe object.
+    try:
+        detail = dest.probe()
+        checks.append({"name": "writeability", "ok": True, "detail": detail})
+    except Exception as exc:  # surface the backend error (permissions, object-lock, …)
+        checks.append({"name": "writeability", "ok": False, "detail": str(exc)})
+    return _finish()
+
+
 @router.post("/service-objects/{sid}/test")
 def test_service_object(sid: str, body: "ServiceTest | None" = None,
                         principal: security.Principal = Depends(security.require_platform_admin),
@@ -1734,18 +1791,7 @@ def test_service_object(sid: str, body: "ServiceTest | None" = None,
         raise HTTPException(404, "service object not found")
     cfg = _service_merged(db, svc)
     if svc.kind.startswith("storage-"):
-        from ..storage import destination_from_service
-        try:
-            dest = destination_from_service(svc.kind, cfg)
-            if dest is None:
-                return {"ok": False, "error": "missing required settings (bucket/container)"}
-            probe = f"healthcheck/{secrets.token_hex(8)}"
-            dest.put_object("_platform", probe, b"arkive-storage-check", immutable=False)
-            data = dest.get_object("_platform", probe)
-            ok = data == b"arkive-storage-check"
-            return {"ok": ok, "error": None if ok else "readback mismatch"}
-        except Exception as exc:  # surface the backend error to the admin
-            return {"ok": False, "error": str(exc)}
+        return _test_storage_service(db, principal, svc, cfg)
     if svc.kind == "email-ses":
         from .. import emailer
         to = ((body.to if body else None) or "").strip()
