@@ -219,26 +219,39 @@ def _identity_via_mcp(access_token: str) -> Optional[str]:
                     logger.warning("Evernote MCP: identity via tool %s → %s",
                                    name, email or username)
                     return email or username
-        # 2) The author on the most recent note — the account owner's email.
-        try:
-            data = _tool_json(session.tool("search_notes", {"query": ""}))
+        # 2) The author on a recent note — Evernote sets note attributes.author to
+        #    the account owner's email. Try a few search queries (an empty query
+        #    returns nothing on some builds) and scan the whole note payload.
+        search_tool = next((t for t in tools if "search" in t.lower() and "note" in t.lower()),
+                           "search_notes")
+        get_tool = next((t for t in tools if t.lower() in ("get_note", "getnote", "note")),
+                        "get_note")
+        for query in ("", "*", "created:19700101"):
+            try:
+                data = _tool_json(session.tool(search_tool, {"query": query}))
+            except Exception:
+                continue
             hits = _as_list(data, "hits", "notes", "results", "items", "matches")
-            for nm in hits[:1]:
+            for nm in hits[:5]:
                 note_id = (nm.get("noteId") or nm.get("guid") or nm.get("id")) \
                     if isinstance(nm, dict) else None
+                # The search hit itself may already carry the author email.
+                e, _ = _scan_identity(nm)
+                if e:
+                    logger.warning("Evernote MCP: identity via note hit → %s", e)
+                    return e
                 if not note_id:
                     continue
-                full = _tool_json(session.tool("get_note", {"noteId": note_id}))
-                if not isinstance(full, dict):
+                try:
+                    full = _tool_json(session.tool(get_tool, {"noteId": note_id}))
+                except Exception:
                     continue
-                attrs = full.get("attributes") if isinstance(full.get("attributes"), dict) else {}
-                for cand in (attrs.get("author"), full.get("author"),
-                             attrs.get("sourceApplication")):
-                    if _looks_email(cand):
-                        logger.warning("Evernote MCP: identity via note author → %s", cand)
-                        return cand.strip()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Evernote MCP: identity via note failed: %s", exc)
+                e, _ = _scan_identity(full)
+                if e:
+                    logger.warning("Evernote MCP: identity via note author → %s", e)
+                    return e
+            if hits:
+                break  # got notes but no email — don't retry other queries
     except Exception as exc:  # noqa: BLE001
         logger.warning("Evernote MCP: identity via MCP failed: %s", exc)
     finally:

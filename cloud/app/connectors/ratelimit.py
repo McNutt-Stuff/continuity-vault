@@ -135,8 +135,12 @@ class RateLimiter:
         if wait is None:
             wait = 60.0
         if wait > self.max_wait:
+            # Defer for the ACTUAL retry window (a short Retry-After from a
+            # secondary rate limit), NOT the far-off primary hourly reset — else
+            # a 60s throttle would stall the whole crawl for an hour.
+            resume_at = time.time() + wait
             raise RateLimitExceeded(
-                f"{self.name} rate limited; retry in {int(wait)}s", self.reset_at)
+                f"{self.name} rate limited; retry in {int(wait)}s", resume_at)
         self._sleep(wait, status, "throttled")
 
     def get(self, client: httpx.Client, url: str, *, status: StatusFn = None,

@@ -570,7 +570,7 @@ def fetch_dropbox(access_token: str, limit: int = 1000,
 # Cloud file browsing + chunked/delta streaming (Dropbox, OneDrive)           #
 # --------------------------------------------------------------------------- #
 
-_FILE_CHUNK = 400  # files ingested per resumable crawl chunk
+_FILE_CHUNK = 1200  # files ingested per resumable crawl chunk
 
 # Selectable "root folder" token: back up the files directly in the account root
 # only (NOT its subfolders — those are selected separately). Kept in sync with
@@ -1720,11 +1720,11 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
 GITHUB_API = "https://api.github.com"
 # Stop making calls with this much quota left so we never fully exhaust the
 # hourly budget (leaves room for the folder picker / other sources).
-_GH_FLOOR = 75
+_GH_FLOOR = 50
 # How long the crawl will sleep inline for a throttle before deferring the rest
-# of the work to the next chunk/cycle (the background job loop does the long
-# wait so the scheduler is never blocked).
-_GH_INLINE_WAIT = 20
+# of the work to the next chunk/cycle. Sized to absorb GitHub's typical ~60s
+# secondary-rate-limit Retry-After in-place instead of pausing the whole crawl.
+_GH_INLINE_WAIT = 75
 
 
 def _gh_headers(token: str) -> dict:
