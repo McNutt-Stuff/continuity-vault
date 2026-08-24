@@ -127,7 +127,7 @@ def list_agents(tenant: Tenant = Depends(security.get_tenant),
     rows = db.query(DesktopAgent).filter(
         DesktopAgent.tenant_id == tenant.id,
         DesktopAgent.state != "retired").all()
-    return [_agent_view(a) for a in rows]
+    return [_agent_view(a, db) for a in rows]
 
 
 @fleet_router.get("/{agent_id}")
@@ -136,7 +136,7 @@ def get_agent(agent_id: str, tenant: Tenant = Depends(security.get_tenant),
     a = db.get(DesktopAgent, agent_id)
     if not a or a.tenant_id != tenant.id:
         raise HTTPException(404, "agent not found")
-    return _agent_view(a)
+    return _agent_view(a, db)
 
 
 class AgentCommand(BaseModel):
@@ -163,6 +163,7 @@ class AgentConfigUpdate(BaseModel):
     destinations: list[str] | None = None
     schedule_minutes: int | None = None
     collectors: list[str] | None = None
+    enabled_collectors: list[str] | None = None
     appliance_endpoint: str | None = None
     verbose_logging: bool | None = None
 
@@ -250,14 +251,42 @@ def get_fs_expand(agent_id: str, path: str = "",
     return {"expansion": (a.fs_expansions or {}).get(path)}
 
 
-def _agent_view(a: DesktopAgent) -> dict:
+def _agent_view(a: DesktopAgent, db: Session | None = None) -> dict:
+    node_name = None
+    node_url = None
+    if db is not None:
+        node_url = _agent_ingest_url(db, a)
+        t = db.get(Tenant, a.tenant_id)
+        if t and t.node_id:
+            n = db.get(Node, t.node_id)
+            node_name = n.name if n else None
+        else:
+            node_name = "Control plane"
     return {
         "id": a.id, "name": a.name, "platform": a.platform, "hostname": a.hostname,
         "version": a.version, "state": a.state, "collectors": a.collectors,
+        "enabled_collectors": _enabled_collectors(a),
         "config": a.config, "telemetry": a.telemetry,
+        "node_name": node_name, "node_url": node_url,
         "last_heartbeat_at": a.last_heartbeat_at.isoformat() if a.last_heartbeat_at else None,
         "last_collection_at": a.last_collection_at.isoformat() if a.last_collection_at else None,
     }
+
+
+# Base collectors are on by default; more sensitive/new ones (iMessage, local
+# Outlook) are OPT-IN — the operator enables them per agent in the Agents UI.
+_BASE_COLLECTORS = {"onepassword", "endpoint_files"}
+
+
+def _enabled_collectors(a: DesktopAgent) -> list:
+    """Collectors the operator has turned ON for this agent. Absent config →
+    only the base collectors (so newly-discovered ones default OFF)."""
+    val = (a.config or {}).get("enabled_collectors")
+    present = a.collectors or []
+    if isinstance(val, list):
+        return [c for c in val if c in present]
+    return [c for c in present if c in _BASE_COLLECTORS]
+
 
 
 def _record_discovered_collector(db: Session, agent: DesktopAgent, source_type: str) -> None:
@@ -461,6 +490,7 @@ def _agent_mappings(db: Session, agent: DesktopAgent) -> list[dict]:
     on its own timer (only when it's online and can reach the data) instead of the
     cloud queuing collects blindly on a schedule."""
     default_min = max(1, get_settings().sync_interval_minutes)
+    enabled = _enabled_collectors(agent)
     out: list[dict] = []
     for c in (db.query(Collection)
               .filter(Collection.tenant_id == agent.tenant_id).all()):
@@ -471,6 +501,8 @@ def _agent_mappings(db: Session, agent: DesktopAgent) -> list[dict]:
             continue  # bound to a different agent
         if not c.agent_id and c.source_type not in (agent.collectors or []):
             continue  # unbound and this agent can't collect it
+        if c.source_type not in enabled:
+            continue  # collector is toggled off on this agent — don't schedule it
         interval = (default_min if c.backup_interval_minutes is None
                     else c.backup_interval_minutes)
         out.append({

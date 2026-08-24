@@ -46,7 +46,7 @@ interface Account {
   has_error?: boolean;
 }
 interface Vault { id: string; name: string; }
-interface Agent { id: string; name: string; hostname: string; collectors: string[]; }
+interface Agent { id: string; name: string; hostname: string; collectors: string[]; enabled_collectors?: string[] }
 
 export default function Connectors() {
   const { me, stepUp } = useAuth();
@@ -144,9 +144,19 @@ export default function Connectors() {
     // collects it and create the agent-bound source. Only show install
     // instructions when no agent is linked yet.
     if (c.requiresAgent) {
-      const eligible = agents.filter((a) => (a.collectors || []).includes(c.type));
-      const pool = eligible.length ? eligible : agents;
-      if (pool.length === 0) { setSetup(c); return; }
+      // Only agents that have this collector ENABLED can serve it.
+      const eligible = agents.filter((a) => (a.enabled_collectors || []).includes(c.type));
+      if (eligible.length === 0) {
+        const hasIt = agents.some((a) => (a.collectors || []).includes(c.type));
+        return notify({
+          title: hasIt ? `Enable ${c.displayName} first` : `No agent can collect ${c.displayName}`,
+          message: hasIt
+            ? `This collector is turned off on your agent(s). Enable it under Agents → Collectors, then add the source.`
+            : `Install the Arkive desktop agent on the device that has ${c.displayName}, then enable the collector under Agents.`,
+          tone: "warn",
+        });
+      }
+      const pool = eligible;
       const vault = vaults[0];
       if (!vault) return notify({ message: "No vault is available to store this source.", tone: "warn" });
       const res = await formDialog({
@@ -156,7 +166,7 @@ export default function Connectors() {
         fields: [{
           name: "agent", label: "Desktop agent", required: true,
           options: pool.map((a) => ({
-            label: `${a.hostname || a.name}${(a.collectors || []).includes(c.type) ? "" : " (collector not reported)"}`,
+            label: `${a.hostname || a.name}`,
             value: a.id,
           })),
         }],

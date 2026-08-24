@@ -72,6 +72,22 @@ def _setup_instructions(connector_type: str) -> list[str]:
             "Browse the agent's drives and choose which folders to back up, plus any file-type",
             "or size exclusions. The agent walks them and pushes each file client-encrypted.",
         ]
+    if connector_type == "imessage":
+        return [
+            "Apple Messages are collected by a local Arkive desktop agent on the Mac (no cloud pull).",
+            "Grant the agent Full Disk Access (System Settings \u2192 Privacy & Security \u2192 Full Disk",
+            "Access) so it can read ~/Library/Messages/chat.db.",
+            "Add the source in the Data Map and pick the agent. Messages, group threads and",
+            "attachments are pushed client-encrypted; whole threads can be reassembled in search.",
+        ]
+    if connector_type == "outlook_local":
+        return [
+            "Local Outlook data is collected by a local Arkive desktop agent on the Mac (no cloud pull).",
+            "Grant the agent Full Disk Access so it can read the Outlook profile under",
+            "~/Library/Group Containers/UBF8T346G9.Office/Outlook.",
+            "Add the source in the Data Map and pick the agent. Email (with attachments),",
+            "contacts, calendar and notes are pushed client-encrypted.",
+        ]
     if connector_type == "icloud":
         return [
             "At appleid.apple.com, generate an app-specific password.",
@@ -142,6 +158,7 @@ _SOURCE_FAMILY = {
     "linkedin": "LinkedIn",
     "github": "GitHub",
     "evernote": "Evernote",
+    "imessage": "Apple", "outlook_local": "Microsoft",
     "onepassword": "Endpoint Collected", "endpoint_files": "Endpoint Collected",
     "custom": "Custom",
 }
@@ -158,6 +175,7 @@ _SOURCE_TYPE = {
     "linkedin": "Social",
     "github": "Developer",
     "evernote": "Notes",
+    "imessage": "Messages", "outlook_local": "Email",
     "custom": "Other",
 }
 

@@ -127,6 +127,75 @@ class OnePasswordConnector(Connector):
 
 
 @register_connector
+class ImessageConnector(Connector):
+    """Apple iMessage / SMS, collected locally by the desktop agent from
+    ``~/Library/Messages/chat.db``. Messages carry their thread (chat) id, the
+    sender/recipients (number or email + contact name), group info and attachment
+    references; attachments are backed up as their own file objects."""
+
+    connector_type = "imessage"
+    display_name = "Apple Messages"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            incremental=True,
+            requires_agent=True,
+            searchable_fields=["chat_id", "chat_name", "from", "to", "service",
+                               "direction", "is_group", "message_guid", "filename", "kind"],
+            facet_fields=["service", "chat_name", "is_group", "kind"],
+            filter_categories=[
+                {"id": "messages", "label": "Messages"},
+                {"id": "attachments", "label": "Attachments"},
+            ],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="agent", authorize_url="", token_url="", scopes=[],
+            icon="mail", color="#34da50",
+            doc_types=["message", "image", "video", "audio", "file", "pdf"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        return iter(())  # agent-pushed; no cloud pull
+
+
+@register_connector
+class OutlookLocalConnector(Connector):
+    """Local Microsoft Outlook store, collected by the desktop agent from the
+    on-device Outlook profile (mail + attachments, contacts, calendar, notes) —
+    so locally-cached data is backed up even for accounts not reachable in cloud."""
+
+    connector_type = "outlook_local"
+    display_name = "Outlook (on this Mac)"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            requires_agent=True,
+            searchable_fields=["from", "to", "folder", "org", "email", "kind"],
+            facet_fields=["kind", "folder"],
+            filter_categories=[
+                {"id": "mail", "label": "Email"},
+                {"id": "contacts", "label": "Contacts"},
+                {"id": "calendar", "label": "Calendar"},
+                {"id": "notes", "label": "Notes"},
+            ],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="agent", authorize_url="", token_url="", scopes=[],
+            icon="mail", color="#0a5bd3",
+            doc_types=["email", "contact", "event", "note"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        return iter(())  # agent-pushed; no cloud pull
+
+
+@register_connector
 class GmailConnector(Connector):
     connector_type = "gmail"
     display_name = "Gmail"

@@ -34,6 +34,8 @@ import httpx
 from .config import Config
 from .collectors import onepassword
 from .collectors import files as files_collector
+from .collectors import imessage
+from .collectors import outlook_local
 from . import agent_log
 from .crypto import encrypt_content, load_or_create_key, wrap_for_recovery
 
@@ -84,6 +86,9 @@ class Agent:
         # Prior endpoint-files backup state ({path: {size, mtime, hash}}) so each
         # run only reads + uploads new or changed files (incremental dedup).
         self._files_state_file = Path(cfg.data_dir) / "files_state.json"
+        # Incremental collect state for the message/mail collectors.
+        self._imessage_state_file = Path(cfg.data_dir) / "imessage_state.json"
+        self._outlook_state_file = Path(cfg.data_dir) / "outlook_local_state.json"
         # Push-model scheduling: the agent owns the cadence for its sources. The
         # per-source last-run timestamps are persisted so a restart doesn't
         # immediately re-collect everything, and the mappings (source + interval +
@@ -141,7 +146,7 @@ class Agent:
             "hostname": socket.gethostname(),
             "platform": "macos",
             "version": self.cfg.version,
-            "collectors": ["onepassword", "endpoint_files"],
+            "collectors": self._collectors(),
         }
         r = httpx.post(f"{self.cfg.cloud_base_url}/agent/activate", json=body, timeout=30)
         r.raise_for_status()
@@ -182,7 +187,7 @@ class Agent:
             "os": platform.platform(),
             "op_available": onepassword.available(),
             "op_auth": onepassword.auth_state(self.cfg.op_service_account_token),
-            "collectors": ["onepassword", "endpoint_files"],
+            "collectors": self._collectors(),
             "version": self.cfg.version,
             "cloud_url": self.cfg.cloud_base_url,
             "last_collection_at": (self.reg or {}).get("last_collection_at"),
@@ -538,9 +543,26 @@ class Agent:
         (carrying the Data Map's file selection), run the file collector; else run
         the configured collectors (1Password)."""
         params = params or {}
-        if params.get("source_type") == "endpoint_files" or params.get("file_config"):
+        st = params.get("source_type")
+        if st == "imessage":
+            return self._collect_imessage(params)
+        if st == "outlook_local":
+            return self._collect_outlook_local(params)
+        if st == "endpoint_files" or params.get("file_config"):
             return self._collect_files(params.get("file_config") or {})
         return self._collect_onepassword()
+
+    def _collectors(self) -> list:
+        """Collector source-types this agent can serve (advertised on activate +
+        heartbeat so the Data Map only offers what's actually present)."""
+        cols = ["onepassword", "endpoint_files"]
+        for name, mod in (("imessage", imessage), ("outlook_local", outlook_local)):
+            try:
+                if mod.available():
+                    cols.append(name)
+            except Exception:
+                pass
+        return cols
 
     def _push_objects(self, source_type: str, objects: list, destinations: list,
                       max_batch_bytes: int = 32 * 1024 * 1024, max_batch: int = 500) -> int:
@@ -612,6 +634,50 @@ class Agent:
             self._files_state_file.write_text(json.dumps(state))
         except Exception as exc:
             self.log.warning("could not persist endpoint_files state: %s", exc)
+
+    def _collect_imessage(self, params: dict) -> dict:
+        destinations = self.reg.get("config", {}).get("destinations", ["cv-cloud"])
+        if not imessage.available():
+            self.log.info("imessage: Messages database not found — nothing to collect")
+            return {"objects": 0, "results": [{"collector": "imessage", "skipped": "no Messages DB"}]}
+        state = self._load_json_state(self._imessage_state_file)
+        objects, new_state = imessage.collect(params.get("file_config") or {}, state)
+        total = self._push_objects("imessage", objects, destinations) if objects else 0
+        if total == len(objects):
+            self._save_json_state(self._imessage_state_file, new_state)
+        self._last_collect = time.time()
+        results = [{"collector": "imessage", "objects": total}]
+        self._write_status({"last_collect": _now_iso(), "results": results})
+        self.log.info("imessage: pushed %d object(s)", total)
+        return {"objects": total, "results": results}
+
+    def _collect_outlook_local(self, params: dict) -> dict:
+        destinations = self.reg.get("config", {}).get("destinations", ["cv-cloud"])
+        if not outlook_local.available():
+            self.log.info("outlook_local: no Outlook profile found — nothing to collect")
+            return {"objects": 0, "results": [{"collector": "outlook_local", "skipped": "no Outlook profile"}]}
+        state = self._load_json_state(self._outlook_state_file)
+        objects, new_state = outlook_local.collect(params.get("file_config") or {}, state)
+        total = self._push_objects("outlook_local", objects, destinations) if objects else 0
+        if total == len(objects):
+            self._save_json_state(self._outlook_state_file, new_state)
+        self._last_collect = time.time()
+        results = [{"collector": "outlook_local", "objects": total}]
+        self._write_status({"last_collect": _now_iso(), "results": results})
+        self.log.info("outlook_local: pushed %d object(s)", total)
+        return {"objects": total, "results": results}
+
+    def _load_json_state(self, path: Path) -> dict:
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return {}
+
+    def _save_json_state(self, path: Path, state: dict) -> None:
+        try:
+            path.write_text(json.dumps(state))
+        except Exception as exc:
+            self.log.warning("could not persist %s: %s", path.name, exc)
 
 
     def _collect_onepassword(self) -> dict:

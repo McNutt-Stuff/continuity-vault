@@ -9,9 +9,18 @@ import { notify } from "../components/dialog";
 interface Agent {
   id: string; name: string; hostname: string; platform: string; version: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  state: string; collectors: string[]; config: any; telemetry: any;
+  state: string; collectors: string[]; enabled_collectors?: string[]; config: any; telemetry: any;
+  node_name?: string | null; node_url?: string | null;
   last_heartbeat_at: string | null; last_collection_at: string | null;
 }
+
+// Per-collector display metadata for the Agents → Collectors toggles.
+const COLLECTOR_META: Record<string, { label: string; desc: string; brand?: string }> = {
+  onepassword: { label: "1Password", desc: "Passwords & secure items via the op CLI", brand: "onepassword" },
+  endpoint_files: { label: "Endpoint files", desc: "Folders you select in the Data Map" },
+  imessage: { label: "Apple Messages", desc: "iMessage/SMS, group threads & attachments" },
+  outlook_local: { label: "Outlook (on this Mac)", desc: "Local email, attachments, contacts, calendar & notes" },
+};
 
 // Online = a heartbeat within the last ~90s.
 function isOnline(a: Agent): boolean {
@@ -224,8 +233,6 @@ function AgentDetail({ a, onCommand, reload }:
   });
   const opState: "missing" | "interactive" | "ready" =
     t.op_available === false ? "missing" : t.op_auth === "unauthenticated" ? "interactive" : "ready";
-  const opTone: "ok" | "info" | "danger" =
-    opState === "missing" ? "danger" : opState === "interactive" ? "info" : "ok";
   const logs: string[] = Array.isArray(t.recent_logs) ? t.recent_logs : [];
 
   function showAdvanced() {
@@ -256,6 +263,12 @@ function AgentDetail({ a, onCommand, reload }:
     catch (e) { await notify({ title: "Couldn't update agent", message: (e as ApiError).message, tone: "danger" }); }
   }
 
+  function toggleCollector(name: string) {
+    const s = new Set(a.enabled_collectors || []);
+    if (s.has(name)) s.delete(name); else s.add(name);
+    void setConfig({ enabled_collectors: [...s] });
+  }
+
   return (
     <>
       <Card style={{ marginBottom: 16 }}>
@@ -274,7 +287,10 @@ function AgentDetail({ a, onCommand, reload }:
               <OnlinePill a={a} />
               <HealthPill a={a} />
             </div>
-            <Pill tone="info">Desktop agent</Pill>
+            <div className="row" style={{ gap: 6 }}>
+              <Pill tone="info">Desktop agent</Pill>
+              <Pill tone="info"><Icon name="server" size={11} /> {a.node_name || "Control plane"}</Pill>
+            </div>
           </div>
         </div>
 
@@ -304,36 +320,42 @@ function AgentDetail({ a, onCommand, reload }:
 
       {/* Collectors */}
       <Card style={{ marginBottom: 16 }}>
-        <h3 style={{ marginBottom: 12 }}>Collectors</h3>
-        <div className="collector-row">
-          <div className="row" style={{ gap: 10 }}>
-            <BrandIcon name="onepassword" size={18} />
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 13 }}>1Password (op CLI)</div>
-              <div className="faint" style={{ fontSize: 11.5 }}>
-                {opState === "missing" ? "CLI not installed"
-                  : opState === "interactive" ? "installed · collects interactively"
-                  : `installed · ${t.op_auth || "ready"}`}
-              </div>
-            </div>
-          </div>
-          <Pill tone={opTone}>{opState === "missing" ? "missing" : opState === "interactive" ? "interactive only" : "ready"}</Pill>
+        <div className="spread" style={{ marginBottom: 12 }}>
+          <h3 style={{ margin: 0 }}>Collectors</h3>
+          <span className="faint" style={{ fontSize: 11.5 }}>Toggle what this agent may collect. Off collectors can't be added as a source.</span>
         </div>
-        {(a.collectors || []).includes("endpoint_files") && (
-          <div className="collector-row" style={{ marginTop: 10 }}>
-            <div className="row" style={{ gap: 10 }}>
-              <Icon name="database" size={16} />
-              <div>
-                <div style={{ fontWeight: 600, fontSize: 13 }}>Endpoint files</div>
-                <div className="faint" style={{ fontSize: 11.5 }}>
-                  Backs up folders you select in the Data Map (local, external & network drives).
-                </div>
-              </div>
-            </div>
-            <Pill tone="ok">ready</Pill>
+        {(a.collectors || []).length === 0 && (
+          <div className="faint" style={{ fontSize: 12.5 }}>
+            No collectors detected yet — the agent reports what it can collect on its next heartbeat.
           </div>
         )}
-        {opState === "interactive" && (
+        {(a.collectors || []).map((name) => {
+          const meta = COLLECTOR_META[name] || { label: name, desc: "" };
+          const on = (a.enabled_collectors || []).includes(name);
+          const isOp = name === "onepassword";
+          const desc = isOp
+            ? (opState === "missing" ? "1Password CLI not installed"
+              : opState === "interactive" ? "installed · collects interactively"
+              : `installed · ${t.op_auth || "ready"}`)
+            : meta.desc;
+          return (
+            <div key={name} className="collector-row" style={{ marginTop: 10 }}>
+              <div className="row" style={{ gap: 10 }}>
+                {meta.brand ? <BrandIcon name={meta.brand} size={18} /> : <Icon name="database" size={16} />}
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>{meta.label}</div>
+                  <div className="faint" style={{ fontSize: 11.5 }}>{desc}</div>
+                </div>
+              </div>
+              <button className={`btn sm ${on ? "primary" : "ghost"}`} style={{ minWidth: 58 }}
+                      title={on ? "Enabled — click to disable" : "Disabled — click to enable"}
+                      onClick={() => toggleCollector(name)}>
+                {on ? "On" : "Off"}
+              </button>
+            </div>
+          );
+        })}
+        {opState === "interactive" && (a.enabled_collectors || []).includes("onepassword") && (
           <div className="hint-box" style={{ marginTop: 10 }}>
             1Password collects <b>interactively</b>: open and unlock the 1Password app, then use
             <span className="mono"> Collect now</span>. Unattended background collection needs a
@@ -342,8 +364,8 @@ function AgentDetail({ a, onCommand, reload }:
         )}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 12 }}>
           <Info label="Last collection" value={timeAgo(a.last_collection_at)} />
-          <Info label="Collectors" value={(a.collectors || []).join(", ") || "—"} />
-          <Info label="1Password auth" value={t.op_auth || "—"} />
+          <Info label="Enabled" value={(a.enabled_collectors || []).map((c) => COLLECTOR_META[c]?.label || c).join(", ") || "None"} />
+          <Info label="Data routes to" value={a.node_name || "Control plane"} />
         </div>
       </Card>
 

@@ -81,6 +81,14 @@ interface SearchResp {
   source_display: Record<string, string>;
 }
 
+interface ThreadMsg {
+  object_id: string; message_guid?: string; title: string; preview: string;
+  from?: string; direction?: string; service?: string; date: string | null;
+  has_attachments: boolean;
+  attachments: { object_id: string; filename: string; kind: string; mime?: string }[];
+}
+interface ThreadResp { chat_id: string; chat_name: string; count: number; messages: ThreadMsg[]; }
+
 const CATEGORY_META: Record<string, { icon: IconName; label: string; color: string }> = {
   credential: { icon: "key", label: "Credentials", color: "#f5a623" },
   message: { icon: "mail", label: "Messages", color: "#ea4335" },
@@ -106,6 +114,8 @@ const SOURCE_META: Record<string, { color: string; icon: IconName; label: string
   onepassword: { color: "#0364d3", icon: "key", label: "1Password" },
   custom: { color: "#7a5cff", icon: "database", label: "Custom" },
   endpoint_files: { color: "#7a5cff", icon: "file", label: "Endpoint Files" },
+  imessage: { color: "#34da50", icon: "mail", label: "Apple Messages" },
+  outlook_local: { color: "#0a5bd3", icon: "mail", label: "Outlook (local)" },
 };
 
 function downloadB64(b64: string, filename: string) {
@@ -309,6 +319,22 @@ export default function Search() {
   const [viewing, setViewing] = useState<Viewing | null>(null);
   const [retrieving, setRetrieving] = useState<Retrieving | null>(null);
   const [versionsFor, setVersionsFor] = useState<Result | null>(null);
+  const [thread, setThread] = useState<ThreadResp | null>(null);
+  const [threadLoading, setThreadLoading] = useState(false);
+
+  async function openThread(chatId: string, sourceType: string) {
+    setThreadLoading(true);
+    setThread({ chat_id: chatId, chat_name: "", count: 0, messages: [] });
+    try {
+      const t = await api.get<ThreadResp>(`/search/thread?source_type=${encodeURIComponent(sourceType)}&chat_id=${encodeURIComponent(chatId)}`);
+      setThread(t);
+    } catch (e) {
+      await notify({ title: "Couldn't load thread", message: (e as Error).message, tone: "danger" });
+      setThread(null);
+    } finally {
+      setThreadLoading(false);
+    }
+  }
   const pollRef = useRef(0);
 
   async function loadRecovered() {
@@ -791,6 +817,13 @@ export default function Search() {
               <div className="stack" style={{ alignItems: "flex-end", gap: 6 }}>
                 <div className="row" style={{ gap: 6 }}>
                   {r.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
+                  {r.category === "message" && r.meta?.chat_id && (
+                    <button className="btn sm ghost" style={{ padding: "1px 8px", fontSize: 11 }}
+                            title="View the whole conversation"
+                            onClick={() => openThread(String(r.meta.chat_id), r.source_type)}>
+                      <Icon name="mail" size={11} /> View thread
+                    </button>
+                  )}
                   {(r.version_count ?? 0) > 1 && (
                     <button className="btn sm ghost" style={{ padding: "1px 8px", fontSize: 11 }}
                             title="View version history" onClick={() => setVersionsFor(r)}>
@@ -1006,6 +1039,56 @@ export default function Search() {
             <div className="modal-foot">
               <div style={{ flex: 1 }} />
               <button className="btn ghost sm" onClick={() => setVersionsFor(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {thread && (
+        <div className="modal-backdrop" onClick={() => setThread(null)}>
+          <div className="modal-panel" style={{ maxWidth: 640 }} onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <div>
+                <h3 style={{ margin: 0 }}>{thread.chat_name || "Conversation"}</h3>
+                <div className="faint" style={{ fontSize: 12 }}>{thread.count} message{thread.count === 1 ? "" : "s"}</div>
+              </div>
+              <button className="btn ghost sm" onClick={() => setThread(null)}><Icon name="logout" size={14} /></button>
+            </div>
+            <div className="modal-body" style={{ maxHeight: "62vh", overflowY: "auto" }}>
+              {threadLoading && <div className="muted">Reassembling thread…</div>}
+              {!threadLoading && thread.messages.length === 0 && (
+                <div className="muted">No messages found for this conversation yet.</div>
+              )}
+              {thread.messages.map((m) => {
+                const sent = m.direction === "sent";
+                return (
+                  <div key={m.object_id} style={{ display: "flex", justifyContent: sent ? "flex-end" : "flex-start", marginBottom: 8 }}>
+                    <div style={{ maxWidth: "78%", background: sent ? "var(--accent-soft, var(--inset))" : "var(--inset)", borderRadius: 12, padding: "8px 12px" }}>
+                      <div className="faint" style={{ fontSize: 11, marginBottom: 2 }}>
+                        {sent ? "Me" : (m.from || "Unknown")} · {m.date ? fmtAbsolute(m.date) : ""}
+                      </div>
+                      <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>
+                        {(m.preview || "").replace(/^[^:]+:\s*/, "") || <span className="faint">(no text)</span>}
+                      </div>
+                      {m.attachments.length > 0 && (
+                        <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                          {m.attachments.map((a) => (
+                            <button key={a.object_id} className="chip" style={{ padding: "2px 8px", fontSize: 11 }}
+                                    title="Find this attachment in search"
+                                    onClick={() => { setThread(null); setQ(a.filename); }}>
+                              <Icon name={a.kind === "image" ? "image" : a.kind === "video" || a.kind === "audio" ? "activity" : "file"} size={11} /> {a.filename}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="modal-foot">
+              <div className="faint" style={{ fontSize: 11, flex: 1 }}>Reassembled from indexed metadata. Recover individual messages or attachments from the search results.</div>
+              <button className="btn ghost sm" onClick={() => setThread(null)}>Close</button>
             </div>
           </div>
         </div>

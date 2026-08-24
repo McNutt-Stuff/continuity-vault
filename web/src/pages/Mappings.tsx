@@ -7,7 +7,7 @@ import { confirmDialog, notify } from "../components/dialog";
 import { FolderPicker, FolderNode } from "../components/FolderPicker";
 
 interface Account { id: string; connector_type: string; account_label: string; account_username?: string | null; }
-interface Agent { id: string; name: string; hostname: string; collectors: string[]; }
+interface Agent { id: string; name: string; hostname: string; collectors: string[]; enabled_collectors?: string[] }
 interface Vault { id: string; name: string; }
 interface StorageTarget {
   id: string; kind: string; label: string; detail?: string;
@@ -345,9 +345,9 @@ export default function Mappings() {
                   ))}
                 </optgroup>
               )}
-              {agents.some((a) => (a.collectors || []).length) && (
+              {agents.some((a) => (a.enabled_collectors || []).length) && (
                 <optgroup label="Desktop agents">
-                  {agents.flatMap((a) => (a.collectors || []).map((c) => (
+                  {agents.flatMap((a) => (a.enabled_collectors || []).map((c) => (
                     <option key={`${a.id}:${c}`} value={`agent:${a.id}:${c}`}>
                       {collectorLabel(c)} — {a.hostname || a.name}
                     </option>
@@ -807,7 +807,11 @@ function scheduleLabel(m: Mapping): string {
 }
 
 function collectorLabel(c: string): string {
-  return c === "onepassword" ? "1Password" : c === "endpoint_files" ? "Endpoint Files" : c;
+  return c === "onepassword" ? "1Password"
+    : c === "endpoint_files" ? "Endpoint Files"
+    : c === "imessage" ? "Apple Messages"
+    : c === "outlook_local" ? "Outlook (local)"
+    : c;
 }
 
 // Gmail folders/labels the operator can skip (excluded via a Gmail search query).

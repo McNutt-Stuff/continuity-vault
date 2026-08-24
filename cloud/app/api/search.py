@@ -173,6 +173,59 @@ def taxonomy(principal: security.Principal = Depends(security.get_principal)):
     return describe()
 
 
+@router.get("/thread")
+def thread(chat_id: str, source_type: str = "imessage",
+           principal: security.Principal = Depends(security.require_passkey),
+           tenant: Tenant = Depends(security.get_tenant),
+           db: Session = Depends(get_db)):
+    """Reassemble a whole message conversation from its indexed messages +
+    attachments (linked by chat_id / message_guid) so the user can read the full
+    thread. Uses indexed metadata only — no content decryption/step-up needed."""
+    vault_ids = security.content_vault_ids(db, principal)
+    if not vault_ids:
+        return {"chat_id": chat_id, "chat_name": "", "messages": []}
+    rows = (db.query(SearchDocument)
+            .filter(SearchDocument.tenant_id == tenant.id,
+                    SearchDocument.vault_id.in_(vault_ids),
+                    SearchDocument.source_type == source_type)
+            .order_by(SearchDocument.created_at.desc()).all())
+
+    # Dedup to the latest row per object, keep only this conversation.
+    seen: set = set()
+    messages: list = []
+    atts_by_msg: dict = {}
+    chat_name = ""
+    for r in rows:
+        if r.object_id in seen:
+            continue
+        seen.add(r.object_id)
+        meta = r.meta or {}
+        if str(meta.get("chat_id")) != str(chat_id):
+            continue
+        chat_name = chat_name or meta.get("chat_name") or ""
+        when = r.modified_at.isoformat() if r.modified_at else None
+        if r.doc_type == "message":
+            messages.append({
+                "object_id": r.object_id,
+                "message_guid": meta.get("message_guid"),
+                "title": r.title, "preview": r.preview,
+                "from": meta.get("from"), "direction": meta.get("direction"),
+                "service": meta.get("service"), "date": when,
+                "has_attachments": bool(meta.get("has_attachments")),
+            })
+        else:  # attachment object
+            atts_by_msg.setdefault(meta.get("message_guid"), []).append({
+                "object_id": r.object_id, "filename": meta.get("filename") or r.title,
+                "kind": r.doc_type, "mime": meta.get("mime"),
+            })
+
+    for m in messages:
+        m["attachments"] = atts_by_msg.get(m["message_guid"], [])
+    messages.sort(key=lambda m: m["date"] or "")
+    return {"chat_id": chat_id, "chat_name": chat_name, "count": len(messages),
+            "messages": messages}
+
+
 @router.get("")
 def search(q: str = "", source_type: str | None = None, doc_type: str | None = None,
            category: str | None = None, label: str | None = None,
