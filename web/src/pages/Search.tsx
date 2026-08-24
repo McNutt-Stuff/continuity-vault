@@ -790,7 +790,7 @@ export default function Search() {
               <div className="flex1">
                 <div className="row" style={{ gap: 6, alignItems: "center" }}>
                   <span style={{ fontWeight: 600 }}>{r.title}</span>
-                  {r.category === "calendar" && r.meta?.recurring && (
+                  {r.category === "calendar" && Boolean(r.meta?.recurring) && (
                     <span title="Recurring event" style={{ display: "inline-flex", color: "var(--text-dim)" }}>
                       <Icon name="repeat" size={13} />
                     </span>
@@ -817,7 +817,7 @@ export default function Search() {
               <div className="stack" style={{ alignItems: "flex-end", gap: 6 }}>
                 <div className="row" style={{ gap: 6 }}>
                   {r.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
-                  {r.category === "message" && r.meta?.chat_id && (
+                  {r.category === "message" && Boolean(r.meta?.chat_id) && (
                     <button className="btn sm ghost" style={{ padding: "1px 8px", fontSize: 11 }}
                             title="View the whole conversation"
                             onClick={() => openThread(String(r.meta.chat_id), r.source_type)}>
