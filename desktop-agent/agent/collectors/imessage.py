@@ -44,7 +44,17 @@ _AUD = {"mp3", "wav", "aac", "flac", "m4a", "caf", "amr"}
 
 
 def available() -> bool:
-    return _CHAT_DB.exists()
+    # The file can exist while macOS still blocks reads (Full Disk Access not
+    # granted); verify we can actually open it so callers skip cleanly instead
+    # of crashing mid-collect.
+    if not _CHAT_DB.exists():
+        return False
+    try:
+        with open(_CHAT_DB, "rb") as fh:
+            fh.read(16)
+        return True
+    except OSError:
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -209,7 +219,13 @@ def collect(config: Optional[dict] = None,
     if not available():
         return [], state
 
-    tmp = _copy_ro(_CHAT_DB)
+    try:
+        tmp = _copy_ro(_CHAT_DB)
+    except OSError as exc:
+        # EPERM here means macOS Full Disk Access isn't granted to the agent.
+        log.warning("imessage: cannot read %s (%s) — grant the agent Full Disk "
+                    "Access in System Settings › Privacy & Security", _CHAT_DB, exc)
+        return [], state
     objects: List[dict] = []
     max_rowid = last_rowid
     try:

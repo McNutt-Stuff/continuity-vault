@@ -158,9 +158,9 @@ def _json(obj) -> bytes:
 # --------------------------------------------------------------------------- #
 
 def _collect_mail(con, cols, table, mime_idx, out, seen):
-    for row in con.execute(f'SELECT * FROM "{table}" LIMIT {_MAX_ROWS}'):
-        rid = str(_first(row, cols, "record_recordid", "recordid", "record_id") or "")
-        if not rid or f"mail:{rid}" in seen:
+    for row in con.execute(f'SELECT rowid AS _arkive_rid, * FROM "{table}" LIMIT {_MAX_ROWS}'):
+        rid = str(_first(row, cols, "record_recordid", "recordid", "record_id") or row["_arkive_rid"])
+        if f"mail:{rid}" in seen:
             continue
         seen.add(f"mail:{rid}")
         subject = _first(row, cols, "subject") or "(no subject)"
@@ -181,9 +181,9 @@ def _collect_mail(con, cols, table, mime_idx, out, seen):
 
 
 def _collect_contacts(con, cols, table, out, seen):
-    for row in con.execute(f'SELECT * FROM "{table}" LIMIT {_MAX_ROWS}'):
-        rid = str(_first(row, cols, "record_recordid", "recordid", "record_id") or "")
-        if not rid or f"contact:{rid}" in seen:
+    for row in con.execute(f'SELECT rowid AS _arkive_rid, * FROM "{table}" LIMIT {_MAX_ROWS}'):
+        rid = str(_first(row, cols, "record_recordid", "recordid", "record_id") or row["_arkive_rid"])
+        if f"contact:{rid}" in seen:
             continue
         seen.add(f"contact:{rid}")
         name = (_first(row, cols, "displayname", "fullname", "title", "name")
@@ -200,9 +200,9 @@ def _collect_contacts(con, cols, table, out, seen):
 
 
 def _collect_calendar(con, cols, table, out, seen):
-    for row in con.execute(f'SELECT * FROM "{table}" LIMIT {_MAX_ROWS}'):
-        rid = str(_first(row, cols, "record_recordid", "recordid", "record_id") or "")
-        if not rid or f"event:{rid}" in seen:
+    for row in con.execute(f'SELECT rowid AS _arkive_rid, * FROM "{table}" LIMIT {_MAX_ROWS}'):
+        rid = str(_first(row, cols, "record_recordid", "recordid", "record_id") or row["_arkive_rid"])
+        if f"event:{rid}" in seen:
             continue
         seen.add(f"event:{rid}")
         title = _first(row, cols, "subject", "title", "summary") or "(event)"
@@ -218,9 +218,9 @@ def _collect_calendar(con, cols, table, out, seen):
 
 
 def _collect_notes(con, cols, table, out, seen):
-    for row in con.execute(f'SELECT * FROM "{table}" LIMIT {_MAX_ROWS}'):
-        rid = str(_first(row, cols, "record_recordid", "recordid", "record_id") or "")
-        if not rid or f"note:{rid}" in seen:
+    for row in con.execute(f'SELECT rowid AS _arkive_rid, * FROM "{table}" LIMIT {_MAX_ROWS}'):
+        rid = str(_first(row, cols, "record_recordid", "recordid", "record_id") or row["_arkive_rid"])
+        if f"note:{rid}" in seen:
             continue
         seen.add(f"note:{rid}")
         title = _first(row, cols, "title", "subject") or "(note)"
@@ -251,32 +251,58 @@ def collect(config: Optional[dict] = None,
         db = data_dir / "Outlook.sqlite"
         tmp = _copy_ro(db)
         log.info("outlook_local: reading profile %s", data_dir)
+        counts = {"mail": 0, "contacts": 0, "calendar": 0, "notes": 0}
         try:
             con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
             con.row_factory = sqlite3.Row
             mime_idx = _mime_index(data_dir) if _want("mail") else {}
+            log.info("outlook_local: %d table(s); %d .olk15MsgSource file(s) indexed",
+                     len(_tables(con)), len(mime_idx))
+            inventory: List[str] = []
             for table in _tables(con):
                 cols = _cols(con, table)
                 if not cols:
                     continue
                 t = table.lower()
                 try:
+                    nrows = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                except sqlite3.Error:
+                    nrows = -1
+                if nrows:
+                    inventory.append(f"{table}({nrows})")
+                before = len(out)
+                cat = None
+                try:
                     if _want("mail") and ("mail" in t or "message" in t):
+                        cat = "mail"
                         _collect_mail(con, cols, table, mime_idx, out, seen)
                     elif _want("contacts") and "contact" in t:
+                        cat = "contacts"
                         _collect_contacts(con, cols, table, out, seen)
                     elif _want("calendar") and ("calendar" in t or "appointment" in t
                                                 or "event" in t):
+                        cat = "calendar"
                         _collect_calendar(con, cols, table, out, seen)
                     elif _want("notes") and ("note" in t):
+                        cat = "notes"
                         _collect_notes(con, cols, table, out, seen)
                 except sqlite3.Error as exc:
                     log.debug("outlook_local: table %s skipped: %s", table, exc)
+                emitted = len(out) - before
+                if cat:
+                    counts[cat] += emitted
+                    log.info("outlook_local: table %-30s → %-8s rows=%s emitted=%d",
+                             table, cat, nrows, emitted)
+            # One compact line lists every non-empty table so an unfamiliar schema
+            # (why a category came back empty) is diagnosable without verbose mode.
+            log.info("outlook_local: table inventory: %s", ", ".join(inventory) or "(none)")
             con.close()
         except Exception as exc:  # noqa: BLE001
             log.warning("outlook_local: profile %s unreadable: %s", data_dir, exc)
         finally:
             _rm(tmp)
+        log.info("outlook_local: profile summary — mail=%d contacts=%d calendar=%d notes=%d",
+                 counts["mail"], counts["contacts"], counts["calendar"], counts["notes"])
 
     log.info("outlook_local: collected %d object(s)", len(out))
     return out, (state or {})
