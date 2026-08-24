@@ -12,13 +12,18 @@ const SYNCED = new Set([
   "gmail", "onepassword", "outlook", "onedrive", "dropbox", "icloud",
   "google_drive", "slack", "notion", "github",
   "reddit", "facebook", "instagram", "google_calendar", "google_contacts",
-  "google_photos", "evernote", "linkedin",
+  "google_photos", "evernote", "linkedin", "imessage",
 ]);
+
+// Local variants reuse a cloud service's brand mark (e.g. the local Outlook
+// store shows the Outlook logo).
+const BRAND_ALIAS: Record<string, string> = { outlook_local: "outlook" };
 
 // Returns the source type when a dedicated brand icon exists, else null so the
 // caller can render a generic glyph (and pick a neutral vs. colored background).
 export function brandForSource(sourceType: string): string | null {
-  return SYNCED.has(sourceType) ? sourceType : null;
+  const t = BRAND_ALIAS[sourceType] ?? sourceType;
+  return SYNCED.has(t) ? t : null;
 }
 
 export function BrandIcon({ name, size = 18 }: { name: BrandName; size?: number }) {

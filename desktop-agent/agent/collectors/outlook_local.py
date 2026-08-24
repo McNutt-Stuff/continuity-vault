@@ -244,9 +244,13 @@ def collect(config: Optional[dict] = None,
 
     out: List[dict] = []
     seen: set = set()
-    for data_dir in _profiles():
+    profiles = _profiles()
+    log.info("outlook_local: scanning %d local profile(s) [filter=%s]",
+             len(profiles), inc or "all")
+    for data_dir in profiles:
         db = data_dir / "Outlook.sqlite"
         tmp = _copy_ro(db)
+        log.info("outlook_local: reading profile %s", data_dir)
         try:
             con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
             con.row_factory = sqlite3.Row

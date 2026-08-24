@@ -20,8 +20,8 @@ interface Agent {
 const COLLECTOR_META: Record<string, { label: string; desc: string; brand?: string }> = {
   onepassword: { label: "1Password", desc: "Passwords & secure items via the op CLI", brand: "onepassword" },
   endpoint_files: { label: "Endpoint files", desc: "Folders you select in the Data Map" },
-  imessage: { label: "Apple Messages", desc: "iMessage/SMS, group threads & attachments" },
-  outlook_local: { label: "Outlook (on this Mac)", desc: "Local email, attachments, contacts, calendar & notes" },
+  imessage: { label: "Apple Messages", desc: "iMessage/SMS, group threads & attachments", brand: "imessage" },
+  outlook_local: { label: "Outlook (local)", desc: "Local email, attachments, contacts, calendar & notes", brand: "outlook" },
 };
 
 // Online = a heartbeat within the last ~90s.

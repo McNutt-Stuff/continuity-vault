@@ -39,6 +39,9 @@ from .collectors import outlook_local
 from . import agent_log
 from .crypto import encrypt_content, load_or_create_key, wrap_for_recovery
 
+# Number of collection workers, so independent sources collect concurrently.
+_WORKER_THREADS = 4
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -102,6 +105,9 @@ class Agent:
         self._worker_started = False
         self._queued_sources: set = set()
         self._queued_lock = threading.Lock()
+        # Serialize persistence of the per-source schedule state so parallel
+        # collectors don't clobber the file mid-write.
+        self._collect_state_lock = threading.Lock()
 
     @property
     def agent_key(self) -> bytes:
@@ -457,8 +463,13 @@ class Agent:
         if self._worker_started:
             return
         self._worker_started = True
-        self.log.info("starting background collection worker")
-        threading.Thread(target=self._worker_loop, name="collector", daemon=True).start()
+        # A small pool of workers so independent sources (1Password, files,
+        # iMessage, Outlook…) collect in parallel instead of queueing behind one
+        # another. Same-source runs are still de-duplicated by _queued_sources.
+        self.log.info("starting %d background collection workers", _WORKER_THREADS)
+        for i in range(_WORKER_THREADS):
+            threading.Thread(target=self._worker_loop, name=f"collector-{i}",
+                             daemon=True).start()
 
     def _enqueue_collect(self, params: Optional[dict]) -> bool:
         """Queue a collection to run on the worker. De-duplicates by source so a
@@ -471,26 +482,33 @@ class Agent:
                 return False
             self._queued_sources.add(source)
         self._job_queue.put(params)
+        self.log.info("collect queued for %s (queue depth ~%d)", source, self._job_queue.qsize())
         return True
 
     def _worker_loop(self) -> None:
         while True:
             params = self._job_queue.get()
             source = params.get("source_type") or "default"
+            started = time.time()
+            self.log.info("collection starting: %s", source)
             try:
                 detail = self.collect_and_push(params)
+                elapsed = time.time() - started
+                self.log.info("collection finished: %s in %.1fs (%s object(s))",
+                              source, elapsed, detail.get("objects", "?"))
                 self._post_command_result("collect", True, detail)
             except Exception as exc:
-                self.log.error("collection failed: %s", exc)
+                self.log.error("collection failed: %s (%s)", source, exc, exc_info=True)
                 self._post_command_result("collect", False, {"error": str(exc)})
             finally:
                 # Advance the (persisted) per-source schedule timer whether or not
                 # the run succeeded, so a failing collect can't re-trigger every
                 # heartbeat and a restart doesn't immediately re-collect.
                 now = time.time()
-                self._last_collect = now
-                self._last_collect_by_source[source] = now
-                self._save_collect_state()
+                with self._collect_state_lock:
+                    self._last_collect = now
+                    self._last_collect_by_source[source] = now
+                    self._save_collect_state()
                 with self._queued_lock:
                     self._queued_sources.discard(source)
                 self._job_queue.task_done()
@@ -637,34 +655,43 @@ class Agent:
 
     def _collect_imessage(self, params: dict) -> dict:
         destinations = self.reg.get("config", {}).get("destinations", ["cv-cloud"])
+        self.log.info("imessage: starting collection → destinations=%s", destinations)
         if not imessage.available():
-            self.log.info("imessage: Messages database not found — nothing to collect")
+            self.log.warning("imessage: Messages database not found at %s — nothing to "
+                             "collect (grant Full Disk Access to the agent?)", imessage._CHAT_DB)
             return {"objects": 0, "results": [{"collector": "imessage", "skipped": "no Messages DB"}]}
         state = self._load_json_state(self._imessage_state_file)
+        self.log.info("imessage: reading new messages since ROWID %s…", state.get("last_rowid", 0))
         objects, new_state = imessage.collect(params.get("file_config") or {}, state)
+        self.log.info("imessage: collected %d object(s); encrypting + pushing…", len(objects))
         total = self._push_objects("imessage", objects, destinations) if objects else 0
         if total == len(objects):
             self._save_json_state(self._imessage_state_file, new_state)
         self._last_collect = time.time()
         results = [{"collector": "imessage", "objects": total}]
         self._write_status({"last_collect": _now_iso(), "results": results})
-        self.log.info("imessage: pushed %d object(s)", total)
+        self.log.info("imessage: pushed %d/%d object(s) (through ROWID %s)",
+                      total, len(objects), new_state.get("last_rowid", "?"))
         return {"objects": total, "results": results}
 
     def _collect_outlook_local(self, params: dict) -> dict:
         destinations = self.reg.get("config", {}).get("destinations", ["cv-cloud"])
+        self.log.info("outlook_local: starting collection → destinations=%s", destinations)
         if not outlook_local.available():
-            self.log.info("outlook_local: no Outlook profile found — nothing to collect")
+            self.log.warning("outlook_local: no Outlook profile found under %s — nothing "
+                             "to collect", outlook_local._GROUP)
             return {"objects": 0, "results": [{"collector": "outlook_local", "skipped": "no Outlook profile"}]}
         state = self._load_json_state(self._outlook_state_file)
+        self.log.info("outlook_local: reading local profiles…")
         objects, new_state = outlook_local.collect(params.get("file_config") or {}, state)
+        self.log.info("outlook_local: collected %d object(s); encrypting + pushing…", len(objects))
         total = self._push_objects("outlook_local", objects, destinations) if objects else 0
         if total == len(objects):
             self._save_json_state(self._outlook_state_file, new_state)
         self._last_collect = time.time()
         results = [{"collector": "outlook_local", "objects": total}]
         self._write_status({"last_collect": _now_iso(), "results": results})
-        self.log.info("outlook_local: pushed %d object(s)", total)
+        self.log.info("outlook_local: pushed %d/%d object(s)", total, len(objects))
         return {"objects": total, "results": results}
 
     def _load_json_state(self, path: Path) -> dict:

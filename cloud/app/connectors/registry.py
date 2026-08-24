@@ -168,7 +168,7 @@ class OutlookLocalConnector(Connector):
     so locally-cached data is backed up even for accounts not reachable in cloud."""
 
     connector_type = "outlook_local"
-    display_name = "Outlook (on this Mac)"
+    display_name = "Outlook (local)"
 
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(

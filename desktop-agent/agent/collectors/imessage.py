@@ -216,6 +216,8 @@ def collect(config: Optional[dict] = None,
         con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
         con.row_factory = sqlite3.Row
         contacts = _load_contacts()
+        log.info("imessage: reading chat.db (ro snapshot) for messages after ROWID %d "
+                 "(%d contact(s) resolved)", last_rowid, len(contacts))
 
         # Chat (thread) metadata + participants.
         chats: Dict[int, dict] = {}
@@ -226,6 +228,7 @@ def collect(config: Optional[dict] = None,
                 "name": r["display_name"] or "", "is_group": (r["style"] == 43),
                 "participants": [],
             }
+        log.debug("imessage: indexed %d chat(s)", len(chats))
         for r in con.execute(
                 "SELECT chj.chat_id, h.id FROM chat_handle_join chj "
                 "JOIN handle h ON h.ROWID = chj.handle_id"):

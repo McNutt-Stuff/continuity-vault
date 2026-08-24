@@ -743,12 +743,13 @@ export default function Search() {
                     const sel = ids.filter((i) => sources.has(i)).length;
                     const allSel = ids.length > 0 && sel === ids.length;
                     const meta = SOURCE_META[st];
+                    const brand = brandForSource(st);
                     return (
                       <div key={st} className="fs-group">
                         <div className="fs-opt" onClick={() => toggleSrcType(ids, allSel)}>
                           <FilterCheck state={allSel ? "on" : sel > 0 ? "partial" : "off"} />
-                          <span className="fs-src-ic" style={{ background: meta?.color ?? "var(--brand)" }}>
-                            <Icon name={meta?.icon ?? "database"} size={11} />
+                          <span className="fs-src-ic" style={{ background: brand ? "var(--inset)" : meta?.color ?? "var(--brand)" }}>
+                            {brand ? <BrandIcon name={brand} size={13} /> : <Icon name={meta?.icon ?? "database"} size={11} />}
                           </span>
                           <span className="fs-opt-label">{data.source_display?.[st] ?? meta?.label ?? st}</span>
                           <span className="fs-opt-count">{n}</span>
