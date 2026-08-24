@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { api, ApiError, getToken } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, bytes, fmtAbsolute, Loading } from "../components/ui";
@@ -73,6 +74,7 @@ interface SearchResp {
   results: Result[];
   facets: {
     source: Record<string, number>;
+    source_accounts: Record<string, { id: string; label: string; username?: string | null; count: number }[]>;
     type: Record<string, number>;
     category: Record<string, number>;
     label: Record<string, number>;
@@ -117,6 +119,42 @@ const SOURCE_META: Record<string, { color: string; icon: IconName; label: string
   imessage: { color: "#34da50", icon: "mail", label: "Apple Messages" },
   outlook_local: { color: "#0a5bd3", icon: "mail", label: "Outlook (local)" },
 };
+
+// Calendar is excluded from the default Type selection because recurring/all-day
+// events currently produce noisy results.
+const DEFAULT_TYPES = Object.keys(CATEGORY_META).filter((k) => k !== "calendar");
+
+// A clean, styled dropdown shell (checkbox multi-selects) — mirrors the date
+// popover: a narrow trigger showing a summary, opening a wider menu panel.
+function FilterMenu({ label, summary, active, width, children }: {
+  label: string; summary: string; active: boolean; width?: number; children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="filter-select" style={{ position: "relative" }}>
+      <span>{label}</span>
+      <button type="button" className={`fs-trigger ${active ? "on" : ""}`} onClick={() => setOpen((o) => !o)}>
+        <span className="fs-trigger-label">{summary}</span>
+        <span className="fs-caret">▾</span>
+      </button>
+      {open && (
+        <>
+          <div className="fs-overlay" onClick={() => setOpen(false)} />
+          <div className="fs-menu" style={width ? { minWidth: width } : undefined}>{children}</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function FilterCheck({ state }: { state: "on" | "partial" | "off" }) {
+  return (
+    <span className={`fs-check ${state === "on" ? "on" : state === "partial" ? "partial" : ""}`}>
+      {state === "on" && <Icon name="check" size={11} />}
+      {state === "partial" && <span className="fs-dash" />}
+    </span>
+  );
+}
 
 function downloadB64(b64: string, filename: string) {
   const bin = atob(b64);
@@ -300,9 +338,9 @@ function isOnePassword(item: Recovered): boolean {
 export default function Search() {
   const { me, stepUp } = useAuth();
   const [q, setQ] = useState("");
-  const [source, setSource] = useState<string | null>(null);
-  const [category, setCategory] = useState<string | null>(null);
-  const [label, setLabel] = useState<string | null>(null);
+  const [sources, setSources] = useState<Set<string>>(new Set());          // selected collection ids
+  const [types, setTypes] = useState<Set<string>>(() => new Set(DEFAULT_TYPES));  // selected categories
+  const [labels, setLabels] = useState<Set<string>>(new Set());            // selected labels
   const [attr, setAttr] = useState<string | null>(null);
   const [attrKey, setAttrKey] = useState("");
   const [sortBy, setSortBy] = useState<"date" | "captured">("date");
@@ -521,9 +559,9 @@ export default function Search() {
     try {
       const params = new URLSearchParams();
       if (q) params.set("q", q);
-      if (source) params.set("source_type", source);
-      if (category) params.set("category", category);
-      if (label) params.set("label", label);
+      for (const id of sources) params.append("collection", id);
+      for (const c of types) params.append("category", c);
+      for (const l of labels) params.append("label", l);
       if (attr) params.set("attr", attr);
       params.set("sort", sortBy);
       params.set("direction", sortDir);
@@ -548,7 +586,7 @@ export default function Search() {
   useEffect(() => {
     if (me?.passkey_verified) void run();
     else setLocked(true);
-  }, [me?.passkey_verified, source, category, label, attr, sortBy, sortDir, dateFrom, dateTo, dateField]);
+  }, [me?.passkey_verified, sources, types, labels, attr, sortBy, sortDir, dateFrom, dateTo, dateField]);
 
   if (locked) {
     return (
@@ -633,15 +671,41 @@ export default function Search() {
       {data && (() => {
         const cats = Object.entries(data.facets.category).sort((a, b) => b[1] - a[1]);
         const srcs = Object.entries(data.facets.source).sort((a, b) => b[1] - a[1]);
-        const labels = Object.entries(data.facets.label).sort((a, b) => b[1] - a[1]);
+        const labelFacets = Object.entries(data.facets.label).sort((a, b) => b[1] - a[1]);
+        const srcAccounts = data.facets.source_accounts || {};
         const attrKeys = Object.keys(data.facets.attributes || {});
         const attrVals = attrKey ? data.facets.attributes?.[attrKey] : undefined;
         const attrValue = attr && attr.startsWith(`${attrKey}:`) ? attr.slice(attrKey.length + 1) : "";
-        const srcLabel = source ? (data.source_display?.[source] ?? SOURCE_META[source]?.label ?? source) : "";
-        const catLabel = category ? (CATEGORY_META[category]?.label ?? category) : "";
-        const hasFilters = !!(source || category || label || attr);
+
+        const selTypes = cats.filter(([c]) => types.has(c)).length;
+        const selLabels = labelFacets.filter(([l]) => labels.has(l)).length;
+        const selSources = srcs.reduce(
+          (acc, [st]) => acc + (srcAccounts[st] || []).filter((a) => sources.has(a.id)).length, 0);
+        const typeSummary = selTypes === 0 ? "All types" : `${selTypes} type${selTypes === 1 ? "" : "s"} selected`;
+        const labelSummary = selLabels === 0 ? "All labels" : `${selLabels} label${selLabels === 1 ? "" : "s"} selected`;
+        const sourceSummary = selSources === 0 ? "All sources" : `${selSources} source${selSources === 1 ? "" : "s"} selected`;
+
+        const typesIsDefault = types.size === DEFAULT_TYPES.length && DEFAULT_TYPES.every((t) => types.has(t));
+        const hasFilters = sources.size > 0 || labels.size > 0 || !!attr || !typesIsDefault;
         const hasDate = !!(dateFrom || dateTo);
-        function clearAll() { setSource(null); setCategory(null); setLabel(null); setAttr(null); setAttrKey(""); }
+        function clearAll() {
+          setSources(new Set()); setTypes(new Set(DEFAULT_TYPES)); setLabels(new Set());
+          setAttr(null); setAttrKey("");
+        }
+        const toggleType = (c: string) => setTypes((prev) => {
+          const n = new Set(prev); n.has(c) ? n.delete(c) : n.add(c); return n;
+        });
+        const toggleLabelSel = (l: string) => setLabels((prev) => {
+          const n = new Set(prev); n.has(l) ? n.delete(l) : n.add(l); return n;
+        });
+        const toggleAcct = (id: string) => setSources((prev) => {
+          const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+        });
+        const toggleSrcType = (ids: string[], allSel: boolean) => setSources((prev) => {
+          const n = new Set(prev);
+          if (allSel) ids.forEach((i) => n.delete(i)); else ids.forEach((i) => n.add(i));
+          return n;
+        });
         const dateFieldLabel = dateField === "captured" ? "captured" : "object date";
         const dateChip = hasDate
           ? `${dateFrom || "…"} → ${dateTo || "…"} (${dateFieldLabel})`
@@ -649,34 +713,74 @@ export default function Search() {
         return (
           <>
             <div className="filter-bar">
-              <label className="filter-select">
-                <span>Source</span>
-                <select value={source ?? ""} onChange={(e) => { setAttr(null); setAttrKey(""); setSource(e.target.value || null); }}>
-                  <option value="">All sources ({data.total_indexed})</option>
-                  {srcs.map(([s, n]) => (
-                    <option key={s} value={s}>{data.source_display?.[s] ?? SOURCE_META[s]?.label ?? s} ({n})</option>
-                  ))}
-                </select>
-              </label>
               {cats.length > 0 && (
-                <label className="filter-select">
-                  <span>Type</span>
-                  <select value={category ?? ""} onChange={(e) => setCategory(e.target.value || null)}>
-                    <option value="">All types</option>
-                    {cats.map(([c, n]) => (
-                      <option key={c} value={c}>{CATEGORY_META[c]?.label ?? c} ({n})</option>
-                    ))}
-                  </select>
-                </label>
+                <FilterMenu label="Type" summary={typeSummary} active={selTypes > 0}>
+                  <div className="fs-menu-head">
+                    <button className="fs-linkbtn" onClick={() => setTypes(new Set(cats.map(([c]) => c)))}>Select all</button>
+                    <button className="fs-linkbtn" onClick={() => setTypes(new Set())}>Clear</button>
+                  </div>
+                  {cats.map(([c, n]) => (
+                    <div key={c} className="fs-opt" onClick={() => toggleType(c)}>
+                      <FilterCheck state={types.has(c) ? "on" : "off"} />
+                      <span className="fs-opt-label">{CATEGORY_META[c]?.label ?? c}</span>
+                      <span className="fs-opt-count">{n}</span>
+                    </div>
+                  ))}
+                </FilterMenu>
               )}
-              {labels.length > 0 && (
-                <label className="filter-select">
-                  <span>Label</span>
-                  <select value={label ?? ""} onChange={(e) => setLabel(e.target.value || null)}>
-                    <option value="">All labels</option>
-                    {labels.map(([l, n]) => <option key={l} value={l}>{l} ({n})</option>)}
-                  </select>
-                </label>
+              {srcs.length > 0 && (
+                <FilterMenu label="Source" summary={sourceSummary} active={selSources > 0} width={300}>
+                  <div className="fs-menu-head">
+                    <button className="fs-linkbtn"
+                            onClick={() => setSources(new Set(srcs.flatMap(([st]) => (srcAccounts[st] || []).map((a) => a.id))))}>
+                      Select all
+                    </button>
+                    <button className="fs-linkbtn" onClick={() => setSources(new Set())}>Clear</button>
+                  </div>
+                  {srcs.map(([st, n]) => {
+                    const accts = srcAccounts[st] || [];
+                    const ids = accts.map((a) => a.id);
+                    const sel = ids.filter((i) => sources.has(i)).length;
+                    const allSel = ids.length > 0 && sel === ids.length;
+                    const meta = SOURCE_META[st];
+                    return (
+                      <div key={st} className="fs-group">
+                        <div className="fs-opt" onClick={() => toggleSrcType(ids, allSel)}>
+                          <FilterCheck state={allSel ? "on" : sel > 0 ? "partial" : "off"} />
+                          <span className="fs-src-ic" style={{ background: meta?.color ?? "var(--brand)" }}>
+                            <Icon name={meta?.icon ?? "database"} size={11} />
+                          </span>
+                          <span className="fs-opt-label">{data.source_display?.[st] ?? meta?.label ?? st}</span>
+                          <span className="fs-opt-count">{n}</span>
+                        </div>
+                        {accts.map((a) => (
+                          <div key={a.id} className="fs-opt fs-sub" onClick={() => toggleAcct(a.id)}>
+                            <FilterCheck state={sources.has(a.id) ? "on" : "off"} />
+                            <span className="fs-opt-label">
+                              {a.label}{a.username ? <span className="fs-sub-user"> · {a.username}</span> : null}
+                            </span>
+                            <span className="fs-opt-count">{a.count}</span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </FilterMenu>
+              )}
+              {labelFacets.length > 0 && (
+                <FilterMenu label="Label" summary={labelSummary} active={selLabels > 0}>
+                  <div className="fs-menu-head">
+                    <button className="fs-linkbtn" onClick={() => setLabels(new Set(labelFacets.map(([l]) => l)))}>Select all</button>
+                    <button className="fs-linkbtn" onClick={() => setLabels(new Set())}>Clear</button>
+                  </div>
+                  {labelFacets.map(([l, n]) => (
+                    <div key={l} className="fs-opt" onClick={() => toggleLabelSel(l)}>
+                      <FilterCheck state={labels.has(l) ? "on" : "off"} />
+                      <span className="fs-opt-label">{l}</span>
+                      <span className="fs-opt-count">{n}</span>
+                    </div>
+                  ))}
+                </FilterMenu>
               )}
               {attrKeys.length > 0 && (
                 <label className="filter-select">
@@ -758,11 +862,8 @@ export default function Search() {
               </label>
             </div>
 
-            {(hasFilters || hasDate) && (
+            {(attr || hasDate) && (
               <div className="active-filters">
-                {source && <span className="filter-chip">{srcLabel}<button onClick={() => { setSource(null); setAttr(null); setAttrKey(""); }}>×</button></span>}
-                {category && <span className="filter-chip">{catLabel}<button onClick={() => setCategory(null)}>×</button></span>}
-                {label && <span className="filter-chip">Label: {label}<button onClick={() => setLabel(null)}>×</button></span>}
                 {attr && <span className="filter-chip">{attr.replace(":", ": ")}<button onClick={() => setAttr(null)}>×</button></span>}
                 {hasDate && <span className="filter-chip">{dateChip}<button onClick={() => { setDateFrom(""); setDateTo(""); }}>×</button></span>}
               </div>
@@ -804,9 +905,11 @@ export default function Search() {
                     {r.labels.slice(0, 4).map((l) => (
                       <span
                         key={l}
-                        className={`chip ${label === l ? "active" : ""}`}
+                        className={`chip ${labels.has(l) ? "active" : ""}`}
                         style={{ padding: "2px 8px", fontSize: 11 }}
-                        onClick={() => setLabel(l)}
+                        onClick={() => setLabels((prev) => {
+                          const n = new Set(prev); n.has(l) ? n.delete(l) : n.add(l); return n;
+                        })}
                       >
                         {l}
                       </span>

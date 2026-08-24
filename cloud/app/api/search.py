@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -228,7 +228,8 @@ def thread(chat_id: str, source_type: str = "imessage",
 
 @router.get("")
 def search(q: str = "", source_type: str | None = None, doc_type: str | None = None,
-           category: str | None = None, label: str | None = None,
+           category: list[str] | None = Query(None), label: list[str] | None = Query(None),
+           collection: list[str] | None = Query(None),
            attr: str | None = None, limit: int = 50, sort: str = "date",
            direction: str = "desc", date_from: str | None = None,
            date_to: str | None = None, date_field: str | None = None,
@@ -240,6 +241,11 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     attr_key, attr_val = "", ""
     if attr and ":" in attr:
         attr_key, attr_val = attr.split(":", 1)
+    # Type (category), label and source (per-account collection) filters are all
+    # multi-select: an empty set means "no filter" (everything).
+    cat_set = set(category or [])
+    label_set = set(label or [])
+    coll_set = set(collection or [])
     # Pull the whole tenant index newest-first, then de-duplicate: repeated
     # backups (and multi-destination stores) create a fresh index row per
     # snapshot for the same object. The UI must show each object once, so we keep
@@ -336,13 +342,17 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         return str(v) == attr_val
 
     def _matches(r: SearchDocument, skip: str = "") -> bool:
-        if skip != "source" and source_type and r.source_type != source_type:
-            return False
+        if skip != "source":
+            if source_type and r.source_type != source_type:
+                return False
+            if coll_set and r.collection_id not in coll_set:
+                return False
         if skip != "type" and doc_type and r.doc_type != doc_type:
             return False
-        if skip != "category" and category and _cat(r) != category:
+        if skip != "category" and cat_set and _cat(r) not in cat_set:
             return False
-        if skip != "label" and label and label not in (r.labels or []):
+        if skip != "label" and label_set and not (
+                label_set & {str(x) for x in (r.labels or [])}):
             return False
         if skip != "attr" and not _attr_match(r):
             return False
@@ -358,9 +368,13 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     by_type: dict[str, int] = {}
     by_category: dict[str, int] = {}
     by_label: dict[str, int] = {}
+    # Per-account (collection) breakdown under each source type.
+    acct_counts: dict[tuple, int] = {}
     for r in unique:
         if _matches(r, skip="source"):
             by_source[r.source_type] = by_source.get(r.source_type, 0) + 1
+            akey = (r.source_type, r.collection_id)
+            acct_counts[akey] = acct_counts.get(akey, 0) + 1
         if _matches(r, skip="type"):
             by_type[r.doc_type] = by_type.get(r.doc_type, 0) + 1
         if _matches(r, skip="category"):
@@ -396,6 +410,20 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     for st in {r.source_type for r in unique}:
         conn = get_connector(st)
         source_display[st] = conn.display_name if conn else st
+
+    # Per-account facet: each source type expands to the individual linked
+    # accounts (collections) it holds, so the source filter can drill into a
+    # specific account (e.g. "Rob's Gmail" vs "Home Gmail").
+    source_accounts: dict[str, list] = {}
+    for (st, cid), cnt in acct_counts.items():
+        source_accounts.setdefault(st, []).append({
+            "id": cid,
+            "label": coll_label.get(cid) or source_display.get(st, st),
+            "username": coll_username.get(cid),
+            "count": cnt,
+        })
+    for st in source_accounts:
+        source_accounts[st].sort(key=lambda a: a["count"], reverse=True)
 
     # Attribute facets over the set filtered by every OTHER filter (not attr).
     meta_facets: dict[str, dict[str, int]] = {}
@@ -514,7 +542,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         "results": results,
         "facets": {"source": by_source, "type": by_type,
                    "category": by_category, "label": by_label,
-                   "attributes": meta_facets},
+                   "attributes": meta_facets, "source_accounts": source_accounts},
         "source_display": source_display,
     }
 
