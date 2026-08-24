@@ -7,6 +7,7 @@ import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { FilterBar } from "../components/FilterBar";
 import { promptDialog, formDialog, confirmDialog, notify } from "../components/dialog";
 import { Ring, Sparkline, AreaChart } from "../components/charts";
+import { VersionPill, ProductionVersion } from "../components/VersionBadge";
 
 export interface AdminSection { key: string; label: string; icon: IconName; group: string; }
 
@@ -739,6 +740,7 @@ function Reports() {
 function Nodes() {
   const [nodes, setNodes] = useState<any[]>([]);
   const [svcs, setSvcs] = useState<ServiceObj[]>([]);
+  const [versions, setVersions] = useState<{ control_plane?: string; platform?: string }>({});
   const [toast, setToast] = useState("");
   const [installCmd, setInstallCmd] = useState("");
   const [sel, setSel] = useState<string | null>(null);
@@ -746,6 +748,7 @@ function Nodes() {
   async function load() {
     try { setNodes(await api.get<any[]>("/admin/nodes")); } catch { /* ignore */ }
     try { setSvcs(await api.get<ServiceObj[]>("/admin/service-objects")); } catch { /* ignore */ }
+    try { setVersions(await api.get("/admin/versions")); } catch { /* ignore */ }
   }
   useEffect(() => { void load(); const iv = setInterval(load, 15000); return () => clearInterval(iv); }, []);
 
@@ -838,9 +841,12 @@ function Nodes() {
     <>
       <div className="spread" style={{ marginBottom: 12 }}>
         <h3 style={{ margin: 0 }}>Node fleet <span className="faint" style={{ fontSize: 12, fontWeight: 400 }}>· {nodes.length} node{nodes.length === 1 ? "" : "s"}</span></h3>
-        <div className="row" style={{ gap: 8 }}>
-          <button className="btn sm" onClick={newInstaller}><Icon name="logout" size={14} /> Install a node</button>
-          <button className="btn primary sm" onClick={registerNode}><Icon name="server" size={14} /> Register node</button>
+        <div className="row" style={{ gap: 12, alignItems: "center" }}>
+          <ProductionVersion label="Production platform" version={versions.platform} />
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn sm" onClick={newInstaller}><Icon name="logout" size={14} /> Install a node</button>
+            <button className="btn primary sm" onClick={registerNode}><Icon name="server" size={14} /> Register node</button>
+          </div>
         </div>
       </div>
       {installCmd && (
@@ -885,6 +891,10 @@ function Nodes() {
                   </div>
                   <div className="faint" style={{ fontSize: 11, marginBottom: 6 }} title={n.last_heartbeat_at ? fmtAbsolute(n.last_heartbeat_at) : "never"}>
                     <Icon name="clock" size={11} /> Last seen {n.last_heartbeat_at ? timeAgo(n.last_heartbeat_at) : "never"}
+                  </div>
+                  <div className="row" style={{ gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+                    <VersionPill version={n.version} updateAvailable={n.update_available} />
+                    {n.version_updated_at && <span className="faint" style={{ fontSize: 10.5 }}>updated {timeAgo(n.version_updated_at)}</span>}
                   </div>
                   <div className="spread faint" style={{ fontSize: 11 }}>
                     <span>{n.tenants || 0} tenant{n.tenants === 1 ? "" : "s"}</span>
@@ -1002,20 +1012,23 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
 
   return (
     <>
-      <div className="spread" style={{ marginBottom: 12 }}>
+      <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
         <button className="btn ghost sm" onClick={onBack}>← Nodes</button>
-        <div className="row" style={{ gap: 8 }}>
-          <button className="btn sm" onClick={async () => { await onEdit(node); await loadNode(); }}>Edit</button>
-          <button className="btn sm" onClick={() => ctl("update", "", "Trigger a software update on this node? It will pull the latest build and restart.")}>
-            <Icon name="clock" size={13} /> Update
-          </button>
-          {node.role !== "public-web" && (
-            <button className="btn sm" onClick={backupNow}>
-              <Icon name="shield" size={13} /> Back up now
+        <div className="row" style={{ gap: 12, alignItems: "center" }}>
+          <ProductionVersion label="Production platform" version={node.production_version} />
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn sm" onClick={async () => { await onEdit(node); await loadNode(); }}>Edit</button>
+            <button className="btn sm" onClick={() => ctl("update", "", "Trigger a software update on this node? It will pull the latest build and restart.")}>
+              <Icon name="clock" size={13} /> Update
             </button>
-          )}
-          <button className="btn sm" onClick={() => ctl("restart", "cv-cloud", "Restart the Arkive application on this node?")}>Restart app</button>
-          {!node.is_self && <button className="btn danger sm" onClick={async () => { await onRemove(node); onBack(); }}>Remove</button>}
+            {node.role !== "public-web" && (
+              <button className="btn sm" onClick={backupNow}>
+                <Icon name="shield" size={13} /> Back up now
+              </button>
+            )}
+            <button className="btn sm" onClick={() => ctl("restart", "cv-cloud", "Restart the Arkive application on this node?")}>Restart app</button>
+            {!node.is_self && <button className="btn danger sm" onClick={async () => { await onRemove(node); onBack(); }}>Remove</button>}
+          </div>
         </div>
       </div>
 
@@ -1029,14 +1042,16 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
               <h3 style={{ margin: 0 }}>{node.name} {node.is_self && <span className="faint" style={{ fontWeight: 400, fontSize: 12 }}>· this node</span>}</h3>
               <div className="faint" style={{ fontSize: 12 }}>
                 {node.category} · {node.role}{node.region ? ` · ${node.region}` : ""}{node.version ? ` · v${node.version}` : ""}
+                {node.version_updated_at ? ` · updated ${timeAgo(node.version_updated_at)}` : ""}
                 {live?.uptime_seconds ? ` · ${uptimeShort(live.uptime_seconds)}` : ""}
               </div>
             </div>
           </div>
-          <div className="row" style={{ gap: 6 }}>
+          <div className="row" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
             <Pill tone={node.online ? "ok" : "warn"}>{node.online ? "Online" : "Offline"}</Pill>
             <Pill tone={node.status === "active" ? "info" : "warn"}>{node.status}</Pill>
             {live?.source === "heartbeat" && <Pill tone="warn">heartbeat only</Pill>}
+            <VersionPill version={node.version} updateAvailable={node.update_available} />
           </div>
         </div>
         {(node.cloud?.provider && node.cloud.provider !== "unknown") && (
@@ -1610,26 +1625,36 @@ function CmsField({ label, value, onChange, area }: { label: string; value: stri
 
 function Fleet() {
   const [rows, setRows] = useState<any[]>([]);
-  useEffect(() => { api.get<any[]>("/admin/fleet").then(setRows).catch(() => {}); }, []);
+  const [prod, setProd] = useState<string>("");
+  useEffect(() => {
+    api.get<any[]>("/admin/fleet").then(setRows).catch(() => {});
+    api.get<{ appliance?: string }>("/admin/versions").then((v) => setProd(v.appliance || "")).catch(() => {});
+  }, []);
   return (
-    <Card>
-      <table className="table">
-        <thead><tr><th>Serial</th><th>Model</th><th>State</th><th>Isolation</th><th>Attestation</th><th>Version</th><th>Heartbeat</th></tr></thead>
-        <tbody>
-          {rows.map((a) => (
-            <tr key={a.id}>
-              <td className="mono">{a.serial}</td><td>{a.model}</td>
-              <td><Pill tone="info">{a.state}</Pill></td>
-              <td className="faint">{a.isolation_state}</td>
-              <td>{a.attestation_ok ? <Pill tone="ok">ok</Pill> : <Pill tone="danger">failed</Pill>}</td>
-              <td>{a.software_version}</td>
-              <td className="faint">{timeAgo(a.last_heartbeat_at)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {rows.length === 0 && <div className="muted">No appliances in fleet.</div>}
-    </Card>
+    <>
+      <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
+        <h3 style={{ margin: 0 }}>Appliance fleet</h3>
+        <ProductionVersion label="Production appliance software" version={prod} />
+      </div>
+      <Card>
+        <table className="table">
+          <thead><tr><th>Serial</th><th>Model</th><th>State</th><th>Attestation</th><th>Version</th><th>Last updated</th><th>Heartbeat</th></tr></thead>
+          <tbody>
+            {rows.map((a) => (
+              <tr key={a.id}>
+                <td className="mono">{a.serial}</td><td>{a.model}</td>
+                <td><Pill tone="info">{a.state}</Pill></td>
+                <td>{a.attestation_ok ? <Pill tone="ok">ok</Pill> : <Pill tone="danger">failed</Pill>}</td>
+                <td><VersionPill version={a.software_version} updateAvailable={a.update_available} /></td>
+                <td className="faint" title={a.version_updated_at ? fmtAbsolute(a.version_updated_at) : ""}>{a.version_updated_at ? timeAgo(a.version_updated_at) : "—"}</td>
+                <td className="faint">{timeAgo(a.last_heartbeat_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {rows.length === 0 && <div className="muted">No appliances in fleet.</div>}
+      </Card>
+    </>
   );
 }
 

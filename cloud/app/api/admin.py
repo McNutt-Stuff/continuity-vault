@@ -293,12 +293,18 @@ def list_tenants(db: Session = Depends(get_db)):
 
 @router.get("/fleet")
 def fleet_view(db: Session = Depends(get_db)):
+    from .. import versions
+    prod = versions.appliance_production_version()
     rows = db.query(Appliance).all()
     return [{
         "id": a.id, "serial": a.serial, "model": a.model, "name": a.name,
         "tenant_id": a.tenant_id, "state": a.state,
         "isolation_state": a.isolation_state, "attestation_ok": a.attestation_ok,
         "tamper_state": a.tamper_state, "software_version": a.software_version,
+        "production_version": prod,
+        "update_available": bool(a.software_version and a.software_version != "0.0.0"
+                                 and a.software_version != prod),
+        "version_updated_at": a.version_updated_at.isoformat() if a.version_updated_at else None,
         "last_heartbeat_at": a.last_heartbeat_at.isoformat() if a.last_heartbeat_at else None,
     } for a in rows]
 
@@ -930,6 +936,12 @@ def _ensure_self_node(db: Session) -> Node:
                 n.region = n.cloud["region"]
         except Exception:
             pass
+    # Keep the self node's version in sync with the control plane's running build.
+    from .. import versions
+    cp_ver = versions.control_plane_version()
+    if cp_ver and cp_ver != n.version:
+        n.version = cp_ver
+        n.version_updated_at = _now()
     n.last_heartbeat_at = _now()
     db.commit()
     return n
@@ -957,12 +969,20 @@ def _node_view(db: Session, n: Node) -> dict:
     stg = tel.get("storage") or {}
     tenant_count = db.query(func.count(Tenant.id)).filter(Tenant.node_id == n.id).scalar()
     backup_ids = list(n.backup_service_ids or [])
+    from .. import versions
+    node_prod = versions.node_production_version()
     return {
         "id": n.id, "name": n.name, "region": n.region, "role": n.role,
         "category": _NODE_CATEGORY.get(n.role, "Other"),
         "endpoint": n.endpoint, "status": n.status, "is_self": bool(n.is_self),
         "version": n.version, "online": online, "telemetry": tel,
         "cloud": n.cloud or {},
+        # The self/control-plane node IS the reference build, so it's never "behind";
+        # fleet nodes are compared to the bundle the control plane serves.
+        "production_version": node_prod,
+        "update_available": bool(not n.is_self and n.version and node_prod
+                                 and n.version != node_prod),
+        "version_updated_at": n.version_updated_at.isoformat() if n.version_updated_at else None,
         "health": {
             "cpu_pct": tel.get("cpu_pct"),
             "mem_pct": mem.get("pct"),
@@ -979,6 +999,14 @@ def _node_view(db: Session, n: Node) -> dict:
         "backup_services": [nm for nm in (_svc_name(s) for s in backup_ids) if nm],
         "last_heartbeat_at": n.last_heartbeat_at.isoformat() if n.last_heartbeat_at else None,
     }
+
+
+@router.get("/versions")
+def platform_versions():
+    """Production software versions the control plane serves to each device class,
+    plus the control plane's own running version — for the admin version banners."""
+    from .. import versions
+    return versions.all_versions()
 
 
 # --------------------------------------------------------------------------- #

@@ -49,11 +49,18 @@ def _telemetry() -> dict:
 
 
 def _version() -> str:
-    try:
-        with open("/etc/arkive/version", "r") as fh:
-            return fh.read().strip()
-    except Exception:
-        return ""
+    # Fleet nodes self-update from the control plane's bundle; report that bundle
+    # version (matches the CP's served version) so the admin can flag out-of-date
+    # nodes. Fall back to the git version stamp.
+    for path in ("/etc/arkive/bundle-version", "/etc/arkive/version"):
+        try:
+            with open(path, "r") as fh:
+                v = fh.read().strip()
+                if v:
+                    return v
+        except Exception:
+            continue
+    return ""
 
 
 def send_heartbeat() -> dict | None:

@@ -141,6 +141,13 @@ def list_appliances(principal: security.Principal = Depends(security.get_princip
     return out
 
 
+@fleet_router.get("/versions")
+def appliance_versions(tenant: Tenant = Depends(security.get_tenant)):
+    """The production appliance software version the control plane currently serves."""
+    from .. import versions
+    return {"production_version": versions.appliance_production_version()}
+
+
 @fleet_router.delete("/{appliance_id}")
 def delete_appliance(appliance_id: str,
                      principal: security.Principal = Depends(security.require_security_admin),
@@ -343,6 +350,10 @@ def _appliance_view(a: Appliance) -> dict:
         "state": a.state,
         "isolation_state": a.isolation_state,
         "software_version": a.software_version,
+        "production_version": _appliance_bundle_version(),
+        "update_available": bool(a.software_version and a.software_version != "0.0.0"
+                                 and a.software_version != _appliance_bundle_version()),
+        "version_updated_at": a.version_updated_at.isoformat() if a.version_updated_at else None,
         "attestation_ok": a.attestation_ok,
         "tamper_state": a.tamper_state,
         "last_heartbeat_at": a.last_heartbeat_at.isoformat() if a.last_heartbeat_at else None,
@@ -683,7 +694,9 @@ def heartbeat(body: HeartbeatRequest,
         tel["public_ip"] = public_ip
     appliance.state = body.state
     appliance.isolation_state = body.isolation_state
-    appliance.software_version = body.software_version
+    if body.software_version and body.software_version != appliance.software_version:
+        appliance.software_version = body.software_version
+        appliance.version_updated_at = _now()
     appliance.telemetry = tel
     appliance.tamper_state = body.tamper_state
     appliance.last_heartbeat_at = _now()

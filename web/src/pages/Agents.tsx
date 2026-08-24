@@ -5,12 +5,14 @@ import { Card, Pill, timeAgo, serverDate, fmtAbsolute, Loading } from "../compon
 import { Icon } from "../components/Icon";
 import { BrandIcon } from "../components/BrandIcon";
 import { notify } from "../components/dialog";
+import { VersionPill, ProductionVersion } from "../components/VersionBadge";
 
 interface Agent {
   id: string; name: string; hostname: string; platform: string; version: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   state: string; collectors: string[]; enabled_collectors?: string[]; config: any; telemetry: any;
   node_name?: string | null; node_url?: string | null;
+  production_version?: string | null; update_available?: boolean; version_updated_at?: string | null;
   last_heartbeat_at: string | null; last_collection_at: string | null;
 }
 
@@ -80,6 +82,7 @@ export default function Agents() {
   const [toast, setToast] = useState("");
   const [selected, setSelected] = useState<Agent | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [prodVersion, setProdVersion] = useState<string>("");
 
   async function load() {
     try {
@@ -94,6 +97,7 @@ export default function Agents() {
   function select(a: Agent) { setSelected(a); }
   useEffect(() => {
     void load();
+    api.get<{ production_version: string }>("/agents/versions").then((r) => setProdVersion(r.production_version)).catch(() => {});
     const t = setInterval(load, 8000);
     return () => clearInterval(t);
   }, []);
@@ -136,7 +140,12 @@ export default function Agents() {
   if (!loaded && agents.length === 0) return <Loading label="Loading agents…" />;
 
   return (
-    <div className="grid grid-2" style={{ alignItems: "start" }}>
+    <>
+      <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
+        <h2 style={{ margin: 0 }}>Endpoints</h2>
+        <ProductionVersion label="Current endpoint software" version={prodVersion} />
+      </div>
+      <div className="grid grid-2" style={{ alignItems: "start" }}>
       <div style={{ minWidth: 0 }}>
         <Card style={{ marginBottom: 16 }}>
           <div className="spread" style={{ marginBottom: 8 }}>
@@ -188,9 +197,10 @@ export default function Agents() {
               </div>
               <StatusDot color={isOnline(a) ? "#35d0a5" : "#6b7688"} pulse={isOnline(a)} />
             </div>
-            <div className="row" style={{ gap: 12, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)" }}>
+            <div className="row" style={{ gap: 12, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)", flexWrap: "wrap" }}>
               <OnlinePill a={a} />
               <HealthPill a={a} />
+              <VersionPill version={a.version} updateAvailable={a.update_available} />
             </div>
           </div>
         ))}
@@ -207,6 +217,7 @@ export default function Agents() {
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </div>
+    </>
   );
 }
 
@@ -290,6 +301,11 @@ function AgentDetail({ a, onCommand, reload }:
             <div className="row" style={{ gap: 6 }}>
               <Pill tone="info">Desktop agent</Pill>
               <Pill tone="info"><Icon name="server" size={11} /> {a.node_name || "Control plane"}</Pill>
+            </div>
+            <VersionPill version={a.version} updateAvailable={a.update_available} />
+            <div className="faint" style={{ fontSize: 11 }}>
+              {a.version_updated_at ? `Updated ${timeAgo(a.version_updated_at)}` : "Update time unknown"}
+              {a.production_version ? ` · production v${a.production_version.slice(0, 12)}` : ""}
             </div>
           </div>
         </div>

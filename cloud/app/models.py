@@ -229,6 +229,7 @@ class Appliance(Base):
     state = Column(String, default="PROVISIONING")  # spec 4.2 state machine
     isolation_state = Column(String, default="sealed")
     software_version = Column(String, default="0.0.0")
+    version_updated_at = Column(DateTime, nullable=True)  # when software_version last changed
     last_heartbeat_at = Column(DateTime, nullable=True)
     last_attestation_at = Column(DateTime, nullable=True)
     attestation_ok = Column(Boolean, default=False)
@@ -307,6 +308,7 @@ class DesktopAgent(Base):
     platform = Column(String, default="macos")
     hostname = Column(String, default="")
     version = Column(String, default="1.0.0")
+    version_updated_at = Column(DateTime, nullable=True)  # when version last changed
     state = Column(String, default="active")  # active | offline | quarantined
     collectors = Column(JSON, default=list)  # e.g. ["onepassword"]
     config = Column(JSON, default=dict)  # destinations, schedule, collector opts
@@ -611,6 +613,7 @@ class Node(Base):
     status = Column(String, default="active")        # active | draining | offline | maintenance
     is_self = Column(Boolean, default=False)         # the running instance
     version = Column(String, default="")
+    version_updated_at = Column(DateTime, nullable=True)  # when version last changed
     telemetry = Column(JSON, default=dict)           # cpu/mem/disk/storage snapshot
     cloud = Column(JSON, default=dict)               # detected provider/region/instance (IMDS)
     # Which platform service objects this node uses (one of each). The running

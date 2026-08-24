@@ -4,6 +4,7 @@ import { Card, Pill, bytes, timeAgo, serverDate, fmtAbsolute, Loading } from "..
 import { Icon } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { confirmDialog, notify, promptDialog } from "../components/dialog";
+import { VersionPill, ProductionVersion } from "../components/VersionBadge";
 import { ApplianceStatePill } from "./Dashboard";
 import { useAuth } from "../auth";
 
@@ -34,6 +35,7 @@ interface Command { type: string; status: string; sequence: number; created_at: 
 interface Appliance {
   id: string; serial: string; model: string; name: string; location_label: string;
   state: string; isolation_state: string; software_version: string;
+  production_version?: string | null; update_available?: boolean; version_updated_at?: string | null;
   attestation_ok: boolean; tamper_state: string;
   last_heartbeat_at: string | null; last_attestation_at: string | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -108,6 +110,7 @@ export default function Appliances() {
   const [installCmd, setInstallCmd] = useState<string | null>(null);
   const [toast, setToast] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const [prodVersion, setProdVersion] = useState<string>("");
 
   async function load() {
     try {
@@ -124,6 +127,7 @@ export default function Appliances() {
   }
   useEffect(() => {
     void load();
+    api.get<{ production_version: string }>("/appliances/versions").then((r) => setProdVersion(r.production_version)).catch(() => {});
     const t = setInterval(load, 8000);
     return () => clearInterval(t);
   }, [selected?.id]);
@@ -178,6 +182,11 @@ export default function Appliances() {
   if (!loaded && apps.length === 0) return <Loading label="Loading appliances…" />;
 
   return (
+    <>
+    <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
+      <h2 style={{ margin: 0 }}>Appliances</h2>
+      <ProductionVersion label="Current appliance software" version={prodVersion} />
+    </div>
     <div className="grid grid-2" style={{ alignItems: "start" }}>
       <div style={{ minWidth: 0 }}>
         {canAdmin && (
@@ -246,9 +255,10 @@ export default function Appliances() {
               </div>
               <StatusDot color={isOnline(a) ? "#35d0a5" : "#6b7688"} pulse={isOnline(a)} />
             </div>
-            <div className="row" style={{ gap: 12, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)" }}>
+            <div className="row" style={{ gap: 12, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)", flexWrap: "wrap" }}>
               <OnlinePill a={a} />
               <HealthPill a={a} />
+              <VersionPill version={a.software_version} updateAvailable={a.update_available} />
             </div>
           </div>
         ))}
@@ -265,6 +275,7 @@ export default function Appliances() {
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </div>
+    </>
   );
 }
 
@@ -368,6 +379,11 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
                 </Pill>
               )}
               <ApplianceStatePill state={a.state} isolation={a.isolation_state} ok={a.attestation_ok} />
+            </div>
+            <VersionPill version={a.software_version} updateAvailable={a.update_available} />
+            <div className="faint" style={{ fontSize: 11 }}>
+              {a.version_updated_at ? `Updated ${timeAgo(a.version_updated_at)}` : "Update time unknown"}
+              {a.production_version ? ` · production v${a.production_version.slice(0, 12)}` : ""}
             </div>
           </div>
         </div>

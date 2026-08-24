@@ -198,6 +198,9 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE connector_accounts ADD COLUMN last_error_at TIMESTAMP",
         "ALTER TABLE appliance_storages ADD COLUMN used_bytes INTEGER DEFAULT 0",
         "ALTER TABLE appliance_storages ADD COLUMN health JSON",
+        "ALTER TABLE nodes ADD COLUMN version_updated_at TIMESTAMP",
+        "ALTER TABLE appliances ADD COLUMN version_updated_at TIMESTAMP",
+        "ALTER TABLE desktop_agents ADD COLUMN version_updated_at TIMESTAMP",
         # Per-user vault ownership (data partitioning). Backfill legacy/shared
         # vaults to the org owner so no vault is left unassigned.
         "ALTER TABLE vaults ADD COLUMN owner_user_id VARCHAR",

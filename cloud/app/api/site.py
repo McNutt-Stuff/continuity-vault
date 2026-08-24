@@ -169,7 +169,9 @@ def node_heartbeat(body: NodeHeartbeat,
     if node is None:
         node = Node(name=body.name, role=body.role, is_self=False)
         db.add(node)
-    node.version = body.version or node.version
+    if body.version and body.version != node.version:
+        node.version = body.version
+        node.version_updated_at = _now()
     node.endpoint = body.endpoint or node.endpoint
     node.telemetry = body.telemetry or {}
     node.cloud = body.cloud or {}
