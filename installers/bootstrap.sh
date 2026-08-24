@@ -46,7 +46,7 @@ if [ "$ROLE" != "control-plane" ]; then
 fi
 
 # ---- Control plane: git-based from the upstream repo ----
-REPO_URL="${CV_REPO_URL:-https://github.com/mcnutter1/continuity-vault.git}"
+REPO_URL="${CV_REPO_URL:-https://github.com/McNutt-Stuff/continuity-vault.git}"
 command -v git >/dev/null 2>&1 || { apt-get update -y && apt-get install -y git; }
 git config --global --add safe.directory "$SRC_DIR" 2>/dev/null || true
 if [ -d "$SRC_DIR/.git" ]; then

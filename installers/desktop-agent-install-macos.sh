@@ -15,7 +15,7 @@
 #
 set -euo pipefail
 
-REPO_URL="${ARKIVE_REPO_URL:-https://github.com/mcnutter1/continuity-vault.git}"
+REPO_URL="${ARKIVE_REPO_URL:-https://github.com/McNutt-Stuff/continuity-vault.git}"
 REPO_BRANCH="${ARKIVE_REPO_BRANCH:-main}"
 HOME_DIR="${ARKIVE_AGENT_HOME:-$HOME/.arkive/home}"
 DATA_DIR="${ARKIVE_AGENT_DIR:-$HOME/.arkive-agent}"

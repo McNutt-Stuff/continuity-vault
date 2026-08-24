@@ -336,7 +336,7 @@ sudo nano /etc/arkive-update.env      # set CV_REPO_URL and CV_REPO_BRANCH
 
 ```bash
 # cloud (first run clones the repo to /opt/arkive-src)
-sudo CV_REPO_URL=https://github.com/mcnutter1/continuity-vault.git \
+sudo CV_REPO_URL=https://github.com/McNutt-Stuff/continuity-vault.git \
      CV_DOMAIN=vault.arkive.life ~/arkive/updater/git-update.sh cloud
 
 # after the first run, config comes from /etc/arkive-update.env:

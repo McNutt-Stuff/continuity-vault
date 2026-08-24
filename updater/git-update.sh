@@ -22,7 +22,7 @@ set -Eeuo pipefail
 COMPONENT="${1:-cloud}"
 CV_SRC_DIR="${CV_SRC_DIR:-/opt/arkive-src}"
 CV_REPO_BRANCH="${CV_REPO_BRANCH:-}"   # empty => auto-detect the default branch
-DEFAULT_REPO="https://github.com/mcnutter1/continuity-vault.git"
+DEFAULT_REPO="https://github.com/McNutt-Stuff/continuity-vault.git"
 
 # Optional config file.
 if [[ -f /etc/arkive-update.env ]]; then
