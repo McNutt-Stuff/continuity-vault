@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import { Card, Pill, bytes, serverDate, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
+import { JobKindBadge } from "../components/JobKindBadge";
 import { confirmDialog, notify } from "../components/dialog";
 import { FolderPicker, FolderNode } from "../components/FolderPicker";
 
@@ -35,6 +36,7 @@ interface Mapping {
   supports_since?: boolean; since_date?: string;
   is_picker?: boolean; reminder_days?: number;
   config?: FileConfig;
+  backfill?: { enabled: boolean; done: boolean; count: number; started_at?: string | null; completed_at?: string | null } | null;
 }
 interface ActivityEvent {
   kind: string; collection_id?: string; source: string; source_type?: string;
@@ -139,8 +141,10 @@ export default function Mappings() {
     return (activity?.events || []).filter((e) => e.collection_id === collectionId).slice(0, 40);
   }
 
-  function jobFor(collectionId: string): Job | undefined {
-    return (activity?.jobs || []).find((j) => j.collection_id === collectionId);
+  // All in-flight jobs for a mapping — a dual-track source can have a recent Sync
+  // and a deep-history Backfill running at once.
+  function jobsFor(collectionId: string): Job[] {
+    return (activity?.jobs || []).filter((j) => j.collection_id === collectionId);
   }
 
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
@@ -451,11 +455,12 @@ export default function Mappings() {
                 )}
                 {!editing && (() => {
                   const evs = eventsFor(m.id);
-                  const job = jobFor(m.id);
-                  const isSyncing = !!syncing[m.id] || !!job;
+                  const jobs = jobsFor(m.id);
+                  const job = jobs[0];
+                  const isSyncing = !!syncing[m.id] || jobs.length > 0;
                   const expanded = openActivity[m.id] || isSyncing;
                   const latest = evs[0];
-                  const pct = job && job.total > 0 ? Math.min(100, (job.processed / job.total) * 100) : 0;
+                  const bf = m.backfill;
                   return (
                     <div style={{ marginTop: 8 }}>
                       <button
@@ -482,15 +487,33 @@ export default function Mappings() {
                       </button>
                       {expanded && (
                         <div className="map-activity">
-                          {job && (
-                            <div className="stack" style={{ gap: 6 }}>
-                              <div className="spread faint" style={{ fontSize: 12 }}>
-                                <span>{job.message || "Working…"}</span>
-                                {job.total > 0 && <span>{job.processed}/{job.total}</span>}
+                          {jobs.map((jb) => {
+                            const jpct = jb.total > 0 ? Math.min(100, (jb.processed / jb.total) * 100) : 0;
+                            return (
+                              <div key={jb.id} className="stack" style={{ gap: 6, marginBottom: 4 }}>
+                                <div className="spread faint" style={{ fontSize: 12 }}>
+                                  <span className="row" style={{ gap: 6, alignItems: "center" }}>
+                                    <JobKindBadge kind={jb.kind} />
+                                    <span>{jb.message || (jb.kind === "backfill" ? "Crawling history…" : "Working…")}</span>
+                                  </span>
+                                  {jb.total > 0 && <span>{jb.processed}/{jb.total}</span>}
+                                </div>
+                                <div className={`progress ${jb.kind === "backfill" ? "backfill" : ""}`}>
+                                  <span style={{ width: jb.total > 0 ? `${jpct}%` : "40%", opacity: jb.total > 0 ? 1 : 0.5 }} />
+                                </div>
                               </div>
-                              <div className="progress">
-                                <span style={{ width: job.total > 0 ? `${pct}%` : "40%", opacity: job.total > 0 ? 1 : 0.5 }} />
-                              </div>
+                            );
+                          })}
+                          {bf?.enabled && !jobs.some((jb) => jb.kind === "backfill") && (
+                            <div className="row" style={{ gap: 6, alignItems: "center", fontSize: 11.5, marginBottom: 4 }}>
+                              <JobKindBadge kind="backfill" />
+                              <span className="faint">
+                                {bf.done
+                                  ? `Full history captured — ${(bf.count || 0).toLocaleString()} items${bf.completed_at ? ` · ${fmtTime(bf.completed_at)}` : ""}`
+                                  : bf.started_at
+                                    ? `Backfilling deep history — ${(bf.count || 0).toLocaleString()} items so far (paced)`
+                                    : "Deep-history backfill queued"}
+                              </span>
                             </div>
                           )}
                           {!job && isSyncing && (

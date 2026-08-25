@@ -8,6 +8,7 @@ import { FilterBar } from "../components/FilterBar";
 import { promptDialog, formDialog, confirmDialog, notify } from "../components/dialog";
 import { Ring, Sparkline, AreaChart } from "../components/charts";
 import { VersionPill, ProductionVersion } from "../components/VersionBadge";
+import { JobKindBadge } from "../components/JobKindBadge";
 
 export interface AdminSection { key: string; label: string; icon: IconName; group: string; }
 
@@ -1348,7 +1349,8 @@ function Workers() {
         </button>
       </div>
       <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
-        Background backup / sync jobs across all tenants. Stopping a worker aborts it at its next chunk boundary.
+        Background jobs across all tenants: recent <b>Sync</b> (scheduled / manual) and paced deep-history <b>Backfill</b> crawls.
+        Stopping a worker aborts it at its next chunk boundary.
       </div>
       <table className="table">
         <thead><tr><th></th><th>Tenant / Source</th><th>Node</th><th>Result</th><th>Time</th><th></th></tr></thead>
@@ -1361,7 +1363,10 @@ function Workers() {
                 </span>
               </td>
               <td>
-                <div style={{ fontWeight: 600 }}>{j.tenant}{j.owner ? ` → ${j.owner}` : ""}</div>
+                <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                  <span style={{ fontWeight: 600 }}>{j.tenant}{j.owner ? ` → ${j.owner}` : ""}</span>
+                  <JobKindBadge kind={j.kind} />
+                </div>
                 <div className="faint" style={{ fontSize: 11 }}>{j.source}{j.source_username && j.source_username !== j.source ? ` (${j.source_username})` : ""}</div>
               </td>
               <td style={{ whiteSpace: "nowrap" }}>{j.node || "Control plane"}</td>
@@ -1370,6 +1375,11 @@ function Workers() {
                   <span title={j.status} style={{ width: 9, height: 9, borderRadius: 999, background: statusColor(j.status), flexShrink: 0 }} />
                   <span className="faint">{(j.processed || 0).toLocaleString()}{j.total ? ` / ${(j.total).toLocaleString()}` : ""}</span>
                 </div>
+                {isActive(j.status) && j.total > 0 && (
+                  <div className={`progress ${j.kind === "backfill" ? "backfill" : ""}`} style={{ marginTop: 4, maxWidth: 160 }}>
+                    <span style={{ width: `${Math.min(100, (j.processed / j.total) * 100)}%` }} />
+                  </div>
+                )}
                 {(j.source_type || j.message) && (
                   <div className="faint" style={{ fontSize: 10.5 }}>{j.source_type || j.kind}{j.message ? ` · ${j.message}` : ""}</div>
                 )}

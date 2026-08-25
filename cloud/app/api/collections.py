@@ -230,6 +230,25 @@ def _collection_view(db: Session, c: Collection) -> dict:
         # a reminder nudges them on a cadence.
         "is_picker": bool(conn and conn.capabilities().picker),
         "reminder_days": int((c.config or {}).get("reminderDays") or 3),
+        # Deep-history backfill status (dual-track sources opted in by an admin):
+        # its own paced background crawl, separate from the recent/scheduled sync.
+        "backfill": _backfill_view(c, conn, account),
+    }
+
+
+def _backfill_view(c: Collection, conn, account) -> dict | None:
+    from .. import platform_config
+    caps = conn.capabilities() if conn else None
+    if not (caps and caps.dual_track and platform_config.source_backfill_enabled(c.source_type)):
+        return None
+    return {
+        "enabled": True,
+        "done": bool(account.backfill_done) if account else False,
+        "count": int(account.backfill_count or 0) if account else 0,
+        "started_at": (account.backfill_started_at.isoformat()
+                       if account and account.backfill_started_at else None),
+        "completed_at": (account.backfill_completed_at.isoformat()
+                         if account and account.backfill_completed_at else None),
     }
 
 

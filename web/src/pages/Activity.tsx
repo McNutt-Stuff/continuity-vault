@@ -3,6 +3,7 @@ import { api } from "../api";
 import { Card, Pill, Stat, bytes, serverDate, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
+import { JobKindBadge } from "../components/JobKindBadge";
 
 interface Event {
   kind: string; source: string; source_username?: string | null; source_type?: string; destination?: string;
@@ -111,12 +112,15 @@ export default function ActivityPage() {
                   <SourceGlyph type={j.source_type} size={18} />
                 </div>
                 <div className="flex1">
-                  <div style={{ fontWeight: 600 }}>{j.source}{j.source_username && j.source_username !== j.source ? <span className="faint" style={{ fontWeight: 400 }}> ({j.source_username})</span> : null}</div>
+                  <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                    <span style={{ fontWeight: 600 }}>{j.source}{j.source_username && j.source_username !== j.source ? <span className="faint" style={{ fontWeight: 400 }}> ({j.source_username})</span> : null}</span>
+                    <JobKindBadge kind={j.kind} />
+                  </div>
                   <div className="spread faint" style={{ fontSize: 12, margin: "4px 0" }}>
-                    <span>{j.message || "Working…"}</span>
+                    <span>{j.message || (j.kind === "backfill" ? "Crawling history…" : "Working…")}</span>
                     {j.total > 0 && <span>{j.processed}/{j.total}</span>}
                   </div>
-                  <div className="progress">
+                  <div className={`progress ${j.kind === "backfill" ? "backfill" : ""}`}>
                     <span style={{ width: j.total > 0 ? `${pct}%` : "40%", opacity: j.total > 0 ? 1 : 0.5 }} />
                   </div>
                 </div>
