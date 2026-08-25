@@ -18,8 +18,11 @@ email viewer render headers, body and attachments.
 from __future__ import annotations
 
 import base64
+import gzip
+import html
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -231,6 +234,124 @@ def _collect_notes(con, cols, table, out, seen):
             body[:160], {"kind": "note"}, ["Outlook", "Notes"]))
 
 
+# --------------------------------------------------------------------------- #
+# New Outlook for Mac (EFM store)                                              #
+# --------------------------------------------------------------------------- #
+# "New Outlook" leaves the legacy Mail table empty and instead stores each
+# message body as gzipped HTML under Files/S0/<n>/EFMData/<id>.dat. The envelope
+# (From/To/Subject/Sent) is rendered inside that HTML as a header block, so we
+# parse it back out; the raw block store that would hold it structurally is
+# opaque. We back up the body + recovered headers as a viewable email.
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+_HDR_RE = {
+    "from": re.compile(r"<b>\s*From:\s*</b>\s*(.*?)\s*<", re.I | re.S),
+    "to": re.compile(r"<b>\s*To:\s*</b>\s*(.*?)\s*<", re.I | re.S),
+    "subject": re.compile(r"<b>\s*Subject:\s*</b>\s*(.*?)\s*<", re.I | re.S),
+    "date": re.compile(r"<b>\s*(?:Sent|Date):\s*</b>\s*(.*?)\s*<", re.I | re.S),
+}
+_DATE_FORMATS = (
+    "%A, %d %B %Y at %H:%M", "%A, %B %d, %Y at %H:%M",
+    "%A, %d %B %Y %H:%M:%S", "%A, %B %d, %Y %H:%M:%S",
+    "%A, %d %B %Y %H:%M", "%A, %B %d, %Y %H:%M",
+    "%A, %B %d, %Y %I:%M %p", "%A, %d %B %Y %I:%M %p",
+)
+
+
+def _html_to_text(html_str: str) -> str:
+    text = html.unescape(_TAG_RE.sub(" ", html_str))
+    return _WS_RE.sub(" ", text).strip()
+
+
+def _hdr(html_str: str, key: str) -> str:
+    m = _HDR_RE[key].search(html_str)
+    if not m:
+        return ""
+    return _WS_RE.sub(" ", html.unescape(_TAG_RE.sub(" ", m.group(1)))).strip()
+
+
+def _parse_hdr_date(s: str) -> Optional[str]:
+    s = (s or "").strip()
+    if not s:
+        return None
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _iso_mtime(p: Path) -> Optional[str]:
+    try:
+        return datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        return None
+
+
+def _wrap_html_email(subject: str, frm: str, to: str, when: Optional[str],
+                     date_text: str, html_body: str) -> bytes:
+    hdr = []
+    if frm:
+        hdr.append(f"From: {frm}")
+    if to:
+        hdr.append(f"To: {to}")
+    hdr.append(f"Subject: {subject}")
+    if date_text or when:
+        hdr.append(f"Date: {date_text or when}")
+    hdr += ["MIME-Version: 1.0", "Content-Type: text/html; charset=utf-8"]
+    return ("\r\n".join(hdr) + "\r\n\r\n" + html_body).encode("utf-8", "replace")
+
+
+def _efm_dirs(profile_root: Path) -> List[Path]:
+    files = profile_root / "Files"
+    if not files.exists():
+        return []
+    return [d for d in files.rglob("EFMData") if d.is_dir()]
+
+
+def _collect_new_outlook(profile_root: Path, out: List[dict], seen: set) -> Tuple[int, int]:
+    """Returns (messages, with_headers)."""
+    n = with_hdr = 0
+    for efm in _efm_dirs(profile_root):
+        for p in sorted(efm.glob("*.dat")):
+            oid = f"outlook_local:mail:efm:{p.stem}"
+            if oid in seen:
+                continue
+            try:
+                if p.stat().st_size > _MAX_MIME_BYTES:
+                    continue
+                body = gzip.decompress(p.read_bytes()).decode("utf-8", "replace")
+            except (OSError, EOFError, gzip.BadGzipFile):
+                continue
+            text = _html_to_text(body)
+            if not text:
+                continue
+            seen.add(oid)
+            subject = _hdr(body, "subject")
+            frm = _hdr(body, "from")
+            to = _hdr(body, "to")
+            date_text = _hdr(body, "date")
+            when = _parse_hdr_date(date_text) or _iso_mtime(p)
+            if subject or frm:
+                with_hdr += 1
+            title = subject or (text[:80].strip() or "Outlook message")
+            preview = (f"{frm} · " if frm else "") + text[:180]
+            out.append(_obj(
+                oid, "email", title,
+                _wrap_html_email(title, frm, to, when, date_text, body), preview,
+                {"kind": "email", "from": frm, "to": to, "date": when,
+                 "date_text": date_text, "folder": "", "has_mime": True,
+                 "content_backed_up": True, "source": "new-outlook",
+                 "meta_source": "header" if subject else "body", "modified": when},
+                ["Outlook", "Mail"]))
+            n += 1
+            if n >= _MAX_ROWS:
+                return n, with_hdr
+    return n, with_hdr
+
+
 def collect(config: Optional[dict] = None,
             state: Optional[dict] = None) -> Tuple[List[dict], dict]:
     """Collect Outlook mail/contacts/calendar/notes from every local profile.
@@ -297,6 +418,19 @@ def collect(config: Optional[dict] = None,
             # (why a category came back empty) is diagnosable without verbose mode.
             log.info("outlook_local: table inventory: %s", ", ".join(inventory) or "(none)")
             con.close()
+            # New Outlook fallback: the legacy Mail table is empty, so pull the
+            # readable message bodies (and headers parsed from them) from EFM.
+            if _want("mail") and counts["mail"] == 0:
+                efm, with_hdr = _collect_new_outlook(data_dir.parent, out, seen)
+                counts["mail"] += efm
+                if efm:
+                    log.warning("outlook_local: legacy Mail table empty (New Outlook) — "
+                                "recovered %d message(s) from EFM, %d with Subject/Sender/Date "
+                                "parsed from the message header. Some are thread-derived; "
+                                "switch Outlook to Legacy for authoritative envelopes.",
+                                efm, with_hdr)
+                else:
+                    log.info("outlook_local: no EFM message bodies found either")
         except Exception as exc:  # noqa: BLE001
             log.warning("outlook_local: profile %s unreadable: %s", data_dir, exc)
         finally:

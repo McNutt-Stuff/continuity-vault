@@ -657,9 +657,19 @@ class Agent:
         destinations = self.reg.get("config", {}).get("destinations", ["cv-cloud"])
         self.log.info("imessage: starting collection → destinations=%s", destinations)
         if not imessage.available():
-            self.log.warning("imessage: Messages database not found at %s — nothing to "
-                             "collect (grant Full Disk Access to the agent?)", imessage._CHAT_DB)
-            return {"objects": 0, "results": [{"collector": "imessage", "skipped": "no Messages DB"}]}
+            if imessage._CHAT_DB.exists():
+                # The file is there but macOS TCC blocks the read: Full Disk
+                # Access must be granted to THIS exact binary, not Terminal/etc.
+                self.log.warning("imessage: %s exists but is unreadable (macOS Full Disk "
+                                 "Access). Grant FDA to this binary and restart the agent: %s "
+                                 "(System Settings › Privacy & Security › Full Disk Access)",
+                                 imessage._CHAT_DB, sys.executable)
+                reason = "no Full Disk Access"
+            else:
+                self.log.warning("imessage: no Messages database at %s (Messages app never "
+                                 "used on this Mac?)", imessage._CHAT_DB)
+                reason = "no Messages DB"
+            return {"objects": 0, "results": [{"collector": "imessage", "skipped": reason}]}
         state = self._load_json_state(self._imessage_state_file)
         self.log.info("imessage: reading new messages since ROWID %s…", state.get("last_rowid", 0))
         objects, new_state = imessage.collect(params.get("file_config") or {}, state)
