@@ -30,7 +30,9 @@ type IconName =
   | "edit"
   | "trash"
   | "sun"
-  | "moon";
+  | "moon"
+  | "insights"
+  | "sparkle";
 
 const paths: Record<IconName, ReactNode> = {
   shield: <path d="M12 2l7 3v6c0 4.5-3 8-7 11-4-3-7-6.5-7-11V5l7-3z" />,
@@ -187,6 +189,14 @@ const paths: Record<IconName, ReactNode> = {
       <path d="M10 11v6M14 11v6" />
     </>
   ),
+  insights: (
+    <>
+      <path d="M4 20V4" />
+      <path d="M4 20h16" />
+      <path d="M7 16l4-5 3 3 5-7" />
+    </>
+  ),
+  sparkle: <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />,
 };
 
 export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {

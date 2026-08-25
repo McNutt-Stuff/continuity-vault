@@ -706,6 +706,25 @@ def update_user(uid: str, body: UserUpdate,
     return _user_view(u)
 
 
+@router.post("/users/{uid}/insights")
+def generate_user_insights(uid: str,
+                           principal: security.Principal = Depends(security.require_platform_admin),
+                           db: Session = Depends(get_db)):
+    """Generate (refresh) a user's digital-footprint insights report on demand."""
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "user not found")
+    from ..workers.insights import generate_for_user
+    row = generate_for_user(db, u)
+    stats = row.stats or {}
+    audit.record(db, actor=principal.user_id, action="admin.user_insights_generated",
+                 tenant_id=u.tenant_id, category="admin", detail={"email": u.email})
+    return {"ok": True, "status": row.status,
+            "generated_at": row.generated_at.isoformat() if row.generated_at else None,
+            "object_count": stats.get("object_count", 0),
+            "card_count": len(row.cards or [])}
+
+
 @router.delete("/users/{uid}")
 def delete_user(uid: str,
                 principal: security.Principal = Depends(security.require_platform_admin),

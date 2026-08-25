@@ -789,3 +789,20 @@ class ServiceObject(Base):
         caps = [c for c in (self.capabilities or []) if c in STORAGE_CAPABILITIES]
         return caps or list(STORAGE_CAPABILITIES)
 
+
+class UserInsights(Base):
+    """Precomputed digital-footprint insights for one user, refreshed by a daily
+    background job so the Insights page loads instantly. Holds the footprint
+    timeline, the derived insight cards, and headline stats as ready-to-render
+    JSON (no per-request mining of the index)."""
+
+    __tablename__ = "user_insights"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, unique=True, index=True)
+    status = Column(String, default="ready")  # ready | insufficient_data
+    generated_at = Column(DateTime, default=_now)
+    timeline = Column(JSON, default=dict)   # footprint-over-time series
+    cards = Column(JSON, default=list)      # derived insight cards
+    stats = Column(JSON, default=dict)      # headline summary numbers
+

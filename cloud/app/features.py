@@ -16,11 +16,13 @@ from __future__ import annotations
 # flag name -> default when neither user nor tenant sets it
 FLAGS: dict[str, bool] = {
     "purge_enabled": True,   # may the account delete (purge) its protected data?
+    "insights_enabled": True,  # show the Insights page (digital-footprint findings)?
 }
 
 # Human labels for the admin UI.
 LABELS = {
     "purge_enabled": "Allow data purge",
+    "insights_enabled": "Digital-footprint Insights",
 }
 
 

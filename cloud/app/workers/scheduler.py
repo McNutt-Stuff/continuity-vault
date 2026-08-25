@@ -26,6 +26,7 @@ logger = logging.getLogger("cv.scheduler")
 _thread: threading.Thread | None = None
 _scope_logged = False
 _last_cloud_purge: datetime | None = None
+_last_insights: datetime | None = None
 
 
 def _now() -> datetime:
@@ -65,6 +66,10 @@ def start_scheduler() -> None:
                 _purge_cloud_unsubscribed()
             except Exception:  # noqa: BLE001
                 logger.exception("cloud-unsubscribe purge failed")
+            try:
+                _run_daily_insights()
+            except Exception:  # noqa: BLE001
+                logger.exception("insight generation failed")
             time.sleep(tick)
 
     _thread = threading.Thread(target=loop, name="cv-sync-scheduler", daemon=True)
@@ -120,6 +125,18 @@ def _purge_recovered() -> None:
         n = purge_expired(db)
         if n:
             logger.info("purged %d expired recovery window(s)", n)
+
+
+def _run_daily_insights() -> None:
+    """Refresh every enabled user's digital-footprint insights once per day so the
+    Insights page always loads instantly. Checked at most every ~24h."""
+    global _last_insights
+    now = datetime.utcnow()
+    if _last_insights and (now - _last_insights) < timedelta(hours=24):
+        return
+    _last_insights = now
+    from .insights import generate_all
+    generate_all()
 
 
 def _effective_interval(c: Collection, default_minutes: int, caps=None) -> int:

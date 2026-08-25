@@ -85,6 +85,22 @@ async function editUserDialog(u: any, isShared: boolean): Promise<boolean> {
   return true;
 }
 
+// Generate (refresh) a user's digital-footprint insights report on demand.
+async function generateInsightsFor(u: any): Promise<void> {
+  try {
+    const r = await api.post<{ status: string; object_count: number; card_count: number }>(
+      `/admin/users/${u.id}/insights`, {});
+    notify({
+      message: r.status === "ready"
+        ? `Insights generated for ${u.email}: ${r.card_count} card(s) from ${r.object_count.toLocaleString()} objects.`
+        : `Not enough data yet to build insights for ${u.email}.`,
+      tone: r.status === "ready" ? "info" : "warn",
+    });
+  } catch (e) {
+    notify({ message: (e as Error)?.message || "Could not generate insights", tone: "danger" });
+  }
+}
+
 // Left-nav sections for the admin console (M365-style, grouped).
 export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "overview", label: "Overview", icon: "grid", group: "" },
@@ -403,7 +419,9 @@ function Users() {
                 <td style={{ textAlign: "right" }}>{money(u.billing_monthly || 0)}/mo</td>
                 <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
                 <td style={{ textAlign: "right" }}>
-                  <button className="btn ghost sm" onClick={async () => { try { if (await editUserDialog(u, u.tenant_type === "shared")) void load(); } catch { /* ignore */ } }}>Edit</button>
+                  <button className="btn ghost sm" title="Generate a digital-footprint insights report"
+                          onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /> Insights</button>{" "}
+                  <button className="btn ghost sm" onClick={async () => { try { if (await editUserDialog(u, u.tenant_type === "shared")) void load(); } catch { /* ignore */ } }}>Manage</button>
                 </td>
               </tr>
             ))}
@@ -654,7 +672,8 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
                     <td>{money(u.billing?.total_monthly || 0)}/mo<div className="faint" style={{ fontSize: 11 }}>{u.billing?.plan?.name || "Personal"}</div></td>
                     <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                      <button className="btn ghost sm" onClick={() => editUser(u)}>Edit</button>{" "}
+                      <button className="btn ghost sm" onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /></button>{" "}
+                      <button className="btn ghost sm" onClick={() => editUser(u)}>Manage</button>{" "}
                       <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
                       <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
                     </td>
@@ -674,7 +693,8 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
                   <td><Pill tone="info">{u.role}</Pill></td>
                   <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
                   <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                    <button className="btn ghost sm" onClick={() => editUser(u)}>Edit</button>{" "}
+                    <button className="btn ghost sm" onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /></button>{" "}
+                    <button className="btn ghost sm" onClick={() => editUser(u)}>Manage</button>{" "}
                     <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
                     <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
                   </td>

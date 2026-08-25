@@ -9,6 +9,7 @@ import { api } from "./api";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Search from "./pages/Search";
+import Insights from "./pages/Insights";
 import Connectors from "./pages/Connectors";
 import Mappings from "./pages/Mappings";
 import Appliances from "./pages/Appliances";
@@ -24,7 +25,7 @@ import Organization from "./pages/Organization";
 
 const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/", label: "Overview", icon: "grid" },
-  { to: "/onboarding", label: "Protection Setup", icon: "shield" },
+  { to: "/insights", label: "Insights", icon: "insights" },
   { to: "/search", label: "Unified Search", icon: "search" },
   { to: "/connectors", label: "Sources", icon: "link" },
   { to: "/mappings", label: "Data Map", icon: "database" },
@@ -64,6 +65,7 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/onboarding" element={<Onboarding />} />
             <Route path="/search" element={<Search />} />
+            {me.features?.insights_enabled !== false && <Route path="/insights" element={<Insights />} />}
             <Route path="/connectors" element={<Connectors />} />
             <Route path="/mappings" element={<Mappings />} />
             <Route path="/activity" element={<ActivityPage />} />
@@ -95,6 +97,7 @@ function Sidebar() {
   }, []);
   const nav = NAV.filter((n) => {
     if (n.to === "/audit" && !me?.can_admin) return false;  // org-level, admin only
+    if (n.to === "/insights" && me?.features?.insights_enabled === false) return false;
     const req = NAV_REQUIRES[n.to];
     if (!req || !options || options.length === 0) return true;  // unconfigured → show all
     return options.includes(req);
@@ -170,7 +173,7 @@ function Sidebar() {
 }
 
 function TopBar() {
-  const { me, stepUp, logout } = useAuth();
+  const { me, stepUp } = useAuth();
   const loc = useLocation();
   const adminKey = loc.pathname.startsWith("/admin/") ? loc.pathname.split("/")[2] : null;
   const title = adminKey
@@ -193,19 +196,49 @@ function TopBar() {
             <Icon name="key" size={14} /> {me?.passkeys?.length ? "Unlock with passkey" : "Set up a passkey"}
           </button>
         )}
-        <div className="row">
-          <div className="brand-logo" style={{ width: 30, height: 30, fontSize: 12 }}>
-            {me?.display_name?.slice(0, 2).toUpperCase()}
-          </div>
-          <div className="stack">
-            <div style={{ fontSize: 13, fontWeight: 600 }}>{me?.display_name}</div>
-            <div className="faint" style={{ fontSize: 11 }}>{me?.role}</div>
-          </div>
-        </div>
-        <button className="btn ghost sm" onClick={logout} title="Sign out">
-          <Icon name="logout" size={15} />
-        </button>
+        <AccountMenu />
       </div>
+    </div>
+  );
+}
+
+function AccountMenu() {
+  const { me, logout } = useAuth();
+  const nav = useNavigate();
+  const [open, setOpen] = useState(false);
+  const go = (to: string) => { setOpen(false); nav(to); };
+  return (
+    <div style={{ position: "relative" }}>
+      <button className="account-trigger" onClick={() => setOpen((o) => !o)}>
+        <div className="brand-logo" style={{ width: 30, height: 30, fontSize: 12 }}>
+          {me?.display_name?.slice(0, 2).toUpperCase()}
+        </div>
+        <div className="stack" style={{ textAlign: "left" }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>{me?.display_name}</div>
+          <div className="faint" style={{ fontSize: 11 }}>{me?.role}</div>
+        </div>
+      </button>
+      {open && (
+        <>
+          <div className="fs-overlay" onClick={() => setOpen(false)} />
+          <div className="account-menu">
+            <div className="account-menu-head">
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{me?.display_name}</div>
+              <div className="faint" style={{ fontSize: 11 }}>{me?.email}</div>
+            </div>
+            <button className="account-menu-item" onClick={() => go("/onboarding")}>
+              <Icon name="shield" size={15} /> Protection Setup
+            </button>
+            <button className="account-menu-item" onClick={() => go("/settings")}>
+              <Icon name="gear" size={15} /> Settings
+            </button>
+            <div className="account-menu-sep" />
+            <button className="account-menu-item danger" onClick={() => { setOpen(false); logout(); }}>
+              <Icon name="logout" size={15} /> Sign out
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
