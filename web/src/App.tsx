@@ -10,6 +10,7 @@ import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Search from "./pages/Search";
 import Insights from "./pages/Insights";
+import Integrations from "./pages/Integrations";
 import Connectors from "./pages/Connectors";
 import Mappings from "./pages/Mappings";
 import Appliances from "./pages/Appliances";
@@ -32,6 +33,7 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/activity", label: "Activity", icon: "activity" },
   { to: "/snapshots", label: "Recovery Points", icon: "clock" },
   { to: "/appliances", label: "Appliances", icon: "server" },
+  { to: "/integrations", label: "Integrations", icon: "puzzle" },
   { to: "/agents", label: "Desktop Agents", icon: "user" },
   { to: "/restore", label: "Restore", icon: "restore" },
   { to: "/audit", label: "Audit Log", icon: "shield" },
@@ -71,6 +73,7 @@ export default function App() {
             <Route path="/activity" element={<ActivityPage />} />
             <Route path="/snapshots" element={<Snapshots />} />
             <Route path="/appliances" element={<Appliances />} />
+            <Route path="/integrations" element={<Integrations />} />
             <Route path="/agents" element={<Agents />} />
             <Route path="/restore" element={<Restore />} />
             <Route path="/audit" element={<Audit />} />

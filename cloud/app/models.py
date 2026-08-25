@@ -806,3 +806,135 @@ class UserInsights(Base):
     cards = Column(JSON, default=list)      # derived insight cards
     stats = Column(JSON, default=dict)      # headline summary numbers
 
+
+class IntegrationConfig(Base):
+    """Platform-wide admin setting for an integration type (mirrors SourceConfig):
+    whether it is available to customers and its default configuration. One row
+    per integration type (e.g. ``ubiquiti``)."""
+
+    __tablename__ = "integration_configs"
+    integration_type = Column(String, primary_key=True)
+    enabled = Column(Boolean, default=True)
+    config = Column(JSON, default=dict)  # platform defaults (interval overrides, etc.)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class IntegrationInstance(Base):
+    """A customer's enabled integration. Unlike a source/connector, integrations
+    gather *auxiliary intelligence* (network/app telemetry) rather than vaulted
+    data. Runs on the tenant's appliance (LAN-local integrations) or a cloud node,
+    per the integration's declared ``runs_on``."""
+
+    __tablename__ = "integration_instances"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    owner_user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
+    integration_type = Column(String, nullable=False, index=True)
+    label = Column(String, default="")
+    enabled = Column(Boolean, default=True)
+    runs_on = Column(String, default="appliance")  # appliance | cloud
+    appliance_id = Column(String, nullable=True, index=True)  # where it runs (LAN integrations)
+    node_id = Column(String, nullable=True)
+    # Encrypted credentials (credstore blob) + non-secret config (host, interval).
+    credentials = Column(Text, nullable=True)
+    config = Column(JSON, default=dict)  # {host, poll_interval_minutes, ...}
+    poll_interval_minutes = Column(Integer, default=60)
+    status = Column(String, default="pending")  # pending | active | error | disabled
+    last_run_at = Column(DateTime, nullable=True)
+    last_success_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    last_stats = Column(JSON, default=dict)  # {clients, apps, bytes} from the last run
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class NetworkClient(Base):
+    """A device/client observed on the customer's network by an integration
+    (e.g. a computer/phone seen by the UniFi controller)."""
+
+    __tablename__ = "network_clients"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    integration_id = Column(String, index=True)
+    client_key = Column(String, index=True)  # stable id (MAC) from the source
+    name = Column(String, default="")
+    hostname = Column(String, default="")
+    ip = Column(String, default="")
+    mac = Column(String, default="")
+    is_wired = Column(Boolean, default=False)
+    is_guest = Column(Boolean, default=False)
+    device_type = Column(String, default="")  # inferred: computer | phone | iot | ...
+    # normal | ignored (out of scope) | monitored (family system, keep building)
+    monitor_state = Column(String, default="normal", index=True)
+    of_interest = Column(Boolean, default=False)  # "Client of Interest"
+    total_bytes = Column(BigInteger, default=0)
+    tx_bytes = Column(BigInteger, default=0)
+    rx_bytes = Column(BigInteger, default=0)
+    first_seen = Column(DateTime, nullable=True)
+    last_seen = Column(DateTime, nullable=True)
+    meta = Column(JSON, default=dict)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class NetworkApp(Base):
+    """An application / cloud service observed in network traffic, aggregated
+    across the tenant (e.g. Gmail, Dropbox, Netflix), with mapped source_type when
+    Arkive has a connector for it (drives shadow-source detection)."""
+
+    __tablename__ = "network_apps"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    integration_id = Column(String, index=True)
+    app_key = Column(String, index=True)  # stable id from the source (cat:app)
+    name = Column(String, default="")
+    category = Column(String, default="")
+    source_type = Column(String, default="", index=True)  # mapped connector, if any
+    total_bytes = Column(BigInteger, default=0)
+    tx_bytes = Column(BigInteger, default=0)
+    rx_bytes = Column(BigInteger, default=0)
+    sessions = Column(Integer, default=0)
+    client_count = Column(Integer, default=0)
+    of_interest = Column(Boolean, default=False)  # "App of Interest"
+    first_seen = Column(DateTime, nullable=True)
+    last_seen = Column(DateTime, nullable=True)
+    meta = Column(JSON, default=dict)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class NetworkUsage(Base):
+    """A client×app usage edge for drill-downs: how much a given device used a
+    given app (traffic volume, sessions, recency)."""
+
+    __tablename__ = "network_usage"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    integration_id = Column(String, index=True)
+    client_key = Column(String, index=True)
+    app_key = Column(String, index=True)
+    total_bytes = Column(BigInteger, default=0)
+    tx_bytes = Column(BigInteger, default=0)
+    rx_bytes = Column(BigInteger, default=0)
+    sessions = Column(Integer, default=0)
+    last_seen = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class IntegrationRun(Base):
+    """One execution of an integration (for status history + monitoring)."""
+
+    __tablename__ = "integration_runs"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    integration_id = Column(String, index=True)
+    integration_type = Column(String, default="")
+    appliance_id = Column(String, nullable=True)
+    status = Column(String, default="ok")  # ok | error
+    started_at = Column(DateTime, default=_now)
+    finished_at = Column(DateTime, nullable=True)
+    clients = Column(Integer, default=0)
+    apps = Column(Integer, default=0)
+    bytes_seen = Column(BigInteger, default=0)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+

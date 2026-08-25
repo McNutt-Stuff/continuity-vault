@@ -111,8 +111,10 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "tenants", label: "Tenants", icon: "user", group: "Customers" },
   { key: "users", label: "Users", icon: "user", group: "Customers" },
   { key: "reports", label: "Reports", icon: "activity", group: "Customers" },
+  { key: "customer-analytics", label: "Customer Analytics", icon: "insights", group: "Customers" },
   { key: "config-objects", label: "Configuration objects", icon: "key", group: "Integrations" },
   { key: "sources", label: "Sources", icon: "link", group: "Integrations" },
+  { key: "integrations", label: "Integrations", icon: "puzzle", group: "Integrations" },
   { key: "service-objects", label: "Service objects", icon: "mail", group: "Integrations" },
   { key: "pricing", label: "Pricing", icon: "database", group: "Integrations" },
   { key: "website", label: "Website", icon: "grid", group: "Integrations" },
@@ -134,11 +136,13 @@ export default function Admin() {
       {s === "tenants" && <Tenants />}
       {s === "users" && <Users />}
       {s === "reports" && <Reports />}
+      {s === "customer-analytics" && <CustomerAnalytics />}
       {s === "nodes" && <Nodes />}
       {s === "storage-usage" && <StorageUsageAdmin />}
       {s === "backups" && <BackupsAdmin />}
       {s === "config-objects" && <ConfigObjectsAdmin />}
       {s === "sources" && <SourcesAdmin />}
+      {s === "integrations" && <IntegrationsAdmin />}
       {s === "service-objects" && <><ServiceObjectsAdmin /><EmailAdmin /></>}
       {s === "fleet" && <Fleet />}
       {s === "pricing" && <Pricing />}
@@ -2866,5 +2870,192 @@ function BackupsAdmin() {
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
+  );
+}
+
+// ---- Integrations (platform enable/disable) --------------------------------
+function IntegrationsAdmin() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [flash, setFlash] = useState("");
+
+  async function load() {
+    setLoading(true);
+    try { setRows(await api.get<any[]>("/admin/integrations")); } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function toggle(r: any) {
+    try {
+      await api.put(`/admin/integrations/${r.integration_type}`, { enabled: !r.enabled });
+      setFlash(`${r.display_name} ${r.enabled ? "disabled" : "enabled"}`);
+      setTimeout(() => setFlash(""), 1800);
+      await load();
+    } catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+  }
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <h3 style={{ margin: 0 }}>Integrations</h3>
+        <span className="faint" style={{ fontSize: 12 }}>{rows.length} integration type(s)</span>
+      </div>
+      <Card>
+        <table className="table">
+          <thead><tr><th>Integration</th><th>Runs on</th><th>Category</th><th>Customers using</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.integration_type}>
+                <td>
+                  <div style={{ fontWeight: 600 }}>{r.display_name}</div>
+                  <div className="faint" style={{ fontSize: 11.5, maxWidth: 420 }}>{r.description}</div>
+                </td>
+                <td><Pill tone="info">{r.runs_on}</Pill></td>
+                <td className="faint" style={{ fontSize: 12 }}>{r.category}</td>
+                <td>{r.instances}</td>
+                <td><Pill tone={r.enabled ? "ok" : "warn"}>{r.enabled ? "enabled" : "disabled"}</Pill></td>
+                <td style={{ textAlign: "right" }}>
+                  <button className="btn ghost sm" onClick={() => toggle(r)}>{r.enabled ? "Disable" : "Enable"}</button>
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && <tr><td colSpan={6} className="muted">{loading ? "Loading…" : "No integrations registered."}</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+      {flash && <div className="toast"><Icon name="check" size={15} /> {flash}</div>}
+    </>
+  );
+}
+
+// ---- Customer Analytics (cross-customer app/service intelligence) -----------
+function CustomerAnalytics() {
+  const [scope, setScope] = useState<"platform" | "tenant">("platform");
+  const [tenantId, setTenantId] = useState("");
+  const [tenants, setTenants] = useState<any[]>([]);
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  async function load() {
+    setLoading(true);
+    const qs = new URLSearchParams({ scope });
+    if (scope === "tenant" && tenantId) qs.set("tenant_id", tenantId);
+    try { setData(await api.get<any>(`/admin/analytics?${qs.toString()}`)); } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }
+  useEffect(() => { api.get<any[]>("/admin/tenants").then(setTenants).catch(() => {}); }, []);
+  useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [scope, tenantId]);
+
+  const t = data?.totals || {};
+  const maxApp = Math.max(1, ...((data?.top_apps || []).map((a: any) => a.total_bytes)));
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <h3 style={{ margin: 0 }}>Customer Analytics</h3>
+        <div className="row" style={{ gap: 8 }}>
+          <div className="row" style={{ gap: 0, border: "1px solid var(--border-soft)", borderRadius: 8, overflow: "hidden" }}>
+            <button className={`btn sm ${scope === "platform" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }}
+                    onClick={() => setScope("platform")}>Platform</button>
+            <button className={`btn sm ${scope === "tenant" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }}
+                    onClick={() => setScope("tenant")}>By customer</button>
+          </div>
+          {scope === "tenant" && (
+            <select className="input sm" value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
+              <option value="">Select a customer…</option>
+              {tenants.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+          )}
+        </div>
+      </div>
+
+      <div className="insights-stats" style={{ marginBottom: 16 }}>
+        <AdminStat icon="activity" label="Apps & services" value={String(t.apps || 0)} tint="#c56cf0" />
+        <AdminStat icon="user" label="Clients seen" value={String(t.clients || 0)} tint="#4f7cff" />
+        <AdminStat icon="grid" label="Customers reporting" value={String(t.tenants || 0)} tint="#2dbe60" />
+        <AdminStat icon="cloud" label="Traffic observed" value={bytes(t.bytes || 0)} tint="#f5a623" />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Sources to build next</h3>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
+            Popular services seen in customer traffic that Arkive doesn't have a connector for yet.
+          </div>
+          <table className="table">
+            <thead><tr><th>Service</th><th>Kind</th><th>Customers</th><th>Traffic</th></tr></thead>
+            <tbody>
+              {(data?.recommended_sources || []).map((r: any) => (
+                <tr key={r.name}>
+                  <td style={{ fontWeight: 600 }}>{r.name}</td>
+                  <td className="faint" style={{ fontSize: 12 }}>{r.kind}</td>
+                  <td>{r.tenant_count}</td>
+                  <td>{bytes(r.total_bytes)}</td>
+                </tr>
+              ))}
+              {(data?.recommended_sources || []).length === 0 && (
+                <tr><td colSpan={4} className="muted">{loading ? "Loading…" : "No unmet sources detected yet."}</td></tr>
+              )}
+            </tbody>
+          </table>
+        </Card>
+
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Device mix</h3>
+          <div className="stack" style={{ gap: 8 }}>
+            {(data?.device_types || []).map((d: any) => (
+              <div key={d.type} className="row" style={{ gap: 10, alignItems: "center" }}>
+                <span style={{ width: 90, fontSize: 12.5, textTransform: "capitalize" }}>{d.type}</span>
+                <div style={{ flex: 1, height: 8, background: "var(--inset)", borderRadius: 4 }}>
+                  <div style={{ height: "100%", borderRadius: 4, background: "#4f7cff",
+                    width: `${(d.count / Math.max(1, ...(data?.device_types || []).map((x: any) => x.count))) * 100}%` }} />
+                </div>
+                <span className="faint" style={{ fontSize: 12, width: 40, textAlign: "right" }}>{d.count}</span>
+              </div>
+            ))}
+            {(data?.device_types || []).length === 0 && <div className="muted">No devices reported.</div>}
+          </div>
+        </Card>
+      </div>
+
+      <Card style={{ marginTop: 16 }}>
+        <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Top apps & services</h3>
+        <table className="table">
+          <thead><tr><th>App / service</th><th>Category</th><th>Source</th><th>Customers</th><th>Traffic</th></tr></thead>
+          <tbody>
+            {(data?.top_apps || []).map((a: any) => (
+              <tr key={a.name}>
+                <td>
+                  <div style={{ fontWeight: 600 }}>{a.name}</div>
+                  <div style={{ height: 4, background: "var(--inset)", borderRadius: 3, marginTop: 3, width: 160 }}>
+                    <div style={{ height: "100%", width: `${(a.total_bytes / maxApp) * 100}%`, background: "#c56cf0", borderRadius: 3 }} />
+                  </div>
+                </td>
+                <td className="faint" style={{ fontSize: 12 }}>{a.category || "—"}</td>
+                <td>{a.has_source ? <Pill tone="ok">supported</Pill> : <Pill tone="warn">no connector</Pill>}</td>
+                <td>{a.tenant_count}</td>
+                <td>{bytes(a.total_bytes)}</td>
+              </tr>
+            ))}
+            {(data?.top_apps || []).length === 0 && <tr><td colSpan={5} className="muted">{loading ? "Loading…" : "No app telemetry yet."}</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+    </>
+  );
+}
+
+function AdminStat({ icon, label, value, tint }: { icon: IconName; label: string; value: string; tint: string }) {
+  return (
+    <div className="insights-stat">
+      <div className="insights-stat-ic" style={{ background: `${tint}22`, color: tint }}>
+        <Icon name={icon} size={16} />
+      </div>
+      <div className="stack" style={{ gap: 1 }}>
+        <div style={{ fontSize: 17, fontWeight: 700 }}>{value}</div>
+        <div className="faint" style={{ fontSize: 11.5 }}>{label}</div>
+      </div>
+    </div>
   );
 }

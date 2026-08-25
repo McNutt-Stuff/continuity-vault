@@ -477,6 +477,7 @@ async def startup() -> None:
             agent.log.error("activation error: %s", exc)
     if agent.activated:
         asyncio.create_task(_heartbeat_loop())
+        asyncio.create_task(_integrations_loop())
 
 
 async def _heartbeat_loop() -> None:
@@ -491,6 +492,22 @@ async def _heartbeat_loop() -> None:
             else:
                 agent.log.error("heartbeat error: %s", exc)
         await asyncio.sleep(interval)
+
+
+async def _integrations_loop() -> None:
+    """Poll + run the appliance's enabled integrations in parallel, shipping
+    results to the node / control plane. Independent of the heartbeat so a slow
+    integration never delays signaling."""
+    from .integrations.worker import IntegrationWorker
+    worker = IntegrationWorker(agent._base, agent._headers, agent.log)
+    agent.log.info("integrations worker started")
+    while True:
+        try:
+            await worker.tick()
+        except Exception as exc:  # noqa: BLE001
+            if not _cp_unavailable(exc):
+                agent.log.error("integrations tick error: %s", exc)
+        await asyncio.sleep(60)  # re-evaluate which integrations are due each minute
 
 
 @app.get("/status")
@@ -519,6 +536,7 @@ async def activate_endpoint(body: dict):
         raise HTTPException(400, "linking_code required")
     d = await agent.activate(code)
     asyncio.create_task(_heartbeat_loop())
+    asyncio.create_task(_integrations_loop())
     return {"activated": True, "appliance_id": d["appliance_id"]}
 
 

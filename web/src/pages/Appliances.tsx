@@ -32,6 +32,11 @@ interface StoredData {
   sources?: SourceSummary[]; items: StoredItem[];
 }
 interface Command { type: string; status: string; sequence: number; created_at: string; }
+interface ApplianceIntegration {
+  id: string; integration_type: string; label: string; enabled: boolean; status: string;
+  poll_interval_minutes: number; last_run_at: string | null; last_error: string | null;
+  last_stats: { clients?: number; apps?: number; bytes_seen?: number };
+}
 interface Appliance {
   id: string; serial: string; model: string; name: string; location_label: string;
   state: string; isolation_state: string; software_version: string;
@@ -40,6 +45,7 @@ interface Appliance {
   last_heartbeat_at: string | null; last_attestation_at: string | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   telemetry: any; stores?: Store[]; stored_data?: StoredData; recent_commands?: Command[];
+  integrations?: ApplianceIntegration[];
   can_manage?: boolean; view_only?: boolean;
 }
 
@@ -427,6 +433,8 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
 
       <StoredDataCard a={a} />
 
+      <IntegrationsCard a={a} />
+
       <NetworkCard a={a} />
 
       <Card style={{ marginBottom: 16 }}>
@@ -524,6 +532,50 @@ function StorageCard({ a, canManage, onAdd, onRename, onDelete, onAdvanced }: {
       )}
       {stores.map((s) => <StorageItem key={s.id} s={s} canManage={canManage} onRename={onRename} onDelete={onDelete} onAdvanced={onAdvanced} />)}
       {stores.length === 0 && <div className="muted">No storage volumes reported yet.</div>}
+    </Card>
+  );
+}
+
+function IntegrationsCard({ a }: { a: Appliance }) {
+  const integs = a.integrations ?? [];
+  const tone = (s: string) => s === "active" ? "ok" : s === "error" ? "danger" : s === "disabled" ? "warn" : "info";
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div className="spread" style={{ marginBottom: 10 }}>
+        <h3 style={{ margin: 0 }}>Integrations</h3>
+        <span className="faint" style={{ fontSize: 12 }}>
+          {integs.length} running here
+        </span>
+      </div>
+      {integs.length === 0 && (
+        <div className="muted">
+          No integrations run on this appliance yet. Add one from the Integrations page to collect
+          network intelligence here.
+        </div>
+      )}
+      {integs.map((i) => (
+        <div key={i.id} className="result-row">
+          <div className="result-icon" style={{ background: "var(--inset)", width: 34, height: 34 }}>
+            <Icon name="activity" size={16} />
+          </div>
+          <div className="flex1">
+            <div style={{ fontWeight: 600 }}>{i.label}</div>
+            <div className="faint" style={{ fontSize: 11.5 }}>
+              every {i.poll_interval_minutes < 60 ? `${i.poll_interval_minutes}m` : `${i.poll_interval_minutes / 60}h`}
+              {i.last_run_at ? ` · last run ${timeAgo(i.last_run_at)}` : " · not run yet"}
+              {i.last_error ? ` · ${i.last_error}` : ""}
+            </div>
+          </div>
+          <div className="stack" style={{ alignItems: "flex-end", gap: 2 }}>
+            <Pill tone={tone(i.status)}>{i.status}</Pill>
+            {i.last_stats?.clients != null && (
+              <div className="faint" style={{ fontSize: 11 }}>
+                {i.last_stats.clients} clients · {i.last_stats.apps ?? 0} apps
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
     </Card>
   );
 }

@@ -35,6 +35,12 @@ from ..models import (
     ConfigObject,
     ConnectorAccount,
     DesktopAgent,
+    IntegrationConfig,
+    IntegrationInstance,
+    IntegrationRun,
+    NetworkApp,
+    NetworkClient,
+    NetworkUsage,
     Node,
     PricingConfig,
     SearchDocument,
@@ -163,6 +169,10 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
     key_records = {v.id: keybroker.export_key_records(v.id) for v in vaults}
 
     pricing = db.get(PricingConfig, "default")
+    # Integrations for the node's tenants + platform enable/disable, so the node
+    # can serve its appliances' integration pull/report locally.
+    integration_instances = (db.query(IntegrationInstance)
+                              .filter(IntegrationInstance.tenant_id.in_(tids)).all())
     return {
         "node_id": node.id,
         "assigned": len(tids),
@@ -177,6 +187,8 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "service_objects": [_ser(s) for s in db.query(ServiceObject).all()],
         "config_objects": [_ser(c) for c in db.query(ConfigObject).all()],
         "source_configs": [_ser(sc) for sc in db.query(SourceConfig).all()],
+        "integration_configs": [_ser(ic) for ic in db.query(IntegrationConfig).all()],
+        "integration_instances": [_ser(i) for i in integration_instances],
         "nodes": [_ser(n) for n in db.query(Node).all()],
         "pricing": _ser(pricing) if pricing else None,
         "pending_jobs": [_ser(j) for j in pending_jobs],
@@ -196,6 +208,11 @@ class PushPayload(BaseModel):
     agents: list[dict] = []
     appliances: list[dict] = []
     insights: list[dict] = []
+    integration_instances: list[dict] = []
+    network_clients: list[dict] = []
+    network_apps: list[dict] = []
+    network_usage: list[dict] = []
+    integration_runs: list[dict] = []
 
 
 _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
@@ -227,7 +244,8 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     authoritative for the portal (search / recovery / billing / activity)."""
     _require_fleet(authorization)
     counts = {"receipts": 0, "documents": 0, "connector_accounts": 0,
-              "jobs": 0, "agents": 0, "appliances": 0, "insights": 0}
+              "jobs": 0, "agents": 0, "appliances": 0, "insights": 0,
+              "integrations": 0, "network": 0}
     for r in body.receipts:
         _upsert(db, SnapshotReceipt, r)
         counts["receipts"] += 1
@@ -297,8 +315,78 @@ def push(body: PushPayload, authorization: str = Header(default=""),
         else:
             db.add(UserInsights(**kw))
         counts["insights"] += 1
+    _ingest_integration_push(db, body, counts)
     db.commit()
     return {"ok": True, **counts}
+
+
+# Instance runtime fields the node owns; config/enable/label/curation stay CP-side.
+_INSTANCE_PUSH_FIELDS = ("status", "last_run_at", "last_success_at", "last_error",
+                         "last_stats", "credentials")
+# Telemetry fields on network rows; monitor_state / of_interest are CP-curated.
+_CLIENT_TELEMETRY = ("name", "hostname", "ip", "mac", "is_wired", "is_guest",
+                     "device_type", "tx_bytes", "rx_bytes", "total_bytes",
+                     "first_seen", "last_seen")
+_APP_TELEMETRY = ("name", "category", "source_type", "tx_bytes", "rx_bytes",
+                  "total_bytes", "sessions", "client_count", "first_seen", "last_seen")
+
+
+def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict) -> None:
+    """Fold node-reported integration telemetry into the control-plane DB without
+    clobbering the user's monitor/interest curation or their instance config."""
+    for row in body.integration_instances:
+        kw = _deser(IntegrationInstance, row)
+        inst = db.get(IntegrationInstance, kw.get("id"))
+        if inst is None:
+            continue  # instance is created CP-side; nothing to attach runtime to
+        for f in _INSTANCE_PUSH_FIELDS:
+            if f in kw:
+                setattr(inst, f, kw[f])
+        counts["integrations"] += 1
+    for row in body.network_clients:
+        kw = _deser(NetworkClient, row)
+        cur = (db.query(NetworkClient)
+               .filter(NetworkClient.tenant_id == kw.get("tenant_id"),
+                       NetworkClient.integration_id == kw.get("integration_id"),
+                       NetworkClient.client_key == kw.get("client_key")).first())
+        if cur is None:
+            db.add(NetworkClient(**{k: v for k, v in kw.items() if k != "id"}))
+        else:
+            for f in _CLIENT_TELEMETRY:
+                if f in kw:
+                    setattr(cur, f, kw[f])
+        counts["network"] += 1
+    for row in body.network_apps:
+        kw = _deser(NetworkApp, row)
+        cur = (db.query(NetworkApp)
+               .filter(NetworkApp.tenant_id == kw.get("tenant_id"),
+                       NetworkApp.integration_id == kw.get("integration_id"),
+                       NetworkApp.app_key == kw.get("app_key")).first())
+        if cur is None:
+            db.add(NetworkApp(**{k: v for k, v in kw.items() if k != "id"}))
+        else:
+            for f in _APP_TELEMETRY:
+                if f in kw:
+                    setattr(cur, f, kw[f])
+        counts["network"] += 1
+    for row in body.network_usage:
+        kw = _deser(NetworkUsage, row)
+        cur = (db.query(NetworkUsage)
+               .filter(NetworkUsage.tenant_id == kw.get("tenant_id"),
+                       NetworkUsage.integration_id == kw.get("integration_id"),
+                       NetworkUsage.client_key == kw.get("client_key"),
+                       NetworkUsage.app_key == kw.get("app_key")).first())
+        if cur is None:
+            db.add(NetworkUsage(**{k: v for k, v in kw.items() if k != "id"}))
+        else:
+            for f in ("tx_bytes", "rx_bytes", "total_bytes", "sessions", "last_seen"):
+                if f in kw:
+                    setattr(cur, f, kw[f])
+        counts["network"] += 1
+    for row in body.integration_runs:
+        if not db.get(IntegrationRun, row.get("id")):
+            db.add(IntegrationRun(**_deser(IntegrationRun, row)))
+            counts["network"] += 1
 
 
 # --------------------------------------------------------------------------- #

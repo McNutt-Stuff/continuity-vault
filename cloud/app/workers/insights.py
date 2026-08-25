@@ -310,6 +310,75 @@ _CARD_BUILDERS = [
 _MAX_CARDS = 5
 
 
+def _network_cards(db: Session, user: User) -> list[dict]:
+    """Cards derived from network integrations (e.g. UniFi): shadow sources the
+    user should enable, and how heavily an app is used vs. others."""
+    from ..models import (ConnectorAccount, IntegrationInstance, NetworkApp)
+    iids = [i.id for i in db.query(IntegrationInstance.id).filter(
+        IntegrationInstance.tenant_id == user.tenant_id,
+        IntegrationInstance.owner_user_id == user.id).all()]
+    if not iids:
+        return []
+    apps = (db.query(NetworkApp)
+            .filter(NetworkApp.tenant_id == user.tenant_id,
+                    NetworkApp.integration_id.in_(iids)).all())
+    if not apps:
+        return []
+    enabled = {a.connector_type for a in db.query(ConnectorAccount).filter(
+        ConnectorAccount.tenant_id == user.tenant_id,
+        ConnectorAccount.owner_user_id == user.id).all()}
+    cards: list[dict] = []
+
+    # 5A — sources to enable based on observed traffic (shadow apps).
+    shadow: dict[str, dict] = {}
+    for a in apps:
+        if a.source_type and a.source_type not in enabled:
+            s = shadow.setdefault(a.source_type, {"name": a.name, "bytes": 0})
+            s["bytes"] += int(a.total_bytes or 0)
+    if shadow:
+        ranked = sorted(shadow.values(), key=lambda s: -s["bytes"])
+        names = [s["name"] for s in ranked[:3]]
+        total = sum(s["bytes"] for s in ranked)
+        cards.append({
+            "id": "shadow_sources",
+            "icon": "link",
+            "tone": "warn",
+            "title": "Cloud apps you're using but not protecting",
+            "headline": f"{len(shadow)} unprotected service{'s' if len(shadow) != 1 else ''} on your network",
+            "body": (f"Your network shows regular use of {', '.join(names)}"
+                     f"{' and more' if len(shadow) > 3 else ''} — "
+                     f"{_fmt_bytes(total)} of traffic — but you haven't connected "
+                     "them as Arkive sources yet. Anything living only in those "
+                     "accounts isn't recoverable. Connecting them closes the gap."),
+            "detail": [{"label": "Services seen", "value": str(len(shadow))},
+                       {"label": "Observed traffic", "value": _fmt_bytes(total)}],
+            "action": {"label": "Connect these sources", "to": "/connectors"},
+        })
+
+    # 5B — how heavily your top app is used vs. the rest (its importance).
+    ranked_apps = sorted(apps, key=lambda a: -int(a.total_bytes or 0))
+    grand = sum(int(a.total_bytes or 0) for a in apps) or 1
+    top = ranked_apps[0]
+    if int(top.total_bytes or 0) > 0:
+        share = round(int(top.total_bytes or 0) / grand * 100)
+        cards.append({
+            "id": "app_importance",
+            "icon": "activity",
+            "tone": "info",
+            "title": "Your most important app",
+            "headline": f"{top.name} is {share}% of your network activity",
+            "body": (f"{top.name} accounts for {share}% of the app traffic Arkive sees on "
+                     f"your network — {_fmt_bytes(int(top.total_bytes or 0))}, far more than "
+                     "anything else. Apps you lean on this heavily hold the data you'd miss "
+                     "most; make sure it's backed by a source and marked as an app of interest."),
+            "detail": [{"label": "Top app", "value": top.name},
+                       {"label": "Share of traffic", "value": f"{share}%"},
+                       {"label": "Has a source", "value": "Yes" if top.source_type in enabled else "No"}],
+            "action": {"label": "Review integrations", "to": "/integrations"},
+        })
+    return cards
+
+
 def build_payload(db: Session, user: User) -> dict:
     """Compute the full insights payload for one user (no DB writes)."""
     vault_ids = [v.id for v in db.query(Vault).filter(Vault.owner_user_id == user.id).all()]
@@ -327,9 +396,15 @@ def build_payload(db: Session, user: User) -> dict:
         "source_count": len(by_source),
         "category_count": len(by_category),
     }
+    try:
+        network_cards = _network_cards(db, user)
+    except Exception:  # noqa: BLE001 — network intel is best-effort
+        logger.exception("network insight cards failed for user %s", user.id)
+        network_cards = []
     if len(objs) < _MIN_OBJECTS:
-        return {"status": "insufficient_data", "stats": stats,
-                "timeline": _build_timeline(objs), "cards": []}
+        # Even a light footprint still benefits from network-derived findings.
+        return {"status": "ready" if network_cards else "insufficient_data",
+                "stats": stats, "timeline": _build_timeline(objs), "cards": network_cards}
     cards = []
     for builder in _CARD_BUILDERS:
         try:
@@ -341,6 +416,7 @@ def build_payload(db: Session, user: User) -> dict:
             cards.append(card)
         if len(cards) >= _MAX_CARDS:
             break
+    cards.extend(network_cards)
     return {"status": "ready", "stats": stats,
             "timeline": _build_timeline(objs), "cards": cards}
 

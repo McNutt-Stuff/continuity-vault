@@ -32,6 +32,12 @@ from ..models import (
     ConfigObject,
     ConnectorAccount,
     DesktopAgent,
+    IntegrationConfig,
+    IntegrationInstance,
+    IntegrationRun,
+    NetworkApp,
+    NetworkClient,
+    NetworkUsage,
     Node,
     PricingConfig,
     SearchDocument,
@@ -55,6 +61,7 @@ _running_insights: set[str] = set()
 _PULL_ORDER = [
     ("config_objects", ConfigObject),
     ("source_configs", SourceConfig),
+    ("integration_configs", IntegrationConfig),
     ("service_objects", ServiceObject),
     ("nodes", Node),
     ("tenants", Tenant),
@@ -65,6 +72,7 @@ _PULL_ORDER = [
     ("appliance_storages", ApplianceStorage),
     ("connector_accounts", ConnectorAccount),
     ("collections", Collection),
+    ("integration_instances", IntegrationInstance),
 ]
 
 # Fields owned by the NODE, never overwritten by a pull (the node produces these
@@ -78,6 +86,10 @@ _PULL_EXCLUDE = {
     # plane's stale copy (NULL, since the node — not the CP — runs these tenants)
     # would make every source look "due" again and re-back-up every tick.
     "collections": {"last_backup_run_at"},
+    # The node runs integrations and owns their runtime status; pulling the CP's
+    # stale copy would reset a just-run status before it's pushed up.
+    "integration_instances": {"status", "last_run_at", "last_success_at",
+                              "last_error", "last_stats"},
 }
 
 
@@ -321,6 +333,15 @@ def _push(s) -> int:
     receipts, documents, accounts = [], [], []
     jobs, agents, appliances = [], [], []
     insights = []
+    integ_cursor = _read_state().get("integrations_cursor")
+    integ_since = None
+    if integ_cursor:
+        try:
+            integ_since = datetime.fromisoformat(integ_cursor)
+        except ValueError:
+            integ_since = None
+    integ_high = integ_since
+    integ_instances, net_clients, net_apps, net_usage, integ_runs = [], [], [], [], []
     with SessionLocal() as db:
         rq = db.query(SnapshotReceipt)
         if since is not None:
@@ -357,20 +378,49 @@ def _push(s) -> int:
             insights.append(_row(row))
             if row.generated_at and (ins_high is None or row.generated_at > ins_high):
                 ins_high = row.generated_at
-    if not (receipts or documents or accounts or jobs or agents or appliances or insights):
+        # Integration telemetry the appliances reported (instance status + network
+        # rows changed since the cursor). Curation (monitor_state/of_interest) is
+        # CP-owned, so pushing telemetry back never clobbers it.
+        for i in db.query(IntegrationInstance).all():
+            integ_instances.append(_row(i))
+        for model, sink in ((NetworkClient, net_clients), (NetworkApp, net_apps),
+                            (NetworkUsage, net_usage)):
+            q = db.query(model)
+            if integ_since is not None:
+                q = q.filter(model.updated_at > integ_since)
+            for row in q.order_by(model.updated_at.asc()).limit(4000).all():
+                sink.append(_row(row))
+                if row.updated_at and (integ_high is None or row.updated_at > integ_high):
+                    integ_high = row.updated_at
+        rq2 = db.query(IntegrationRun)
+        if integ_since is not None:
+            rq2 = rq2.filter(IntegrationRun.created_at > integ_since)
+        for row in rq2.order_by(IntegrationRun.created_at.asc()).limit(1000).all():
+            integ_runs.append(_row(row))
+    if not (receipts or documents or accounts or jobs or agents or appliances or insights
+            or integ_instances or net_clients or net_apps or net_usage or integ_runs):
         return 0
     res = _post("/nodes/sync/push", {
         "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
         "receipts": receipts, "documents": documents, "connector_accounts": accounts,
         "jobs": jobs, "agents": agents, "appliances": appliances, "insights": insights,
+        "integration_instances": integ_instances, "network_clients": net_clients,
+        "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
     })
     if res and res.get("ok"):
         if high is not None:
             _save_cursor(high.isoformat())
         if ins_high is not None:
             _save_insights_cursor(ins_high.isoformat())
-        logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d appliances=%d insights=%d",
-                    len(receipts), len(documents), len(jobs), len(agents), len(appliances), len(insights))
+        if integ_high is not None:
+            st = _read_state()
+            st["integrations_cursor"] = integ_high.isoformat()
+            _write_state(st)
+        logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d "
+                    "appliances=%d insights=%d integrations=%d network=%d",
+                    len(receipts), len(documents), len(jobs), len(agents),
+                    len(appliances), len(insights), len(integ_instances),
+                    len(net_clients) + len(net_apps) + len(net_usage))
         return len(receipts) + len(documents)
     return 0
 

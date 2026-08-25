@@ -18,6 +18,7 @@ from .api import (
     connectors,
     dashboard,
     insights,
+    integrations,
     org,
     node_sync,
     photos,
@@ -59,6 +60,9 @@ app.include_router(tenant.router, prefix=API)
 app.include_router(org.router, prefix=API)
 app.include_router(dashboard.router, prefix=API)
 app.include_router(insights.router, prefix=API)
+app.include_router(integrations.router, prefix=API)
+app.include_router(integrations.agent_router, prefix=API)
+app.include_router(integrations.admin_router, prefix=API)
 app.include_router(billing.router, prefix=API)
 app.include_router(connectors.router, prefix=API)
 app.include_router(collections.router, prefix=API)

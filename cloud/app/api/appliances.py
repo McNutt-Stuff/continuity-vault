@@ -204,6 +204,20 @@ def get_appliance(appliance_id: str,
     # A member only sees data belonging to their own vaults on a shared appliance.
     allowed = None if admin else security.content_vault_ids(db, principal)
     view["stored_data"] = _stored_data(db, a, allowed_vault_ids=allowed)
+    # Integrations running on this appliance (status surfaced in the portal).
+    from ..models import IntegrationInstance
+    integs = (db.query(IntegrationInstance)
+              .filter(IntegrationInstance.appliance_id == a.id)
+              .order_by(IntegrationInstance.created_at.desc()).all())
+    if not admin:
+        integs = [i for i in integs if i.owner_user_id == principal.user_id]
+    view["integrations"] = [{
+        "id": i.id, "integration_type": i.integration_type,
+        "label": i.label or i.integration_type, "enabled": i.enabled,
+        "status": i.status, "poll_interval_minutes": i.poll_interval_minutes,
+        "last_run_at": i.last_run_at.isoformat() if i.last_run_at else None,
+        "last_error": i.last_error, "last_stats": i.last_stats or {},
+    } for i in integs]
     return view
 
 
