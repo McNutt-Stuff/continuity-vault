@@ -134,9 +134,11 @@ init_installer "Arkive Appliance" "$DATA_DIR/install-state"
 require_root
 note "Cloud control plane: ${CV_CLOUD_URL}"
 
-# Collect the one-time linking code up front (before hidden steps).
+# Collect the one-time linking code up front (before hidden steps). Only prompt
+# on a fresh install — a re-install / self-update keeps the appliance's existing
+# registration, so it must never block on an interactive prompt.
 LINKING_CODE="${CV_LINKING_CODE:-}"
-if [[ -z "$LINKING_CODE" && -t 0 ]]; then
+if [[ -z "$LINKING_CODE" && ! -f /etc/continuity-vault/appliance.env && -t 0 ]]; then
   printf "  %sEnter the linking code from your Arkive portal%s (blank to link later): " "$BOLD" "$RESET"
   read -r LINKING_CODE || true
 fi
