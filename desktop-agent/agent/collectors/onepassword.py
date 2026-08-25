@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -145,11 +146,19 @@ def collect(op_token: str = "") -> List[dict]:
             if f.get("purpose") == "USERNAME":
                 username = f.get("value", "")
         payload = _canonical_payload(detail)
+        # Dedup on 1Password's own edit timestamp — the authoritative "changed"
+        # signal — so unchanged items never re-version, even if a display field
+        # (e.g. a live TOTP code) varies between reads. Fall back to the payload
+        # hash only when no timestamp is available.
+        updated = str(detail.get("updated_at") or it.get("updated_at") or "")
+        content_hash = (hashlib.sha256(f"onepassword:{it['id']}:{updated}".encode()).hexdigest()
+                        if updated else hashlib.sha256(payload).hexdigest())
         objects.append({
             "object_id": f"onepassword:{it['id']}",
             "kind": kind,
             "title": it.get("title", "(untitled)"),
             "content_b64": base64.b64encode(payload).decode(),
+            "content_hash": content_hash,
             "preview": f"{category} · {vault}",
             "meta": {"vault": vault, "category": category, "tags": it.get("tags", []),
                      "url": urls[0] if urls else None, "username": username},

@@ -591,9 +591,11 @@ class Agent:
         batch_bytes = 0
         for o in objects:
             plaintext = base64.b64decode(o["content_b64"])
-            # Stable plaintext hash so the cloud can version/dedupe correctly even
-            # though each envelope is encrypted with a fresh nonce.
-            o["content_hash"] = hashlib.sha256(plaintext).hexdigest()
+            # Prefer a collector-supplied stable hash (e.g. 1Password dedups on
+            # its own edit timestamp, immune to volatile display fields); else
+            # hash the plaintext. Encryption uses a fresh nonce each run, so the
+            # ciphertext is never a stable dedup key.
+            o.setdefault("content_hash", hashlib.sha256(plaintext).hexdigest())
             envelope = encrypt_content(self.agent_key, plaintext, o["object_id"])
             o["content_b64"] = base64.b64encode(envelope).decode()
             o["client_encrypted"] = True
