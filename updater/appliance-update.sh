@@ -20,7 +20,20 @@ STAGE_DIR="/tmp/cv-appliance-update"
 
 log() { echo "[appliance-update] $*"; }
 
-if [[ ! -f "$STAGE_FILE" ]]; then log "no staged update"; exit 0; fi
+# No cloud-staged package? Fall back to the control-plane content self-update
+# (pull /appliance/bundle and re-install if the version changed). This makes the
+# manual command and the timer both update from the control plane, never GitHub.
+if [[ ! -f "$STAGE_FILE" ]]; then
+  log "no staged update — checking the control plane for a content update"
+  for self in "$INSTALL_DIR/installers/appliance-update.sh" \
+              "${ARKIVE_SRC_DIR:-/opt/arkive-src}/installers/appliance-update.sh"; do
+    if [[ -x "$self" || -f "$self" ]]; then
+      exec bash "$self"
+    fi
+  done
+  log "control-plane self-updater not found at $INSTALL_DIR/installers/appliance-update.sh"
+  exit 0
+fi
 
 VERSION="$(python3 -c 'import sys,json;print(json.load(open(sys.argv[1]))["version"])' "$STAGE_FILE")"
 URL="$(python3 -c 'import sys,json;print(json.load(open(sys.argv[1]))["packageUrl"])' "$STAGE_FILE")"

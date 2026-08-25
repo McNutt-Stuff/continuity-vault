@@ -108,6 +108,11 @@ install_service() {
 install_selfupdate() {
   # Headless self-update: a timer periodically pulls the cloud bundle and
   # re-installs when the version changed (no git required).
+  # Drop any legacy GitHub-based update timer from older installs so appliances
+  # only ever pull content from the control plane.
+  systemctl disable --now cv-appliance-update.timer 2>/dev/null || true
+  rm -f /etc/systemd/system/cv-appliance-update.service \
+        /etc/systemd/system/cv-appliance-update.timer 2>/dev/null || true
   cp "$INSTALL_DIR/infra/systemd/cv-appliance-selfupdate.service" /etc/systemd/system/
   cp "$INSTALL_DIR/infra/systemd/cv-appliance-selfupdate.timer" /etc/systemd/system/
   systemctl daemon-reload

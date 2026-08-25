@@ -341,19 +341,28 @@ sudo CV_REPO_URL=https://github.com/McNutt-Stuff/continuity-vault.git \
 
 # after the first run, config comes from /etc/arkive-update.env:
 sudo /opt/arkive-src/updater/git-update.sh cloud
-# appliance:
-sudo /opt/arkive-src/updater/git-update.sh appliance
 ```
 
 Nothing to do if already up to date; `CV_FORCE=1` redeploys anyway.
 
-**Automatic updates on a timer** (checks GitHub every 10 min cloud / 30 min appliance):
+> **Appliances and desktop agents never use GitHub.** They pull their content
+> bundles from the control plane. Update an appliance manually with:
+>
+> ```bash
+> sudo /opt/continuity-vault/installers/appliance-update.sh   # or: sudo systemctl start cv-appliance-selfupdate.service
+> ```
+>
+> `CV_FORCE=1` re-installs even when already current.
+
+**Automatic updates on a timer:**
+
+- **Cloud (control plane)** checks GitHub every 10 min via `cv-cloud-update.timer`.
+- **Appliances** check the *control plane* every 10 min via `cv-appliance-selfupdate.timer` (enabled automatically by the installer — no GitHub).
 
 ```bash
-sudo cp /opt/arkive-src/infra/systemd/cv-cloud-update.* /etc/systemd/system/   # cloud
-sudo cp /opt/arkive-src/infra/systemd/cv-appliance-update.* /etc/systemd/system/ # appliance
+sudo cp /opt/arkive-src/infra/systemd/cv-cloud-update.* /etc/systemd/system/   # cloud only
 sudo systemctl daemon-reload
-sudo systemctl enable --now cv-cloud-update.timer        # or cv-appliance-update.timer
+sudo systemctl enable --now cv-cloud-update.timer
 ```
 
 **Private repos:** use a token URL in `CV_REPO_URL`

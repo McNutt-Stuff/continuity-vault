@@ -512,25 +512,29 @@ _appliance_version_cache: str | None = None
 
 
 def _appliance_bundle_version() -> str:
-    """Stable content hash of the appliance bundle; changes only when code changes,
-    so the headless self-update timer only re-installs on real updates."""
+    """Stable content hash of everything shipped in the appliance bundle — code
+    plus the installer/updater/unit files — so the headless self-update timer
+    re-installs on any real change (including update-script fixes)."""
     global _appliance_version_cache
     if _appliance_version_cache:
         return _appliance_version_cache
     root = _repo_root()
-    h = hashlib.sha256()
-    for d in ("appliance", "shared"):
+    paths: list = []
+    for d in _BUNDLE_DIRS:
         base = root / d
-        if not base.exists():
-            continue
-        for f in sorted(base.rglob("*")):
-            if f.is_file() and not any(x in str(f) for x in _BUNDLE_EXCLUDE) \
-                    and f.name != "VERSION":
-                h.update(str(f.relative_to(root)).encode())
-                try:
-                    h.update(f.read_bytes())
-                except Exception:
-                    pass
+        if base.exists():
+            paths.extend(base.rglob("*"))
+    for f in _BUNDLE_FILES:
+        paths.append(root / f)
+    h = hashlib.sha256()
+    for f in sorted(set(paths)):
+        if f.is_file() and not any(x in str(f) for x in _BUNDLE_EXCLUDE) \
+                and f.name != "VERSION":
+            h.update(str(f.relative_to(root)).encode())
+            try:
+                h.update(f.read_bytes())
+            except Exception:
+                pass
     _appliance_version_cache = h.hexdigest()[:12]
     return _appliance_version_cache
 
@@ -543,6 +547,13 @@ def appliance_bootstrap():
         return PlainTextResponse(path.read_text())
     except Exception:
         raise HTTPException(404, "bootstrap unavailable")
+
+
+@agent_router.get("/bundle/version")
+def appliance_bundle_version():
+    """Advertise the appliance bundle version the control plane serves so the
+    self-update timer can cheaply check before downloading the whole bundle."""
+    return {"version": _appliance_bundle_version()}
 
 
 @agent_router.get("/bundle")

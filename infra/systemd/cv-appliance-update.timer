@@ -1,5 +1,5 @@
 [Unit]
-Description=Check Arkive GitHub for appliance updates every 30 minutes
+Description=Check the control plane for appliance updates every 30 minutes
 
 [Timer]
 OnBootSec=5min
