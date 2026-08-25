@@ -12,6 +12,7 @@ Auth: uses a 1Password service account token when provided
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import logging
 import os
@@ -104,6 +105,24 @@ def _op(args: List[str], env: dict) -> str:
     return proc.stdout
 
 
+# Keys whose values change every read (not real edits) and would otherwise make
+# an unchanged item hash differently each run, creating a spurious new version.
+_VOLATILE_FIELD_KEYS = ("totp",)
+
+
+def _canonical_payload(detail: dict) -> bytes:
+    """Deterministic serialization for content-hash dedup: drop live/volatile
+    values (e.g. the current 30-second TOTP code) and sort keys so re-indexing an
+    unchanged item produces an identical hash instead of a fresh version."""
+    clean = copy.deepcopy(detail)
+    for f in clean.get("fields", []) or []:
+        if isinstance(f, dict):
+            for k in _VOLATILE_FIELD_KEYS:
+                f.pop(k, None)
+    return json.dumps(clean, sort_keys=True, ensure_ascii=False,
+                      separators=(",", ":")).encode("utf-8")
+
+
 def collect(op_token: str = "") -> List[dict]:
     """Return normalized agent objects for every reachable 1Password item.
 
@@ -125,7 +144,7 @@ def collect(op_token: str = "") -> List[dict]:
         for f in detail.get("fields", []):
             if f.get("purpose") == "USERNAME":
                 username = f.get("value", "")
-        payload = json.dumps(detail).encode()
+        payload = _canonical_payload(detail)
         objects.append({
             "object_id": f"onepassword:{it['id']}",
             "kind": kind,
