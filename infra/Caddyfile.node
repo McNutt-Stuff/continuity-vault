@@ -8,12 +8,26 @@
 
 	# API -> local control-plane application (workers/indexing/sync live here).
 	handle /api/* {
-		reverse_proxy 127.0.0.1:8000
+		reverse_proxy 127.0.0.1:8000 {
+			lb_try_duration 5s
+		}
 	}
 
 	# No public web interface on a data-plane node.
 	handle {
 		respond "Arkive data-plane node — no public interface" 404
+	}
+
+	# During a node redeploy, surface a retryable 503 (not a bare 502) so the
+	# control plane / agents treat it as "updating, retry shortly".
+	handle_errors {
+		@cp_down expression {http.error.status_code} in [502, 503, 504]
+		handle @cp_down {
+			header Retry-After "30"
+			header Content-Type "application/json"
+			respond `{"error":"node_updating","detail":"Node is updating — retry shortly."}` 503
+		}
+		respond "{http.error.status_code} {http.error.status_text}" {http.error.status_code}
 	}
 
 	header {

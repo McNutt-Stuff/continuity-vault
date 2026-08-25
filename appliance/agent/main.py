@@ -38,6 +38,15 @@ from . import agent_log, sysinfo
 settings = get_settings()
 app = FastAPI(title="Arkive Appliance Agent", version="1.0.0")
 
+
+def _cp_unavailable(exc: BaseException) -> bool:
+    """Gateway/connection error that means the control plane is momentarily
+    unreachable (most often mid-deploy) — treat as transient, retry later."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (502, 503, 504)
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+                            httpx.RemoteProtocolError, httpx.PoolTimeout))
+
 DATA = Path(settings.data_dir)
 DATA.mkdir(parents=True, exist_ok=True)
 _REG = DATA / "registration.json"
@@ -157,6 +166,11 @@ class Agent:
                 else:
                     raise
             self._last_latency_ms = round((time.perf_counter() - t0) * 1000)
+            if r.status_code in (502, 503, 504):
+                # Control plane momentarily unreachable (most often mid-deploy).
+                self.log.info("control plane unavailable (%s) — update in progress? "
+                              "will retry", r.status_code)
+                return
             if r.status_code != 200:
                 self.log.warning("heartbeat rejected: %s", r.status_code)
                 return
@@ -471,7 +485,11 @@ async def _heartbeat_loop() -> None:
         try:
             await agent.heartbeat_once()
         except Exception as exc:
-            agent.log.error("heartbeat error: %s", exc)
+            if _cp_unavailable(exc):
+                agent.log.info("control plane unavailable (update in progress?) — "
+                               "will retry: %s", exc)
+            else:
+                agent.log.error("heartbeat error: %s", exc)
         await asyncio.sleep(interval)
 
 

@@ -483,6 +483,7 @@ def _persist_stream_cursor(account: ConnectorAccount, mode: str,
         account.backfill_count = int(account.backfill_count or 0) + int(count)
         if state.get("done"):
             account.backfill_done = True
+            account.backfill_completed_at = datetime.now(timezone.utc)
     else:
         if new_cursor is not None:
             account.sync_cursor = new_cursor

@@ -199,6 +199,7 @@ class ConnectorAccount(Base):
     backfill_cursor = Column(JSON, nullable=True)
     backfill_done = Column(Boolean, default=False)
     backfill_started_at = Column(DateTime, nullable=True)
+    backfill_completed_at = Column(DateTime, nullable=True)  # last full-history pass finished
     backfill_count = Column(Integer, default=0)  # items captured by the deep crawl
     created_at = Column(DateTime, default=_now)
 
@@ -728,6 +729,9 @@ class SourceConfig(Base):
     enabled = Column(Boolean, default=True)
     config_object_id = Column(String, nullable=True)
     family = Column(String, nullable=True)  # admin override of the default source family grouping
+    # Opt-in deep-history backfill for this source (only meaningful for connectors
+    # whose capabilities advertise dual_track). Off by default.
+    backfill_enabled = Column(Boolean, default=False)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 

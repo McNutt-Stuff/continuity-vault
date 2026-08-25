@@ -37,6 +37,10 @@ _ADDRESSBOOK = Path.home() / "Library" / "Application Support" / "AddressBook" /
 _APPLE_EPOCH = 978307200
 _MAX_ATTACH_BYTES = 100 * 1024 * 1024  # skip pathologically large attachments
 _MAX_MESSAGES = 50000                  # safety cap per run
+# Messages processed per resumable chunk. The caller loops on has_more, saving
+# state after each chunk, so a large backlog drains over successive runs (and an
+# interruption resumes instead of re-scanning from the start).
+_CHUNK_MESSAGES = 1500
 
 _IMG = {"jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "tiff", "bmp"}
 _VID = {"mp4", "mov", "avi", "mkv", "webm", "m4v", "3gp"}
@@ -209,13 +213,20 @@ def _rm(path: str) -> None:
 # --------------------------------------------------------------------------- #
 
 def collect(config: Optional[dict] = None,
-            state: Optional[dict] = None) -> Tuple[List[dict], dict]:
-    """Collect new iMessage/SMS messages + attachments since the last run.
+            state: Optional[dict] = None,
+            max_messages: Optional[int] = None) -> Tuple[List[dict], dict]:
+    """Collect a bounded, resumable chunk of new iMessage/SMS messages since the
+    last run.
 
-    ``state`` = {"last_rowid": N}; returns (objects, new_state)."""
+    Reads messages with ``ROWID > last_rowid`` in ascending ROWID order, capped at
+    ``max_messages`` (default ``_CHUNK_MESSAGES``). ``state`` = {"last_rowid": N};
+    returns ``(objects, {"last_rowid": N, "has_more": bool})``. The caller loops on
+    ``has_more`` — persisting state per chunk — so a huge backlog drains over runs
+    and is never re-scanned from the start."""
     config = config or {}
     state = state or {}
     last_rowid = int(state.get("last_rowid") or 0)
+    chunk = int(max_messages or _CHUNK_MESSAGES)
     if not available():
         return [], state
 
@@ -228,14 +239,31 @@ def collect(config: Optional[dict] = None,
         return [], state
     objects: List[dict] = []
     max_rowid = last_rowid
+    has_more = False
     try:
         con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
         con.row_factory = sqlite3.Row
-        contacts = _load_contacts()
-        log.info("imessage: reading chat.db (ro snapshot) for messages after ROWID %d "
-                 "(%d contact(s) resolved)", last_rowid, len(contacts))
 
-        # Chat (thread) metadata + participants.
+        # The bounded chunk of new messages (resumable by ROWID). Fetch one extra
+        # to detect whether more remain after this chunk.
+        msg_rows = con.execute(
+            "SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.date, m.is_from_me, "
+            "m.service, h.id AS handle "
+            "FROM message m LEFT JOIN handle h ON h.ROWID = m.handle_id "
+            "WHERE m.ROWID > ? ORDER BY m.ROWID ASC LIMIT ?",
+            (last_rowid, chunk + 1)).fetchall()
+        has_more = len(msg_rows) > chunk
+        msg_rows = msg_rows[:chunk]
+        if not msg_rows:
+            con.close()
+            return [], {"last_rowid": last_rowid, "has_more": False}
+        chunk_hi = msg_rows[-1]["ROWID"]
+        max_rowid = chunk_hi
+        contacts = _load_contacts()
+        log.info("imessage: chunk of %d message(s) after ROWID %d (has_more=%s, "
+                 "%d contact(s) resolved)", len(msg_rows), last_rowid, has_more, len(contacts))
+
+        # Chat (thread) metadata + participants (small — all threads).
         chats: Dict[int, dict] = {}
         for r in con.execute("SELECT ROWID, guid, chat_identifier, display_name, style "
                              "FROM chat"):
@@ -244,34 +272,29 @@ def collect(config: Optional[dict] = None,
                 "name": r["display_name"] or "", "is_group": (r["style"] == 43),
                 "participants": [],
             }
-        log.debug("imessage: indexed %d chat(s)", len(chats))
         for r in con.execute(
                 "SELECT chj.chat_id, h.id FROM chat_handle_join chj "
                 "JOIN handle h ON h.ROWID = chj.handle_id"):
             c = chats.get(r["chat_id"])
             if c is not None and r["id"]:
                 c["participants"].append(r["id"])
-        # message ROWID -> its chat ROWID.
+        # Scope the message→chat and attachment joins to just this chunk's ROWID
+        # range (a range scan, not a full-table load, so each chunk stays cheap).
         msg_chat: Dict[int, int] = {}
-        for r in con.execute("SELECT chat_id, message_id FROM chat_message_join"):
+        for r in con.execute(
+                "SELECT chat_id, message_id FROM chat_message_join "
+                "WHERE message_id > ? AND message_id <= ?", (last_rowid, chunk_hi)):
             msg_chat.setdefault(r["message_id"], r["chat_id"])
-
-        # Attachments per message.
+        # Attachments for just this chunk's messages.
         msg_atts: Dict[int, List[sqlite3.Row]] = {}
         for r in con.execute(
                 "SELECT maj.message_id, a.ROWID aid, a.guid, a.filename, a.mime_type, "
                 "a.transfer_name, a.total_bytes "
-                "FROM message_attachment_join maj JOIN attachment a ON a.ROWID = maj.attachment_id"):
+                "FROM message_attachment_join maj JOIN attachment a ON a.ROWID = maj.attachment_id "
+                "WHERE maj.message_id > ? AND maj.message_id <= ?", (last_rowid, chunk_hi)):
             msg_atts.setdefault(r["message_id"], []).append(r)
 
-        rows = con.execute(
-            "SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.date, m.is_from_me, "
-            "m.service, h.id AS handle "
-            "FROM message m LEFT JOIN handle h ON h.ROWID = m.handle_id "
-            "WHERE m.ROWID > ? ORDER BY m.ROWID ASC LIMIT ?",
-            (last_rowid, _MAX_MESSAGES))
-
-        for m in rows:
+        for m in msg_rows:
             rowid = m["ROWID"]
             max_rowid = max(max_rowid, rowid)
             guid = m["guid"] or f"row{rowid}"
@@ -367,8 +390,9 @@ def collect(config: Optional[dict] = None,
     finally:
         _rm(tmp)
 
-    new_state = {"last_rowid": max_rowid}
-    log.info("imessage: collected %d object(s) (through ROWID %d)", len(objects), max_rowid)
+    new_state = {"last_rowid": max_rowid, "has_more": has_more}
+    log.info("imessage: collected %d object(s) (through ROWID %d, has_more=%s)",
+             len(objects), max_rowid, has_more)
     return objects, new_state
 
 

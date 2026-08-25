@@ -42,6 +42,24 @@ from .crypto import encrypt_content, load_or_create_key, wrap_for_recovery
 # Number of collection workers, so independent sources collect concurrently.
 _WORKER_THREADS = 4
 
+# Gateway statuses that mean the control plane is momentarily unreachable (e.g.
+# mid-deploy): treat as transient and retry rather than a hard failure.
+_GATEWAY_CODES = (502, 503, 504)
+
+
+class ControlPlaneUnavailable(Exception):
+    """The control plane is temporarily unreachable (gateway error / connection
+    refused) — most often because it's being updated. Retry later."""
+
+
+def _is_cp_unavailable(exc: BaseException) -> bool:
+    if isinstance(exc, ControlPlaneUnavailable):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _GATEWAY_CODES
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+                            httpx.RemoteProtocolError, httpx.PoolTimeout))
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -490,6 +508,7 @@ class Agent:
             params = self._job_queue.get()
             source = params.get("source_type") or "default"
             started = time.time()
+            deferred = False
             self.log.info("collection starting: %s", source)
             try:
                 detail = self.collect_and_push(params)
@@ -497,18 +516,24 @@ class Agent:
                 self.log.info("collection finished: %s in %.1fs (%s object(s))",
                               source, elapsed, detail.get("objects", "?"))
                 self._post_command_result("collect", True, detail)
+            except ControlPlaneUnavailable as exc:
+                deferred = True
+                self.log.info("collection deferred: %s — control plane unavailable (%s); "
+                              "will retry shortly (update in progress?)", source, exc)
             except Exception as exc:
                 self.log.error("collection failed: %s (%s)", source, exc, exc_info=True)
                 self._post_command_result("collect", False, {"error": str(exc)})
             finally:
                 # Advance the (persisted) per-source schedule timer whether or not
                 # the run succeeded, so a failing collect can't re-trigger every
-                # heartbeat and a restart doesn't immediately re-collect.
+                # heartbeat and a restart doesn't immediately re-collect — EXCEPT on
+                # a transient control-plane outage, which should retry promptly.
                 now = time.time()
                 with self._collect_state_lock:
                     self._last_collect = now
-                    self._last_collect_by_source[source] = now
-                    self._save_collect_state()
+                    if not deferred:
+                        self._last_collect_by_source[source] = now
+                        self._save_collect_state()
                 with self._queued_lock:
                     self._queued_sources.discard(source)
                 self._job_queue.task_done()
@@ -611,15 +636,31 @@ class Agent:
 
     def _push_batch(self, source_type: str, batch: list, destinations: list) -> int:
         base = self._base()
-        r = httpx.post(f"{base}/agent/ingest", json={
-            "source_type": source_type,
-            "destinations": destinations,
-            "objects": batch,
-        }, headers=self._headers(), timeout=180)
-        r.raise_for_status()
-        self.log.info("pushed batch of %d (%s) -> %s snapshot %s", len(batch), source_type,
-                      base, r.json().get("snapshot_id", "?"))
-        return len(batch)
+        payload = {"source_type": source_type, "destinations": destinations, "objects": batch}
+        last = None
+        # Retry briefly on a gateway error (control plane mid-deploy); if it's
+        # still down, raise a transient error so the collect defers to next cycle
+        # without advancing its cursor (no data loss, no scary traceback).
+        for attempt in range(3):
+            try:
+                r = httpx.post(f"{base}/agent/ingest", json=payload,
+                               headers=self._headers(), timeout=180)
+                if r.status_code in _GATEWAY_CODES:
+                    raise ControlPlaneUnavailable(f"HTTP {r.status_code}")
+                r.raise_for_status()
+                self.log.info("pushed batch of %d (%s) -> %s snapshot %s", len(batch), source_type,
+                              base, r.json().get("snapshot_id", "?"))
+                return len(batch)
+            except Exception as exc:
+                if not _is_cp_unavailable(exc):
+                    raise
+                last = exc
+                if attempt < 2:
+                    wait = 5 * (attempt + 1)
+                    self.log.info("control plane unavailable (%s) — retry %d/3 in %ds "
+                                  "(update in progress?)", exc, attempt + 1, wait)
+                    time.sleep(wait)
+        raise ControlPlaneUnavailable(str(last))
 
     def _collect_files(self, file_config: dict) -> dict:
         destinations = self.reg.get("config", {}).get("destinations", ["cv-cloud"])
@@ -673,17 +714,41 @@ class Agent:
                 reason = "no Messages DB"
             return {"objects": 0, "results": [{"collector": "imessage", "skipped": reason}]}
         state = self._load_json_state(self._imessage_state_file)
-        self.log.info("imessage: reading new messages since ROWID %s…", state.get("last_rowid", 0))
-        objects, new_state = imessage.collect(params.get("file_config") or {}, state)
-        self.log.info("imessage: collected %d object(s); encrypting + pushing…", len(objects))
-        total = self._push_objects("imessage", objects, destinations) if objects else 0
-        if total == len(objects):
-            self._save_json_state(self._imessage_state_file, new_state)
+        cfg = params.get("file_config") or {}
+        self.log.info("imessage: draining new messages since ROWID %s…", state.get("last_rowid", 0))
+        # Drain the backlog in bounded, resumable chunks: push each chunk, persist
+        # its cursor, then continue — so a huge history captures over time and an
+        # interruption resumes instead of re-scanning the same messages forever.
+        # Bounded per invocation so it never blocks the other collectors.
+        total = 0
+        chunks = 0
+        deadline = time.time() + 20 * 60
+        while time.time() < deadline:
+            prev_rowid = int(state.get("last_rowid") or 0)
+            objects, new_state = imessage.collect(cfg, state)
+            pushed = self._push_objects("imessage", objects, destinations) if objects else 0
+            total += pushed
+            if objects and pushed != len(objects):
+                self.log.warning("imessage: chunk partially pushed (%d/%d) — will retry "
+                                 "next run", pushed, len(objects))
+                break
+            new_rowid = int(new_state.get("last_rowid") or prev_rowid)
+            if new_rowid > prev_rowid:
+                # Persist the advanced cursor per chunk so progress is durable.
+                state = {"last_rowid": new_rowid}
+                self._save_json_state(self._imessage_state_file, state)
+                chunks += 1
+                self.log.info("imessage: chunk %d done — %d object(s), through ROWID %d",
+                              chunks, pushed, new_rowid)
+            # Stop when the source is exhausted or the cursor didn't advance
+            # (safety against an unexpected non-advancing chunk).
+            if not new_state.get("has_more") or new_rowid <= prev_rowid:
+                break
         self._last_collect = time.time()
         results = [{"collector": "imessage", "objects": total}]
         self._write_status({"last_collect": _now_iso(), "results": results})
-        self.log.info("imessage: pushed %d/%d object(s) (through ROWID %s)",
-                      total, len(objects), new_state.get("last_rowid", "?"))
+        self.log.info("imessage: pushed %d object(s) across %d chunk(s) (through ROWID %s)",
+                      total, chunks, state.get("last_rowid", "?"))
         return {"objects": total, "results": results}
 
     def _collect_outlook_local(self, params: dict) -> dict:
@@ -786,8 +851,12 @@ class Agent:
             try:
                 self.heartbeat()  # heartbeat pulls mappings + runs due collects
             except Exception as exc:
-                self.log.error("loop error: %s", exc)
-                self._write_status({"error": str(exc)})
+                if _is_cp_unavailable(exc):
+                    self.log.info("control plane unavailable (update in progress?) — "
+                                  "will retry: %s", exc)
+                else:
+                    self.log.error("loop error: %s", exc)
+                    self._write_status({"error": str(exc)})
                 self._fast_poll = False
             time.sleep(2 if getattr(self, "_fast_poll", False) else idle)
 

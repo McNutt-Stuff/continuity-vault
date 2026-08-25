@@ -10,7 +10,7 @@ import contextlib
 import logging
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
@@ -35,6 +35,15 @@ logger = logging.getLogger("cv.jobs")
 _CANCEL_REQUESTS: set = set()
 
 _JOB_LOG_MAX = 800  # keep the tail; a full-library crawl can log a lot
+
+# Deep-history backfill pacing: each batch runs a bounded window then yields, and
+# rests this long before the next batch — so the crawl balances with the recent
+# track and stays respectful of provider rate limits.
+_BACKFILL_WINDOW_SECONDS = 30 * 60
+_BACKFILL_PAUSE_MINUTES = 10
+# Re-crawl the whole history on this cadence to catch anything missed since the
+# last full pass (dedup keeps it cheap — only genuinely new/missed items store).
+_BACKFILL_RESCAN_DAYS = 30
 
 
 class _JobLogCapture(logging.Handler):
@@ -128,28 +137,62 @@ def ensure_backfill_running(db: Session, collection: Collection) -> Optional[Syn
     if not collection.connector_account_id:
         return None
     from ..connectors import get_connector
+    from .. import platform_config
     conn = get_connector(collection.source_type)
     if conn is None or not conn.capabilities().dual_track:
         return None
-    acct = db.get(ConnectorAccount, collection.connector_account_id)
-    if acct is None or acct.active is False or acct.backfill_done:
+    # Deep backfill is opt-in per source type (admin › Sources).
+    if not platform_config.source_backfill_enabled(collection.source_type):
         return None
-    # Back-compat: an account whose delta cursor is already established (old full
-    # backup completed) is treated as fully backfilled — don't re-crawl it.
-    if acct.backfill_cursor is None:
+    acct = db.get(ConnectorAccount, collection.connector_account_id)
+    if acct is None or acct.active is False:
+        return None
+    if acct.backfill_done:
+        # Periodic re-scan: re-crawl the whole history on a long cadence to catch
+        # anything the first pass missed (dedup makes already-captured items a
+        # no-op). The prior full pass IS the coverage index we compare against.
+        completed = acct.backfill_completed_at
+        if completed is not None:
+            if completed.tzinfo is not None:
+                completed = completed.replace(tzinfo=None)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            if (now - completed) < timedelta(days=_BACKFILL_RESCAN_DAYS):
+                return None
+            acct.backfill_done = False
+            acct.backfill_cursor = None
+            db.commit()
+            logger.info("re-scanning %s (%s) for missed history (last pass %s)",
+                        collection.name, collection.source_type, completed)
+        else:
+            return None
+    # Back-compat (first-ever pass only): a legacy account whose delta cursor is
+    # already established (old full backup completed) is treated as fully
+    # backfilled — don't re-crawl it. Never applies to a re-scan reset (which has
+    # a prior completion timestamp).
+    if (acct.backfill_cursor is None and acct.backfill_completed_at is None
+            and acct.backfill_started_at is None):
         old = acct.sync_cursor if isinstance(acct.sync_cursor, dict) else {}
         if old.get("history_id") and not old.get("has_more"):
             acct.backfill_done = True
             db.commit()
             return None
-    # Only one backfill job per collection at a time.
-    active = (db.query(SyncJob)
+    # One backfill batch at a time per source, paced between batches so the deep
+    # crawl balances with the recent track and respects provider rate limits.
+    recent = (db.query(SyncJob)
               .filter(SyncJob.collection_id == collection.id,
-                      SyncJob.kind == "backfill",
-                      SyncJob.status.in_(["queued", "running"])).first())
-    if active is not None:
-        return active
-    logger.info("starting deep-history backfill for %s (%s)", collection.name,
+                      SyncJob.kind == "backfill")
+              .order_by(SyncJob.created_at.desc()).first())
+    if recent is not None:
+        if recent.status in ("queued", "running"):
+            return recent
+        fin = recent.finished_at
+        if fin is not None:
+            if fin.tzinfo is not None:
+                fin = fin.replace(tzinfo=None)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            if (now - fin) < timedelta(minutes=_BACKFILL_PAUSE_MINUTES):
+                return None  # resting between batches
+    logger.info("starting deep-history backfill batch for %s (%s)", collection.name,
                 collection.source_type)
     return start_backup_job(db, collection.tenant_id, collection.id, kind="backfill",
                             destinations=collection.destinations or None)
@@ -195,8 +238,10 @@ def _run(job_id: str, destinations: Optional[List[str]]) -> None:
                 # resumable chunks: keep pulling while the persisted cursor reports
                 # more, so one job can span hours without holding the whole library
                 # in memory. Guarded by a wall-clock and iteration cap so a runaway
-                # source can't loop forever.
-                deadline = time.time() + 6 * 3600
+                # source can't loop forever. Backfill batches run a bounded window
+                # then yield (the scheduler starts the next batch after a rest).
+                window = _BACKFILL_WINDOW_SECONDS if mode == "backfill" else 6 * 3600
+                deadline = time.time() + window
                 for _ in range(100000):
                     if _cancel_requested(db, job.id):
                         raise JobCancelled()

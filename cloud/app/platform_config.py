@@ -37,6 +37,7 @@ def _load() -> dict:
                         values = {}
                 data[sc.connector_type] = {
                     "enabled": bool(sc.enabled),
+                    "backfill_enabled": bool(getattr(sc, "backfill_enabled", False)),
                     "config_object_id": sc.config_object_id,
                     "values": values,
                 }
@@ -53,6 +54,12 @@ def source_values(connector_type: str) -> dict:
 def source_enabled(connector_type: str, default: bool = True) -> bool:
     row = _load().get(connector_type)
     return default if row is None else bool(row["enabled"])
+
+
+def source_backfill_enabled(connector_type: str) -> bool:
+    """Whether an admin has opted this source into the deep-history backfill."""
+    row = _load().get(connector_type)
+    return bool(row and row.get("backfill_enabled"))
 
 
 def invalidate() -> None:

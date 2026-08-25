@@ -6,9 +6,12 @@
 {{DOMAIN}} {
 	encode zstd gzip
 
-	# API -> control plane
+	# API -> control plane. lb_try_duration briefly rides out a fast restart so a
+	# quick redeploy doesn't surface an error at all.
 	handle /api/* {
-		reverse_proxy 127.0.0.1:8000
+		reverse_proxy 127.0.0.1:8000 {
+			lb_try_duration 5s
+		}
 	}
 
 	# Static single-page app
@@ -16,6 +19,19 @@
 		root * {{WEBROOT}}
 		try_files {path} /index.html
 		file_server
+	}
+
+	# When the control plane is down (e.g. mid-deploy), return a clear, retryable
+	# 503 with Retry-After instead of a bare 502 — clients (agents/appliances/
+	# nodes) recognise this as "updating, try again shortly".
+	handle_errors {
+		@cp_down expression {http.error.status_code} in [502, 503, 504]
+		handle @cp_down {
+			header Retry-After "30"
+			header Content-Type "application/json"
+			respond `{"error":"control_plane_updating","detail":"Arkive is updating — retry shortly."}` 503
+		}
+		respond "{http.error.status_code} {http.error.status_text}" {http.error.status_code}
 	}
 
 	header {

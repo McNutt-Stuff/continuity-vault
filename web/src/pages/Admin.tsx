@@ -2094,7 +2094,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 interface ConfigKey { secret: boolean; set: boolean; value: string }
 interface ConfigObj { id: string; name: string; kind: string; keys: Record<string, ConfigKey>; updated_at?: string }
-interface SourceSlot { type: string; label: string; kind: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean; icon: string; color: string; family: string; category: string }
+interface SourceSlot { type: string; label: string; kind: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean; icon: string; color: string; family: string; category: string; backfill_supported?: boolean; backfill_enabled?: boolean }
 interface DraftRow { key: string; value: string; secret: boolean; set: boolean }
 interface ServiceKind { kind: string; label: string; category: string; credential_keys: string[]; settings: string[]; setting_defaults?: Record<string, string>; required: string[]; capabilities?: string[] }
 interface ServiceObj { id: string; name: string; kind: string; kind_label: string; category: string; enabled: boolean; config_object_id: string | null; settings: Record<string, string>; setting_keys: string[]; credential_keys: string[]; capabilities?: string[]; capability_options?: string[]; configured: boolean; updated_at?: string }
@@ -2220,7 +2220,7 @@ function SourcesAdmin() {
   }
   useEffect(() => { void load(); }, []);
 
-  async function setSource(s: SourceSlot, patch: { enabled?: boolean; config_object_id?: string | null; family?: string }) {
+  async function setSource(s: SourceSlot, patch: { enabled?: boolean; config_object_id?: string | null; family?: string; backfill_enabled?: boolean }) {
     try { await api.put(`/admin/sources/${s.type}`, patch); await load(); } catch { flash("Update failed"); }
   }
 
@@ -2252,6 +2252,7 @@ function SourcesAdmin() {
         <div className="muted" style={{ fontSize: 12.5, marginBottom: 16 }}>
           Enable each integration and link the configuration object that supplies its credentials.
           Sources are grouped by family — change a source's family to regroup it (this also applies on the customer catalog).
+          Deep backfill (where supported) runs a paced background crawl of full history alongside the fast recent sync.
         </div>
         <div className="stack" style={{ gap: 20 }}>
           {families.map((fam) => (
@@ -2261,7 +2262,7 @@ function SourcesAdmin() {
                 <span className="faint" style={{ fontSize: 11 }}>{sources.filter((s) => (s.family || "Other") === fam).length}</span>
               </div>
               <table className="table">
-                <thead><tr><th>Source</th><th>Enabled</th><th>Configuration</th><th>Status</th><th></th></tr></thead>
+                <thead><tr><th>Source</th><th>Enabled</th><th>Configuration</th><th>Status</th><th>Backfill</th><th></th></tr></thead>
                 <tbody>
                   {sources.filter((s) => (s.family || "Other") === fam).map((s) => {
                     const brand = brandForSource(s.type);
@@ -2286,6 +2287,15 @@ function SourcesAdmin() {
                           </select>
                         </td>
                         <td><Pill tone={s.configured ? "ok" : "warn"}>{s.configured ? "Configured" : "Not set"}</Pill></td>
+                        <td>
+                          {s.backfill_supported
+                            ? <label className="row" style={{ gap: 6, alignItems: "center", fontSize: 11.5 }}>
+                                <input type="checkbox" checked={!!s.backfill_enabled}
+                                       onChange={(e) => setSource(s, { backfill_enabled: e.target.checked })} />
+                                <span className="faint">Deep history</span>
+                              </label>
+                            : <span className="faint" style={{ fontSize: 11 }}>—</span>}
+                        </td>
                         <td><button className="btn ghost sm" onClick={() => editFamily(s)}>Change family</button></td>
                       </tr>
                     );

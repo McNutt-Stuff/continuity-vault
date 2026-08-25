@@ -1591,11 +1591,14 @@ def _source_slots() -> list[dict]:
 
 @router.get("/sources")
 def list_sources(db: Session = Depends(get_db)):
+    from ..connectors import get_connector
     rows = {sc.connector_type: sc for sc in db.query(SourceConfig).all()}
     out = []
     for slot in _source_slots():
         sc = rows.get(slot["type"])
         vals = _decrypt_values(db.get(ConfigObject, sc.config_object_id)) if (sc and sc.config_object_id) else {}
+        conn = get_connector(slot["type"])
+        supports_backfill = bool(conn and conn.capabilities().dual_track)
         out.append({
             "type": slot["type"], "label": slot["label"], "kind": slot["kind"],
             "icon": slot["icon"], "color": slot["color"], "category": slot["category"],
@@ -1605,6 +1608,8 @@ def list_sources(db: Session = Depends(get_db)):
             "enabled": True if sc is None else bool(sc.enabled),
             "config_object_id": sc.config_object_id if sc else None,
             "configured": all(vals.get(k) for k in slot["required"]),
+            "backfill_supported": supports_backfill,
+            "backfill_enabled": bool(sc and getattr(sc, "backfill_enabled", False)),
         })
     return out
 
@@ -1613,6 +1618,7 @@ class SourceUpdate(BaseModel):
     enabled: bool | None = None
     config_object_id: str | None = None
     family: str | None = None
+    backfill_enabled: bool | None = None
 
 
 @router.put("/sources/{ctype}")
@@ -1633,12 +1639,16 @@ def update_source(ctype: str, body: SourceUpdate,
         sc.config_object_id = body.config_object_id or None
     if body.family is not None:
         sc.family = body.family.strip() or None
+    if body.backfill_enabled is not None:
+        sc.backfill_enabled = body.backfill_enabled
     db.commit()
     platform_config.invalidate()
     emailer.invalidate_config_cache()
     audit.record(db, actor=principal.user_id, action="admin.source_updated",
-                 category="admin", detail={"source": ctype, "enabled": sc.enabled})
-    return {"ok": True, "enabled": sc.enabled, "config_object_id": sc.config_object_id}
+                 category="admin", detail={"source": ctype, "enabled": sc.enabled,
+                                           "backfill_enabled": sc.backfill_enabled})
+    return {"ok": True, "enabled": sc.enabled, "config_object_id": sc.config_object_id,
+            "backfill_enabled": sc.backfill_enabled}
 
 
 # =========================================================================== #
