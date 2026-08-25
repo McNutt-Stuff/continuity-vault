@@ -44,6 +44,7 @@ from ..models import (
     SyncJob,
     Tenant,
     User,
+    UserInsights,
     Vault,
 )
 from .site import _fleet_secret
@@ -149,6 +150,15 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
     pending_jobs = (db.query(SyncJob)
                     .filter(SyncJob.node_id == node.id, SyncJob.status == "queued").all())
 
+    # Users whose digital-footprint insights an admin (or the user) asked to
+    # (re)generate — the node mines its local index and pushes the report back.
+    uids = [u.id for u in users]
+    pending_insights = ([uid for (uid,) in
+                         db.query(UserInsights.user_id)
+                         .filter(UserInsights.user_id.in_(uids),
+                                 UserInsights.status == "pending").all()]
+                        if uids else [])
+
     # Wrapped key material for each vault (fleet-shared KEK → usable on the node).
     key_records = {v.id: keybroker.export_key_records(v.id) for v in vaults}
 
@@ -170,6 +180,7 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "nodes": [_ser(n) for n in db.query(Node).all()],
         "pricing": _ser(pricing) if pricing else None,
         "pending_jobs": [_ser(j) for j in pending_jobs],
+        "pending_insights": pending_insights,
         "agent_commands": agent_commands,
         "key_records": key_records,
     }
@@ -184,6 +195,7 @@ class PushPayload(BaseModel):
     jobs: list[dict] = []
     agents: list[dict] = []
     appliances: list[dict] = []
+    insights: list[dict] = []
 
 
 _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
@@ -215,7 +227,7 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     authoritative for the portal (search / recovery / billing / activity)."""
     _require_fleet(authorization)
     counts = {"receipts": 0, "documents": 0, "connector_accounts": 0,
-              "jobs": 0, "agents": 0, "appliances": 0}
+              "jobs": 0, "agents": 0, "appliances": 0, "insights": 0}
     for r in body.receipts:
         _upsert(db, SnapshotReceipt, r)
         counts["receipts"] += 1
@@ -269,6 +281,22 @@ def push(body: PushPayload, authorization: str = Header(default=""),
         if ap:
             _apply(ap, a, _APPLIANCE_FIELDS)
             counts["appliances"] += 1
+    # Digital-footprint insights the node computed for its tenants. Key on user_id
+    # (not the row id, which differs between the node and any control-plane
+    # pending marker) so there's exactly one report per user.
+    for ins in body.insights:
+        kw = _deser(UserInsights, ins)
+        uid = kw.get("user_id")
+        if not uid:
+            continue
+        existing = db.query(UserInsights).filter(UserInsights.user_id == uid).first()
+        if existing is not None:
+            for k, v in kw.items():
+                if k not in ("id", "user_id"):
+                    setattr(existing, k, v)
+        else:
+            db.add(UserInsights(**kw))
+        counts["insights"] += 1
     db.commit()
     return {"ok": True, **counts}
 

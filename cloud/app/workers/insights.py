@@ -70,6 +70,17 @@ class _Obj:
         self.title = title
 
 
+def _time_reliable(o: "_Obj") -> bool:
+    """Calendar events carry arbitrary dates (far past/future), so their
+    timestamps must never drive footprint timelines or "oldest item" analysis."""
+    return o.doc_type != "event" and o.category != "calendar"
+
+
+def _dated(objs: list["_Obj"]) -> list["_Obj"]:
+    """Objects whose timestamp can be trusted for time-based analysis."""
+    return [o for o in objs if o.when is not None and _time_reliable(o)]
+
+
 def _collect_objects(db: Session, vault_ids: list[str], tenant_id: str) -> list[_Obj]:
     """Deduplicated logical objects (latest row per source_type+object_id)."""
     if not vault_ids:
@@ -92,7 +103,7 @@ def _collect_objects(db: Session, vault_ids: list[str], tenant_id: str) -> list[
 
 
 def _build_timeline(objs: list[_Obj]) -> dict:
-    dated = [o for o in objs if o.when is not None]
+    dated = _dated(objs)
     if not dated:
         return {"granularity": "year", "points": [], "series": [],
                 "bytes": [], "cumulative": [], "total_objects": len(objs),
@@ -163,7 +174,7 @@ def _build_timeline(objs: list[_Obj]) -> dict:
 # Insight cards — each returns a card dict when the data qualifies, else None. #
 # --------------------------------------------------------------------------- #
 def _card_longevity(objs: list[_Obj], stats: dict) -> dict | None:
-    dated = [o for o in objs if o.when is not None]
+    dated = _dated(objs)
     if len(dated) < _MIN_OBJECTS:
         return None
     dated.sort(key=lambda o: o.when)
@@ -351,17 +362,44 @@ def generate_for_user(db: Session, user: User) -> UserInsights:
     return row
 
 
+def mark_pending(db: Session, user: User) -> UserInsights:
+    """Flag a user's insights as awaiting (re)generation. Used on the control
+    plane for node-hosted tenants: the assigned node picks this up on its next
+    replication pull, generates the report locally, and pushes the result back."""
+    row = db.query(UserInsights).filter(UserInsights.user_id == user.id).one_or_none()
+    if row is None:
+        row = UserInsights(tenant_id=user.tenant_id, user_id=user.id, stats={},
+                           timeline={}, cards=[])
+        db.add(row)
+    row.tenant_id = user.tenant_id
+    row.status = "pending"
+    db.commit()
+    return row
+
+
+def _is_control_plane() -> bool:
+    from ..config import get_settings
+    return (get_settings().node_role or "control-plane") == "control-plane"
+
+
 def generate_all() -> int:
     """Refresh insights for every active user who has the feature enabled.
     Returns the number of users processed."""
     count = 0
+    control_plane = _is_control_plane()
     with SessionLocal() as db:
         from ..models import Tenant
         users = db.query(User).filter(User.status == "active").all()
         tenants = {t.id: t for t in db.query(Tenant).all()}
         for u in users:
             try:
-                if not features.resolve(u, tenants.get(u.tenant_id), "insights_enabled"):
+                tenant = tenants.get(u.tenant_id)
+                if not features.resolve(u, tenant, "insights_enabled"):
+                    continue
+                # In federation the assigned node owns its tenants' index and
+                # computes their insights (then pushes them up); the control
+                # plane must not also generate them from its replicated copy.
+                if control_plane and tenant and tenant.node_id:
                     continue
                 generate_for_user(db, u)
                 count += 1

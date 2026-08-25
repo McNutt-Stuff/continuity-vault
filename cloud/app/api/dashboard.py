@@ -199,11 +199,13 @@ def overview(scope: str = "me",
         else:  # store:<id> / appliance / appliance:<id>
             usage["appliance"] += b
     # Oldest protected item by the CONTENT's own timestamp (file/email date),
-    # not when we ingested it.
+    # not when we ingested it. Calendar events are excluded — their dates are
+    # arbitrary (recurring/future) and would skew "how far back" the history goes.
     oldest = (db.query(func.min(SearchDocument.modified_at))
               .filter(SearchDocument.tenant_id == tenant.id,
                       SearchDocument.vault_id.in_(vault_ids),
-                      SearchDocument.modified_at.isnot(None)).scalar()) if vault_ids else None
+                      SearchDocument.modified_at.isnot(None),
+                      SearchDocument.doc_type != "event").scalar()) if vault_ids else None
 
     # --- Pending Arkive Cloud deletion (30-day grace after unsubscribe) -------
     from .billing import cloud_delete_target, cloud_stored_summary

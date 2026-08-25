@@ -88,11 +88,15 @@ async function editUserDialog(u: any, isShared: boolean): Promise<boolean> {
 // Generate (refresh) a user's digital-footprint insights report on demand.
 async function generateInsightsFor(u: any): Promise<void> {
   try {
-    const r = await api.post<{ status: string; object_count: number; card_count: number }>(
+    const r = await api.post<{ status: string; queued?: boolean; message?: string; object_count?: number; card_count?: number }>(
       `/admin/users/${u.id}/insights`, {});
+    if (r.queued || r.status === "pending") {
+      notify({ message: r.message || `Insights requested for ${u.email} — the tenant's node will report back shortly.`, tone: "info" });
+      return;
+    }
     notify({
       message: r.status === "ready"
-        ? `Insights generated for ${u.email}: ${r.card_count} card(s) from ${r.object_count.toLocaleString()} objects.`
+        ? `Insights generated for ${u.email}: ${r.card_count ?? 0} card(s) from ${(r.object_count ?? 0).toLocaleString()} objects.`
         : `Not enough data yet to build insights for ${u.email}.`,
       tone: r.status === "ready" ? "info" : "warn",
     });

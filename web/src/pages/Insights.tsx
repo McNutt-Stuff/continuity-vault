@@ -28,7 +28,7 @@ interface InsightCard {
   action?: { label: string; to: string };
 }
 interface InsightsResp {
-  status: "ready" | "insufficient_data";
+  status: "ready" | "insufficient_data" | "pending";
   generated_at: string | null;
   stats: { object_count?: number; total_bytes?: number; source_count?: number; category_count?: number };
   timeline: Timeline;
@@ -52,6 +52,13 @@ export default function Insights() {
   }
   useEffect(() => { void load(); }, []);
 
+  // While a node-hosted report is being generated remotely, poll until it lands.
+  useEffect(() => {
+    if (data?.status !== "pending") return;
+    const t = setTimeout(() => { void load(); }, 8000);
+    return () => clearTimeout(t);
+  }, [data]);
+
   async function refresh() {
     setRefreshing(true);
     try { setData(await api.post<InsightsResp>("/insights/refresh", {})); }
@@ -60,6 +67,31 @@ export default function Insights() {
   }
 
   if (loading) return <Loading label="Analyzing your digital footprint…" />;
+
+  if (data?.status === "pending") {
+    return (
+      <>
+        <div className="spread" style={{ marginBottom: 18 }}>
+          <div className="stack">
+            <h2 style={{ margin: 0 }}>Your digital footprint</h2>
+            <div className="faint" style={{ fontSize: 12.5 }}>A living view of everything Arkive protects for you</div>
+          </div>
+        </div>
+        <Card className="insights-hero">
+          <div className="row" style={{ gap: 14, alignItems: "center", padding: "20px 8px" }}>
+            <span className="spinner" />
+            <div className="flex1">
+              <div style={{ fontWeight: 600, fontSize: 15 }}>Building your insights…</div>
+              <div className="faint" style={{ fontSize: 12.5 }}>
+                We're mining your protected data to surface your footprint timeline and tailored findings.
+                This page will update automatically in a few moments.
+              </div>
+            </div>
+          </div>
+        </Card>
+      </>
+    );
+  }
 
   const tl = data?.timeline;
   const hasTimeline = !!tl && (tl.points?.length || 0) > 0;

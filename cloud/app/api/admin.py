@@ -710,11 +710,21 @@ def update_user(uid: str, body: UserUpdate,
 def generate_user_insights(uid: str,
                            principal: security.Principal = Depends(security.require_platform_admin),
                            db: Session = Depends(get_db)):
-    """Generate (refresh) a user's digital-footprint insights report on demand."""
+    """Generate (refresh) a user's digital-footprint insights report on demand.
+    For a node-hosted tenant the control plane can't mine the index itself, so it
+    queues the request; the assigned node generates it and pushes the result back."""
     u = db.get(User, uid)
     if not u:
         raise HTTPException(404, "user not found")
-    from ..workers.insights import generate_for_user
+    tenant = db.get(Tenant, u.tenant_id)
+    from ..workers.insights import generate_for_user, mark_pending
+    if tenant is not None and tenant.node_id:
+        row = mark_pending(db, u)
+        audit.record(db, actor=principal.user_id, action="admin.user_insights_requested",
+                     tenant_id=u.tenant_id, category="admin",
+                     detail={"email": u.email, "node_id": tenant.node_id})
+        return {"ok": True, "status": "pending", "queued": True,
+                "message": "Requested from the tenant's node — it will report back shortly."}
     row = generate_for_user(db, u)
     stats = row.stats or {}
     audit.record(db, actor=principal.user_id, action="admin.user_insights_generated",

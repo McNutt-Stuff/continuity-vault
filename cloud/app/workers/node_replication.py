@@ -41,6 +41,7 @@ from ..models import (
     SyncJob,
     Tenant,
     User,
+    UserInsights,
     Vault,
 )
 
@@ -48,6 +49,7 @@ logger = logging.getLogger("cv.replication")
 
 _thread: threading.Thread | None = None
 _running_jobs: set[str] = set()
+_running_insights: set[str] = set()
 
 # Upsert in FK-dependency order so a strict database accepts the rows.
 _PULL_ORDER = [
@@ -88,18 +90,38 @@ def _state_path() -> Path:
     return base / "replication_state.json"
 
 
-def _load_cursor() -> str | None:
+def _read_state() -> dict:
     try:
-        return json.loads(_state_path().read_text()).get("push_cursor")
+        return json.loads(_state_path().read_text())
     except Exception:
-        return None
+        return {}
+
+
+def _write_state(d: dict) -> None:
+    try:
+        _state_path().write_text(json.dumps(d))
+    except Exception:
+        logger.debug("could not persist replication state", exc_info=True)
+
+
+def _load_cursor() -> str | None:
+    return _read_state().get("push_cursor")
 
 
 def _save_cursor(iso: str) -> None:
-    try:
-        _state_path().write_text(json.dumps({"push_cursor": iso}))
-    except Exception:
-        logger.debug("could not persist replication cursor", exc_info=True)
+    st = _read_state()
+    st["push_cursor"] = iso
+    _write_state(st)
+
+
+def _load_insights_cursor() -> str | None:
+    return _read_state().get("insights_cursor")
+
+
+def _save_insights_cursor(iso: str) -> None:
+    st = _read_state()
+    st["insights_cursor"] = iso
+    _write_state(st)
 
 
 def _post(path: str, payload: dict) -> dict | None:
@@ -219,9 +241,37 @@ def _pull(s) -> int:
     # them locally and run them against the local DB.
     for j in bundle.get("pending_jobs", []) or []:
         _run_pending_job(j)
+    # Admin/user-requested insight (re)generation for our tenants: mine the local
+    # index and push the report back to the control plane.
+    for uid in bundle.get("pending_insights", []) or []:
+        _run_insight_request(uid)
     logger.info("replication pull: %d assigned tenant(s), %d row(s) synced%s",
                 bundle.get("assigned", 0), n, f", {skipped} skipped" if skipped else "")
     return n
+
+
+def _run_insight_request(user_id: str) -> None:
+    if not user_id or user_id in _running_insights:
+        return
+    _running_insights.add(user_id)
+
+    def _go() -> None:
+        try:
+            from .insights import generate_for_user
+            with SessionLocal() as db:
+                u = db.get(User, user_id)
+                if u is not None:
+                    generate_for_user(db, u)
+        except Exception:  # noqa: BLE001
+            logger.exception("insight generation failed for user %s", user_id)
+        finally:
+            _running_insights.discard(user_id)
+            try:
+                _push(get_settings())  # report the fresh insight back promptly
+            except Exception:  # noqa: BLE001
+                logger.debug("post-insight push failed", exc_info=True)
+
+    threading.Thread(target=_go, name=f"cv-node-insight-{user_id[:8]}", daemon=True).start()
 
 
 def _run_pending_job(j: dict) -> None:
@@ -260,8 +310,17 @@ def _push(s) -> int:
         except ValueError:
             since = None
     high = since
+    ins_cursor = _load_insights_cursor()
+    ins_since = None
+    if ins_cursor:
+        try:
+            ins_since = datetime.fromisoformat(ins_cursor)
+        except ValueError:
+            ins_since = None
+    ins_high = ins_since
     receipts, documents, accounts = [], [], []
     jobs, agents, appliances = [], [], []
+    insights = []
     with SessionLocal() as db:
         rq = db.query(SnapshotReceipt)
         if since is not None:
@@ -289,18 +348,29 @@ def _push(s) -> int:
             agents.append(_row(ag))
         for ap in db.query(Appliance).all():
             appliances.append(_row(ap))
-    if not (receipts or documents or accounts or jobs or agents or appliances):
+        # Digital-footprint insights refreshed since the last push (daily job or
+        # an admin/user request) — report them so the portal stays authoritative.
+        iq = db.query(UserInsights)
+        if ins_since is not None:
+            iq = iq.filter(UserInsights.generated_at > ins_since)
+        for row in iq.order_by(UserInsights.generated_at.asc()).limit(1000).all():
+            insights.append(_row(row))
+            if row.generated_at and (ins_high is None or row.generated_at > ins_high):
+                ins_high = row.generated_at
+    if not (receipts or documents or accounts or jobs or agents or appliances or insights):
         return 0
     res = _post("/nodes/sync/push", {
         "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
         "receipts": receipts, "documents": documents, "connector_accounts": accounts,
-        "jobs": jobs, "agents": agents, "appliances": appliances,
+        "jobs": jobs, "agents": agents, "appliances": appliances, "insights": insights,
     })
     if res and res.get("ok"):
         if high is not None:
             _save_cursor(high.isoformat())
-        logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d appliances=%d",
-                    len(receipts), len(documents), len(jobs), len(agents), len(appliances))
+        if ins_high is not None:
+            _save_insights_cursor(ins_high.isoformat())
+        logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d appliances=%d insights=%d",
+                    len(receipts), len(documents), len(jobs), len(agents), len(appliances), len(insights))
         return len(receipts) + len(documents)
     return 0
 
