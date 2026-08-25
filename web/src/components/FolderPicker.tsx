@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, useEffect, useMemo, useState } from "react";
 import { Icon } from "./Icon";
 import { bytes } from "./ui";
 
@@ -110,6 +110,58 @@ export function FolderPicker(props: Props) {
     }
   }
 
+  // Index every folder currently loaded in the tree (roots + lazily-expanded
+  // children) so we can tell which of the operator's *saved* selections still
+  // exist. Selected folders that were moved/deleted no longer appear anywhere in
+  // the browsable tree — this lets us surface them so they can be un-selected.
+  const loadedIndex = useMemo(() => {
+    const loaded = new Set<string>();
+    const expandedParents = new Set<string>();
+    const nameByPath = new Map<string, string>();
+    const walk = (nodes: FolderNode[]) => {
+      for (const n of nodes) {
+        loaded.add(n.path);
+        nameByPath.set(n.path, n.name);
+        const kids = lazyKids[n.path] ?? n.children;
+        if (kids) { expandedParents.add(n.path); walk(kids); }
+      }
+    };
+    walk(roots);
+    for (const [p, kids] of Object.entries(lazyKids)) {
+      expandedParents.add(p);
+      for (const k of kids) { loaded.add(k.path); nameByPath.set(k.path, k.name); }
+    }
+    return { loaded, expandedParents, nameByPath, rootPaths: roots.map((r) => r.path) };
+  }, [roots, lazyKids]);
+
+  // "ok" = present in the tree, "gone" = confidently missing (its drive/parent is
+  // loaded but it isn't there), "unknown" = parent not browsed yet.
+  function availabilityOf(p: string): "ok" | "gone" | "unknown" {
+    const { loaded, expandedParents, rootPaths } = loadedIndex;
+    if (p === "__root__" || loaded.has(p)) return "ok";
+    const underRoot = rootPaths.some((r) => p === r || p.startsWith(r.endsWith("/") ? r : r + "/"));
+    if (rootPaths.length > 0 && !underRoot) return "gone";  // whole drive/volume/home is gone
+    const par = p.replace(/\/[^/]*$/, "");
+    if (expandedParents.has(par)) return "gone";  // parent browsed, folder absent → deleted
+    return "unknown";
+  }
+
+  const selectedList = useMemo(() => {
+    const items = [
+      ...[...selected].map((p) => ({ path: p, flat: false })),
+      ...[...flatSel].map((p) => ({ path: p, flat: true })),
+    ];
+    return items
+      .map((it) => ({ ...it, avail: availabilityOf(it.path), name: loadedIndex.nameByPath.get(it.path) }))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [selected, flatSel, loadedIndex]);
+
+  function displayName(path: string, name?: string): string {
+    if (path === "__root__") return "Files in the root folder";
+    return name || path.replace(/\/+$/, "").split("/").pop() || path;
+  }
+
   function renderNode(node: FolderNode, depth: number) {
     const isSel = selected.has(node.path) || flatSel.has(node.path);
     const isFlat = flatSel.has(node.path);
@@ -177,6 +229,36 @@ export function FolderPicker(props: Props) {
             {roots.map((r) => renderNode(r, 0))}
             {!loading && roots.length === 0 && <div className="muted">{props.emptyLabel || "No folders found."}</div>}
           </div>
+          {selectedList.length > 0 && (
+            <div style={{ marginTop: 10, border: "1px solid var(--border-soft)", borderRadius: 8, padding: 8 }}>
+              <div className="faint" style={{ fontSize: 11, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                Selected folders
+              </div>
+              <div className="stack" style={{ gap: 2 }}>
+                {selectedList.map((it) => {
+                  const gone = it.avail === "gone";
+                  return (
+                    <div key={(it.flat ? FLAT : "") + it.path} className="row"
+                         style={{ gap: 6, alignItems: "center", padding: "2px 0", opacity: gone ? 0.85 : 1 }}>
+                      <Icon name={gone ? "alert" : "database"} size={13} />
+                      <span style={{ fontSize: 12.5, textDecoration: gone ? "line-through" : "none" }}>
+                        {displayName(it.path, it.name)}
+                      </span>
+                      {it.flat && <span className="faint" style={{ fontSize: 10 }}>· files only</span>}
+                      {gone && (
+                        <span style={{ fontSize: 10.5, color: "var(--warn-c,#d19a30)" }}>(no longer available)</span>
+                      )}
+                      <span className="faint" style={{ fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 260 }}
+                            title={it.path}>{it.path === "__root__" ? "" : it.path}</span>
+                      <div style={{ flex: 1 }} />
+                      <button className="btn ghost sm" style={{ padding: "0 6px", minWidth: 18 }}
+                              title="Remove from selection" onClick={() => toggleSelect(it.path)}>×</button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {props.extra}
           <div className="faint" style={{ fontSize: 11, marginTop: 8 }}>
             {selected.size + flatSel.size} folder(s) selected · nothing selected backs up everything. Each item is encrypted before upload.

@@ -41,10 +41,37 @@ interface OnePasswordView {
   fields: OpField[]; urls: { label?: string; href: string }[]; notes?: string;
 }
 interface NoteView { title?: string; notebook?: string; tags?: string[]; content?: string }
+interface CalendarView {
+  title?: string; start?: string; end?: string; allDay?: boolean;
+  location?: string; description?: string; organizer?: string;
+  attendees?: { name?: string; email?: string; status?: string }[];
+  link?: string; recurring?: boolean;
+}
+interface ChatAttachment { filename?: string; kind?: string; mime?: string }
+interface ChatMsgView {
+  text?: string; service?: string; date?: string; chatName?: string;
+  isGroup?: boolean; isFromMe?: boolean;
+  from?: { name?: string; handle?: string };
+  to?: { name?: string; handle?: string }[];
+  attachments?: ChatAttachment[];
+}
+interface SocialView {
+  network: string; author?: string; date?: string; text?: string; title?: string;
+  permalink?: string; group?: string; kind?: string;
+  stats?: { label: string; value: string | number }[];
+}
+interface ContactView {
+  name?: string; org?: string; jobTitle?: string; photo?: string;
+  emails?: { label?: string; value: string }[];
+  phones?: { label?: string; value: string }[];
+  notes?: string;
+}
 interface Viewing {
   item: Recovered;
-  kind: "text" | "image" | "binary" | "email" | "onepassword" | "pdf" | "audio" | "video" | "note";
+  kind: "text" | "image" | "binary" | "email" | "onepassword" | "pdf" | "audio" | "video"
+      | "note" | "calendar" | "imessage" | "social" | "contact";
   text?: string; url?: string; email?: EmailView; onePassword?: OnePasswordView; note?: NoteView;
+  calendar?: CalendarView; message?: ChatMsgView; social?: SocialView; contact?: ContactView;
 }
 
 interface Result {
@@ -123,6 +150,9 @@ const SOURCE_META: Record<string, { color: string; icon: IconName; label: string
 // Calendar is excluded from the default Type selection because recurring/all-day
 // events currently produce noisy results.
 const DEFAULT_TYPES = Object.keys(CATEGORY_META).filter((k) => k !== "calendar");
+
+// Sources whose recovered items render as social posts/profiles.
+const SOCIAL_SOURCES = ["reddit", "facebook", "instagram", "twitter", "mastodon", "linkedin"];
 
 // A clean, styled dropdown shell (checkbox multi-selects) — mirrors the date
 // popover: a narrow trigger showing a summary, opening a wider menu panel.
@@ -335,6 +365,105 @@ function isOnePassword(item: Recovered): boolean {
     || ["login", "password", "secret", "note", "identity", "api_key", "credit_card"].includes(item.doc_type);
 }
 
+// Format a timestamp that may arrive as an ISO string, a unix-seconds number
+// (Reddit's created_utc), or a numeric string. Falls back to the raw value.
+function fmtWhen(v: unknown): string {
+  if (v == null || v === "") return "";
+  let d: Date | null = null;
+  if (typeof v === "number") d = new Date(v > 1e12 ? v : v * 1000);
+  else if (typeof v === "string") {
+    d = /^\d+$/.test(v) ? new Date(Number(v) * 1000) : new Date(v);
+  }
+  if (!d || isNaN(d.getTime())) return String(v);
+  return d.toLocaleString();
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseCalendar(d: any): CalendarView {
+  const s = d.start, e = d.end;
+  const start = typeof s === "string" ? s : (s?.dateTime || s?.date);
+  const end = typeof e === "string" ? e : (e?.dateTime || e?.date);
+  const allDay = !!(s && typeof s === "object" && s.date && !s.dateTime);
+  return {
+    title: d.summary || d.title || d.subject,
+    start, end, allDay,
+    location: d.location || (d.location?.displayName),
+    description: d.description || d.bodyPreview,
+    organizer: d.organizer?.email || d.organizer?.displayName
+      || d.organizer?.emailAddress?.address,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    attendees: (d.attendees || []).map((a: any) => ({
+      name: a.displayName || a.emailAddress?.name,
+      email: a.email || a.emailAddress?.address,
+      status: a.responseStatus || a.status?.response,
+    })).filter((a: { name?: string; email?: string }) => a.name || a.email),
+    link: d.htmlLink || d.hangoutLink || d.webLink || d.onlineMeeting?.joinUrl,
+    recurring: Array.isArray(d.recurrence) && d.recurrence.length > 0,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseMessage(d: any): ChatMsgView {
+  return {
+    text: d.text, service: d.service, date: d.date,
+    chatName: d.chat_name, isGroup: d.is_group, isFromMe: d.is_from_me,
+    from: d.from, to: d.to, attachments: d.attachments,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseSocial(d: any, item: Recovered): SocialView {
+  const share = d.specificContent?.["com.linkedin.ugc.ShareContent"]?.shareCommentary;
+  const text = d.selftext || d.body || d.message || d.text || d.caption
+    || share?.text || "";
+  const stats: { label: string; value: string | number }[] = [];
+  if (d.score != null) stats.push({ label: "Score", value: d.score });
+  if (d.ups != null && d.score == null) stats.push({ label: "Upvotes", value: d.ups });
+  if (d.num_comments != null) stats.push({ label: "Comments", value: d.num_comments });
+  if (d.like_count != null) stats.push({ label: "Likes", value: d.like_count });
+  return {
+    network: item.source_type,
+    author: d.author || d.username || d.screen_name || d.from
+      || d.name || d.localizedHeadline || undefined,
+    date: fmtWhen(d.created_utc ?? d.created_time ?? d.timestamp ?? d.created?.time ?? d.createdAt),
+    text,
+    title: d.title,
+    permalink: d.permalink_url || d.url || d.link
+      || (d.permalink ? `https://reddit.com${d.permalink}` : undefined),
+    group: d.subreddit ? `r/${d.subreddit}` : undefined,
+    kind: item.doc_type,
+    stats,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseContact(d: any): ContactView {
+  const name = d.name
+    || [d.firstName, d.lastName].filter(Boolean).join(" ")
+    || [d.localizedFirstName, d.localizedLastName].filter(Boolean).join(" ")
+    || d.displayName || d.fullName || undefined;
+  const emails: { label?: string; value: string }[] = [];
+  if (typeof d.email === "string") emails.push({ value: d.email });
+  for (const e of (d.emailAddresses || d.emails || [])) {
+    const value = typeof e === "string" ? e : (e.field || e.value || e.address);
+    if (value) emails.push({ label: e && typeof e === "object" ? e.label : undefined, value });
+  }
+  const phones: { label?: string; value: string }[] = [];
+  if (typeof d.phone === "string") phones.push({ value: d.phone });
+  for (const p of (d.phones || d.phoneNumbers || [])) {
+    const value = typeof p === "string" ? p : (p.field || p.value || p.number);
+    if (value) phones.push({ label: p && typeof p === "object" ? p.label : undefined, value });
+  }
+  return {
+    name,
+    org: d.company || d.organization || d.org || undefined,
+    jobTitle: d.jobTitle || d.title || d.headline || d.localizedHeadline || undefined,
+    photo: d.photo || d.picture || d.photoUrl || undefined,
+    emails, phones,
+    notes: d.notes || d.note || undefined,
+  };
+}
+
 export default function Search() {
   const { me, stepUp } = useAuth();
   const [q, setQ] = useState("");
@@ -495,6 +624,49 @@ export default function Search() {
       }
       const text = await blob.text();
       const oversized = text.trimStart().startsWith("{") && text.includes("content_exceeds_cap");
+      // Calendar events: render a formatted event card (title, when, where, who).
+      if (!oversized && (item.doc_type === "event" || item.source_type === "google_calendar")) {
+        try {
+          setViewing({ item, kind: "calendar", calendar: parseCalendar(JSON.parse(text)), url });
+          await loadRecovered();
+          return;
+        } catch { /* fall through */ }
+      }
+      // iMessage / SMS: render the message as a chat bubble with its thread info.
+      if (!oversized && item.source_type === "imessage") {
+        try {
+          setViewing({ item, kind: "imessage", message: parseMessage(JSON.parse(text)), url });
+          await loadRecovered();
+          return;
+        } catch { /* fall through */ }
+      }
+      // Contacts / people: render an address-book style card.
+      if (!oversized && (item.doc_type === "person" || item.doc_type === "contact")) {
+        try {
+          setViewing({ item, kind: "contact", contact: parseContact(JSON.parse(text)), url });
+          await loadRecovered();
+          return;
+        } catch { /* fall through */ }
+      }
+      // Social posts / comments / profiles: render a network-styled post card.
+      if (!oversized && (["post", "comment", "profile"].includes(item.doc_type)
+          || SOCIAL_SOURCES.includes(item.source_type))) {
+        try {
+          setViewing({ item, kind: "social", social: parseSocial(JSON.parse(text), item), url });
+          await loadRecovered();
+          return;
+        } catch { /* fall through */ }
+      }
+      // Notes (e.g. Evernote): render the note body rather than raw JSON. Guarded
+      // so 1Password secure notes still fall through to the credential card.
+      if (!oversized && item.doc_type === "note" && item.source_type !== "onepassword") {
+        try {
+          const n = JSON.parse(text);
+          setViewing({ item, kind: "note", note: n, url });
+          await loadRecovered();
+          return;
+        } catch { /* fall through to generic rendering */ }
+      }
       // 1Password items: parse the op JSON into a structured credential display.
       if (!oversized && isOnePassword(item)) {
         try {
@@ -1027,6 +1199,18 @@ export default function Search() {
                   </pre>
                 </div>
               )}
+              {viewing.kind === "calendar" && viewing.calendar && (
+                <CalendarCard data={viewing.calendar} title={viewing.item.title} />
+              )}
+              {viewing.kind === "imessage" && viewing.message && (
+                <ChatCard data={viewing.message} />
+              )}
+              {viewing.kind === "contact" && viewing.contact && (
+                <ContactCard data={viewing.contact} title={viewing.item.title} />
+              )}
+              {viewing.kind === "social" && viewing.social && (
+                <SocialCard data={viewing.social} title={viewing.item.title} />
+              )}
               {viewing.kind === "binary" && (
                 <div className="muted" style={{ padding: 16 }}>
                   This item type can't be previewed. Use Download to save it.
@@ -1322,6 +1506,265 @@ function OnePasswordCard({ data }: { data: OnePasswordView }) {
       {data.updatedAt && (
         <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>Last modified {data.updatedAt}</div>
       )}
+    </div>
+  );
+}
+
+// Recovered calendar event — an invitation-style card (title, when, where, who).
+function CalendarCard({ data, title }: { data: CalendarView; title: string }) {
+  const when = data.allDay
+    ? [data.start, data.end].filter(Boolean).map((s) => (s || "").slice(0, 10)).join(" – ")
+    : [data.start, data.end].filter(Boolean).map(fmtWhen).join("  →  ");
+  return (
+    <div style={{ maxHeight: "62vh", overflow: "auto" }}>
+      <div className="row" style={{ gap: 12, alignItems: "flex-start", marginBottom: 14 }}>
+        <div style={{ width: 46, borderRadius: 10, overflow: "hidden", textAlign: "center",
+                      border: "1px solid var(--border,#22304a)", flexShrink: 0 }}>
+          <div style={{ background: "#0078d4", color: "#fff", fontSize: 10, fontWeight: 700,
+                        textTransform: "uppercase", padding: "2px 0" }}>
+            {data.start ? new Date(data.start).toLocaleString(undefined, { month: "short" }) : "—"}
+          </div>
+          <div style={{ fontSize: 20, fontWeight: 700, padding: "3px 0" }}>
+            {data.start && !isNaN(new Date(data.start).getTime())
+              ? new Date(data.start).getDate() : "?"}
+          </div>
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 700, fontSize: 16 }}>{data.title || title}</div>
+          <div className="row" style={{ gap: 6, alignItems: "center", marginTop: 2 }}>
+            <Icon name="calendar" size={13} />
+            <span className="faint" style={{ fontSize: 12.5 }}>{when || "No date"}</span>
+            {data.recurring && <Pill tone="info"><Icon name="repeat" size={11} /> Recurring</Pill>}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gap: 8 }}>
+        {data.location && (
+          <div className="row" style={{ gap: 8, alignItems: "center", border: "1px solid var(--border,#22304a)",
+                                        borderRadius: 8, padding: "8px 10px" }}>
+            <Icon name="grid" size={14} />
+            <span style={{ fontSize: 13, overflowWrap: "anywhere" }}>{data.location}</span>
+          </div>
+        )}
+        {data.organizer && (
+          <div className="row" style={{ gap: 8, alignItems: "center", border: "1px solid var(--border,#22304a)",
+                                        borderRadius: 8, padding: "8px 10px" }}>
+            <Icon name="user" size={14} />
+            <span style={{ fontSize: 13 }}>Organized by <b>{data.organizer}</b></span>
+          </div>
+        )}
+        {data.attendees && data.attendees.length > 0 && (
+          <div style={{ border: "1px solid var(--border,#22304a)", borderRadius: 8, padding: "8px 10px" }}>
+            <div className="faint" style={{ fontSize: 11, marginBottom: 6 }}>
+              {data.attendees.length} guest{data.attendees.length === 1 ? "" : "s"}
+            </div>
+            <div style={{ display: "grid", gap: 4 }}>
+              {data.attendees.map((a, i) => (
+                <div key={i} className="row" style={{ gap: 8, alignItems: "center", fontSize: 12.5 }}>
+                  <Icon name={a.status === "accepted" ? "check" : "user"} size={12} />
+                  <span>{a.name || a.email}</span>
+                  {a.name && a.email && <span className="faint">· {a.email}</span>}
+                  {a.status && <span className="faint" style={{ marginLeft: "auto" }}>{a.status}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {data.description && (
+          <div style={{ border: "1px solid var(--border,#22304a)", borderRadius: 8, padding: "8px 10px" }}>
+            <div className="faint" style={{ fontSize: 11, marginBottom: 4 }}>Details</div>
+            <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "inherit", fontSize: 13 }}>{data.description}</pre>
+          </div>
+        )}
+        {data.link && (
+          <a href={data.link} target="_blank" rel="noreferrer noopener"
+             style={{ color: "var(--accent,#4f7cff)", fontSize: 13, overflowWrap: "anywhere" }}>
+            {data.link}
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Recovered iMessage/SMS — rendered as a single chat bubble with thread context.
+function ChatCard({ data }: { data: ChatMsgView }) {
+  const mine = !!data.isFromMe;
+  const who = mine ? "Me" : (data.from?.name || data.from?.handle || "Unknown");
+  return (
+    <div style={{ maxHeight: "62vh", overflow: "auto" }}>
+      <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 12,
+                                    paddingBottom: 10, borderBottom: "1px solid var(--border,#22304a)" }}>
+        <div style={{ width: 34, height: 34, borderRadius: "50%", display: "grid", placeItems: "center",
+                      background: data.service === "SMS" ? "#34c759" : "#0b93f6", color: "#fff", flexShrink: 0 }}>
+          <Icon name="mail" size={16} />
+        </div>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>{data.chatName || who}</div>
+          <div className="faint" style={{ fontSize: 11.5 }}>
+            {data.isGroup ? "Group conversation" : "Direct message"} · {data.service || "iMessage"}
+          </div>
+        </div>
+      </div>
+
+      <div className="faint" style={{ fontSize: 11, textAlign: "center", marginBottom: 8 }}>
+        {fmtWhen(data.date)}
+      </div>
+      <div style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start" }}>
+        <div style={{ maxWidth: "78%" }}>
+          {!mine && (
+            <div className="faint" style={{ fontSize: 11, marginBottom: 3, marginLeft: 6 }}>{who}</div>
+          )}
+          {data.text && (
+            <div style={{
+              background: mine ? "#0b93f6" : "var(--panel-2,#1b2740)",
+              color: mine ? "#fff" : "inherit",
+              borderRadius: 16, padding: "8px 13px", fontSize: 14, lineHeight: 1.4,
+              overflowWrap: "anywhere", whiteSpace: "pre-wrap",
+            }}>
+              {data.text}
+            </div>
+          )}
+          {data.attachments && data.attachments.length > 0 && (
+            <div style={{ marginTop: 6, display: "grid", gap: 4 }}>
+              {data.attachments.map((a, i) => (
+                <div key={i} className="row" style={{ gap: 6, alignItems: "center", fontSize: 12,
+                      background: "var(--panel-2,#1b2740)", borderRadius: 10, padding: "6px 10px" }}>
+                  <Icon name={a.kind === "image" ? "image" : a.kind === "video" ? "activity" : "file"} size={13} />
+                  <span style={{ overflowWrap: "anywhere" }}>{a.filename || "attachment"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {data.to && data.to.length > 0 && (
+        <div className="faint" style={{ fontSize: 11, marginTop: 14, textAlign: "center" }}>
+          To: {data.to.map((t) => t.name || t.handle).filter(Boolean).join(", ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Recovered social post/comment/profile — a network-branded card.
+function SocialCard({ data, title }: { data: SocialView; title: string }) {
+  const brand = brandForSource(data.network);
+  const netLabel = SOURCE_META[data.network]?.label || data.network;
+  const tint = SOURCE_META[data.network]?.color || "#c56cf0";
+  return (
+    <div style={{ maxHeight: "62vh", overflow: "auto" }}>
+      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 12 }}>
+        <div style={{ width: 38, height: 38, borderRadius: 9, display: "grid", placeItems: "center",
+                      background: tint }}>
+          {brand ? <BrandIcon name={brand} size={20} /> : <Icon name="activity" size={18} />}
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>{data.author || netLabel}</div>
+          <div className="faint" style={{ fontSize: 11.5 }}>
+            {netLabel}{data.group ? ` · ${data.group}` : ""}
+            {data.kind && data.kind !== "post" ? ` · ${data.kind}` : ""}
+            {data.date ? ` · ${data.date}` : ""}
+          </div>
+        </div>
+      </div>
+
+      {data.title && data.title !== data.text && (
+        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{data.title}</div>
+      )}
+      <div style={{ border: "1px solid var(--border,#22304a)", borderRadius: 8, padding: "12px 14px" }}>
+        {data.text ? (
+          <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "inherit", fontSize: 14, lineHeight: 1.5 }}>
+            {data.text}
+          </pre>
+        ) : (
+          <div className="muted">{title}</div>
+        )}
+      </div>
+
+      {data.stats && data.stats.length > 0 && (
+        <div className="row" style={{ gap: 16, marginTop: 10 }}>
+          {data.stats.map((s, i) => (
+            <div key={i} className="row" style={{ gap: 5, alignItems: "center", fontSize: 12.5 }}>
+              <span className="faint">{s.label}</span>
+              <b>{s.value}</b>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {data.permalink && (
+        <div style={{ marginTop: 10 }}>
+          <a href={data.permalink} target="_blank" rel="noreferrer noopener"
+             style={{ color: "var(--accent,#4f7cff)", fontSize: 13, overflowWrap: "anywhere" }}>
+            View original on {netLabel}
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Recovered contact/person — an address-book style card.
+function ContactCard({ data, title }: { data: ContactView; title: string }) {
+  const name = data.name || title;
+  const initials = (name || "?").split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
+  return (
+    <div style={{ maxHeight: "62vh", overflow: "auto" }}>
+      <div className="row" style={{ gap: 12, alignItems: "center", marginBottom: 14 }}>
+        {data.photo ? (
+          <img src={data.photo} alt={name} style={{ width: 52, height: 52, borderRadius: "50%", objectFit: "cover" }} />
+        ) : (
+          <div style={{ width: 52, height: 52, borderRadius: "50%", display: "grid", placeItems: "center",
+                        background: "#35d0a5", color: "#04231b", fontWeight: 700, fontSize: 18 }}>
+            {initials || "?"}
+          </div>
+        )}
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 17 }}>{name}</div>
+          {(data.jobTitle || data.org) && (
+            <div className="faint" style={{ fontSize: 12.5 }}>
+              {[data.jobTitle, data.org].filter(Boolean).join(" · ")}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gap: 8 }}>
+        {(data.emails || []).map((e, i) => (
+          <div key={`e${i}`} className="row" style={{ gap: 10, alignItems: "center",
+                border: "1px solid var(--border,#22304a)", borderRadius: 8, padding: "8px 10px" }}>
+            <Icon name="mail" size={14} />
+            <div style={{ flex: 1 }}>
+              <div className="faint" style={{ fontSize: 10.5 }}>{e.label || "email"}</div>
+              <a href={`mailto:${e.value}`} style={{ color: "var(--accent,#4f7cff)", fontSize: 13, overflowWrap: "anywhere" }}>
+                {e.value}
+              </a>
+            </div>
+          </div>
+        ))}
+        {(data.phones || []).map((p, i) => (
+          <div key={`p${i}`} className="row" style={{ gap: 10, alignItems: "center",
+                border: "1px solid var(--border,#22304a)", borderRadius: 8, padding: "8px 10px" }}>
+            <Icon name="activity" size={14} />
+            <div style={{ flex: 1 }}>
+              <div className="faint" style={{ fontSize: 10.5 }}>{p.label || "phone"}</div>
+              <span style={{ fontSize: 13 }}>{p.value}</span>
+            </div>
+          </div>
+        ))}
+        {data.notes && (
+          <div style={{ border: "1px solid var(--border,#22304a)", borderRadius: 8, padding: "8px 10px" }}>
+            <div className="faint" style={{ fontSize: 11, marginBottom: 4 }}>Notes</div>
+            <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "inherit", fontSize: 13 }}>{data.notes}</pre>
+          </div>
+        )}
+        {(!data.emails || data.emails.length === 0) && (!data.phones || data.phones.length === 0) && !data.notes && (
+          <div className="muted" style={{ padding: 8 }}>No contact details captured.</div>
+        )}
+      </div>
     </div>
   );
 }

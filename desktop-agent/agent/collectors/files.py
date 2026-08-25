@@ -309,31 +309,42 @@ def collect(config: dict, known: dict | None = None) -> tuple[List[dict], dict, 
         # "flat:<path>" backs up only the files directly in <path> (no subfolders).
         flat = isinstance(root, str) and root.startswith(_FLAT_PREFIX)
         rp = Path(root[len(_FLAT_PREFIX):] if flat else root)
-        if not rp.exists():
-            continue
-        if flat:
-            try:
-                with os.scandir(rp) as it:
-                    for entry in it:
-                        if entry.name.startswith("."):
-                            continue
-                        try:
-                            if not entry.is_file(follow_symlinks=False):
-                                continue
-                        except OSError:
-                            continue
-                        if handle(Path(entry.path)):
-                            return objects, new_state, unchanged
-            except OSError:
+        try:
+            if not rp.exists():
+                # A previously-selected folder was moved or deleted — skip it and
+                # keep going so the backup job still succeeds for the rest.
                 continue
+        except OSError:
             continue
-        for dirpath, dirnames, filenames in os.walk(rp):
-            # Prune noise/system dirs in-place so os.walk doesn't descend them.
-            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
-            for fn in filenames:
-                if fn.startswith("."):
+        try:
+            if flat:
+                try:
+                    with os.scandir(rp) as it:
+                        for entry in it:
+                            if entry.name.startswith("."):
+                                continue
+                            try:
+                                if not entry.is_file(follow_symlinks=False):
+                                    continue
+                            except OSError:
+                                continue
+                            if handle(Path(entry.path)):
+                                return objects, new_state, unchanged
+                except OSError:
                     continue
-                if handle(Path(dirpath) / fn):
-                    return objects, new_state, unchanged
+                continue
+            # os.walk swallows per-directory errors by default; the try/except
+            # guards against the root vanishing mid-walk.
+            for dirpath, dirnames, filenames in os.walk(rp):
+                # Prune noise/system dirs in-place so os.walk doesn't descend them.
+                dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+                for fn in filenames:
+                    if fn.startswith("."):
+                        continue
+                    if handle(Path(dirpath) / fn):
+                        return objects, new_state, unchanged
+        except OSError:
+            # Folder deleted/unmounted while we were walking it — move on.
+            continue
     return objects, new_state, unchanged
 

@@ -53,6 +53,11 @@ def start_scheduler() -> None:
             except Exception:  # noqa: BLE001 - never let the thread die
                 logger.exception("scheduled backup cycle failed")
             try:
+                from .jobs import reap_stale_jobs
+                reap_stale_jobs()
+            except Exception:  # noqa: BLE001
+                logger.exception("stale-job reap failed")
+            try:
                 _purge_recovered()
             except Exception:  # noqa: BLE001
                 logger.exception("recovery purge failed")

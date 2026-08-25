@@ -1367,7 +1367,12 @@ function Workers() {
                   <span style={{ fontWeight: 600 }}>{j.tenant}{j.owner ? ` → ${j.owner}` : ""}</span>
                   <JobKindBadge kind={j.kind} />
                 </div>
-                <div className="faint" style={{ fontSize: 11 }}>{j.source}{j.source_username && j.source_username !== j.source ? ` (${j.source_username})` : ""}</div>
+                <div className="faint row" style={{ fontSize: 11, gap: 5, alignItems: "center" }}>
+                  {j.source_type && (brandForSource(j.source_type)
+                    ? <BrandIcon name={brandForSource(j.source_type)!} size={13} />
+                    : <Icon name="database" size={12} />)}
+                  <span>{j.source}{j.source_username && j.source_username !== j.source ? ` (${j.source_username})` : ""}</span>
+                </div>
               </td>
               <td style={{ whiteSpace: "nowrap" }}>{j.node || "Control plane"}</td>
               <td>

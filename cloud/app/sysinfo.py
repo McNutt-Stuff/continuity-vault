@@ -196,27 +196,38 @@ def processes(top: int = 8) -> list[dict]:
 
 
 def service_status(unit: str) -> dict:
-    """State + resource use of a systemd unit (best-effort)."""
-    active = _run(["systemctl", "is-active", unit]) or "unknown"
-    enabled = _run(["systemctl", "is-enabled", unit]) or "unknown"
+    """State + resource use of a systemd unit (best-effort).
+
+    Derives state from ``systemctl show`` (which exits 0 and reports the true
+    ActiveState even for inactive/failed units) instead of ``is-active`` — whose
+    non-zero exit code was turning legitimate states into a blank "dead" pill. A
+    unit not installed on this node's role is flagged ``not_found`` so callers can
+    hide it rather than report a running node's missing per-role unit as dead."""
     show = _run(["systemctl", "show", unit, "-p",
-                 "MainPID,MemoryCurrent,ActiveEnterTimestampMonotonic,SubState"])
-    mem_bytes = 0
-    sub = ""
+                 "LoadState,ActiveState,SubState,UnitFileState,MemoryCurrent"])
+    props: dict[str, str] = {}
     for line in show.splitlines():
         k, _, v = line.partition("=")
-        if k == "MemoryCurrent" and v.isdigit():
-            mem_bytes = int(v)
-        elif k == "SubState":
-            sub = v
+        props[k] = v
+    load = props.get("LoadState", "")
+    not_found = (load in ("not-found", "masked", "error")) or not show
+    active = props.get("ActiveState") or (_run(["systemctl", "is-active", unit]) or "unknown")
+    enabled = props.get("UnitFileState") or (_run(["systemctl", "is-enabled", unit]) or "unknown")
+    sub = props.get("SubState", "")
+    mem_raw = props.get("MemoryCurrent", "")
+    mem_bytes = int(mem_raw) if mem_raw.isdigit() else 0
     return {"unit": unit, "active": active, "enabled": enabled,
-            "sub_state": sub, "memory_bytes": mem_bytes}
+            "sub_state": sub, "memory_bytes": mem_bytes, "not_found": not_found}
 
 
 def services() -> list[dict]:
+    # Only report units actually installed on this node's role — a per-role unit
+    # that doesn't exist here must not surface as a "dead" core process.
     out = []
     for unit, label in SERVICES.items():
         s = service_status(unit)
+        if s.get("not_found"):
+            continue
         s["label"] = label
         out.append(s)
     return out

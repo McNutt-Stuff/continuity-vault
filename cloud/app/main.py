@@ -103,6 +103,14 @@ def startup() -> None:
 
         seed()
 
+    # Clear jobs left "running" by a previous process — their worker threads died
+    # with the old process, so they can never complete on their own.
+    try:
+        from .workers.jobs import reap_stale_jobs
+        reap_stale_jobs(on_startup=True)
+    except Exception:  # noqa: BLE001
+        pass
+
     # Background sync. Federated mode (per-node data planes): a customer node
     # replicates its assigned tenants' config from the control plane into its
     # LOCAL database, runs its own scheduler over that data, and pushes results

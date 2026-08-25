@@ -407,84 +407,103 @@ def _graph_iso(since_date: str) -> str:
 _OUTLOOK_CHUNK = 200
 
 
+def _outlook_obj(c: "httpx.Client", headers: dict, m: dict, content_cap: int) -> SourceObject:
+    sender = (m.get("from") or {}).get("emailAddress", {}).get("address", "")
+    mime = c.get(f"https://graph.microsoft.com/v1.0/me/messages/{m['id']}/$value", headers=headers)
+    raw = mime.content if mime.status_code < 400 else b""
+    content, backed = _capped(raw, content_cap)
+    return SourceObject(
+        object_id=f"outlook:{m['id']}",
+        doc_type="email",
+        title=m.get("subject") or "(no subject)",
+        content=content,
+        preview=(m.get("bodyPreview") or "")[:200],
+        meta={"from": sender, "folder": "Inbox", "webLink": m.get("webLink"),
+              "content_backed_up": backed},
+        labels=["Inbox"],
+        size_bytes=len(raw) or None,  # type: ignore
+        modified_at=_parse_dt(m.get("receivedDateTime")),
+    )
+
+
 def stream_outlook(access_token: str, cursor: Optional[dict] = None,
                    content_cap: int = _DEFAULT_CAP, options: Optional[dict] = None,
-                   state: Optional[dict] = None):
-    """Stream an Outlook/Graph mailbox, capturing the *whole* history by paging
-    backwards (newest-first) in resumable chunks, then incrementally picking up
-    new mail on later runs. Honors an optional ``sinceDate`` window.
+                   state: Optional[dict] = None, mode: str = "recent"):
+    """Two-track Outlook/Graph mailbox pull:
 
-    Cursor shapes:
-      * ``{"scan": {"next_link", "head", "filter"}, "has_more": True}`` — a paged
-        scan in progress (resume from the saved ``@odata.nextLink``).
-      * ``{"backfilled": True, "last_seen": <iso>}`` — history captured; later
-        runs pull only messages newer than ``last_seen``.
+      * ``mode="recent"`` — pulls mail newer than the stored watermark (fast,
+        scheduled). The first recent run just records the watermark.
+      * ``mode="backfill"`` — pages the whole mailbox *backwards* (newest-first)
+        in resumable chunks so full history is captured concurrently. Honors an
+        optional ``sinceDate`` floor and sets ``state['done']`` when exhausted.
     """
     headers = {"Authorization": f"Bearer {access_token}"}
     cursor = cursor or {}
     options = options or {}
     select = "id,subject,from,bodyPreview,receivedDateTime,parentFolderId,webLink"
 
-    scan = cursor.get("scan") or {}
-    if scan.get("next_link"):
-        url: Optional[str] = scan.get("next_link")
-        params: Optional[dict] = None
-        head = scan.get("head")
-    else:
-        last_seen = cursor.get("last_seen")
-        since_iso = _graph_iso(options.get("sinceDate") or "")
-        filters = []
-        if last_seen:  # incremental: only mail newer than the last full scan
-            filters.append(f"receivedDateTime gt {last_seen}")
-        elif since_iso:  # initial backfill limited to the chosen window
-            filters.append(f"receivedDateTime ge {since_iso}")
-        base_filter = " and ".join(filters)
-        url = "https://graph.microsoft.com/v1.0/me/messages"
-        params = {"$top": 50, "$select": select, "$orderby": "receivedDateTime desc"}
-        if base_filter:
-            params["$filter"] = base_filter
-        head = None
-
-    emitted = 0
-    exhausted = False
     with httpx.Client(timeout=120) as c:
-        while emitted < _OUTLOOK_CHUNK and url:
+        if mode == "backfill":
+            if cursor.get("done"):
+                if state is not None:
+                    state["cursor"], state["done"] = cursor, True
+                return
+            scan = cursor.get("scan") or {}
+            if scan.get("next_link"):
+                url: Optional[str] = scan["next_link"]
+                params: Optional[dict] = None
+            else:
+                since_iso = _graph_iso(options.get("sinceDate") or "")
+                url = "https://graph.microsoft.com/v1.0/me/messages"
+                params = {"$top": 50, "$select": select, "$orderby": "receivedDateTime desc"}
+                if since_iso:
+                    params["$filter"] = f"receivedDateTime ge {since_iso}"
+            emitted = 0
+            exhausted = False
+            while url and emitted < _OUTLOOK_CHUNK:
+                r = c.get(url, headers=headers, params=params)
+                r.raise_for_status()
+                body = r.json()
+                for m in body.get("value", []):
+                    yield _outlook_obj(c, headers, m, content_cap)
+                    emitted += 1
+                url, params = body.get("@odata.nextLink"), None
+                if not url:
+                    exhausted = True
+                    break
+            if state is not None:
+                if exhausted or not url:
+                    state["cursor"], state["done"] = {"done": True}, True
+                else:
+                    state["cursor"] = {"scan": {"next_link": url}, "has_more": True}
+            return
+
+        # ---- recent / delta track ----
+        last_seen = cursor.get("last_seen")
+        if not last_seen:
+            # First recent run: record a watermark; the backfill track captures
+            # history and new mail flows from here forward.
+            if state is not None:
+                state["cursor"] = {"last_seen": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+            return
+        url = "https://graph.microsoft.com/v1.0/me/messages"
+        params = {"$top": 50, "$select": select, "$orderby": "receivedDateTime desc",
+                  "$filter": f"receivedDateTime gt {last_seen}"}
+        newest = last_seen
+        emitted = 0
+        while url and emitted < _OUTLOOK_CHUNK:
             r = c.get(url, headers=headers, params=params)
             r.raise_for_status()
             body = r.json()
             vals = body.get("value", [])
-            if head is None and vals:
-                head = vals[0].get("receivedDateTime")  # newest message in this scan
+            if vals:
+                newest = max(newest, vals[0].get("receivedDateTime") or newest)
             for m in vals:
-                sender = (m.get("from") or {}).get("emailAddress", {}).get("address", "")
-                mime = c.get(f"https://graph.microsoft.com/v1.0/me/messages/{m['id']}/$value",
-                             headers=headers)
-                raw = mime.content if mime.status_code < 400 else b""
-                content, backed = _capped(raw, content_cap)
-                yield SourceObject(
-                    object_id=f"outlook:{m['id']}",
-                    doc_type="email",
-                    title=m.get("subject") or "(no subject)",
-                    content=content,
-                    preview=(m.get("bodyPreview") or "")[:200],
-                    meta={"from": sender, "folder": "Inbox", "webLink": m.get("webLink"),
-                          "content_backed_up": backed},
-                    labels=["Inbox"],
-                    size_bytes=len(raw) or None,  # type: ignore
-                    modified_at=_parse_dt(m.get("receivedDateTime")),
-                )
+                yield _outlook_obj(c, headers, m, content_cap)
                 emitted += 1
             url, params = body.get("@odata.nextLink"), None
-            if not url:
-                exhausted = True
-                break
-
-    if state is not None:
-        if exhausted or not url:
-            new_last = head or cursor.get("last_seen")
-            state["cursor"] = {"backfilled": True, "last_seen": new_last}
-        else:
-            state["cursor"] = {"scan": {"next_link": url, "head": head}, "has_more": True}
+        if state is not None:
+            state["cursor"] = {"last_seen": newest}
 
 
 def fetch_graph_files(access_token: str, limit: int = 500,

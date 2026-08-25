@@ -91,6 +91,48 @@ def request_cancel(job_id: str) -> None:
     _CANCEL_REQUESTS.add(job_id)
 
 
+# A job runs in a daemon thread; a process restart kills the thread but leaves
+# its row "running" forever. Reap such orphans (and never-picked-up queued jobs).
+_STALE_RUNNING_HOURS = 7   # > the 6h per-job wall-clock deadline
+_STALE_QUEUED_HOURS = 3
+
+
+def reap_stale_jobs(on_startup: bool = False) -> int:
+    """Mark orphaned/stuck jobs as failed so they stop showing as running. On
+    startup every "running" job is orphaned (its worker thread died with the old
+    process); otherwise reap by age. Node-owned jobs re-sync from the node if
+    they're genuinely still running."""
+    def _naive(dt):
+        return dt.replace(tzinfo=None) if dt and dt.tzinfo else dt
+    reaped = 0
+    try:
+        with SessionLocal() as db:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            for j in db.query(SyncJob).filter(SyncJob.status.in_(["running", "cancelling"])).all():
+                started = _naive(j.started_at) or _naive(j.created_at)
+                stale = on_startup or (started and (now - started) > timedelta(hours=_STALE_RUNNING_HOURS))
+                if stale:
+                    j.status = "failed"
+                    j.error = j.error or "Worker ended unexpectedly — orphaned job reaped"
+                    j.message = "Reaped (worker no longer running)"
+                    j.finished_at = now
+                    reaped += 1
+            for j in db.query(SyncJob).filter(SyncJob.status == "queued").all():
+                created = _naive(j.created_at)
+                if created and (now - created) > timedelta(hours=_STALE_QUEUED_HOURS):
+                    j.status = "failed"
+                    j.error = "Never started — reaped"
+                    j.finished_at = now
+                    reaped += 1
+            if reaped:
+                db.commit()
+    except Exception:  # noqa: BLE001 - never let reaping break startup/scheduling
+        logger.exception("stale-job reap failed")
+    if reaped:
+        logger.info("reaped %d stale/orphaned job(s)", reaped)
+    return reaped
+
+
 def _cancel_requested(db: Session, job_id: str) -> bool:
     if job_id in _CANCEL_REQUESTS:
         return True

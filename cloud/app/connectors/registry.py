@@ -292,6 +292,7 @@ class OutlookConnector(Connector):
             streaming=True,
             delta=True,
             historical=True,
+            dual_track=True,
             searchable_fields=["from", "to", "folder"],
             facet_fields=["folder"],
         )
@@ -310,8 +311,8 @@ class OutlookConnector(Connector):
         )
 
     def fetch_stream(self, account_label, cursor=None, config=None, state=None, mode="recent"):
-        # Stream the whole mailbox in bounded, resumable chunks (oldest history is
-        # captured by paging back through Graph), honoring a "since" window.
+        # Two-track: "recent" pulls new mail from a watermark; "backfill" pages
+        # the whole mailbox backwards. Both resume via bounded chunks.
         config = config or {}
         if config.get("access_token"):
             from ..config import get_settings
@@ -320,7 +321,7 @@ class OutlookConnector(Connector):
                 config["access_token"], cursor=cursor,
                 content_cap=s.content_max_bytes,
                 options={"sinceDate": config.get("sinceDate")},
-                state=state if state is not None else {})
+                state=state if state is not None else {}, mode=mode)
             return
         yield from self.fetch_objects(account_label, config=config)
 
