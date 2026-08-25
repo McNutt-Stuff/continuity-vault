@@ -244,25 +244,29 @@ def _storage_id(kind: str) -> Optional[str]:
     return kind.split(":", 1)[1] if kind.startswith("store:") else None
 
 
-def crawl_has_more(db: Session, collection: Collection) -> bool:
-    """True when a big-history source (e.g. Google Photos) still has more to crawl
-    — its persisted cursor reports has_more. Lets a background job loop chunk by
-    chunk until the whole library is captured."""
+def crawl_has_more(db: Session, collection: Collection, mode: str = "recent") -> bool:
+    """True when a big-history source still has more to crawl — its persisted
+    cursor reports has_more. Lets a background job loop chunk by chunk until the
+    whole library is captured. ``mode="backfill"`` checks the deep-crawl cursor."""
     if not collection.connector_account_id:
         return False
     acct = db.get(ConnectorAccount, collection.connector_account_id)
-    cur = acct.sync_cursor if acct else None
+    if acct is None:
+        return False
+    cur = acct.backfill_cursor if mode == "backfill" else acct.sync_cursor
     return bool(isinstance(cur, dict) and cur.get("has_more"))
 
 
-def crawl_resume_after(db: Session, collection: Collection) -> Optional[float]:
+def crawl_resume_after(db: Session, collection: Collection, mode: str = "recent") -> Optional[float]:
     """Epoch time before which the next chunk should not run — set by a connector
     that hit a rate limit (e.g. GitHub), so the job loop waits for the provider's
     window to reset instead of hammering it. None when there's no backoff."""
     if not collection.connector_account_id:
         return None
     acct = db.get(ConnectorAccount, collection.connector_account_id)
-    cur = acct.sync_cursor if acct else None
+    if acct is None:
+        return None
+    cur = acct.backfill_cursor if mode == "backfill" else acct.sync_cursor
     if isinstance(cur, dict) and cur.get("resume_after"):
         try:
             return float(cur["resume_after"])
@@ -303,12 +307,16 @@ def existing_object_ids(db: Session, collection_id: str) -> set:
 
 
 def run_backup(db: Session, collection: Collection, destinations: Optional[List[str]] = None,
-               progress: Optional[Callable[[int, int, str], None]] = None
-               ) -> SnapshotReceipt:
+               progress: Optional[Callable[[int, int, str], None]] = None,
+               mode: str = "recent") -> SnapshotReceipt:
     """Pull from the source connector and ingest into protected storage.
 
     ``progress(processed, total, message)`` is called at milestones so a tracked
-    job can show live status for long pulls (e.g. a full Gmail backup)."""
+    job can show live status for long pulls (e.g. a full Gmail backup).
+
+    ``mode`` selects the track for dual-track connectors: "recent" runs the fast
+    forward delta on the schedule; "backfill" runs one resumable chunk of the
+    independent backward deep-history crawl (its own cursor)."""
     account = (
         db.get(ConnectorAccount, collection.connector_account_id)
         if collection.connector_account_id
@@ -350,7 +358,7 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
         # bounded batches so a large library can't materialize into memory and OOM.
         if caps.streaming:
             return _run_backup_streaming(db, collection, account, connector, config,
-                                         destinations, caps, label, progress)
+                                         destinations, caps, label, progress, mode)
         # Incremental: pass the stored cursor; the connector returns a new cursor to
         # persist (full first backup, then deltas since the last sync).
         result = connector.fetch(label, cursor=(account.sync_cursor if account else None),
@@ -393,11 +401,16 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
 def _run_backup_streaming(db: Session, collection: Collection,
                           account: Optional[ConnectorAccount], connector, config: dict,
                           destinations: List[str], caps, label: str,
-                          progress: Optional[Callable[[int, int, str], None]]
+                          progress: Optional[Callable[[int, int, str], None]],
+                          mode: str = "recent"
                           ) -> SnapshotReceipt:
     """Pull a content-heavy source lazily and ingest in bounded batches so memory
     stays flat regardless of library/mailbox size (each batch = one recovery
-    point). ``state['cursor']`` (set by the connector) is persisted for deltas."""
+    point). ``state['cursor']`` (set by the connector) is persisted for deltas.
+
+    For dual-track connectors, ``mode`` picks the cursor + track: "backfill" reads
+    and writes ``account.backfill_cursor`` (independent of the "recent" delta on
+    ``account.sync_cursor``) so both tracks run concurrently without conflict."""
     batch_bytes_cap = 64 * 1024 * 1024  # flush a batch at ~64 MiB of content
     batch_count_cap = 50
     batch: List = []
@@ -405,8 +418,9 @@ def _run_backup_streaming(db: Session, collection: Collection,
     total = 0
     last_receipt: Optional[SnapshotReceipt] = None
     state: dict = {}
+    is_backfill = (mode == "backfill")
     if progress:
-        progress(0, 0, f"Fetching from {label}…")
+        progress(0, 0, f"{'Backfilling' if is_backfill else 'Fetching'} from {label}…")
 
     def flush():
         nonlocal batch, batch_bytes, last_receipt
@@ -418,12 +432,16 @@ def _run_backup_streaming(db: Session, collection: Collection,
         batch = []
         batch_bytes = 0
 
-    cursor = account.sync_cursor if account else None
+    if account is not None and is_backfill:
+        cursor = account.backfill_cursor
+    else:
+        cursor = account.sync_cursor if account else None
     # Let the connector report throttle/waiting status into the live job message
     # (e.g. GitHub rate-limit backoff) without changing the stream signature.
     if progress:
         config = {**config, "_status": lambda msg: progress(total, total, msg)}
-    for obj in connector.fetch_stream(label, cursor=cursor, config=config, state=state):
+    for obj in connector.fetch_stream(label, cursor=cursor, config=config,
+                                      state=state, mode=mode):
         batch.append(obj)
         batch_bytes += len(getattr(obj, "content", b"") or b"")
         total += 1
@@ -440,8 +458,7 @@ def _run_backup_streaming(db: Session, collection: Collection,
                  .order_by(SnapshotReceipt.created_at.desc()).first())
         if prior is not None:
             if account:
-                if new_cursor is not None:
-                    account.sync_cursor = new_cursor
+                _persist_stream_cursor(account, mode, new_cursor, state, 0)
                 _record_sync_success(db, account, 0)
             return prior
     if last_receipt is None:  # first run with nothing pulled — establish a baseline
@@ -449,10 +466,26 @@ def _run_backup_streaming(db: Session, collection: Collection,
                                       searchable_fields=caps.searchable_fields,
                                       facet_fields=caps.facet_fields, actor="sync-worker")
     if account:
-        if new_cursor is not None:
-            account.sync_cursor = new_cursor
+        _persist_stream_cursor(account, mode, new_cursor, state, total)
         _record_sync_success(db, account, total)
     return last_receipt
+
+
+def _persist_stream_cursor(account: ConnectorAccount, mode: str,
+                           new_cursor, state: dict, count: int) -> None:
+    """Write the connector's new cursor to the track-appropriate column and, for a
+    backfill, record progress + completion so the deep crawl resumes correctly."""
+    if mode == "backfill":
+        if new_cursor is not None:
+            account.backfill_cursor = new_cursor
+        if account.backfill_started_at is None:
+            account.backfill_started_at = datetime.now(timezone.utc)
+        account.backfill_count = int(account.backfill_count or 0) + int(count)
+        if state.get("done"):
+            account.backfill_done = True
+    else:
+        if new_cursor is not None:
+            account.sync_cursor = new_cursor
 
 
 def ingest_objects(db: Session, collection: Collection, source_objects,

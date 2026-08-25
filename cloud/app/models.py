@@ -193,6 +193,13 @@ class ConnectorAccount(Base):
     last_object_count = Column(Integer, nullable=True)  # items captured in the last sync
     last_error = Column(Text, nullable=True)            # last sync error message (NULL = healthy)
     last_error_at = Column(DateTime, nullable=True)
+    # Dual-track deep crawl: independent of the forward/delta sync_cursor, a
+    # long-running BACKWARD crawl captures full history in resumable chunks while
+    # the scheduled "recent" delta track keeps up with new items concurrently.
+    backfill_cursor = Column(JSON, nullable=True)
+    backfill_done = Column(Boolean, default=False)
+    backfill_started_at = Column(DateTime, nullable=True)
+    backfill_count = Column(Integer, default=0)  # items captured by the deep crawl
     created_at = Column(DateTime, default=_now)
 
 

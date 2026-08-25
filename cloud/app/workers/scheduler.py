@@ -190,6 +190,15 @@ def _process_collection(db, c: Collection, now: datetime, default_minutes: int) 
     acct = db.get(ConnectorAccount, c.connector_account_id)
     if acct is not None and acct.active is False:
         return (0, 0, 0)
+    # Dual-track sources: keep the independent deep-history backfill progressing in
+    # its own background job while the fast recent delta below runs on schedule.
+    if caps.dual_track:
+        try:
+            from .jobs import ensure_backfill_running
+            ensure_backfill_running(db, c)
+        except Exception as exc:  # noqa: BLE001 - never abort scheduling on this
+            db.rollback()
+            logger.warning("backfill ensure failed for %s: %s", c.id, exc)
     if not _is_due(c, interval, now):
         return (1, 0, 0)
     # Track the scheduled run as a job so the admin worker view shows it (and that

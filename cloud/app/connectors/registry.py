@@ -207,6 +207,7 @@ class GmailConnector(Connector):
             delta=True,
             streaming=True,
             historical=True,
+            dual_track=True,
             searchable_fields=["from", "to", "folder", "labels"],
             facet_fields=["folder"],
         )
@@ -239,9 +240,11 @@ class GmailConnector(Connector):
             return FetchResult(objects=objects, cursor=new_cursor, has_more=False)
         return FetchResult(objects=list(self.fetch_objects(account_label, config=config)))
 
-    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
-        # Yield messages one at a time so a huge mailbox ingests in bounded
-        # batches (never materialized into RAM); record the delta cursor in state.
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None, mode="recent"):
+        # Two-track pull: mode="recent" history-deltas from the watermark; mode=
+        # "backfill" pages the whole mailbox backwards in resumable chunks. The two
+        # run concurrently with separate cursors so new mail is captured promptly
+        # while a large history backfills in the background.
         config = config or {}
         if config.get("access_token"):
             from ..config import get_settings
@@ -251,7 +254,7 @@ class GmailConnector(Connector):
                 max_messages=s.sync_max_items, content_cap=s.content_max_bytes,
                 options={"excludeFolders": config.get("excludeFolders"),
                          "includeSpamTrash": config.get("includeSpamTrash"),
-                         "sinceDate": config.get("sinceDate")}, state=state)
+                         "sinceDate": config.get("sinceDate")}, state=state, mode=mode)
         else:
             yield from self.fetch_objects(account_label, config=config)
 
@@ -306,7 +309,7 @@ class OutlookConnector(Connector):
             doc_types=["email"],
         )
 
-    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None, mode="recent"):
         # Stream the whole mailbox in bounded, resumable chunks (oldest history is
         # captured by paging back through Graph), honoring a "since" window.
         config = config or {}
@@ -378,7 +381,7 @@ class OneDriveConnector(Connector):
         token = (config or {}).get("access_token")
         return live.onedrive_list_folders(token, path) if token else []
 
-    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None, mode="recent"):
         config = config or {}
         if config.get("access_token"):
             yield from live.stream_onedrive(config["access_token"], cursor, config,
@@ -443,7 +446,7 @@ class DropboxConnector(Connector):
         token = (config or {}).get("access_token")
         return live.dropbox_list_folders(token, path) if token else []
 
-    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None, mode="recent"):
         config = config or {}
         if config.get("access_token"):
             yield from live.stream_dropbox(config["access_token"], cursor, config,
@@ -509,7 +512,7 @@ class GoogleDriveConnector(Connector):
         token = (config or {}).get("access_token")
         return live.drive_list_folders(token, path) if token else []
 
-    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None, mode="recent"):
         config = config or {}
         if config.get("access_token"):
             yield from live.stream_drive(config["access_token"], cursor, config,
@@ -912,7 +915,7 @@ class GitHubConnector(Connector):
         token = (config or {}).get("access_token")
         return live.github_list_repos(token, path) if token else []
 
-    def fetch_stream(self, account_label, cursor=None, config=None, state=None):
+    def fetch_stream(self, account_label, cursor=None, config=None, state=None, mode="recent"):
         config = config or {}
         if config.get("access_token"):
             yield from live.stream_github(config["access_token"], cursor, config,

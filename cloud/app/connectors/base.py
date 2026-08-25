@@ -95,6 +95,11 @@ class ConnectorCapabilities:
     # "back up from this date" window (config["sinceDate"]). Big-history pulls run
     # as a looping background job (chunk → persist cursor → continue).
     historical: bool = False
+    # Source supports two concurrent tracks: a fast "recent" delta on the schedule
+    # and an independent long-running BACKWARD deep-history backfill. The connector
+    # branches on fetch_stream(mode="recent"|"backfill") and the two tracks keep
+    # separate cursors (sync_cursor vs backfill_cursor).
+    dual_track: bool = False
     # Source is imported via an interactive picker (user selects items/albums each
     # session, e.g. Google Photos Picker API) rather than an automatic pull.
     picker: bool = False
@@ -159,11 +164,14 @@ class Connector:
         return FetchResult(objects=objects, cursor=None, has_more=False)
 
     def fetch_stream(self, account_label: str, cursor=None,
-                     config: Optional[dict] = None, state: Optional[dict] = None):
+                     config: Optional[dict] = None, state: Optional[dict] = None,
+                     mode: str = "recent"):
         """Yield objects lazily for bounded-memory (batched) ingest so a large,
         content-heavy source can't materialize its whole payload into RAM. The
         default adapts ``fetch_objects`` (no cursor); connectors that support
-        deltas override and set ``state['cursor']`` for the next run."""
+        deltas override and set ``state['cursor']`` for the next run. Dual-track
+        connectors also honour ``mode`` ("recent" delta vs "backfill" deep crawl)
+        and set ``state['done']`` when a backfill has captured the whole history."""
         yield from self.fetch_objects(account_label, config=config)
 
     def fetch_objects(self, account_label: str, since: Optional[datetime] = None,

@@ -120,6 +120,41 @@ def start_backup_job(db: Session, tenant_id: str, collection_id: str,
     return job
 
 
+def ensure_backfill_running(db: Session, collection: Collection) -> Optional[SyncJob]:
+    """For a dual-track source, make sure the independent deep-history backfill is
+    progressing: start one backfill job if the crawl isn't finished and none is
+    already active. Safe to call every scheduler tick (it's a cheap no-op once the
+    backfill is complete or already running)."""
+    if not collection.connector_account_id:
+        return None
+    from ..connectors import get_connector
+    conn = get_connector(collection.source_type)
+    if conn is None or not conn.capabilities().dual_track:
+        return None
+    acct = db.get(ConnectorAccount, collection.connector_account_id)
+    if acct is None or acct.active is False or acct.backfill_done:
+        return None
+    # Back-compat: an account whose delta cursor is already established (old full
+    # backup completed) is treated as fully backfilled — don't re-crawl it.
+    if acct.backfill_cursor is None:
+        old = acct.sync_cursor if isinstance(acct.sync_cursor, dict) else {}
+        if old.get("history_id") and not old.get("has_more"):
+            acct.backfill_done = True
+            db.commit()
+            return None
+    # Only one backfill job per collection at a time.
+    active = (db.query(SyncJob)
+              .filter(SyncJob.collection_id == collection.id,
+                      SyncJob.kind == "backfill",
+                      SyncJob.status.in_(["queued", "running"])).first())
+    if active is not None:
+        return active
+    logger.info("starting deep-history backfill for %s (%s)", collection.name,
+                collection.source_type)
+    return start_backup_job(db, collection.tenant_id, collection.id, kind="backfill",
+                            destinations=collection.destinations or None)
+
+
 def _run(job_id: str, destinations: Optional[List[str]]) -> None:
     with SessionLocal() as db:
         job = db.get(SyncJob, job_id)
@@ -147,29 +182,33 @@ def _run(job_id: str, destinations: Optional[List[str]]) -> None:
             db.commit()
 
         base = {"n": 0}
+        # Backfill jobs run the independent backward deep-history crawl; every
+        # other job runs the fast forward/recent track.
+        mode = "backfill" if job.kind == "backfill" else "recent"
         with capture_job_log() as cap:
-            logger.info("backup job %s starting: %s (%s) → %s", job.id, collection.name,
+            logger.info("%s job %s starting: %s (%s) → %s", mode, job.id, collection.name,
                         collection.source_type,
                         destinations or collection.destinations or ["cv-cloud"])
             try:
                 receipt = None
-                # Big-history sources (e.g. Google Photos) crawl in resumable chunks:
-                # keep pulling while the persisted cursor reports more, so one job can
-                # span hours without holding the whole library in memory. Guarded by a
-                # wall-clock and iteration cap so a runaway source can't loop forever.
+                # Big-history sources (e.g. Gmail backfill, Google Photos) crawl in
+                # resumable chunks: keep pulling while the persisted cursor reports
+                # more, so one job can span hours without holding the whole library
+                # in memory. Guarded by a wall-clock and iteration cap so a runaway
+                # source can't loop forever.
                 deadline = time.time() + 6 * 3600
                 for _ in range(100000):
                     if _cancel_requested(db, job.id):
                         raise JobCancelled()
-                    receipt = run_backup(db, collection, destinations, progress=progress)
+                    receipt = run_backup(db, collection, destinations, progress=progress, mode=mode)
                     base["n"] = job.processed  # carry the running total into the next chunk
                     db.refresh(collection)
-                    if not crawl_has_more(db, collection) or time.time() > deadline:
+                    if not crawl_has_more(db, collection, mode) or time.time() > deadline:
                         break
                     # A connector can ask us to wait before the next chunk (e.g. a
                     # GitHub rate-limit backoff): sleep until its reset, keeping the
                     # job "running" with a live countdown, bounded by the deadline.
-                    resume_at = crawl_resume_after(db, collection)
+                    resume_at = crawl_resume_after(db, collection, mode)
                     if resume_at and resume_at > time.time():
                         wait_end = min(resume_at + 2, deadline)
                         while time.time() < wait_end:

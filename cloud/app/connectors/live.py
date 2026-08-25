@@ -254,27 +254,28 @@ _GMAIL_BACKFILL_CHUNK = 1000
 
 def stream_gmail(access_token: str, cursor: Optional[dict] = None,
                  max_messages: int = 5000, content_cap: int = _DEFAULT_CAP,
-                 options: Optional[dict] = None, state: Optional[dict] = None):
-    """Lazy Gmail pull: yields one message at a time (so the caller ingests in
-    bounded batches instead of holding the whole mailbox in RAM).
+                 options: Optional[dict] = None, state: Optional[dict] = None,
+                 mode: str = "recent"):
+    """Two-track Gmail pull (bounded memory — yields one message at a time):
 
-    Full history is captured by paging *backwards* through the mailbox in
-    resumable chunks — each chunk saves a ``pageToken`` and reports ``has_more``
-    so the job loop continues until every message is backed up; only then does it
-    switch to history-based deltas. An optional ``sinceDate`` limits the window.
+      * ``mode="recent"`` — history-delta from the stored ``historyId`` (fast,
+        runs on the schedule). The first recent run just records the mailbox head
+        as a watermark; new mail flows from there forward.
+      * ``mode="backfill"`` — pages *backwards* through the mailbox (bounded to
+        messages older than enrollment via ``before:``) in resumable chunks so
+        full history is captured concurrently with the recent track. Sets
+        ``state['done']`` when the whole history has been ingested.
+
+    An optional ``sinceDate`` sets a floor on how deep the backfill goes.
     """
     headers = {"Authorization": f"Bearer {access_token}"}
     cursor = cursor or {}
     options = options or {}
     exclude = {str(f).upper() for f in (options.get("excludeFolders") or [])}
     include_spam_trash = bool(options.get("includeSpamTrash")) and not (exclude & {"SPAM", "TRASH"})
-    query_parts = [_GMAIL_EXCLUDE_QUERY[f] for f in exclude if f in _GMAIL_EXCLUDE_QUERY]
-    since_q = _gmail_since_query(options.get("sinceDate") or "")
-    if since_q:
-        query_parts.append(since_q)
-    query = " ".join(query_parts)
+    base_query_parts = [_GMAIL_EXCLUDE_QUERY[f] for f in exclude if f in _GMAIL_EXCLUDE_QUERY]
 
-    def _emit(mid: str):
+    def _emit(c, mid):
         o = _gmail_message(c, headers, mid, content_cap)
         if not o:
             return None
@@ -283,62 +284,80 @@ def stream_gmail(access_token: str, cursor: Optional[dict] = None,
         return o
 
     with httpx.Client(timeout=60) as c:
-        history_id = cursor.get("history_id")
-        if history_id:
-            # Delta sync from the last recorded history point.
-            try:
-                ids = _gmail_history_ids(c, headers, str(history_id), max_messages)
-            except _HistoryGone:
-                logger.info("gmail history %s expired; full resync", history_id)
-                ids = None
-            if ids is not None:
-                for mid in ids:
-                    o = _emit(mid)
-                    if o:
-                        yield o
-                if state is not None:
-                    state["cursor"] = {"history_id": _gmail_history_id(c, headers)}
-                return
-            # history gone → fall through to a fresh full backfill
+        if mode == "backfill":
+            yield from _stream_gmail_backfill(
+                c, headers, cursor, state, base_query_parts, include_spam_trash,
+                options, _emit)
+            return
 
-        # Full backfill (initial run, resuming a chunked backfill, or after a
-        # history-expiry resync). Capture the mailbox head once so deltas can
-        # resume cleanly after the whole history is ingested.
-        full = cursor.get("full") or {}
-        start_history_id = full.get("start_history_id") or _gmail_history_id(c, headers)
-        next_token = full.get("page_token")
-        emitted = 0
-        exhausted = False
-        while emitted < _GMAIL_BACKFILL_CHUNK:
-            params: dict = {"maxResults": 500}
-            if query:
-                params["q"] = query
-            if include_spam_trash:
-                params["includeSpamTrash"] = "true"
-            if next_token:
-                params["pageToken"] = next_token
-            r = c.get(f"{GMAIL}/messages", headers=headers, params=params)
-            r.raise_for_status()
-            data = r.json()
-            for ref in data.get("messages", []):
-                o = _emit(ref["id"])
-                if o:
-                    yield o
-                    emitted += 1
-            next_token = data.get("nextPageToken")
-            if not next_token:
-                exhausted = True
-                break
+        # ---- recent / delta track ----
+        history_id = cursor.get("history_id")
+        if not history_id:
+            # First recent run: record the mailbox head as a watermark. The
+            # backfill track captures the current inbox + full history; new mail
+            # is picked up from this point forward on subsequent runs.
+            if state is not None:
+                state["cursor"] = {"history_id": _gmail_history_id(c, headers)}
+            return
+        try:
+            ids = _gmail_history_ids(c, headers, str(history_id), max_messages)
+        except _HistoryGone:
+            logger.info("gmail history %s expired; resetting the recent watermark "
+                        "(older mail is covered by the backfill track)", history_id)
+            ids = []
+        for mid in ids:
+            o = _emit(c, mid)
+            if o:
+                yield o
         if state is not None:
-            if exhausted:
-                # Whole mailbox captured → hand off to history-based deltas.
-                state["cursor"] = {"history_id": start_history_id}
-            else:
-                state["cursor"] = {
-                    "full": {"page_token": next_token,
-                             "start_history_id": start_history_id},
-                    "has_more": True,
-                }
+            state["cursor"] = {"history_id": _gmail_history_id(c, headers)}
+
+
+def _stream_gmail_backfill(c, headers, cursor, state, base_query_parts,
+                           include_spam_trash, options, emit):
+    """Page the mailbox backwards (newest→oldest) in one resumable chunk. Runs
+    independently of the recent track and covers the whole mailbox (content-hash
+    dedup makes any overlap with recent a no-op); ``sinceDate`` sets a floor."""
+    if cursor.get("done"):
+        if state is not None:
+            state["cursor"] = cursor
+            state["done"] = True
+        return
+    query_parts = list(base_query_parts)
+    since_q = _gmail_since_query(options.get("sinceDate") or "")
+    if since_q:
+        query_parts.append(since_q)
+    query = " ".join(query_parts)
+
+    next_token = cursor.get("page_token")
+    emitted = 0
+    exhausted = False
+    while emitted < _GMAIL_BACKFILL_CHUNK:
+        params: dict = {"maxResults": 500}
+        if query:
+            params["q"] = query
+        if include_spam_trash:
+            params["includeSpamTrash"] = "true"
+        if next_token:
+            params["pageToken"] = next_token
+        r = c.get(f"{GMAIL}/messages", headers=headers, params=params)
+        r.raise_for_status()
+        data = r.json()
+        for ref in data.get("messages", []):
+            o = emit(c, ref["id"])
+            if o:
+                yield o
+                emitted += 1
+        next_token = data.get("nextPageToken")
+        if not next_token:
+            exhausted = True
+            break
+    if state is not None:
+        if exhausted:
+            state["cursor"] = {"done": True}
+            state["done"] = True
+        else:
+            state["cursor"] = {"page_token": next_token, "has_more": True}
 
 
 def fetch_graph_mail(access_token: str, limit: int = 40,
