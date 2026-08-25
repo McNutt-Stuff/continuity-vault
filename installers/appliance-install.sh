@@ -44,7 +44,9 @@ create_user_dirs() {
 
 sync_code() {
   if command -v rsync >/dev/null; then
-    rsync -a --delete --exclude '.git' --exclude '.venv' --exclude 'node_modules' \
+    # --checksum: compare by content, not size+mtime, so the stamped VERSION
+    # file (constant 12-byte size) is never skipped when its contents change.
+    rsync -a --checksum --delete --exclude '.git' --exclude '.venv' --exclude 'node_modules' \
       "$REPO_SRC/" "$INSTALL_DIR/"
   else
     cp -r "$REPO_SRC/." "$INSTALL_DIR/"

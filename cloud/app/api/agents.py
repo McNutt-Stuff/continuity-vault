@@ -15,6 +15,7 @@ import hashlib
 import logging
 import secrets
 import tarfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -382,6 +383,7 @@ def bundle():
         version = _agent_bundle_version().encode()
         vi = tarfile.TarInfo("desktop-agent/VERSION")
         vi.size = len(version)
+        vi.mtime = int(time.time())  # fresh mtime so rsync never skips the stamp
         tar.addfile(vi, io.BytesIO(version))
     return Response(content=buf.getvalue(), media_type="application/gzip",
                     headers={"Content-Disposition": "attachment; filename=arkive-agent.tar.gz"})

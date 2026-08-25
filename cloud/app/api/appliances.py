@@ -14,6 +14,7 @@ import hashlib
 import io
 import secrets
 import tarfile
+import time
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -579,6 +580,7 @@ def appliance_bundle():
         version = _appliance_bundle_version().encode()
         vi = tarfile.TarInfo("appliance/VERSION")
         vi.size = len(version)
+        vi.mtime = int(time.time())  # fresh mtime so rsync never skips the stamp
         tar.addfile(vi, io.BytesIO(version))
     return Response(content=buf.getvalue(), media_type="application/gzip",
                     headers={"Content-Disposition": "attachment; filename=arkive-appliance.tar.gz"})
