@@ -38,7 +38,8 @@ class IntegrationWorker:
             if not iid or not inst.get("enabled", True):
                 continue
             interval = max(5, int(inst.get("poll_interval_minutes") or 60)) * 60
-            if now - self._last_run.get(iid, 0.0) < interval:
+            # A user-requested re-poll runs now, regardless of the interval.
+            if not inst.get("repoll") and now - self._last_run.get(iid, 0.0) < interval:
                 continue
             self._last_run[iid] = now
             due.append(inst)

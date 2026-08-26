@@ -520,7 +520,7 @@ async def _integrations_loop() -> None:
         except Exception as exc:  # noqa: BLE001
             if not _cp_unavailable(exc):
                 agent.log.error("integrations tick error: %s", exc)
-        await asyncio.sleep(60)  # re-evaluate which integrations are due each minute
+        await asyncio.sleep(20)  # check due-ness often so a re-poll runs promptly
 
 
 async def _provision_loop() -> None:

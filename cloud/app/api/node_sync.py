@@ -246,10 +246,24 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     counts = {"receipts": 0, "documents": 0, "connector_accounts": 0,
               "jobs": 0, "agents": 0, "appliances": 0, "insights": 0,
               "integrations": 0, "network": 0}
+    # A node can hold data for a tenant/user that was removed on the control
+    # plane; inserting it would violate a FK and abort the whole push. Skip any
+    # row whose tenant or owner isn't present here so one orphan can't block sync.
+    valid_tenants = {t for (t,) in db.query(Tenant.id).all()}
+    valid_users = {u for (u,) in db.query(User.id).all()}
+
+    def _known(row: dict) -> bool:
+        tid = row.get("tenant_id")
+        return tid is None or tid in valid_tenants
+
     for r in body.receipts:
+        if not _known(r):
+            continue
         _upsert(db, SnapshotReceipt, r)
         counts["receipts"] += 1
     for d in body.documents:
+        if not _known(d):
+            continue
         _upsert(db, SearchDocument, d)
         counts["documents"] += 1
     # Only status/cursor fields for accounts — never overwrite the encrypted
@@ -278,6 +292,8 @@ def push(body: PushPayload, authorization: str = Header(default=""),
                  .filter(Node.name == body.node, Node.role == body.role).first()
                  or db.query(Node).filter(Node.name == body.node).first())
     for j in body.jobs:
+        if not _known(j):
+            continue
         job = db.get(SyncJob, j.get("id"))
         if job:
             _apply(job, j, _JOB_FIELDS)
@@ -301,12 +317,13 @@ def push(body: PushPayload, authorization: str = Header(default=""),
             counts["appliances"] += 1
     # Digital-footprint insights the node computed for its tenants. Key on user_id
     # (not the row id, which differs between the node and any control-plane
-    # pending marker) so there's exactly one report per user.
+    # pending marker) so there's exactly one report per user. Skip a row whose
+    # tenant or user no longer exists here.
     for ins in body.insights:
-        kw = _deser(UserInsights, ins)
-        uid = kw.get("user_id")
-        if not uid:
+        uid = ins.get("user_id")
+        if not _known(ins) or not uid or uid not in valid_users:
             continue
+        kw = _deser(UserInsights, ins)
         existing = db.query(UserInsights).filter(UserInsights.user_id == uid).first()
         if existing is not None:
             for k, v in kw.items():
@@ -315,7 +332,7 @@ def push(body: PushPayload, authorization: str = Header(default=""),
         else:
             db.add(UserInsights(**kw))
         counts["insights"] += 1
-    _ingest_integration_push(db, body, counts)
+    _ingest_integration_push(db, body, counts, valid_tenants, valid_users)
     db.commit()
     return {"ok": True, **counts}
 
@@ -328,14 +345,25 @@ _APP_TELEMETRY = ("name", "category", "source_type", "tx_bytes", "rx_bytes",
                   "total_bytes", "sessions", "client_count", "first_seen", "last_seen")
 
 
-def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict) -> None:
+def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict,
+                             valid_tenants: set, valid_users: set) -> None:
     """Fold node-reported integration telemetry into the control-plane DB without
     clobbering the user's monitor/interest curation. Instances are node-authoritative
-    (portal calls are proxied there), so they upsert in full for the CP mirror."""
+    (portal calls are proxied there), so they upsert in full for the CP mirror.
+    Rows for a tenant/owner no longer present here are skipped (would violate FKs)."""
+    def _ok(row: dict) -> bool:
+        tid = row.get("tenant_id")
+        return tid is None or tid in valid_tenants
+
     for row in body.integration_instances:
+        owner = row.get("owner_user_id")
+        if not _ok(row) or (owner and owner not in valid_users):
+            continue
         _upsert(db, IntegrationInstance, row)
         counts["integrations"] += 1
     for row in body.network_clients:
+        if not _ok(row):
+            continue
         kw = _deser(NetworkClient, row)
         cur = (db.query(NetworkClient)
                .filter(NetworkClient.tenant_id == kw.get("tenant_id"),
@@ -349,6 +377,8 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict) -> 
                     setattr(cur, f, kw[f])
         counts["network"] += 1
     for row in body.network_apps:
+        if not _ok(row):
+            continue
         kw = _deser(NetworkApp, row)
         cur = (db.query(NetworkApp)
                .filter(NetworkApp.tenant_id == kw.get("tenant_id"),
@@ -362,6 +392,8 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict) -> 
                     setattr(cur, f, kw[f])
         counts["network"] += 1
     for row in body.network_usage:
+        if not _ok(row):
+            continue
         kw = _deser(NetworkUsage, row)
         cur = (db.query(NetworkUsage)
                .filter(NetworkUsage.tenant_id == kw.get("tenant_id"),
@@ -376,6 +408,8 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict) -> 
                     setattr(cur, f, kw[f])
         counts["network"] += 1
     for row in body.integration_runs:
+        if not _ok(row):
+            continue
         if not db.get(IntegrationRun, row.get("id")):
             db.add(IntegrationRun(**_deser(IntegrationRun, row)))
             counts["network"] += 1

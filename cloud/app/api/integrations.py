@@ -352,8 +352,20 @@ def _app_aggregates(db: Session, tenant_id: str, iids: list[str],
 @router.get("/data")
 def integration_data(principal: security.Principal = Depends(security.get_principal),
                      db: Session = Depends(get_db)):
-    """Everything the user drill-down needs: clients, apps, shadow sources, stats."""
-    iids = _user_instance_ids(db, principal)
+    """Aggregated drill-down across all of the user's integrations."""
+    return _drilldown(db, principal, _user_instance_ids(db, principal))
+
+
+@router.get("/{iid}/data")
+def integration_instance_data(iid: str,
+                              principal: security.Principal = Depends(security.get_principal),
+                              db: Session = Depends(get_db)):
+    """Drill-down scoped to a single integration instance."""
+    inst = _owned_instance(db, principal, iid)
+    return _drilldown(db, principal, [inst.id])
+
+
+def _drilldown(db: Session, principal, iids: list[str]) -> dict:
     if not iids:
         return {"clients": [], "apps": [], "shadow": [], "stats": {}}
     clients = (db.query(NetworkClient)
@@ -443,6 +455,21 @@ def set_app_interest(body: AppInterest,
     return {"ok": True, "of_interest": body.of_interest}
 
 
+@router.post("/{iid}/repoll")
+def repoll_instance(iid: str,
+                    principal: security.Principal = Depends(security.get_principal),
+                    db: Session = Depends(get_db)):
+    """Request an immediate collection run (the appliance runs it on its next
+    poll, bypassing the interval)."""
+    inst = _owned_instance(db, principal, iid)
+    if not inst.enabled:
+        raise HTTPException(409, "the integration is paused")
+    inst.repoll_requested = True
+    inst.updated_at = _now()
+    db.commit()
+    return {"ok": True}
+
+
 # --------------------------------------------------------------------------- #
 # Appliance data plane (fleet/appliance-token authed)                          #
 # --------------------------------------------------------------------------- #
@@ -466,6 +493,7 @@ def appliance_pull(appliance: Appliance = Depends(_agent_appliance),
             "id": i.id, "integration_type": i.integration_type,
             "enabled": i.enabled, "config": i.config or {},
             "credentials": creds, "poll_interval_minutes": i.poll_interval_minutes,
+            "repoll": bool(i.repoll_requested),
         })
     return {"integrations": out}
 
@@ -578,6 +606,7 @@ def _ingest_report(db: Session, tid: str, inst: IntegrationInstance,
     inst.status = "active" if body.status == "ok" else "error"
     inst.last_error = body.error
     inst.last_stats = body.stats or {}
+    inst.repoll_requested = False  # a run just completed; clear any pending re-poll
     if body.status == "ok":
         inst.last_success_at = now
     if body.credentials_update:

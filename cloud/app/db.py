@@ -205,6 +205,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE integration_instances ADD COLUMN provision_state VARCHAR DEFAULT 'idle'",
         "ALTER TABLE integration_instances ADD COLUMN provision_message TEXT",
         "ALTER TABLE integration_instances ADD COLUMN provision_otp VARCHAR",
+        "ALTER TABLE integration_instances ADD COLUMN repoll_requested BOOLEAN DEFAULT false",
         "ALTER TABLE appliance_storages ADD COLUMN used_bytes INTEGER DEFAULT 0",
         "ALTER TABLE appliance_storages ADD COLUMN health JSON",
         "ALTER TABLE nodes ADD COLUMN version_updated_at TIMESTAMP",

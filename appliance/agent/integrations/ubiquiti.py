@@ -262,6 +262,13 @@ def _get(c: httpx.Client, base: str, path: str, headers: dict) -> list:
     return body.get("data", body) if isinstance(body, dict) else body
 
 
+def _post(c: httpx.Client, base: str, path: str, headers: dict, payload: dict) -> list:
+    r = c.post(f"{base}{path}", headers=headers, json=payload)
+    r.raise_for_status()
+    body = r.json()
+    return body.get("data", body) if isinstance(body, dict) else body
+
+
 def _device_type(name: str, oui: str, is_wired: bool) -> str:
     hay = f"{name} {oui}".lower()
     if any(k in hay for k in ("iphone", "ipad", "android", "pixel", "galaxy", "phone")):
@@ -332,48 +339,85 @@ def collect(config: dict, credentials: dict, log) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("ubiquiti: stat/sta failed: %s", exc)
 
-        # --- DPI per client (apps + traffic) ---------------------------------
+        # --- DPI per client (apps + traffic) — DPI stats are POST endpoints --
         apps_agg: dict[str, dict] = {}
         usage: list[dict] = []
-        try:
-            dpi = _get(c, base, f"/proxy/network/api/s/{site}/stat/stadpi", headers)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("ubiquiti: stat/stadpi failed: %s", exc)
-            dpi = []
-        for entry in dpi:
-            mac = (entry.get("mac") or "").lower()
-            for a in entry.get("by_app", []):
-                aid = a.get("app")
-                cid = a.get("cat")
-                tx = int(a.get("tx_bytes", 0) or 0)
-                rx = int(a.get("rx_bytes", 0) or 0)
-                total = tx + rx
-                if total <= 0:
-                    continue
-                aname = apps_names.get(int(aid)) if aid is not None else None
-                cname = cat_names.get(int(cid)) if cid is not None else None
-                name = aname or cname or (f"App {aid}" if aid is not None else "Unknown")
-                app_key = f"{cid}:{aid}"
-                ag = apps_agg.setdefault(app_key, {
-                    "app_key": app_key, "name": name, "category": cname or "",
-                    "tx_bytes": 0, "rx_bytes": 0, "total_bytes": 0,
-                    "clients": set(), "last_seen": _now_iso(),
-                })
-                ag["tx_bytes"] += tx
-                ag["rx_bytes"] += rx
-                ag["total_bytes"] += total
-                if mac:
-                    ag["clients"].add(mac)
+
+        def _name_for(aid, cid) -> tuple[str, str]:
+            aname = apps_names.get(int(aid)) if aid is not None else None
+            cname = cat_names.get(int(cid)) if cid is not None else None
+            return (aname or cname or (f"App {aid}" if aid is not None else "Unknown"),
+                    cname or "")
+
+        def _add(app_key: str, name: str, category: str, tx: int, rx: int, mac: str) -> None:
+            total = tx + rx
+            if total <= 0:
+                return
+            ag = apps_agg.setdefault(app_key, {
+                "app_key": app_key, "name": name, "category": category,
+                "tx_bytes": 0, "rx_bytes": 0, "total_bytes": 0,
+                "clients": set(), "client_count": 0, "last_seen": _now_iso()})
+            ag["tx_bytes"] += tx
+            ag["rx_bytes"] += rx
+            ag["total_bytes"] += total
+            if mac:
+                ag["clients"].add(mac)
                 usage.append({"client_key": mac, "app_key": app_key,
                               "tx_bytes": tx, "rx_bytes": rx, "total_bytes": total,
                               "last_seen": _now_iso()})
+
+        # Per-client DPI (best: gives usage edges). UniFi wants a POST body.
+        dpi: list = []
+        try:
+            dpi = _post(c, base, f"/proxy/network/api/s/{site}/stat/stadpi",
+                        headers, {"type": "by_app"})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ubiquiti: stat/stadpi failed: %s", exc)
+        for entry in dpi:
+            mac = (entry.get("mac") or "").lower()
+            for a in entry.get("by_app", []):
+                name, category = _name_for(a.get("app"), a.get("cat"))
+                _add(f"{a.get('cat')}:{a.get('app')}", name, category,
+                     int(a.get("tx_bytes", 0) or 0), int(a.get("rx_bytes", 0) or 0), mac)
+
+        # Fall back to site-wide DPI (no per-client breakdown) if per-client empty.
+        if not apps_agg:
+            try:
+                site_dpi = _post(c, base, f"/proxy/network/api/s/{site}/stat/sitedpi",
+                                 headers, {"type": "by_app"})
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ubiquiti: stat/sitedpi failed: %s", exc)
+                site_dpi = []
+            for entry in site_dpi:
+                for a in entry.get("by_app", []):
+                    name, category = _name_for(a.get("app"), a.get("cat"))
+                    key = f"{a.get('cat')}:{a.get('app')}"
+                    tx = int(a.get("tx_bytes", 0) or 0)
+                    rx = int(a.get("rx_bytes", 0) or 0)
+                    if tx + rx <= 0:
+                        continue
+                    ag = apps_agg.setdefault(key, {
+                        "app_key": key, "name": name, "category": category,
+                        "tx_bytes": 0, "rx_bytes": 0, "total_bytes": 0,
+                        "clients": set(), "client_count": 0, "last_seen": _now_iso()})
+                    ag["tx_bytes"] += tx
+                    ag["rx_bytes"] += rx
+                    ag["total_bytes"] += tx + rx
+                    n = a.get("clients") or a.get("num_clients") or 0
+                    if isinstance(n, int):
+                        ag["client_count"] = max(ag["client_count"], n)
+
+        if not apps_agg:
+            log.warning("ubiquiti: no DPI app data — enable Deep Packet Inspection "
+                        "(Settings → Traffic Identification) on the controller")
 
         apps = []
         for ag in apps_agg.values():
             apps.append({
                 "app_key": ag["app_key"], "name": ag["name"], "category": ag["category"],
                 "tx_bytes": ag["tx_bytes"], "rx_bytes": ag["rx_bytes"],
-                "total_bytes": ag["total_bytes"], "client_count": len(ag["clients"]),
+                "total_bytes": ag["total_bytes"],
+                "client_count": len(ag["clients"]) or ag.get("client_count", 0),
                 "last_seen": ag["last_seen"],
             })
         apps.sort(key=lambda a: -a["total_bytes"])
@@ -381,10 +425,13 @@ def collect(config: dict, credentials: dict, log) -> dict:
         total_bytes = sum(a["total_bytes"] for a in apps)
         log.info("ubiquiti: collected %d client(s), %d app(s), %s bytes",
                  len(clients), len(apps), total_bytes)
+        stats = {"clients": len(clients), "apps": len(apps), "bytes_seen": total_bytes}
+        if not apps:
+            stats["note"] = ("No application data — enable Deep Packet Inspection "
+                             "(Settings → Traffic Identification) on your UniFi controller.")
         return {
             "clients": clients,
             "apps": apps,
             "usage": usage,
-            "stats": {"clients": len(clients), "apps": len(apps),
-                      "bytes_seen": total_bytes},
+            "stats": stats,
         }

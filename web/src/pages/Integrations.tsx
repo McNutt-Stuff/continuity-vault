@@ -19,7 +19,7 @@ interface Instance {
   poll_interval_minutes: number; host: string; last_run_at: string | null;
   last_success_at: string | null; last_error: string | null;
   provision_state?: string; provision_message?: string | null;
-  last_stats: { clients?: number; apps?: number; bytes_seen?: number };
+  last_stats: { clients?: number; apps?: number; bytes_seen?: number; note?: string };
 }
 interface ApplianceRef { id: string; name: string; state: string; online: boolean; }
 interface ListResp { available: Spec[]; instances: Instance[]; appliances: ApplianceRef[]; }
@@ -46,19 +46,13 @@ const STATUS_TONE: Record<string, "ok" | "warn" | "info" | "danger"> = {
 
 export default function Integrations() {
   const [list, setList] = useState<ListResp | null>(null);
-  const [data, setData] = useState<DataResp | null>(null);
   const [loading, setLoading] = useState(true);
   const [setupSpec, setSetupSpec] = useState<Spec | null>(null);
-  const [tab, setTab] = useState<"apps" | "clients">("apps");
+  const [detailId, setDetailId] = useState<string | null>(null);
 
   async function load() {
-    try {
-      const [l, d] = await Promise.all([
-        api.get<ListResp>("/integrations"),
-        api.get<DataResp>("/integrations/data").catch(() => null),
-      ]);
-      setList(l); setData(d);
-    } catch { /* ignore */ }
+    try { setList(await api.get<ListResp>("/integrations")); }
+    catch { /* ignore */ }
     finally { setLoading(false); }
   }
   useEffect(() => { void load(); }, []);
@@ -77,7 +71,12 @@ export default function Integrations() {
 
   if (loading) return <Loading label="Loading integrations…" />;
 
-  const hasData = !!data && (data.apps.length > 0 || data.clients.length > 0);
+  const detailInst = detailId ? list?.instances.find((i) => i.id === detailId) : null;
+  if (detailId && detailInst) {
+    return <IntegrationDetail inst={detailInst} spec={specByType[detailInst.integration_type]}
+                              onBack={() => { setDetailId(null); void load(); }}
+                              onChanged={load} />;
+  }
 
   return (
     <>
@@ -95,13 +94,14 @@ export default function Integrations() {
       {list && list.instances.length > 0 && (
         <div className="insights-cards" style={{ marginBottom: 20 }}>
           {list.instances.map((i) => (
-            <InstanceCard key={i.id} inst={i} spec={specByType[i.integration_type]} onChanged={load} />
+            <InstanceCard key={i.id} inst={i} spec={specByType[i.integration_type]}
+                          onOpen={() => setDetailId(i.id)} onChanged={load} />
           ))}
         </div>
       )}
 
       {/* Add an integration */}
-      <Card style={{ marginBottom: 22 }}>
+      <Card>
         <div className="row" style={{ gap: 8, marginBottom: 10, alignItems: "center" }}>
           <Icon name="puzzle" size={16} />
           <h3 style={{ margin: 0, fontSize: 15 }}>Available integrations</h3>
@@ -134,56 +134,6 @@ export default function Integrations() {
           )}
         </div>
       </Card>
-
-      {/* Drill-downs */}
-      {hasData && data && (
-        <>
-          {data.shadow.length > 0 && (
-            <Card style={{ marginBottom: 18, borderColor: "var(--warn,#f5a623)" }}>
-              <div className="row" style={{ gap: 8, marginBottom: 8, alignItems: "center" }}>
-                <Icon name="alert" size={16} />
-                <h3 style={{ margin: 0, fontSize: 15 }}>Cloud apps you're not protecting yet</h3>
-              </div>
-              <div className="faint" style={{ fontSize: 12.5, marginBottom: 10 }}>
-                We see these services on your network, but you haven't connected them as sources —
-                so anything living only there isn't recoverable.
-              </div>
-              <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
-                {data.shadow.map((s) => <ShadowChip key={s.source_type} s={s} />)}
-              </div>
-            </Card>
-          )}
-
-          <div className="insights-stats" style={{ marginBottom: 16 }}>
-            <MiniStat icon="user" label="Clients seen" value={String(data.stats.clients || 0)} tint="#4f7cff" />
-            <MiniStat icon="shield" label="Monitored" value={String(data.stats.monitored || 0)} tint="#2dbe60" />
-            <MiniStat icon="activity" label="Apps & services" value={String(data.stats.apps || 0)} tint="#c56cf0" />
-            <MiniStat icon="cloud" label="Traffic seen" value={bytes(data.stats.bytes || 0)} tint="#f5a623" />
-          </div>
-
-          <Card>
-            <div className="row" style={{ gap: 8, marginBottom: 12 }}>
-              <button className={`chip ${tab === "apps" ? "active" : ""}`} onClick={() => setTab("apps")}>
-                Apps & services
-              </button>
-              <button className={`chip ${tab === "clients" ? "active" : ""}`} onClick={() => setTab("clients")}>
-                Clients & devices
-              </button>
-            </div>
-            {tab === "apps"
-              ? <AppsTable apps={data.apps} onChanged={load} />
-              : <ClientsTable clients={data.clients} onChanged={load} />}
-          </Card>
-        </>
-      )}
-
-      {!hasData && list && list.instances.length > 0 && (
-        <Card>
-          <div className="muted" style={{ padding: 12 }}>
-            No network data yet — your integration will report on its next poll. Check back shortly.
-          </div>
-        </Card>
-      )}
 
       {setupSpec && (
         <SetupModal spec={setupSpec} appliances={list?.appliances || []}
@@ -222,21 +172,25 @@ function ShadowChip({ s }: { s: ShadowSource }) {
   );
 }
 
-function InstanceCard({ inst, spec, onChanged }: { inst: Instance; spec?: Spec; onChanged: () => void }) {
+function InstanceCard({ inst, spec, onOpen, onChanged }: {
+  inst: Instance; spec?: Spec; onOpen: () => void; onChanged: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [resuming, setResuming] = useState(false);
   const st = inst.last_stats || {};
   const provisioning = !!inst.provision_state && !["idle", "done"].includes(inst.provision_state);
-  async function setInterval_(minutes: number) {
-    setBusy(true);
-    try { await api.put(`/integrations/${inst.id}`, { poll_interval_minutes: minutes }); onChanged(); }
-    catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
-    finally { setBusy(false); }
-  }
   async function toggle() {
     setBusy(true);
     try { await api.put(`/integrations/${inst.id}`, { enabled: !inst.enabled }); onChanged(); }
+    finally { setBusy(false); }
+  }
+  async function repoll() {
+    setBusy(true);
+    try {
+      await api.post(`/integrations/${inst.id}/repoll`, {});
+      notify({ message: "Re-poll requested — new data will arrive shortly.", tone: "info" });
+    } catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
     finally { setBusy(false); }
   }
   async function remove() {
@@ -249,7 +203,8 @@ function InstanceCard({ inst, spec, onChanged }: { inst: Instance; spec?: Spec; 
   }
   return (
     <Card className="insight-card">
-      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 8 }}>
+      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 8, cursor: provisioning ? "default" : "pointer" }}
+           onClick={() => { if (!provisioning) onOpen(); }}>
         <div className="insight-card-ic" style={{ background: "#0559c91e", color: "#0559c9" }}>
           <SourceIcon type={inst.integration_type} fallback="activity" size={20} />
         </div>
@@ -272,21 +227,22 @@ function InstanceCard({ inst, spec, onChanged }: { inst: Instance; spec?: Spec; 
       {inst.last_error && !provisioning && (
         <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 6 }}>{inst.last_error}</div>
       )}
-      <div className="row" style={{ gap: 16, fontSize: 12.5, marginBottom: 8 }}>
+      <div className="row" style={{ gap: 16, fontSize: 12.5, marginBottom: 10 }}>
         <span className="faint">Clients <b style={{ color: "var(--text)" }}>{st.clients ?? "—"}</b></span>
         <span className="faint">Apps <b style={{ color: "var(--text)" }}>{st.apps ?? "—"}</b></span>
         <span className="faint">Seen <b style={{ color: "var(--text)" }}>{st.bytes_seen ? bytes(st.bytes_seen) : "—"}</b></span>
       </div>
-      <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8 }}>
-        <span className="faint" style={{ fontSize: 12 }}>Poll every</span>
-        <select className="input sm" disabled={busy} value={inst.poll_interval_minutes}
-                onChange={(e) => void setInterval_(Number(e.target.value))} style={{ width: 130 }}>
-          {[15, 30, 60, 180, 360, 720, 1440].map((m) => (
-            <option key={m} value={m}>{m < 60 ? `${m} min` : m < 1440 ? `${m / 60} h` : "1 day"}</option>
-          ))}
-        </select>
-      </div>
-      <div className="row" style={{ gap: 8 }}>
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        {!provisioning && (
+          <>
+            <button className="btn sm" disabled={busy} onClick={onOpen}>
+              <Icon name="search" size={13} /> Details
+            </button>
+            <button className="btn ghost sm" disabled={busy} onClick={() => void repoll()}>
+              <Icon name="repeat" size={13} /> Re-poll
+            </button>
+          </>
+        )}
         <button className="btn ghost sm" disabled={busy} onClick={() => setEditing(true)}>
           <Icon name="edit" size={13} /> Edit
         </button>
@@ -305,6 +261,148 @@ function InstanceCard({ inst, spec, onChanged }: { inst: Instance; spec?: Spec; 
                            onDone={() => { setResuming(false); onChanged(); }} />
       )}
     </Card>
+  );
+}
+
+// Full-page detail for one integration instance — its own clients, apps, shadow
+// sources and stats (scoped to this instance only).
+function IntegrationDetail({ inst, spec, onBack, onChanged }: {
+  inst: Instance; spec?: Spec; onBack: () => void; onChanged: () => void;
+}) {
+  const [data, setData] = useState<DataResp | null>(null);
+  const [tab, setTab] = useState<"apps" | "clients">("apps");
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [repolling, setRepolling] = useState(false);
+
+  async function loadData() {
+    try { setData(await api.get<DataResp>(`/integrations/${inst.id}/data`)); }
+    catch { /* ignore */ }
+  }
+  useEffect(() => {
+    void loadData();
+    const t = setInterval(loadData, 8000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inst.id]);
+
+  async function repoll() {
+    setRepolling(true);
+    try {
+      await api.post(`/integrations/${inst.id}/repoll`, {});
+      notify({ message: "Re-poll requested — refreshing shortly.", tone: "info" });
+      setTimeout(() => { void loadData(); onChanged(); setRepolling(false); }, 25000);
+    } catch (e) { notify({ message: (e as Error).message, tone: "danger" }); setRepolling(false); }
+  }
+  async function toggle() {
+    setBusy(true);
+    try { await api.put(`/integrations/${inst.id}`, { enabled: !inst.enabled }); onChanged(); }
+    finally { setBusy(false); }
+  }
+  async function remove() {
+    if (!(await confirmDialog({ title: `Remove ${inst.label}?`,
+      message: "This stops the integration and deletes the network telemetry it collected.",
+      confirmLabel: "Remove", tone: "danger" }))) return;
+    try { await api.del(`/integrations/${inst.id}`); onBack(); }
+    catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+  }
+
+  const stats = data?.stats || {};
+  const lastRun = inst.last_run_at
+    ? new Date(inst.last_run_at.endsWith("Z") ? inst.last_run_at : `${inst.last_run_at}Z`).toLocaleString()
+    : null;
+  const pollLbl = inst.poll_interval_minutes < 60
+    ? `${inst.poll_interval_minutes}m` : `${inst.poll_interval_minutes / 60}h`;
+
+  return (
+    <>
+      <button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 12 }}>
+        ← Integrations
+      </button>
+      <div className="spread" style={{ marginBottom: 16, alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+        <div className="row" style={{ gap: 12, alignItems: "center" }}>
+          <div className="insight-card-ic" style={{ background: "#0559c91e", color: "#0559c9", width: 44, height: 44 }}>
+            <SourceIcon type={inst.integration_type} fallback="activity" size={24} />
+          </div>
+          <div className="stack" style={{ gap: 2 }}>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <h2 style={{ margin: 0 }}>{inst.label}</h2>
+              <Pill tone={STATUS_TONE[inst.status] || "info"}>{inst.status}</Pill>
+            </div>
+            <div className="faint" style={{ fontSize: 12.5 }}>
+              {inst.host || inst.integration_type} · polls every {pollLbl}
+              {lastRun ? ` · last run ${lastRun}` : ""}
+            </div>
+          </div>
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn sm" disabled={repolling} onClick={() => void repoll()}>
+            {repolling ? <><span className="spinner-dot" /> Re-polling…</> : <><Icon name="repeat" size={13} /> Re-poll</>}
+          </button>
+          <button className="btn ghost sm" onClick={() => setEditing(true)}><Icon name="edit" size={13} /> Edit</button>
+          <button className="btn ghost sm" disabled={busy} onClick={() => void toggle()}>{inst.enabled ? "Pause" : "Resume"}</button>
+          <button className="btn danger sm" onClick={() => void remove()}>Remove</button>
+        </div>
+      </div>
+
+      {inst.last_error && (
+        <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12.5, marginBottom: 12 }}>{inst.last_error}</div>
+      )}
+
+      <div className="insights-stats" style={{ marginBottom: 16 }}>
+        <MiniStat icon="user" label="Clients seen" value={String(stats.clients || 0)} tint="#4f7cff" />
+        <MiniStat icon="shield" label="Monitored" value={String(stats.monitored || 0)} tint="#2dbe60" />
+        <MiniStat icon="activity" label="Apps & services" value={String(stats.apps || 0)} tint="#c56cf0" />
+        <MiniStat icon="cloud" label="Traffic seen" value={bytes(stats.bytes || 0)} tint="#f5a623" />
+      </div>
+
+      {data && data.apps.length === 0 && (
+        <Card style={{ marginBottom: 16 }}>
+          <div className="row" style={{ gap: 10, alignItems: "center" }}>
+            <Icon name="info" size={16} />
+            <span className="faint" style={{ fontSize: 12.5 }}>
+              {inst.last_stats?.note
+                || "No application data yet. If this persists, enable Deep Packet Inspection (Settings → Traffic Identification) on your UniFi controller."}
+            </span>
+          </div>
+        </Card>
+      )}
+
+      {data && data.shadow.length > 0 && (
+        <Card style={{ marginBottom: 16, borderColor: "var(--warn,#f5a623)" }}>
+          <div className="row" style={{ gap: 8, marginBottom: 8, alignItems: "center" }}>
+            <Icon name="alert" size={16} />
+            <h3 style={{ margin: 0, fontSize: 15 }}>Cloud apps you're not protecting yet</h3>
+          </div>
+          <div className="faint" style={{ fontSize: 12.5, marginBottom: 10 }}>
+            We see these services on your network, but you haven't connected them as sources —
+            so anything living only there isn't recoverable.
+          </div>
+          <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+            {data.shadow.map((s) => <ShadowChip key={s.source_type} s={s} />)}
+          </div>
+        </Card>
+      )}
+
+      <Card>
+        <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+          <button className={`chip ${tab === "apps" ? "active" : ""}`} onClick={() => setTab("apps")}>
+            Apps & services
+          </button>
+          <button className={`chip ${tab === "clients" ? "active" : ""}`} onClick={() => setTab("clients")}>
+            Clients & devices
+          </button>
+        </div>
+        {tab === "apps"
+          ? <AppsTable apps={data?.apps || []} onChanged={loadData} />
+          : <ClientsTable clients={data?.clients || []} onChanged={loadData} />}
+      </Card>
+
+      {editing && (
+        <EditModal inst={inst} spec={spec} onClose={() => setEditing(false)}
+                   onDone={() => { setEditing(false); onChanged(); }} />
+      )}
+    </>
   );
 }
 
