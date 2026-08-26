@@ -217,6 +217,13 @@ def _apply_additive_migrations() -> None:
         "ON search_documents(tenant_id, created_at)",
         "CREATE INDEX IF NOT EXISTS ix_search_documents_vault_created "
         "ON search_documents(vault_id, created_at)",
+        # Support the per-object DISTINCT ON dedup used by Overview / Protection
+        # Setup (newest row per source+object) so Postgres needn't sort the whole
+        # tenant index each time.
+        "CREATE INDEX IF NOT EXISTS ix_search_documents_tenant_obj "
+        "ON search_documents(tenant_id, source_type, object_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_search_documents_vault_obj "
+        "ON search_documents(vault_id, source_type, object_id, created_at)",
         "CREATE INDEX IF NOT EXISTS ix_snapshot_receipts_tenant_vault "
         "ON snapshot_receipts(tenant_id, vault_id)",
         "ALTER TABLE appliance_storages ADD COLUMN used_bytes INTEGER DEFAULT 0",

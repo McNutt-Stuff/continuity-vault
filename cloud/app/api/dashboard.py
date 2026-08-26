@@ -134,11 +134,21 @@ def overview(scope: str = "me",
                     for t, n in sorted(type_counts.items(), key=lambda kv: -kv[1])]
 
     # --- Objects protected (deduped per logical object) + type breakdown -----
-    docs = (db.query(SearchDocument.source_type, SearchDocument.object_id,
-                     SearchDocument.size_bytes, SearchDocument.doc_type)
-            .filter(SearchDocument.tenant_id == tenant.id,
-                    SearchDocument.vault_id.in_(vault_ids))
-            .order_by(SearchDocument.created_at.desc()).all()) if vault_ids else []
+    # On Postgres, push the "newest row per (source, object)" to the DB via
+    # DISTINCT ON so we don't haul every version/destination row into Python;
+    # SQLite (dev) falls back to the ordered scan + the Python dedup below.
+    docs = []
+    if vault_ids:
+        dq = (db.query(SearchDocument.source_type, SearchDocument.object_id,
+                       SearchDocument.size_bytes, SearchDocument.doc_type)
+              .filter(SearchDocument.tenant_id == tenant.id,
+                      SearchDocument.vault_id.in_(vault_ids)))
+        if db.bind is not None and db.bind.dialect.name == "postgresql":
+            docs = (dq.distinct(SearchDocument.source_type, SearchDocument.object_id)
+                      .order_by(SearchDocument.source_type, SearchDocument.object_id,
+                                SearchDocument.created_at.desc()).all())
+        else:
+            docs = dq.order_by(SearchDocument.created_at.desc()).all()
     seen: set[tuple] = set()
     bucket_counts: dict[str, int] = {}
     source_obj_counts: dict[str, int] = {}
@@ -187,7 +197,7 @@ def overview(scope: str = "me",
     # Bytes actually written (cumulative across recovery points), grouped into
     # the three places data can live. Customer cloud is shown only when used.
     usage = {"cloud": 0, "appliance": 0, "customer": 0}
-    receipts = (db.query(SnapshotReceipt)
+    receipts = (db.query(SnapshotReceipt.total_bytes, SnapshotReceipt.destination)
                 .filter(SnapshotReceipt.tenant_id == tenant.id,
                         SnapshotReceipt.vault_id.in_(vault_ids)).all()) if vault_ids else []
     for r in receipts:
@@ -278,11 +288,20 @@ def trends(period: str = "week", scope: str = "me",
     """Cumulative count of protected objects over time, per object type, so the
     dashboard can draw a growth trend line per category over a rolling window."""
     vault_ids, _eff = security.scoped_vault_ids(db, principal, scope)
-    docs = (db.query(SearchDocument.source_type, SearchDocument.object_id,
-                     SearchDocument.doc_type, SearchDocument.created_at)
-            .filter(SearchDocument.tenant_id == tenant.id,
-                    SearchDocument.vault_id.in_(vault_ids))
-            .order_by(SearchDocument.created_at.asc()).all()) if vault_ids else []
+    # Earliest row per object is all trends needs; DISTINCT ON (Postgres) fetches
+    # just those instead of every version. SQLite falls back to the full scan.
+    docs = []
+    if vault_ids:
+        dq = (db.query(SearchDocument.source_type, SearchDocument.object_id,
+                       SearchDocument.doc_type, SearchDocument.created_at)
+              .filter(SearchDocument.tenant_id == tenant.id,
+                      SearchDocument.vault_id.in_(vault_ids)))
+        if db.bind is not None and db.bind.dialect.name == "postgresql":
+            docs = (dq.distinct(SearchDocument.source_type, SearchDocument.object_id)
+                      .order_by(SearchDocument.source_type, SearchDocument.object_id,
+                                SearchDocument.created_at.asc()).all())
+        else:
+            docs = dq.order_by(SearchDocument.created_at.asc()).all()
     # First time each logical object was protected + its bucket.
     first: dict[tuple, tuple] = {}
     earliest = None
