@@ -18,7 +18,7 @@ from typing import Optional
 
 import httpx
 
-from .dpi_signatures import DPI_APPS, DPI_CATS
+from .dpi_signatures import app_name
 
 # UniFi OS rejects requests it doesn't recognize as a browser with HTTP 499, so a
 # real browser User-Agent (not python-httpx/…) is required to authenticate.
@@ -220,6 +220,9 @@ def finalize(session: dict, config: dict, log) -> dict:
     site = session["site"]
     csrf = session.get("csrf", "")
     out = {"host": base, "site": site}
+    discovered = _discover_site(c, base, _auth_headers({}, csrf), log)
+    if discovered:
+        out["site"] = site = discovered
     api_key = _try_mint_api_key(c, base, site, csrf, log)
     if api_key:
         out["api_key"] = api_key
@@ -233,32 +236,28 @@ def finalize(session: dict, config: dict, log) -> dict:
     return out
 
 
-def _load_dpi_names(c: httpx.Client, base: str, site: str, log) -> tuple[dict, dict]:
-    """Resolve DPI app/category id→name from the controller when available,
-    merged over the static fallback."""
-    apps = dict(DPI_APPS)
-    cats = dict(DPI_CATS)
-    loaded = 0
-    for path in (f"/proxy/network/api/s/{site}/stat/dpiapp",
-                 f"/proxy/network/api/s/{site}/rest/dpiapp",
-                 f"/proxy/network/v2/api/site/{site}/dpi/apps"):
+def _discover_site(c: httpx.Client, base: str, headers: dict, log) -> Optional[str]:
+    """Find the controller's site short-name (the ``default`` in the URL is a
+    per-controller value). Returns the first site, preferring one named
+    ``default`` when several exist."""
+    for path in (f"{base}/proxy/network/api/self/sites",
+                 f"{base}/api/self/sites"):
         try:
-            r = c.get(f"{base}{path}")
-            if r.status_code < 300:
-                body = r.json()
-                for row in (body.get("data") if isinstance(body, dict) else body) or []:
-                    aid = row.get("app", row.get("id"))
-                    name = row.get("name") or row.get("app_name")
-                    if aid is not None and name:
-                        apps[int(aid)] = name
-                        loaded += 1
-                    cid, cname = row.get("cat"), row.get("cat_name") or row.get("category")
-                    if cid is not None and cname:
-                        cats[int(cid)] = cname
+            r = c.get(path, headers=headers)
+            if r.status_code >= 300:
+                continue
+            body = r.json()
+            rows = body.get("data", body) if isinstance(body, dict) else body
+            names = [row.get("name") for row in (rows or []) if row.get("name")]
+            if names:
+                pick = "default" if "default" in names else names[0]
+                if len(names) > 1:
+                    log.info("ubiquiti: %d sites found (%s); using '%s'",
+                             len(names), ", ".join(names), pick)
+                return pick
         except Exception as exc:  # noqa: BLE001
-            log.debug("ubiquiti: dpi name load via %s failed: %s", path, exc)
-    log.info("ubiquiti: resolved %d DPI app name(s) from the controller", loaded)
-    return apps, cats
+            log.debug("ubiquiti: site discovery via %s failed: %s", path, exc)
+    return None
 
 
 def _get(c: httpx.Client, base: str, path: str, headers: dict) -> list:
@@ -299,7 +298,9 @@ def collect(config: dict, credentials: dict, log) -> dict:
             csrf = _login(c, base, credentials.get("username", ""),
                           credentials.get("password", ""), log)
         headers = _auth_headers(credentials, csrf)
-        apps_names, cat_names = _load_dpi_names(c, base, site, log)
+        # Confirm the site short-name (controllers rarely use literal "default").
+        if site == "default":
+            site = _discover_site(c, base, headers, log) or site
 
         # --- Clients (named, known + active) ---------------------------------
         by_mac: dict[str, dict] = {}
@@ -338,123 +339,138 @@ def collect(config: dict, credentials: dict, log) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("ubiquiti: stat/sta failed: %s", exc)
 
-        # --- Application traffic (DPI / Traffic Identification) ---------------
+        # --- Application traffic (v2 Traffic API) ----------------------------
+        # UniFi OS serves per-app traffic from /v2/api/site/<site>/traffic, which
+        # REQUIRES a start/end window in epoch-ms — without it the controller
+        # returns HTTP 400. Response shape:
+        #   {"client_usage_by_app":[{"client":{mac,name,...},
+        #        "usage_by_app":[{application,category,bytes_received,
+        #                         bytes_transmitted,total_bytes,...}]}],
+        #    "total_usage_by_app":[{application,category,bytes_received,
+        #                           bytes_transmitted,total_bytes,client_count}]}
+        # application/category are numeric ids resolved via the DPI catalog.
         apps_agg: dict[str, dict] = {}
         usage: list[dict] = []
 
-        def _name_for(aid, cid) -> tuple[str, str]:
-            aname = apps_names.get(int(aid)) if aid is not None else None
-            cname = cat_names.get(int(cid)) if cid is not None else None
-            return (aname or cname or (f"App {aid}" if aid is not None else "Unknown"),
-                    cname or "")
+        def _key(aid, cid) -> str:
+            return f"{cid}:{aid}"
 
-        def _rows_from(raw) -> list:
-            """Coerce any endpoint response into a list of records."""
-            if isinstance(raw, list):
-                return raw
-            if isinstance(raw, dict):
-                for k in ("data", "applications", "apps", "entries", "items", "by_app"):
-                    v = raw.get(k)
-                    if isinstance(v, list):
-                        return v
-            return []
+        def _ensure(aid, cid) -> dict:
+            key = _key(aid, cid)
+            ag = apps_agg.get(key)
+            if ag is None:
+                name, category = app_name(aid, cid)
+                ag = apps_agg[key] = {
+                    "app_key": key, "name": name, "category": category,
+                    "tx_bytes": 0, "rx_bytes": 0, "total_bytes": 0,
+                    "clients": set(), "client_count": 0, "last_seen": _now_iso()}
+            return ag
 
-        def _shape(raw) -> str:
-            if isinstance(raw, list):
-                f = raw[0] if raw else None
-                keys = sorted(f.keys()) if isinstance(f, dict) else type(f).__name__
-                return f"list[{len(raw)}] first={keys}"
-            if isinstance(raw, dict):
-                return f"dict keys={sorted(raw.keys())}"
-            return type(raw).__name__
-
-        def _fold_dpi(rows: list, per_client: bool) -> int:
-            """Fold a DPI/traffic response into apps_agg. Tolerates the many field
-            names / shapes across classic + v2 UniFi APIs."""
-            got = 0
-            for entry in (rows or []):
-                if not isinstance(entry, dict):
+        end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        start_ms = end_ms - 24 * 3600 * 1000
+        query = f"?start={start_ms}&end={end_ms}&includeUnidentified=true"
+        traffic = None
+        for attempt in range(2):
+            path = f"/proxy/network/v2/api/site/{site}/traffic{query}"
+            try:
+                r = c.get(f"{base}{path}", headers=headers)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ubiquiti: v2 traffic request failed: %s", exc)
+                break
+            if r.status_code < 300:
+                traffic = r.json()
+                break
+            # A 404 usually means the site short-name is wrong — rediscover once.
+            if r.status_code == 404 and attempt == 0:
+                found = _discover_site(c, base, headers, log)
+                if found and found != site:
+                    log.info("ubiquiti: v2 traffic 404 on site '%s'; retrying '%s'",
+                             site, found)
+                    site = found
                     continue
-                mac = (entry.get("mac") or "").lower() if per_client else ""
-                recs = (entry.get("by_app") or entry.get("apps")
-                        or entry.get("applications"))
-                if recs is None:  # flat: the entry itself is an app record
-                    recs = [entry]
-                for a in recs:
-                    if not isinstance(a, dict):
-                        continue
-                    aid = a.get("app", a.get("app_id", a.get("id")))
-                    cid = a.get("cat", a.get("category", a.get("cat_id")))
-                    tx = int(a.get("tx_bytes") or a.get("upload") or a.get("tx")
-                             or a.get("wan_tx_bytes") or 0)
-                    rx = int(a.get("rx_bytes") or a.get("download") or a.get("rx")
-                             or a.get("wan_rx_bytes") or 0)
+            log.warning("ubiquiti: v2 traffic → HTTP %s", r.status_code)
+            break
+
+        if isinstance(traffic, dict):
+            # Site-wide totals are the authoritative per-app bytes + client_count.
+            for a in traffic.get("total_usage_by_app") or []:
+                tx = int(a.get("bytes_transmitted") or 0)
+                rx = int(a.get("bytes_received") or 0)
+                if tx + rx <= 0:
+                    continue
+                ag = _ensure(a.get("application"), a.get("category"))
+                ag["tx_bytes"] += tx
+                ag["rx_bytes"] += rx
+                ag["total_bytes"] += tx + rx
+                ag["client_count"] = max(ag["client_count"],
+                                         int(a.get("client_count") or 0))
+            # Per-client usage → usage rows + client roster (bytes already counted
+            # in the site totals above, so don't re-sum them into apps_agg).
+            for entry in traffic.get("client_usage_by_app") or []:
+                cl = entry.get("client") or {}
+                mac = (cl.get("mac") or "").lower()
+                if mac:
+                    nm = cl.get("name") or cl.get("hostname") or mac
+                    cur = by_mac.setdefault(mac, {
+                        "client_key": mac, "mac": mac, "name": nm,
+                        "hostname": cl.get("hostname", ""), "ip": cl.get("ip", ""),
+                        "is_wired": bool(cl.get("is_wired")),
+                        "is_guest": bool(cl.get("is_guest")),
+                        "tx_bytes": 0, "rx_bytes": 0, "total_bytes": 0,
+                        "last_seen": _now_iso()})
+                    if cur["name"] == mac and nm:
+                        cur["name"] = nm
+                    cur["device_type"] = _device_type(cur["name"], cl.get("oui", ""),
+                                                       cur["is_wired"])
+                for a in entry.get("usage_by_app") or []:
+                    tx = int(a.get("bytes_transmitted") or 0)
+                    rx = int(a.get("bytes_received") or 0)
                     if tx + rx <= 0:
                         continue
-                    name, category = _name_for(aid, cid)
-                    inline = (a.get("name") or a.get("app_name") or a.get("x_app_name")
-                              or a.get("application_name"))
-                    if inline:
-                        name = inline
-                    key = f"{cid}:{aid}" if aid is not None else f"name:{name}"
-                    ag = apps_agg.setdefault(key, {
-                        "app_key": key, "name": name, "category": category,
-                        "tx_bytes": 0, "rx_bytes": 0, "total_bytes": 0,
-                        "clients": set(), "client_count": 0, "last_seen": _now_iso()})
-                    ag["tx_bytes"] += tx
-                    ag["rx_bytes"] += rx
-                    ag["total_bytes"] += tx + rx
-                    if name and ag["name"].startswith("App "):
-                        ag["name"] = name
+                    ag = _ensure(a.get("application"), a.get("category"))
+                    if not traffic.get("total_usage_by_app"):
+                        ag["tx_bytes"] += tx
+                        ag["rx_bytes"] += rx
+                        ag["total_bytes"] += tx + rx
                     if mac:
                         ag["clients"].add(mac)
-                        usage.append({"client_key": mac, "app_key": key,
-                                      "tx_bytes": tx, "rx_bytes": rx, "total_bytes": tx + rx,
-                                      "last_seen": _now_iso()})
-                    else:
-                        cc = a.get("clients", a.get("num_clients"))
-                        if isinstance(cc, int):
-                            ag["client_count"] = max(ag["client_count"], cc)
-                    got += 1
-            return got
+                        usage.append({"client_key": mac, "app_key": ag["app_key"],
+                                      "tx_bytes": tx, "rx_bytes": rx,
+                                      "total_bytes": tx + rx, "last_seen": _now_iso()})
+            log.info("ubiquiti: v2 traffic → %d app(s), %d client usage row(s)",
+                     len(apps_agg), len(usage))
 
-        # UDM/UniFi OS serve app traffic from the newer v2 API; classic stat/*dpi
-        # endpoints are often empty. Try both, use the first with data, and LOG
-        # each response's shape so the exact schema is visible in the logs.
-        macs = list(by_mac.keys())
-        candidates = [
-            ("GET",  f"/proxy/network/v2/api/site/{site}/traffic/apps", None, False),
-            ("GET",  f"/proxy/network/v2/api/site/{site}/traffic/applications", None, False),
-            ("GET",  f"/proxy/network/v2/api/site/{site}/insights/applications", None, False),
-            ("GET",  f"/proxy/network/v2/api/site/{site}/dpi/apps", None, False),
-            ("POST", f"/proxy/network/api/s/{site}/stat/sitedpi", {"type": "by_app"}, False),
-            ("POST", f"/proxy/network/api/s/{site}/stat/dpi", {"type": "by_app"}, False),
-            ("GET",  f"/proxy/network/api/s/{site}/stat/dpi", None, False),
-            ("GET",  f"/proxy/network/api/s/{site}/stat/current-dpi", None, False),
-            ("POST", f"/proxy/network/api/s/{site}/stat/stadpi",
-             {"type": "by_app", "macs": macs[:500]}, True),
-        ]
-        for method, path, payload, per_client in candidates:
-            if apps_agg:
-                break
-            short = path.split("/proxy/network")[-1]
+        # Classic DPI fallback for older controllers (Network < 9.1) where the v2
+        # traffic endpoint isn't present or returns nothing.
+        if not apps_agg:
             try:
-                r = (c.post(f"{base}{path}", headers=headers, json=payload) if method == "POST"
-                     else c.get(f"{base}{path}", headers=headers))
-                if r.status_code >= 300:
-                    log.info("ubiquiti: %s → HTTP %s", short, r.status_code)
-                    continue
-                raw = r.json()
-                data = raw.get("data", raw) if isinstance(raw, dict) else raw
-                rows = _rows_from(data) or _rows_from(raw)
-                got = _fold_dpi(rows, per_client)
-                log.info("ubiquiti: %s → %s → %d app record(s)", short, _shape(data), got)
+                r = c.post(f"{base}/proxy/network/api/s/{site}/stat/sitedpi",
+                           headers=headers, json={"type": "by_app"})
+                if r.status_code < 300:
+                    body = r.json()
+                    rows = body.get("data", body) if isinstance(body, dict) else body
+                    for a in (rows or []):
+                        if not isinstance(a, dict):
+                            continue
+                        tx = int(a.get("tx_bytes") or 0)
+                        rx = int(a.get("rx_bytes") or 0)
+                        if tx + rx <= 0:
+                            continue
+                        ag = _ensure(a.get("app"), a.get("cat"))
+                        ag["tx_bytes"] += tx
+                        ag["rx_bytes"] += rx
+                        ag["total_bytes"] += tx + rx
+                        ag["client_count"] = max(ag["client_count"],
+                                                 int(a.get("known_clients") or 0))
+                    log.info("ubiquiti: classic sitedpi fallback → %d app(s)", len(apps_agg))
+                else:
+                    log.info("ubiquiti: classic sitedpi → HTTP %s", r.status_code)
             except Exception as exc:  # noqa: BLE001
-                log.warning("ubiquiti: %s failed: %s", short, exc)
+                log.warning("ubiquiti: classic sitedpi fallback failed: %s", exc)
 
         if not apps_agg:
-            log.warning("ubiquiti: no application data from any endpoint (see the shape "
-                        "logs above to identify the right one)")
+            log.warning("ubiquiti: no application traffic returned — is Traffic "
+                        "Identification (DPI) enabled on the controller?")
 
         apps = []
         for ag in apps_agg.values():
@@ -462,7 +478,7 @@ def collect(config: dict, credentials: dict, log) -> dict:
                 "app_key": ag["app_key"], "name": ag["name"], "category": ag["category"],
                 "tx_bytes": ag["tx_bytes"], "rx_bytes": ag["rx_bytes"],
                 "total_bytes": ag["total_bytes"],
-                "client_count": len(ag["clients"]) or ag.get("client_count", 0),
+                "client_count": max(len(ag["clients"]), ag.get("client_count", 0)),
                 "last_seen": ag["last_seen"],
             })
         apps.sort(key=lambda a: -a["total_bytes"])
