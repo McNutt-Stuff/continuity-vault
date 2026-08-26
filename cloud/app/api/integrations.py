@@ -79,6 +79,7 @@ def _instance_view(inst: IntegrationInstance) -> dict:
         "runs_on": inst.runs_on,
         "appliance_id": inst.appliance_id,
         "status": inst.status,
+        "health": _instance_health(inst),
         "poll_interval_minutes": inst.poll_interval_minutes,
         "host": (inst.config or {}).get("host", ""),
         "provision_state": inst.provision_state or "idle",
@@ -88,6 +89,27 @@ def _instance_view(inst: IntegrationInstance) -> dict:
         "last_error": inst.last_error,
         "last_stats": inst.last_stats or {},
     }
+
+
+def _instance_health(inst: IntegrationInstance) -> str:
+    """Coarse health for the card/detail badge: paused | setup | error | stale |
+    pending | ok. Lets the user see at a glance if collection is failing."""
+    if not inst.enabled:
+        return "paused"
+    prov = inst.provision_state or "idle"
+    if prov not in ("idle", "done"):
+        return "error" if prov == "error" else "setup"
+    if inst.status == "error" or inst.last_error:
+        return "error"
+    if inst.last_run_at is None:
+        return "pending"
+    # No successful run in a while (3× the poll interval, min 30m) → stale.
+    ref = inst.last_success_at or inst.last_run_at
+    stale_after = max(30, int(inst.poll_interval_minutes or 30) * 3)
+    if (_now() - ref).total_seconds() > stale_after * 60:
+        return "stale"
+    return "ok"
+
 
 
 def _admin_enabled(db: Session, integration_type: str) -> bool:
@@ -363,6 +385,63 @@ def integration_instance_data(iid: str,
     """Drill-down scoped to a single integration instance."""
     inst = _owned_instance(db, principal, iid)
     return _drilldown(db, principal, [inst.id])
+
+
+@router.get("/{iid}/usage")
+def integration_usage(iid: str, app_key: str | None = None,
+                      client_key: str | None = None, source_type: str | None = None,
+                      principal: security.Principal = Depends(security.get_principal),
+                      db: Session = Depends(get_db)):
+    """Relationship drill-down for one instance: which clients use an app
+    (``app_key`` or ``source_type``), or which apps a client uses (``client_key``).
+    Powers the expandable rows on the Apps/Clients tabs and the shadow-app popup."""
+    inst = _owned_instance(db, principal, iid)
+    tid = principal.tenant_id
+    clients = {c.client_key: c for c in db.query(NetworkClient).filter(
+        NetworkClient.tenant_id == tid, NetworkClient.integration_id == inst.id).all()}
+    apps = {a.app_key: a for a in db.query(NetworkApp).filter(
+        NetworkApp.tenant_id == tid, NetworkApp.integration_id == inst.id).all()}
+    usage = db.query(NetworkUsage).filter(
+        NetworkUsage.tenant_id == tid, NetworkUsage.integration_id == inst.id).all()
+
+    if client_key:  # → the apps this device uses
+        rows: dict[str, dict] = {}
+        for u in usage:
+            if u.client_key != client_key:
+                continue
+            meta = apps.get(u.app_key)
+            r = rows.setdefault(u.app_key, {
+                "app_key": u.app_key, "name": meta.name if meta else u.app_key,
+                "category": meta.category if meta else "",
+                "source_type": meta.source_type if meta else "", "total_bytes": 0})
+            r["total_bytes"] += int(u.total_bytes or 0)
+        return {"mode": "apps",
+                "apps": sorted(rows.values(), key=lambda x: -x["total_bytes"])}
+
+    # → the clients using this app (or any app mapped to this source_type)
+    if source_type:
+        want = {k for k, a in apps.items() if a.source_type == source_type}
+    elif app_key:
+        want = {app_key}
+    else:
+        raise HTTPException(400, "specify app_key, client_key or source_type")
+    rows2: dict[str, dict] = {}
+    for u in usage:
+        if u.app_key not in want or not u.client_key:
+            continue
+        c = clients.get(u.client_key)
+        r = rows2.setdefault(u.client_key, {
+            "client_key": u.client_key,
+            "id": c.id if c else None,
+            "name": (c.name or c.hostname or c.mac) if c else u.client_key,
+            "device_type": c.device_type if c else "",
+            "ip": c.ip if c else "", "mac": c.mac if c else u.client_key,
+            "monitor_state": c.monitor_state if c else "normal",
+            "total_bytes": 0})
+        r["total_bytes"] += int(u.total_bytes or 0)
+    return {"mode": "clients",
+            "clients": sorted(rows2.values(), key=lambda x: -x["total_bytes"])}
+
 
 
 def _drilldown(db: Session, principal, iids: list[str]) -> dict:

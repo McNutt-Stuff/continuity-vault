@@ -38,8 +38,11 @@ APP_SOURCE_MAP: dict[str, str] = {
     "google photos": "google_photos",
     "evernote": "evernote",
     "linkedin": "linkedin",
-    "imessage": "imessage",
-    "apple messages": "imessage",
+    # iMessage/Messages are backed up as part of iCloud — treat them as covered
+    # when iCloud is connected (Arkive has no standalone iMessage connector).
+    "imessage": "icloud",
+    "apple imessage": "icloud",
+    "apple messages": "icloud",
 }
 
 # Popular services worth a connector. ``source_type`` is set when we already have

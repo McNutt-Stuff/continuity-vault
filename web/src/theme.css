@@ -489,4 +489,5 @@ h3 { font-size: 15px; }
 /* --- Integrations --- */
 .integration-tile { border: 1px solid var(--border-soft); border-radius: 14px; padding: 16px;
   background: var(--panel); display: flex; flex-direction: column; }
+.drill-row > td { background: var(--inset); border-top: none; }
 .input.sm { padding: 5px 8px; font-size: 12.5px; }
