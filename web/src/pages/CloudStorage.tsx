@@ -5,9 +5,9 @@ import { Icon, IconName } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
 import { notify, confirmDialog } from "../components/dialog";
 
-interface ProviderField { name: string; label: string; placeholder?: string; required?: boolean; secret?: boolean; }
+interface ProviderField { name: string; label: string; placeholder?: string; required?: boolean; secret?: boolean; options?: { value: string; label: string }[]; }
 interface ProviderSpec {
-  provider: string; display_name: string; icon: string; color: string;
+  provider: string; display_name: string; icon: string; color: string; help?: string[];
   config: ProviderField[]; write: ProviderField[]; read: ProviderField[]; provision?: ProviderField[];
 }
 interface StorageInstance {
@@ -40,6 +40,33 @@ const fmtAgo = (s: string | null): string => {
   return `${Math.round(secs / 86400)}d ago`;
 };
 const health = (s: StorageInstance) => HEALTH[s.enabled ? (s.status || "unknown") : "unknown"] || HEALTH.unknown;
+
+// Pre-fill dropdown fields with their first option so required selects aren't "".
+function selectDefaults(fields: ProviderField[]): Record<string, string> {
+  const d: Record<string, string> = {};
+  for (const f of fields) if (f.options && f.options.length) d[f.name] = f.options[0].value;
+  return d;
+}
+
+function FieldInput({ f, value, onChange, placeholder, showRequired = true }: {
+  f: ProviderField; value: string; onChange: (v: string) => void; placeholder?: string; showRequired?: boolean;
+}) {
+  return (
+    <label className="stack" style={{ marginBottom: 12 }}>
+      <span className="faint" style={{ fontSize: 11.5 }}>{f.label}{f.required && showRequired ? " *" : ""}</span>
+      {f.options ? (
+        <select className="input" value={value} onChange={(e) => onChange(e.target.value)}>
+          {!f.required && <option value="">—</option>}
+          {f.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      ) : (
+        <input className="input" type={f.secret ? "password" : "text"}
+               placeholder={placeholder ?? f.placeholder ?? ""}
+               value={value} onChange={(e) => onChange(e.target.value)} />
+      )}
+    </label>
+  );
+}
 
 export default function CloudStorage() {
   const [list, setList] = useState<ListResp | null>(null);
@@ -85,7 +112,7 @@ export default function CloudStorage() {
       {list && list.instances.length > 0 ? (
         <div className="insights-cards" style={{ marginBottom: 20 }}>
           {list.instances.map((s) => (
-            <StorageCard key={s.id} inst={s} onOpen={() => setDetailId(s.id)} onChanged={load} />
+            <StorageCard key={s.id} inst={s} onOpen={() => setDetailId(s.id)} />
           ))}
         </div>
       ) : (
@@ -115,16 +142,9 @@ export default function CloudStorage() {
   );
 }
 
-function StorageCard({ inst, onOpen, onChanged }: { inst: StorageInstance; onOpen: () => void; onChanged: () => void }) {
-  const [busy, setBusy] = useState(false);
+function StorageCard({ inst, onOpen }: { inst: StorageInstance; onOpen: () => void }) {
   const h = health(inst);
   const provisioning = ["provisioning", "starting"].includes(inst.provision_state);
-  async function test() {
-    setBusy(true);
-    try { await api.post(`/storage/${inst.id}/test`, {}); onChanged(); }
-    catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
-    finally { setBusy(false); }
-  }
   return (
     <Card className="insight-card">
       <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 8, cursor: provisioning ? "default" : "pointer" }}
@@ -136,14 +156,9 @@ function StorageCard({ inst, onOpen, onChanged }: { inst: StorageInstance; onOpe
           <div style={{ fontWeight: 700 }}>{inst.name}</div>
           <div className="faint" style={{ fontSize: 11 }}>{inst.provider_display}</div>
         </div>
-        {provisioning ? (
-          <Pill tone="info"><span className="spinner-dot" /> Setting up</Pill>
-        ) : (
-          <div className="row" style={{ gap: 6, alignItems: "center" }} title={h.label}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: h.dot, flexShrink: 0 }} />
-            <Pill tone={h.tone}>{h.label}</Pill>
-          </div>
-        )}
+        {provisioning
+          ? <Pill tone="info"><span className="spinner-dot" /> Setting up</Pill>
+          : <Pill tone={h.tone}>{h.label}</Pill>}
       </div>
       {provisioning ? (
         <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>{inst.provision_message || "Provisioning your cloud storage…"}</div>
@@ -165,12 +180,7 @@ function StorageCard({ inst, onOpen, onChanged }: { inst: StorageInstance; onOpe
       )}
       <div className="row" style={{ gap: 8, marginTop: "auto" }}>
         {!provisioning && (
-          <>
-            <button className="btn sm" onClick={onOpen}><Icon name="search" size={13} /> Details</button>
-            <button className="btn ghost sm" disabled={busy} onClick={() => void test()}>
-              <Icon name="repeat" size={13} /> {busy ? "Testing…" : "Test"}
-            </button>
-          </>
+          <button className="btn sm" onClick={onOpen}><Icon name="search" size={13} /> Details</button>
         )}
       </div>
     </Card>
@@ -195,8 +205,12 @@ function StorageDetail({ inst, providers, onBack, onChanged }: {
 
   async function test() {
     setBusy(true);
-    try { await api.post(`/storage/${inst.id}/test`, {}); await loadData(); onChanged(); }
-    catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+    try {
+      const res = await api.post<StorageInstance>(`/storage/${inst.id}/test`, {});
+      await loadData(); onChanged();
+      if (res.last_test_ok) notify({ title: "Storage healthy", message: "Read & write access verified.", tone: "ok" });
+      else notify({ title: "Storage test failed", message: res.last_test_error || "Could not verify access.", tone: "danger" });
+    } catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
     finally { setBusy(false); }
   }
   async function toggle() {
@@ -414,10 +428,11 @@ function ProvisionForm({ provider, onClose, onDone }: {
   provider: ProviderSpec; onClose: () => void; onDone: () => void;
 }) {
   const [name, setName] = useState(`My ${provider.display_name}`);
-  const [admin, setAdmin] = useState<Record<string, string>>({});
+  const [admin, setAdmin] = useState<Record<string, string>>(() => selectDefaults(provider.provision || []));
   const [starting, setStarting] = useState(false);
   const [err, setErr] = useState("");
   const [provId, setProvId] = useState<string | null>(null);
+  const [showHelp, setShowHelp] = useState(true);
   const fields = provider.provision || [];
 
   async function start() {
@@ -454,6 +469,20 @@ function ProvisionForm({ provider, onClose, onDone }: {
         </div>
         <div className="modal-body" style={{ maxHeight: "68vh", overflow: "auto" }}>
           {err && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 10 }}>{err}</div>}
+          {(provider.help || []).length > 0 && (
+            <div style={{ border: "1px solid var(--border-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, background: "var(--inset)" }}>
+              <button className="btn ghost sm" style={{ padding: 0, marginBottom: showHelp ? 8 : 0 }}
+                      onClick={() => setShowHelp((v) => !v)}>
+                <Icon name="info" size={13} /> Where do I find these?
+                <span style={{ display: "inline-block", marginLeft: 4, fontSize: 10, transform: showHelp ? "rotate(90deg)" : "none" }}>▶</span>
+              </button>
+              {showHelp && (
+                <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.6 }}>
+                  {(provider.help || []).map((s, i) => <li key={i}>{s}</li>)}
+                </ol>
+              )}
+            </div>
+          )}
           <label className="stack" style={{ marginBottom: 12 }}>
             <span className="faint" style={{ fontSize: 11.5 }}>Display name</span>
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
@@ -462,12 +491,8 @@ function ProvisionForm({ provider, onClose, onDone }: {
             Admin credential <span style={{ textTransform: "none" }}>· used once, never stored</span>
           </div>
           {fields.map((f) => (
-            <label key={f.name} className="stack" style={{ marginBottom: 12 }}>
-              <span className="faint" style={{ fontSize: 11.5 }}>{f.label}{f.required ? " *" : ""}</span>
-              <input className="input" type={f.secret ? "password" : "text"}
-                     placeholder={f.placeholder || ""} value={admin[f.name] || ""}
-                     onChange={(e) => setAdmin((a) => ({ ...a, [f.name]: e.target.value }))} />
-            </label>
+            <FieldInput key={f.name} f={f} value={admin[f.name] || ""}
+                        onChange={(v) => setAdmin((a) => ({ ...a, [f.name]: v }))} />
           ))}
           <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
             <Icon name="shield" size={12} /> We'll create a dedicated bucket, a write-only backup key,
@@ -555,7 +580,7 @@ function SetupForm({ provider, existing, onClose, onDone }: {
 }) {
   const editing = !!existing;
   const [name, setName] = useState(existing?.name || provider.display_name);
-  const [cfg, setCfg] = useState<Record<string, string>>({ ...(existing?.config || {}) });
+  const [cfg, setCfg] = useState<Record<string, string>>({ ...selectDefaults(provider.config), ...(existing?.config || {}) });
   const [write, setWrite] = useState<Record<string, string>>({});
   const [read, setRead] = useState<Record<string, string>>({});
   const [showRead, setShowRead] = useState(false);
@@ -589,12 +614,9 @@ function SetupForm({ provider, existing, onClose, onDone }: {
   }
 
   const field = (f: ProviderField, val: Record<string, string>, set: (u: Record<string, string>) => void, ph?: string) => (
-    <label key={f.name} className="stack" style={{ marginBottom: 12 }}>
-      <span className="faint" style={{ fontSize: 11.5 }}>{f.label}{f.required && !editing ? " *" : ""}</span>
-      <input className="input" type={f.secret ? "password" : "text"}
-             placeholder={ph ?? f.placeholder ?? ""} value={val[f.name] || ""}
-             onChange={(e) => set({ ...val, [f.name]: e.target.value })} />
-    </label>
+    <FieldInput key={f.name} f={f} value={val[f.name] || ""} placeholder={ph}
+                showRequired={!editing}
+                onChange={(v) => set({ ...val, [f.name]: v })} />
   );
 
   return (

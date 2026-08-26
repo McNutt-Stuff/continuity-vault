@@ -30,14 +30,64 @@ logger = logging.getLogger("cv.storage")
 # Destination-id prefix used in Collection.destinations / SnapshotReceipt.destination.
 DEST_PREFIX = "byos:"
 
-# Provider field specs driving the "existing storage" setup dialog. config =
-# non-secret routing; write/read = the two credential sets (Read vs Write).
+# Region / location option lists (value → friendly label) for the setup dropdowns.
+AWS_REGIONS = [
+    {"value": "us-east-1", "label": "US East (N. Virginia)"},
+    {"value": "us-east-2", "label": "US East (Ohio)"},
+    {"value": "us-west-1", "label": "US West (N. California)"},
+    {"value": "us-west-2", "label": "US West (Oregon)"},
+    {"value": "ca-central-1", "label": "Canada (Central)"},
+    {"value": "eu-west-1", "label": "Europe (Ireland)"},
+    {"value": "eu-west-2", "label": "Europe (London)"},
+    {"value": "eu-west-3", "label": "Europe (Paris)"},
+    {"value": "eu-central-1", "label": "Europe (Frankfurt)"},
+    {"value": "eu-north-1", "label": "Europe (Stockholm)"},
+    {"value": "eu-south-1", "label": "Europe (Milan)"},
+    {"value": "ap-south-1", "label": "Asia Pacific (Mumbai)"},
+    {"value": "ap-southeast-1", "label": "Asia Pacific (Singapore)"},
+    {"value": "ap-southeast-2", "label": "Asia Pacific (Sydney)"},
+    {"value": "ap-northeast-1", "label": "Asia Pacific (Tokyo)"},
+    {"value": "ap-northeast-2", "label": "Asia Pacific (Seoul)"},
+    {"value": "ap-east-1", "label": "Asia Pacific (Hong Kong)"},
+    {"value": "sa-east-1", "label": "South America (São Paulo)"},
+    {"value": "me-south-1", "label": "Middle East (Bahrain)"},
+    {"value": "af-south-1", "label": "Africa (Cape Town)"},
+]
+GCP_LOCATIONS = [
+    {"value": "US", "label": "United States (multi-region)"},
+    {"value": "EU", "label": "European Union (multi-region)"},
+    {"value": "ASIA", "label": "Asia (multi-region)"},
+    {"value": "us-central1", "label": "Iowa (us-central1)"},
+    {"value": "us-east1", "label": "South Carolina (us-east1)"},
+    {"value": "us-east4", "label": "N. Virginia (us-east4)"},
+    {"value": "us-west1", "label": "Oregon (us-west1)"},
+    {"value": "us-west2", "label": "Los Angeles (us-west2)"},
+    {"value": "europe-west1", "label": "Belgium (europe-west1)"},
+    {"value": "europe-west2", "label": "London (europe-west2)"},
+    {"value": "europe-west3", "label": "Frankfurt (europe-west3)"},
+    {"value": "europe-north1", "label": "Finland (europe-north1)"},
+    {"value": "asia-east1", "label": "Taiwan (asia-east1)"},
+    {"value": "asia-northeast1", "label": "Tokyo (asia-northeast1)"},
+    {"value": "asia-southeast1", "label": "Singapore (asia-southeast1)"},
+    {"value": "australia-southeast1", "label": "Sydney (australia-southeast1)"},
+]
+
+# Provider field specs driving the setup dialogs. config = non-secret routing;
+# write/read = the two credential sets; provision = the org-admin credential used
+# once to auto-create everything; help = step-by-step for where to find it.
 PROVIDERS: dict[str, dict] = {
     "aws": {
         "provider": "aws", "display_name": "Amazon S3", "icon": "cloud", "color": "#FF9900",
+        "help": [
+            "Sign in to the AWS Console and open IAM.",
+            "Go to Users → Create user (or pick an existing admin user).",
+            "Attach a policy granting S3 + IAM access (e.g. AdministratorAccess).",
+            "Open the user → Security credentials → Create access key → \u201cApplication running outside AWS\u201d.",
+            "Copy the Access key ID and Secret access key below, then pick your region.",
+        ],
         "config": [
             {"name": "bucket", "label": "Bucket name", "placeholder": "my-arkive-backups", "required": True},
-            {"name": "region", "label": "Region", "placeholder": "us-east-1", "required": True},
+            {"name": "region", "label": "Region", "required": True, "options": AWS_REGIONS},
             {"name": "storage_class", "label": "Storage class", "placeholder": "INTELLIGENT_TIERING", "required": False},
             {"name": "endpoint_url", "label": "Custom endpoint (S3-compatible, optional)", "placeholder": "", "required": False},
         ],
@@ -52,11 +102,17 @@ PROVIDERS: dict[str, dict] = {
         "provision": [
             {"name": "access_key_id", "label": "Admin access key ID", "required": True},
             {"name": "secret_access_key", "label": "Admin secret access key", "required": True, "secret": True},
-            {"name": "region", "label": "Region", "placeholder": "us-east-1", "required": True},
+            {"name": "region", "label": "Region", "required": True, "options": AWS_REGIONS},
         ],
     },
     "azure": {
         "provider": "azure", "display_name": "Azure Blob Storage", "icon": "cloud", "color": "#0089D6",
+        "help": [
+            "Open the Azure Portal → Storage accounts.",
+            "Select an existing storage account (or create one).",
+            "Go to Security + networking → Access keys → Show keys.",
+            "Copy the Storage account name and key1 below.",
+        ],
         "config": [
             {"name": "account_name", "label": "Storage account name", "placeholder": "myarkivestore", "required": True},
             {"name": "container", "label": "Container name", "placeholder": "arkive-backups", "required": True},
@@ -77,10 +133,16 @@ PROVIDERS: dict[str, dict] = {
     },
     "gcp": {
         "provider": "gcp", "display_name": "Google Cloud Storage", "icon": "cloud", "color": "#4285F4",
+        "help": [
+            "Open the Google Cloud Console → IAM & Admin → Service Accounts.",
+            "Create a service account and grant it the \u201cStorage Admin\u201d role.",
+            "Open it → Keys → Add key → Create new key → JSON, and download the file.",
+            "Paste the JSON file contents below, and enter your Project ID.",
+        ],
         "config": [
             {"name": "bucket", "label": "Bucket name", "placeholder": "my-arkive-backups", "required": True},
             {"name": "project_id", "label": "Project ID", "placeholder": "my-gcp-project", "required": True},
-            {"name": "location", "label": "Location", "placeholder": "US", "required": False},
+            {"name": "location", "label": "Location", "required": False, "options": GCP_LOCATIONS},
         ],
         "write": [
             {"name": "service_account_json", "label": "Write service-account key (JSON)", "required": True, "secret": True},
@@ -91,7 +153,7 @@ PROVIDERS: dict[str, dict] = {
         "provision": [
             {"name": "service_account_json", "label": "Admin service-account key (JSON)", "required": True, "secret": True},
             {"name": "project_id", "label": "Project ID", "required": True},
-            {"name": "location", "label": "Location", "placeholder": "US", "required": False},
+            {"name": "location", "label": "Location", "required": False, "options": GCP_LOCATIONS},
         ],
     },
 }
