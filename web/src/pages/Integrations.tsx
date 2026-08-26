@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
-import { Card, Pill, bytes, Loading } from "../components/ui";
+import { Card, Pill, bytes, Loading, groupScope } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
 import { notify, confirmDialog, promptDialog } from "../components/dialog";
@@ -23,7 +23,7 @@ interface Instance {
   last_stats: { clients?: number; apps?: number; bytes_seen?: number; note?: string };
 }
 interface ApplianceRef { id: string; name: string; state: string; online: boolean; }
-interface ListResp { available: Spec[]; instances: Instance[]; appliances: ApplianceRef[]; }
+interface ListResp { available: Spec[]; instances: Instance[]; appliances: ApplianceRef[]; plan: string; }
 
 interface NetClient {
   id: string; name: string; device_name: string; nickname: string;
@@ -91,6 +91,7 @@ export default function Integrations() {
   const detailInst = detailId ? list?.instances.find((i) => i.id === detailId) : null;
   if (detailId && detailInst) {
     return <IntegrationDetail inst={detailInst} spec={specByType[detailInst.integration_type]}
+                              plan={list?.plan || ""}
                               onBack={() => { setDetailId(null); void load(); }}
                               onChanged={load} />;
   }
@@ -351,8 +352,8 @@ function InstanceCard({ inst, spec, onOpen, onChanged }: {
 
 // Full-page detail for one integration instance — its own clients, apps, shadow
 // sources and stats (scoped to this instance only).
-function IntegrationDetail({ inst, spec, onBack, onChanged }: {
-  inst: Instance; spec?: Spec; onBack: () => void; onChanged: () => void;
+function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
+  inst: Instance; spec?: Spec; plan: string; onBack: () => void; onChanged: () => void;
 }) {
   const [data, setData] = useState<DataResp | null>(null);
   const [tab, setTab] = useState<"apps" | "clients">("apps");
@@ -455,7 +456,11 @@ function IntegrationDetail({ inst, spec, onBack, onChanged }: {
       <div className="insights-stats" style={{ marginBottom: 16 }}>
         <MiniStat icon="user" label="Clients seen" value={String(stats.clients || 0)} tint="#4f7cff" />
         <MiniStat icon="shield" label="My devices" value={String(stats.mine || 0)} tint="#2dbe60" />
-        <MiniStat icon="grid" label="Family / org" value={String((stats.family || 0) + (stats.organization || 0))} tint="#35d0a5" />
+        {groupScope(plan) && (
+          <MiniStat icon="grid" label={groupScope(plan)!.label}
+                    value={String(groupScope(plan)!.value === "family" ? (stats.family || 0) : (stats.organization || 0))}
+                    tint="#35d0a5" />
+        )}
         <MiniStat icon="activity" label="Apps & services" value={String(stats.apps || 0)} tint="#c56cf0" />
         <MiniStat icon="cloud" label="Traffic seen" value={bytes(stats.bytes || 0)} tint="#f5a623" />
       </div>
@@ -501,7 +506,7 @@ function IntegrationDetail({ inst, spec, onBack, onChanged }: {
         </div>
         {tab === "apps"
           ? <AppsTable iid={inst.id} apps={data?.apps || []} onChanged={loadData} />
-          : <ClientsTable iid={inst.id} clients={data?.clients || []} onChanged={loadData} />}
+          : <ClientsTable iid={inst.id} plan={plan} clients={data?.clients || []} onChanged={loadData} />}
       </Card>
 
       {shadowDetail && (
@@ -951,8 +956,9 @@ function UsageApps({ iid, clientKey }: { iid: string; clientKey: string }) {
 }
 
 
-function ClientsTable({ iid, clients, onChanged }: { iid: string; clients: NetClient[]; onChanged: () => void }) {
+function ClientsTable({ iid, plan, clients, onChanged }: { iid: string; plan: string; clients: NetClient[]; onChanged: () => void }) {
   const [open, setOpen] = useState<string | null>(null);
+  const group = groupScope(plan);  // null for personal accounts → only "Me"
   async function setState_(c: NetClient, monitor_state: string) {
     try { await api.post(`/integrations/clients/${c.id}`, { monitor_state }); onChanged(); }
     catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
@@ -1018,8 +1024,11 @@ function ClientsTable({ iid, clients, onChanged }: { iid: string; clients: NetCl
                           onChange={(e) => void setOwnership(c, e.target.value)} style={{ width: 130 }}>
                     <option value="">Unassigned</option>
                     <option value="personal">Me</option>
-                    <option value="family">Family</option>
-                    <option value="organization">Organization</option>
+                    {group && <option value={group.value}>{group.label}</option>}
+                    {/* keep a stored scope visible even if it doesn't match the plan */}
+                    {c.ownership && c.ownership !== "personal" && c.ownership !== group?.value && (
+                      <option value={c.ownership}>{c.ownership === "family" ? "My family" : "My organization"}</option>
+                    )}
                   </select>
                 </td>
                 <td className="faint" style={{ fontSize: 12 }}>{c.ip || "—"}</td>

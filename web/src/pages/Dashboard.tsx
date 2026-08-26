@@ -2,7 +2,7 @@ import { ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
-import { Card, Pill, bytes, Loading } from "../components/ui";
+import { Card, Pill, bytes, Loading, groupScope } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
 import { PhotoPickerModal } from "../components/PhotoPicker";
@@ -108,7 +108,7 @@ export default function Dashboard() {
                 <Icon name="user" size={13} /> My account
               </button>
               <button className={`btn sm ${scope === "org" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }} onClick={() => setScope("org")}>
-                <Icon name="grid" size={13} /> My organization
+                <Icon name="grid" size={13} /> {groupScope(tenant?.plan)?.label ?? "My organization"}
               </button>
             </div>
           )}

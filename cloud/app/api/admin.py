@@ -2040,6 +2040,7 @@ def backups_overview(db: Session = Depends(get_db)):
             "components": r.components or [],
             "destinations": r.destinations or [],
             "message": r.message or "", "error": r.error or "",
+            "has_log": bool(r.log),
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "finished_at": r.finished_at.isoformat() if r.finished_at else None,
             "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -2120,6 +2121,7 @@ def backups_overview(db: Session = Depends(get_db)):
             "id": r.id, "node_name": r.node_name, "role": r.role, "status": r.status,
             "total_bytes": r.total_bytes or 0, "message": r.message or "", "error": r.error or "",
             "destinations": r.destinations or [], "components": r.components or [],
+            "has_log": bool(r.log),
             "created_at": r.created_at.isoformat() if r.created_at else None,
             "finished_at": r.finished_at.isoformat() if r.finished_at else None,
         } for r in runs[:30]],
@@ -2147,3 +2149,16 @@ def run_backup_now(principal: security.Principal = Depends(security.require_plat
     audit.record(db, actor=principal.user_id, action="admin.backup_triggered",
                  category="admin", detail={})
     return {"ok": True, "message": "Control-plane backup started"}
+
+
+@router.get("/backups/{run_id}/log")
+def backup_run_log(run_id: str,
+                   principal: security.Principal = Depends(security.require_platform_admin),
+                   db: Session = Depends(get_db)):
+    """The verbose process log for one backup run (for diagnosing failures)."""
+    run = db.get(BackupRun, run_id)
+    if not run:
+        raise HTTPException(404, "backup run not found")
+    return {"id": run.id, "node_name": run.node_name, "status": run.status,
+            "error": run.error or "", "message": run.message or "",
+            "log": run.log or []}

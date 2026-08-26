@@ -134,7 +134,8 @@ def overview(scope: str = "me",
                     for t, n in sorted(type_counts.items(), key=lambda kv: -kv[1])]
 
     # --- Objects protected (deduped per logical object) + type breakdown -----
-    docs = (db.query(SearchDocument)
+    docs = (db.query(SearchDocument.source_type, SearchDocument.object_id,
+                     SearchDocument.size_bytes, SearchDocument.doc_type)
             .filter(SearchDocument.tenant_id == tenant.id,
                     SearchDocument.vault_id.in_(vault_ids))
             .order_by(SearchDocument.created_at.desc()).all()) if vault_ids else []

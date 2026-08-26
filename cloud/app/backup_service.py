@@ -99,26 +99,41 @@ def _dump_database(dest_path: str) -> Tuple[bool, str]:
     if sep and "+" in scheme:
         url = scheme.split("+", 1)[0] + "://" + rest
     pg_dump = shutil.which("pg_dump") or "pg_dump"
+    logger.info("backup: pg_dump starting (%s)", pg_dump)
     try:
         # Stream pg_dump → gzip so the SQL is never fully buffered and the staged
         # file stays small (a plain dump can be many GB and fill the disk).
-        proc = subprocess.Popen(
-            [pg_dump, "--no-owner", "--no-privileges", url],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        with gzip.open(dest_path, "wb", compresslevel=6) as gz:
-            shutil.copyfileobj(proc.stdout, gz, length=1024 * 1024)
-        proc.stdout.close()
-        try:
-            _, err = proc.communicate(timeout=1800)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            return False, "pg_dump timed out"
+        # stderr goes to a TEMP FILE, not a PIPE: if diagnostics exceed the ~64KB
+        # pipe buffer while we're busy reading stdout, pg_dump would block writing
+        # stderr and we'd block reading stdout — a deadlock that hangs the whole
+        # backup forever ("runs but never finishes").
+        with tempfile.TemporaryFile() as errf:
+            proc = subprocess.Popen(
+                [pg_dump, "--no-owner", "--no-privileges", url],
+                stdout=subprocess.PIPE, stderr=errf)
+            with gzip.open(dest_path, "wb", compresslevel=6) as gz:
+                shutil.copyfileobj(proc.stdout, gz, length=1024 * 1024)
+            proc.stdout.close()
+            try:
+                proc.wait(timeout=1800)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                logger.error("backup: pg_dump timed out after 1800s")
+                return False, "pg_dump timed out"
+            errf.seek(0)
+            err = errf.read()
         if proc.returncode != 0:
-            return False, (err.decode(errors="replace")[:300] or "pg_dump failed")
+            msg = err.decode(errors="replace")[:300] or "pg_dump failed"
+            logger.error("backup: pg_dump exited %s: %s", proc.returncode, msg)
+            return False, msg
+        size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+        logger.info("backup: pg_dump done (%d bytes gzipped)", size)
         return True, "pg_dump.gz"
     except FileNotFoundError:
+        logger.error("backup: pg_dump not installed")
         return False, "pg_dump not installed"
     except Exception as exc:  # noqa: BLE001
+        logger.exception("backup: pg_dump failed")
         return False, str(exc)[:300]
 
 
@@ -151,6 +166,8 @@ def build_bundle(node_name: str, role: str, version: str) -> Tuple[bytes, List[s
         db_ok, db_note = _dump_database(os.path.join(staging, "database.sql.gz"))
         if db_ok:
             components.append("database")
+        else:
+            logger.warning("backup: database NOT captured — %s", db_note)
         notes.append(f"db:{db_note}")
 
         # 2) Key store — wrapped vault/recovery keys + fleet signer + client regs.
@@ -160,6 +177,7 @@ def build_bundle(node_name: str, role: str, version: str) -> Tuple[bytes, List[s
         signer = os.environ.get("CV_FLEET_SIGNER", "./cv_fleet_signer.json")
         if _copy_tree(signer, os.path.join(staging, "config", os.path.basename(signer))):
             components.append("config")
+        logger.info("backup: staged components: %s", ", ".join(components) or "none")
 
         # 3) Manifest.
         meta = {
@@ -179,7 +197,9 @@ def build_bundle(node_name: str, role: str, version: str) -> Tuple[bytes, List[s
             tar.add(staging, arcname="arkive-backup")
         raw = buf.getvalue()
 
+    logger.info("backup: archive assembled (%d bytes), encrypting…", len(raw))
     encrypted = credstore.encrypt_bytes(_ENC_SCOPE, raw)
+    logger.info("backup: encrypted archive is %d bytes", len(encrypted))
     return encrypted, components, ";".join(notes)
 
 
@@ -240,11 +260,15 @@ def reap_stale_runs(db, *, node_id=None, node_name=None, older_than_minutes: int
     return reaped
 
 
+_BACKUP_LOG_MAX = 400
+
+
 def run_backup_once(db) -> Optional[dict]:
     """Run one infrastructure backup of this node to its assigned destinations.
     Records and returns a BackupRun view (dict). Returns a 'skipped' run when no
-    backup destinations are configured."""
-    from .models import BackupRun, ServiceObject
+    backup destinations are configured. Captures a verbose per-run process log so
+    the Backups page can show exactly what happened (and where it stalled)."""
+    from .models import BackupRun
     s = get_settings()
     node = _resolve_self_node(db)
     node_id = node.id if node else None
@@ -260,6 +284,32 @@ def run_backup_once(db) -> Optional[dict]:
     db.add(run)
     db.commit()
 
+    from .workers.jobs import capture_job_log
+    with capture_job_log() as cap:
+        try:
+            _execute_backup(db, run, node, node_name, role)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("backup: run failed unexpectedly")
+            run.status = "failed"
+            run.error = (str(exc)[:500]) or "unexpected error"
+        finally:
+            # Never leave a run stuck "running" — every exit path must land a
+            # terminal status + the captured log, or the dashboard shows a phantom.
+            if run.status == "running":
+                run.status = "failed"
+                if not run.error:
+                    run.error = "backup ended before reporting a final status"
+            if not run.finished_at:
+                run.finished_at = _now()
+            run.log = (cap.records or [])[-_BACKUP_LOG_MAX:]
+            db.commit()
+    return _run_view(run)
+
+
+def _execute_backup(db, run, node, node_name: str, role: str) -> None:
+    """Do the actual backup work, recording results onto ``run``. Returns early
+    (no value) on skip / fatal build error; run.status carries the outcome."""
+    from .models import ServiceObject
     svc_ids = list((node.backup_service_ids or []) if node else [])
     services = []
     for sid in svc_ids:
@@ -270,10 +320,11 @@ def run_backup_once(db) -> Optional[dict]:
         run.status = "skipped"
         run.message = "No backup destinations assigned"
         run.finished_at = _now()
-        db.commit()
         logger.info("backup: %s has no backup destinations — skipped", node_name)
-        return _run_view(run)
+        return
 
+    logger.info("backup: %s destination(s): %s", len(services),
+                ", ".join(sv.name for sv in services))
     version = ""
     try:
         with open("/etc/arkive/version") as fh:
@@ -289,8 +340,7 @@ def run_backup_once(db) -> Optional[dict]:
         run.status = "failed"
         run.error = str(exc)[:500]
         run.finished_at = _now()
-        db.commit()
-        return _run_view(run)
+        return
 
     run.components = components
     run.message = note
@@ -310,7 +360,9 @@ def run_backup_once(db) -> Optional[dict]:
             dest = destination_from_service(svc.kind, _service_config(db, svc))
             if dest is None:
                 entry.update(status="failed", error="missing required settings (bucket/container)")
+                logger.warning("backup: %s has no usable destination config", svc.name)
             else:
+                logger.info("backup: uploading %d bytes to %s (%s)…", size, svc.name, svc.kind)
                 dest.put_object(_BACKUP_PREFIX, key, encrypted, immutable=True)
                 entry.update(status="ok", bytes=size)
                 ok_count += 1
@@ -335,10 +387,8 @@ def run_backup_once(db) -> Optional[dict]:
     else:
         run.status = "partial"
     run.finished_at = _now()
-    db.commit()
     logger.info("backup: %s complete — %s (%d/%d destinations, db=%s, %d bytes)",
                 node_name, run.status, ok_count, len(services), db_captured, size)
-    return _run_view(run)
 
 
 def _run_view(run) -> dict:
@@ -347,7 +397,7 @@ def _run_view(run) -> dict:
         "role": run.role, "kind": run.kind, "status": run.status,
         "components": run.components or [], "destinations": run.destinations or [],
         "total_bytes": run.total_bytes or 0, "message": run.message or "",
-        "error": run.error or "",
+        "error": run.error or "", "log": run.log or [], "has_log": bool(run.log),
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "created_at": run.created_at.isoformat() if run.created_at else None,

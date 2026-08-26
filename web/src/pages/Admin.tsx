@@ -2663,14 +2663,14 @@ function StorageUsageAdmin() {
 // Infrastructure Backups (node/CP core-state backups to storage services)     //
 // --------------------------------------------------------------------------- //
 interface BackupDest { service_id: string; name: string; kind: string; status: string; bytes: number; error?: string | null; }
-interface BackupRunView { id: string; status: string; total_bytes: number; components: string[]; destinations: BackupDest[]; message?: string; error?: string; created_at?: string | null; finished_at?: string | null; }
+interface BackupRunView { id: string; status: string; total_bytes: number; components: string[]; destinations: BackupDest[]; message?: string; error?: string; has_log?: boolean; created_at?: string | null; finished_at?: string | null; }
 interface BackupNode { id: string; name: string; role: string; category: string; is_self: boolean; backup_service_ids: string[]; backup_services: string[]; last_backup: BackupRunView | null; }
 interface BackupService { id: string; name: string; kind: string; kind_label: string; enabled: boolean; settings: Record<string, string>; nodes: string[]; bytes: number; backed_up_nodes: number; }
 interface BackupsData {
   summary: { nodes_total: number; nodes_protected: number; total_stored_bytes: number; success_24h: number; failed_24h: number; interval_minutes: number; last_run_at: string | null };
   nodes: BackupNode[];
   services: BackupService[];
-  recent: { id: string; node_name: string; role: string; status: string; total_bytes: number; message?: string; error?: string; destinations: BackupDest[]; components: string[]; created_at?: string | null; finished_at?: string | null }[];
+  recent: { id: string; node_name: string; role: string; status: string; total_bytes: number; message?: string; error?: string; has_log?: boolean; destinations: BackupDest[]; components: string[]; created_at?: string | null; finished_at?: string | null }[];
 }
 
 function backupTone(status: string): "ok" | "warn" | "danger" | "info" {
@@ -2687,9 +2687,13 @@ function BackupsAdmin() {
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
+  const [logRun, setLogRun] = useState<any | null>(null);
 
   async function load() {
     try { setD(await api.get<BackupsData>("/admin/backups")); } catch { /* ignore */ }
+  }
+  async function openBackupLog(id: string) {
+    try { setLogRun(await api.get<any>(`/admin/backups/${id}/log`)); } catch { /* ignore */ }
   }
   useEffect(() => {
     void load();
@@ -2844,7 +2848,7 @@ function BackupsAdmin() {
       <Card style={{ marginTop: 16 }}>
         <h3 style={{ marginTop: 0 }}>Recent backup runs</h3>
         <table className="table">
-          <thead><tr><th>Node</th><th>Status</th><th>Components</th><th>Destinations</th><th>Size</th><th>When</th></tr></thead>
+          <thead><tr><th>Node</th><th>Status</th><th>Components</th><th>Destinations</th><th>Size</th><th>When</th><th></th></tr></thead>
           <tbody>
             {d.recent.map((r) => (
               <tr key={r.id}>
@@ -2861,12 +2865,43 @@ function BackupsAdmin() {
                 </td>
                 <td>{r.total_bytes ? bytes(r.total_bytes) : "—"}</td>
                 <td className="faint" style={{ fontSize: 11, whiteSpace: "nowrap" }} title={r.created_at ? fmtAbsolute(r.created_at) : ""}>{r.created_at ? timeAgo(r.created_at) : ""}</td>
+                <td style={{ textAlign: "right" }}>
+                  {r.has_log && <button className="btn ghost sm" onClick={() => void openBackupLog(r.id)}><Icon name="note" size={12} /> Log</button>}
+                </td>
               </tr>
             ))}
-            {d.recent.length === 0 && <tr><td colSpan={6} className="muted">No backup runs yet.</td></tr>}
+            {d.recent.length === 0 && <tr><td colSpan={7} className="muted">No backup runs yet.</td></tr>}
           </tbody>
         </table>
       </Card>
+
+      {logRun && (
+        <div className="modal-backdrop" onClick={() => setLogRun(null)}>
+          <div className="modal-panel" style={{ width: "min(860px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <div>
+                <h3 style={{ margin: 0 }}>Backup log — {logRun.node_name}</h3>
+                <div className="faint" style={{ fontSize: 12 }}>{logRun.status}{logRun.message ? ` · ${logRun.message}` : ""}</div>
+              </div>
+              <button className="btn ghost sm" onClick={() => setLogRun(null)}>Close</button>
+            </div>
+            <div className="modal-body">
+              {logRun.error && <div className="faint" style={{ color: "var(--danger)", fontSize: 12.5, marginBottom: 8 }}>{logRun.error}</div>}
+              <div className="terminal-log">
+                {(logRun.log || []).length === 0
+                  ? <div className="faint">No log captured for this run.</div>
+                  : (logRun.log || []).map((l: any, i: number) => (
+                      <div key={i} className={`tlog-line lvl-${(l.level || "INFO").toLowerCase()}`}>
+                        <span className="tlog-ts">{fmtAbsolute(l.ts)}</span>
+                        <span className="tlog-lvl">{(l.level || "INFO").padEnd(7)}</span>
+                        <span className="tlog-msg">{l.msg}</span>
+                      </div>
+                    ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>

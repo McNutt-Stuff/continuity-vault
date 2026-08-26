@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import { Card, Pill, bytes } from "../components/ui";
+import { Card, Pill, bytes, groupScope } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { confirmDialog } from "../components/dialog";
 
@@ -129,11 +129,13 @@ export default function Onboarding() {
         <div className="row" style={{ gap: 8, alignItems: "center" }}>
           <Icon name="shield" size={16} />
           <h2 style={{ margin: 0 }}>Protection Setup</h2>
-          {org?.name && <Pill tone="info">Organization-wide</Pill>}
+          {org?.name && groupScope(org?.plan) && (
+            <Pill tone="info">{groupScope(org?.plan)!.value === "family" ? "Family-wide" : "Organization-wide"}</Pill>
+          )}
         </div>
         <div className="muted" style={{ fontSize: 13 }}>
-          {org?.name
-            ? <>These settings protect <b>{org.name}</b> — they apply across the whole organization and every member's vaults. </>
+          {org?.name && groupScope(org?.plan)
+            ? <>These settings protect <b>{org.name}</b> — they apply across your whole {groupScope(org?.plan)!.noun} and every member's vaults. </>
             : null}
           Choose how your data is protected, how much you protect, and see your monthly cost.
           Your selections control which storage destinations are available across the platform.

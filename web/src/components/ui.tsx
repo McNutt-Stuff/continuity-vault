@@ -59,6 +59,18 @@ export function serverDate(iso: string): Date {
   return new Date(hasTz ? iso : iso + "Z");
 }
 
+// Softer, plan-appropriate language for the shared/group data scope: a Family
+// plan says "family"; Business/Enterprise say "organization"; personal accounts
+// have no group scope (just "Me"). Returns null when there's no group scope.
+export type GroupScope = { value: "family" | "organization"; label: string; noun: string };
+export function groupScope(plan?: string): GroupScope | null {
+  const p = (plan || "").toLowerCase();
+  if (p === "family") return { value: "family", label: "My family", noun: "family" };
+  if (p === "business" || p === "enterprise")
+    return { value: "organization", label: "My organization", noun: "organization" };
+  return null;
+}
+
 // Absolute local date/time for tooltips — consistent across the app.
 export function fmtAbsolute(iso: string | null): string {
   if (!iso) return "—";

@@ -142,7 +142,10 @@ def pricing_public(p: PricingConfig) -> dict:
 
 def _usage(db: Session, tenant_id: str) -> tuple[int, int, dict]:
     """Deduped object count, protected bytes, and per-bucket counts."""
-    docs = (db.query(SearchDocument)
+    # Only the columns the aggregation needs — avoids hauling the heavy TEXT
+    # columns (search_blob/preview/meta) for every row.
+    docs = (db.query(SearchDocument.source_type, SearchDocument.object_id,
+                     SearchDocument.size_bytes, SearchDocument.doc_type)
             .filter(SearchDocument.tenant_id == tenant_id)
             .order_by(SearchDocument.created_at.desc()).all())
     seen: set = set()
@@ -283,7 +286,8 @@ def _user_usage(db: Session, user) -> tuple[int, int, dict]:
                  db.query(Vault.id).filter(Vault.owner_user_id == user.id).all()]
     if not vault_ids:
         return 0, 0, {}
-    docs = (db.query(SearchDocument)
+    docs = (db.query(SearchDocument.source_type, SearchDocument.object_id,
+                     SearchDocument.size_bytes, SearchDocument.doc_type)
             .filter(SearchDocument.vault_id.in_(vault_ids))
             .order_by(SearchDocument.created_at.desc()).all())
     seen: set = set()

@@ -655,6 +655,7 @@ class BackupRun(Base):
     total_bytes = Column(BigInteger, default=0)
     message = Column(String, default="")
     error = Column(Text, default="")
+    log = Column(JSON, default=list)  # verbose per-run process log [{ts,level,msg}]
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now, index=True)

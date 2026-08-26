@@ -209,6 +209,16 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE network_clients ADD COLUMN nickname VARCHAR DEFAULT ''",
         "ALTER TABLE network_clients ADD COLUMN ownership VARCHAR DEFAULT ''",
         "ALTER TABLE network_clients ADD COLUMN owner_user_id VARCHAR",
+        "ALTER TABLE backup_runs ADD COLUMN log JSON",
+        # Composite indexes for the hot "whole tenant index, newest-first" scans
+        # (unified search, Overview, Protection Setup usage) — the single-column
+        # tenant_id/vault_id indexes still left Postgres sorting the whole match.
+        "CREATE INDEX IF NOT EXISTS ix_search_documents_tenant_created "
+        "ON search_documents(tenant_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_search_documents_vault_created "
+        "ON search_documents(vault_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_snapshot_receipts_tenant_vault "
+        "ON snapshot_receipts(tenant_id, vault_id)",
         "ALTER TABLE appliance_storages ADD COLUMN used_bytes INTEGER DEFAULT 0",
         "ALTER TABLE appliance_storages ADD COLUMN health JSON",
         "ALTER TABLE nodes ADD COLUMN version_updated_at TIMESTAMP",

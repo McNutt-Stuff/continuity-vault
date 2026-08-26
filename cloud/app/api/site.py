@@ -196,6 +196,7 @@ class BackupReport(BaseModel):
     total_bytes: int = 0
     message: str = ""
     error: str = ""
+    log: list = []
     started_at: str | None = None
     finished_at: str | None = None
     created_at: str | None = None
@@ -235,6 +236,7 @@ def node_backup_report(body: BackupReport,
     run.total_bytes = int(body.total_bytes or 0)
     run.message = body.message or ""
     run.error = body.error or ""
+    run.log = body.log or []
     run.started_at = _dt(body.started_at)
     run.finished_at = _dt(body.finished_at)
     if body.created_at:

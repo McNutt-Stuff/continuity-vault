@@ -135,11 +135,13 @@ def list_integrations(principal: security.Principal = Depends(security.get_princ
     appliances = (db.query(Appliance)
                   .filter(Appliance.tenant_id == principal.tenant_id,
                           Appliance.state != "retired").all())
+    tenant = db.get(Tenant, principal.tenant_id)
     return {
         "available": available,
         "instances": [_instance_view(i) for i in instances],
         "appliances": [{"id": a.id, "name": a.name, "state": a.state,
                         "online": a.state not in ("retired", "offline")} for a in appliances],
+        "plan": (tenant.plan if tenant else "") or "",
     }
 
 
