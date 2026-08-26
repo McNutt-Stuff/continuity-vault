@@ -18,6 +18,7 @@ interface Instance {
   enabled: boolean; runs_on: string; appliance_id: string | null; status: string;
   poll_interval_minutes: number; host: string; last_run_at: string | null;
   last_success_at: string | null; last_error: string | null;
+  provision_state?: string; provision_message?: string | null;
   last_stats: { clients?: number; apps?: number; bytes_seen?: number };
 }
 interface ApplianceRef { id: string; name: string; state: string; online: boolean; }
