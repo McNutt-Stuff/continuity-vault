@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { startRegistration, startAuthentication } from "@simplewebauthn/browser";
-import { api, setToken, Me, LoginResponse } from "./api";
+import { api, setToken, getToken, setOnUnauthorized, ApiError, Me, LoginResponse } from "./api";
 
 interface StartResult {
   exists: boolean;
@@ -18,6 +18,7 @@ interface CodeResult {
 interface AuthState {
   me: Me | null;
   loading: boolean;
+  sessionExpired: boolean;
   loginStart: (email: string) => Promise<StartResult>;
   loginWithPasskey: (email: string) => Promise<void>;
   signup: (email: string, displayName: string, orgName: string) => Promise<CodeResult>;
@@ -38,16 +39,35 @@ export function useAuth() {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
+  const [sessionExpired, setSessionExpired] = useState(false);
 
   async function refresh() {
     try {
       setMe(await api.get<Me>("/auth/me"));
-    } catch {
+      setSessionExpired(false);
+    } catch (e) {
+      // A 401 while a token is stored means the session expired (vs. never
+      // signed in) — surface the timeout notice on the login screen.
+      if ((e as ApiError)?.status === 401) {
+        if (getToken()) setSessionExpired(true);
+        setToken(null);
+      }
       setMe(null);
     } finally {
       setLoading(false);
     }
   }
+
+  // Any authenticated request that 401s (token expired) signs the user out and
+  // flips the app to the login screen with the timeout notice.
+  useEffect(() => {
+    setOnUnauthorized(() => {
+      setToken(null);
+      setMe(null);
+      setSessionExpired(true);
+    });
+    return () => setOnUnauthorized(null);
+  }, []);
 
   useEffect(() => {
     void refresh();
@@ -55,6 +75,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function applySession(res: LoginResponse) {
     setToken(res.token);
+    setSessionExpired(false);
     await refresh();
   }
 
@@ -124,6 +145,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   function logout() {
     setToken(null);
     setMe(null);
+    setSessionExpired(false);
   }
 
   return (
@@ -131,6 +153,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         me,
         loading,
+        sessionExpired,
         loginStart,
         loginWithPasskey,
         signup,

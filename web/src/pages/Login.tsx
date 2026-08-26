@@ -5,7 +5,7 @@ import { Icon } from "../components/Icon";
 type Stage = "email" | "signup" | "code";
 
 export default function Login() {
-  const { loginStart, loginWithPasskey, signup, requestEmailCode, verifyEmailCode } = useAuth();
+  const { loginStart, loginWithPasskey, signup, requestEmailCode, verifyEmailCode, sessionExpired } = useAuth();
   const [stage, setStage] = useState<Stage>("email");
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -92,6 +92,16 @@ export default function Login() {
         <div className="auth-logo">
           <img src="/logos/Logo-Full.png" alt="Arkive — Your digital legacy, protected forever." />
         </div>
+
+        {sessionExpired && (
+          <div className="lock-banner" style={{ marginBottom: 14 }}>
+            <Icon name="clock" />
+            <div>
+              <div style={{ fontWeight: 600 }}>Your session timed out</div>
+              <div className="faint" style={{ fontSize: 12 }}>Please sign in again to continue.</div>
+            </div>
+          </div>
+        )}
 
         {stage === "email" && (
           <>

@@ -14,6 +14,13 @@ export function getToken() {
   return token;
 }
 
+// Global session-expiry hook: the AuthProvider registers a callback so any 401
+// on an authenticated request signs the user out and shows the timeout notice.
+let onUnauthorized: (() => void) | null = null;
+export function setOnUnauthorized(cb: (() => void) | null) {
+  onUnauthorized = cb;
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(BASE + path, {
     method,
@@ -29,6 +36,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       detail = (await res.json()).detail ?? detail;
     } catch {
       /* ignore */
+    }
+    // A 401 on an authenticated (non-auth) request means the session expired —
+    // fire the global sign-out so the app redirects to Login with a notice.
+    if (res.status === 401 && token && !path.startsWith("/auth/")) {
+      onUnauthorized?.();
     }
     throw new ApiError(res.status, detail);
   }
