@@ -840,6 +840,11 @@ class IntegrationInstance(Base):
     config = Column(JSON, default=dict)  # {host, poll_interval_minutes, ...}
     poll_interval_minutes = Column(Integer, default=60)
     status = Column(String, default="pending")  # pending | active | error | disabled
+    # Interactive setup (e.g. UniFi MFA): the appliance and portal coordinate an
+    # OTP handshake through these fields until an API key is minted.
+    provision_state = Column(String, default="idle")  # idle|starting|authenticating|awaiting_otp|verifying|done|error
+    provision_message = Column(Text, nullable=True)
+    provision_otp = Column(String, nullable=True)  # transient code the user submitted
     last_run_at = Column(DateTime, nullable=True)
     last_success_at = Column(DateTime, nullable=True)
     last_error = Column(Text, nullable=True)

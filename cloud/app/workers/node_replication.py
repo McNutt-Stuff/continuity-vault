@@ -72,7 +72,6 @@ _PULL_ORDER = [
     ("appliance_storages", ApplianceStorage),
     ("connector_accounts", ConnectorAccount),
     ("collections", Collection),
-    ("integration_instances", IntegrationInstance),
 ]
 
 # Fields owned by the NODE, never overwritten by a pull (the node produces these
@@ -86,10 +85,8 @@ _PULL_EXCLUDE = {
     # plane's stale copy (NULL, since the node — not the CP — runs these tenants)
     # would make every source look "due" again and re-back-up every tick.
     "collections": {"last_backup_run_at"},
-    # The node runs integrations and owns their runtime status; pulling the CP's
-    # stale copy would reset a just-run status before it's pushed up.
-    "integration_instances": {"status", "last_run_at", "last_success_at",
-                              "last_error", "last_stats"},
+    # Integration instances are created + driven on the node (portal calls are
+    # proxied there), so they're node-authoritative and pushed up, never pulled.
 }
 
 

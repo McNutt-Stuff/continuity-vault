@@ -20,6 +20,11 @@ import httpx
 
 from .dpi_signatures import DPI_APPS, DPI_CATS
 
+# UniFi OS rejects requests it doesn't recognize as a browser with HTTP 499, so a
+# real browser User-Agent (not python-httpx/…) is required to authenticate.
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
@@ -36,17 +41,36 @@ def _base_url(host: str) -> str:
 
 def _client() -> httpx.Client:
     # UniFi OS ships a self-signed cert on the LAN; verification off is expected.
-    return httpx.Client(verify=False, timeout=30, follow_redirects=True)
+    # The browser-like headers are what get past UniFi's 499 bot rejection.
+    return httpx.Client(
+        verify=False, timeout=30, follow_redirects=True,
+        headers={"User-Agent": _UA, "Accept": "application/json",
+                 "Content-Type": "application/json", "Referer": "https://unifi/"})
 
 
 def _login(c: httpx.Client, base: str, username: str, password: str, log) -> str:
-    """Authenticate to UniFi OS; returns the CSRF token (cookies set on client)."""
-    r = c.post(f"{base}/api/auth/login",
-               json={"username": username, "password": password, "rememberMe": True})
-    r.raise_for_status()
-    csrf = r.headers.get("x-csrf-token") or r.headers.get("x-updated-csrf-token") or ""
-    log.info("ubiquiti: authenticated to %s", base)
-    return csrf
+    """Authenticate to the controller; returns the CSRF token (cookies set on the
+    client). Tries UniFi OS (`/api/auth/login`) then the legacy path (`/api/login`)."""
+    if not username or not password:
+        raise RuntimeError("no controller login — enter the admin username and password")
+    body = {"username": username, "password": password, "rememberMe": True}
+    last: Optional[httpx.Response] = None
+    for path in ("/api/auth/login", "/api/login"):
+        log.info("ubiquiti: authenticating to %s%s", base, path)
+        try:
+            r = c.post(f"{base}{path}", json=body)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ubiquiti: login POST to %s failed: %s", path, exc)
+            continue
+        if r.status_code < 300:
+            csrf = r.headers.get("x-csrf-token") or r.headers.get("x-updated-csrf-token") or ""
+            log.info("ubiquiti: authenticated to %s (via %s)", base, path)
+            return csrf
+        log.warning("ubiquiti: login via %s returned HTTP %s", path, r.status_code)
+        last = r
+    code = last.status_code if last is not None else "no response"
+    raise RuntimeError(f"controller login failed (HTTP {code}) — check the address, "
+                       "username and password")
 
 
 def _auth_headers(credentials: dict, csrf: str = "") -> dict:
@@ -84,23 +108,128 @@ def _try_mint_api_key(c: httpx.Client, base: str, site: str, csrf: str, log) -> 
     return None
 
 
-def provision(config: dict, credentials: dict, log) -> dict:
-    """Validate the login and return the credential dict to persist. Prefers a
-    minted API key; otherwise keeps the login for headless re-auth."""
+def _is_mfa(r: httpx.Response) -> bool:
+    """Does this login response mean multi-factor / email verification is required?
+    UniFi OS signals it via HTTP 499 or a ``required``/``needs2fa`` field."""
+    if r.status_code == 499:
+        return True
+    try:
+        data = r.json()
+    except Exception:
+        data = {}
+    if isinstance(data, dict):
+        req = str(data.get("required") or data.get("error") or "").lower()
+        if any(k in req for k in ("2fa", "mfa", "otp", "email", "totp")):
+            return True
+        if data.get("needs2fa") or data.get("mfa_required"):
+            return True
+    return False
+
+
+def _mfa_message(r: httpx.Response) -> str:
+    try:
+        data = r.json()
+    except Exception:
+        data = {}
+    req = str((data or {}).get("required") or "").lower()
+    if "email" in req:
+        return "Enter the verification code we just emailed to your Ubiquiti account."
+    return ("Enter the verification code from your authenticator app, or the one "
+            "sent to your Ubiquiti account email.")
+
+
+def begin_auth(config: dict, credentials: dict, log):
+    """Start the controller login. Returns ``(session, result)`` where result
+    ``state`` is ``authenticated`` (no MFA), ``mfa_required`` (need an OTP), or
+    ``error``. The open session is reused to submit the OTP and mint a key."""
     base = _base_url(config.get("host") or credentials.get("host", ""))
+    site = config.get("site") or credentials.get("site") or "default"
     username = credentials.get("username", "")
     password = credentials.get("password", "")
-    site = config.get("site") or "default"
-    with _client() as c:
-        csrf = _login(c, base, username, password, log)
-        api_key = _try_mint_api_key(c, base, site, csrf, log)
+    if not username or not password:
+        return None, {"state": "error",
+                      "message": "Enter the controller admin username and password."}
+    c = _client()
+    body = {"username": username, "password": password, "rememberMe": True}
+    last: Optional[httpx.Response] = None
+    for path in ("/api/auth/login", "/api/login"):
+        log.info("ubiquiti: authenticating to %s%s", base, path)
+        try:
+            r = c.post(f"{base}{path}", json=body)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ubiquiti: login POST %s failed: %s", path, exc)
+            continue
+        last = r
+        if r.status_code < 300:
+            csrf = r.headers.get("x-csrf-token") or ""
+            log.info("ubiquiti: authenticated (no MFA) via %s", path)
+            return ({"client": c, "base": base, "site": site, "csrf": csrf},
+                    {"state": "authenticated"})
+        if _is_mfa(r):
+            csrf = r.headers.get("x-csrf-token") or ""
+            log.info("ubiquiti: MFA required (HTTP %s via %s)", r.status_code, path)
+            return ({"client": c, "base": base, "site": site, "csrf": csrf},
+                    {"state": "mfa_required", "message": _mfa_message(r)})
+        log.warning("ubiquiti: login via %s returned HTTP %s", path, r.status_code)
+    c.close()
+    code = last.status_code if last is not None else "no response"
+    return None, {"state": "error",
+                  "message": f"Controller login failed (HTTP {code}). "
+                             "Check the address, username and password."}
+
+
+def submit_otp(session: dict, credentials: dict, otp: str, log):
+    """Submit the user's verification code on the existing session."""
+    c = session["client"]
+    base = session["base"]
+    csrf = session.get("csrf", "")
+    username = credentials.get("username", "")
+    password = credentials.get("password", "")
+    otp = (otp or "").strip()
+    headers = {"x-csrf-token": csrf} if csrf else {}
+    attempts = (
+        ("/api/auth/login", {"username": username, "password": password,
+                             "token": otp, "rememberMe": True}),
+        ("/api/auth/login", {"username": username, "password": password,
+                             "ubic_2fa_token": otp, "rememberMe": True}),
+        ("/api/auth/mfa", {"token": otp}),
+        ("/api/auth/2fa/verify", {"token": otp}),
+    )
+    last: Optional[httpx.Response] = None
+    for path, payload in attempts:
+        try:
+            r = c.post(f"{base}{path}", json=payload, headers=headers)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ubiquiti: otp POST %s failed: %s", path, exc)
+            continue
+        last = r
+        if r.status_code < 300:
+            session["csrf"] = r.headers.get("x-csrf-token") or csrf
+            log.info("ubiquiti: verification accepted via %s", path)
+            return {"state": "authenticated"}
+    code = last.status_code if last is not None else "?"
+    log.warning("ubiquiti: verification failed (HTTP %s)", code)
+    return {"state": "error", "message": "That code didn't work — check it and try again."}
+
+
+def finalize(session: dict, config: dict, log) -> dict:
+    """After authentication, mint a reusable API key (preferred) or persist the
+    session cookies so future polls are headless. Returns the credential update."""
+    c = session["client"]
+    base = session["base"]
+    site = session["site"]
+    csrf = session.get("csrf", "")
     out = {"host": base, "site": site}
+    api_key = _try_mint_api_key(c, base, site, csrf, log)
     if api_key:
         out["api_key"] = api_key
     else:
-        # No key endpoint — keep the login so polling can re-auth headlessly.
-        out["username"] = username
-        out["password"] = password
+        cookies = {k: v for k, v in c.cookies.items()}
+        if cookies:
+            out["cookies"] = cookies
+            if csrf:
+                out["csrf"] = csrf
+            log.info("ubiquiti: stored authenticated session (no API-key endpoint)")
     return out
 
 
@@ -153,7 +282,14 @@ def collect(config: dict, credentials: dict, log) -> dict:
     site = config.get("site") or credentials.get("site") or "default"
     with _client() as c:
         csrf = ""
-        if not credentials.get("api_key"):
+        if credentials.get("api_key"):
+            pass  # API key sent as a header (see _auth_headers)
+        elif credentials.get("cookies"):
+            # Reuse a session captured during interactive setup (MFA accounts).
+            for k, v in (credentials.get("cookies") or {}).items():
+                c.cookies.set(k, v)
+            csrf = credentials.get("csrf", "")
+        else:
             csrf = _login(c, base, credentials.get("username", ""),
                           credentials.get("password", ""), log)
         headers = _auth_headers(credentials, csrf)

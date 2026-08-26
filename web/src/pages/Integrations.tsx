@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { Card, Pill, bytes, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
+import { SourceIcon } from "../components/SourceIcon";
 import { notify, confirmDialog } from "../components/dialog";
 
 interface CredField { name: string; label: string; type: string; placeholder: string; required: boolean; help: string; }
@@ -67,6 +68,12 @@ export default function Integrations() {
     return list.available.filter((s) => !have.has(s.integration_type) || s.needs_appliance);
   }, [list]);
 
+  const specByType = useMemo(() => {
+    const m: Record<string, Spec> = {};
+    for (const s of (list?.available || [])) m[s.integration_type] = s;
+    return m;
+  }, [list]);
+
   if (loading) return <Loading label="Loading integrations…" />;
 
   const hasData = !!data && (data.apps.length > 0 || data.clients.length > 0);
@@ -87,7 +94,7 @@ export default function Integrations() {
       {list && list.instances.length > 0 && (
         <div className="insights-cards" style={{ marginBottom: 20 }}>
           {list.instances.map((i) => (
-            <InstanceCard key={i.id} inst={i} onChanged={load} />
+            <InstanceCard key={i.id} inst={i} spec={specByType[i.integration_type]} onChanged={load} />
           ))}
         </div>
       )}
@@ -103,7 +110,7 @@ export default function Integrations() {
             <div key={s.integration_type} className="integration-tile">
               <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 6 }}>
                 <div className="insight-card-ic" style={{ background: `${s.color}1e`, color: s.color }}>
-                  <Icon name={asIcon(s.icon)} size={18} />
+                  <SourceIcon type={s.integration_type} fallback={asIcon(s.icon)} size={20} />
                 </div>
                 <div className="flex1">
                   <div style={{ fontWeight: 700 }}>{s.display_name}</div>
@@ -214,9 +221,12 @@ function ShadowChip({ s }: { s: ShadowSource }) {
   );
 }
 
-function InstanceCard({ inst, onChanged }: { inst: Instance; onChanged: () => void }) {
+function InstanceCard({ inst, spec, onChanged }: { inst: Instance; spec?: Spec; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const st = inst.last_stats || {};
+  const provisioning = !!inst.provision_state && !["idle", "done"].includes(inst.provision_state);
   async function setInterval_(minutes: number) {
     setBusy(true);
     try { await api.put(`/integrations/${inst.id}`, { poll_interval_minutes: minutes }); onChanged(); }
@@ -240,7 +250,7 @@ function InstanceCard({ inst, onChanged }: { inst: Instance; onChanged: () => vo
     <Card className="insight-card">
       <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 8 }}>
         <div className="insight-card-ic" style={{ background: "#0559c91e", color: "#0559c9" }}>
-          <Icon name="activity" size={18} />
+          <SourceIcon type={inst.integration_type} fallback="activity" size={20} />
         </div>
         <div className="flex1">
           <div style={{ fontWeight: 700 }}>{inst.label}</div>
@@ -248,7 +258,17 @@ function InstanceCard({ inst, onChanged }: { inst: Instance; onChanged: () => vo
         </div>
         <Pill tone={STATUS_TONE[inst.status] || "info"}>{inst.status}</Pill>
       </div>
-      {inst.last_error && (
+      {provisioning && (
+        <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8,
+              border: "1px solid var(--warn,#f5a623)", borderRadius: 8, padding: "6px 10px" }}>
+          <Icon name="alert" size={14} />
+          <span style={{ fontSize: 12.5, flex: 1 }}>
+            {inst.provision_state === "error" ? "Setup didn't finish" : "Setup in progress"}
+          </span>
+          <button className="btn primary sm" onClick={() => setResuming(true)}>Continue setup</button>
+        </div>
+      )}
+      {inst.last_error && !provisioning && (
         <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 6 }}>{inst.last_error}</div>
       )}
       <div className="row" style={{ gap: 16, fontSize: 12.5, marginBottom: 8 }}>
@@ -266,12 +286,98 @@ function InstanceCard({ inst, onChanged }: { inst: Instance; onChanged: () => vo
         </select>
       </div>
       <div className="row" style={{ gap: 8 }}>
+        <button className="btn ghost sm" disabled={busy} onClick={() => setEditing(true)}>
+          <Icon name="edit" size={13} /> Edit
+        </button>
         <button className="btn ghost sm" disabled={busy} onClick={() => void toggle()}>
           {inst.enabled ? "Pause" : "Resume"}
         </button>
         <button className="btn danger sm" disabled={busy} onClick={() => void remove()}>Remove</button>
       </div>
+      {editing && (
+        <EditModal inst={inst} spec={spec} onClose={() => setEditing(false)}
+                   onDone={() => { setEditing(false); onChanged(); }} />
+      )}
+      {resuming && (
+        <ProvisioningModal instanceId={inst.id} label={inst.label}
+                           onClose={() => { setResuming(false); onChanged(); }}
+                           onDone={() => { setResuming(false); onChanged(); }} />
+      )}
     </Card>
+  );
+}
+
+function EditModal({ inst, spec, onClose, onDone }: {
+  inst: Instance; spec?: Spec; onClose: () => void; onDone: () => void;
+}) {
+  const [label, setLabel] = useState(inst.label);
+  const [host, setHost] = useState(inst.host || "");
+  const [interval, setIntervalM] = useState(inst.poll_interval_minutes);
+  const [secrets, setSecrets] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const secretFields = (spec?.credential_fields || []).filter((f) => f.type !== "host");
+
+  async function save() {
+    setSaving(true); setErr("");
+    try {
+      const filled = Object.fromEntries(Object.entries(secrets).filter(([, v]) => v));
+      const hostChanged = host.trim() !== (inst.host || "");
+      const body: Record<string, unknown> = { label, poll_interval_minutes: interval };
+      if (hostChanged || Object.keys(filled).length > 0) {
+        body.credentials = { host: host.trim(), ...filled };
+      }
+      await api.put(`/integrations/${inst.id}`, body);
+      notify({ message: "Integration updated.", tone: "info" });
+      onDone();
+    } catch (e) {
+      setErr((e as Error)?.message || "Could not update the integration"); setSaving(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" style={{ maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread">
+          <h3 style={{ margin: 0 }}>Edit {inst.label}</h3>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="logout" size={14} /></button>
+        </div>
+        <div className="modal-body">
+          {err && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 10 }}>{err}</div>}
+          <label className="stack" style={{ marginBottom: 12 }}>
+            <span className="faint" style={{ fontSize: 11.5 }}>Name</span>
+            <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} />
+          </label>
+          <label className="stack" style={{ marginBottom: 12 }}>
+            <span className="faint" style={{ fontSize: 11.5 }}>Controller address</span>
+            <input className="input" value={host} onChange={(e) => setHost(e.target.value)} />
+          </label>
+          {secretFields.map((f) => (
+            <label key={f.name} className="stack" style={{ marginBottom: 12 }}>
+              <span className="faint" style={{ fontSize: 11.5 }}>{f.label}</span>
+              <input className="input" type={f.type === "password" ? "password" : "text"}
+                     placeholder="leave blank to keep current" value={secrets[f.name] || ""}
+                     onChange={(e) => setSecrets((s) => ({ ...s, [f.name]: e.target.value }))} />
+            </label>
+          ))}
+          <label className="stack">
+            <span className="faint" style={{ fontSize: 11.5 }}>Poll interval</span>
+            <select className="input" value={interval} onChange={(e) => setIntervalM(Number(e.target.value))}>
+              {[15, 30, 60, 180, 360, 720, 1440].map((m) => (
+                <option key={m} value={m}>{m < 60 ? `${m} min` : m < 1440 ? `${m / 60} hours` : "1 day"}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="modal-foot">
+          <div style={{ flex: 1 }} />
+          <button className="btn sm" onClick={onClose}>Cancel</button>
+          <button className="btn primary sm" disabled={saving} onClick={() => void save()}>
+            {saving ? "Saving…" : "Save changes"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -283,6 +389,7 @@ function SetupModal({ spec, appliances, onClose, onDone }: {
   const [interval, setIntervalM] = useState(spec.default_interval_minutes);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const [provInst, setProvInst] = useState<Instance | null>(null);
 
   async function save() {
     if (spec.needs_appliance && !applianceId) { setErr("Select an appliance to run this on."); return; }
@@ -291,17 +398,27 @@ function SetupModal({ spec, appliances, onClose, onDone }: {
     }
     setSaving(true); setErr("");
     try {
-      await api.post("/integrations", {
+      const inst = await api.post<Instance>("/integrations", {
         integration_type: spec.integration_type,
         appliance_id: spec.needs_appliance ? applianceId : null,
         credentials: vals,
         poll_interval_minutes: interval,
       });
-      notify({ message: `${spec.display_name} connected — it will start collecting shortly.`, tone: "info" });
-      onDone();
+      // Interactive integrations (MFA/OTP) hand off to the provisioning wizard.
+      if (inst.provision_state && inst.provision_state !== "idle") {
+        setProvInst(inst); setSaving(false);
+      } else {
+        notify({ message: `${spec.display_name} connected — it will start collecting shortly.`, tone: "info" });
+        onDone();
+      }
     } catch (e) {
       setErr((e as Error)?.message || "Could not set up the integration"); setSaving(false);
     }
+  }
+
+  if (provInst) {
+    return <ProvisioningModal instanceId={provInst.id} label={provInst.label}
+                              onClose={onClose} onDone={onDone} />;
   }
 
   return (
@@ -363,6 +480,150 @@ function SetupModal({ spec, appliances, onClose, onDone }: {
                   onClick={() => void save()}>
             {saving ? "Connecting…" : "Connect"}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface ProvResp {
+  provision_state: string; message: string | null; needs_otp: boolean;
+  done: boolean; error: boolean; step: number; steps: string[];
+}
+
+// Interactive setup wizard: drives the login → email/OTP verification → API-key
+// handshake on the appliance, showing live progress at each step.
+function ProvisioningModal({ instanceId, label, onClose, onDone }: {
+  instanceId: string; label: string; onClose: () => void; onDone: () => void;
+}) {
+  const [prov, setProv] = useState<ProvResp | null>(null);
+  const [otp, setOtp] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function poll() {
+    try { setProv(await api.get<ProvResp>(`/integrations/${instanceId}/provision`)); }
+    catch { /* transient (e.g. still replicating to the node) — keep polling */ }
+  }
+  useEffect(() => {
+    // Kick off (idempotent) then poll for progress until done/error.
+    api.post(`/integrations/${instanceId}/provision`, {}).catch(() => {});
+    void poll();
+    const t = setInterval(poll, 2000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instanceId]);
+
+  async function submitOtp() {
+    if (!otp.trim()) return;
+    setSubmitting(true); setErr("");
+    try {
+      await api.post(`/integrations/${instanceId}/provision/otp`, { otp: otp.trim() });
+      setOtp(""); await poll();
+    } catch (e) { setErr((e as Error)?.message || "Could not submit the code"); }
+    finally { setSubmitting(false); }
+  }
+  async function retry() {
+    setErr("");
+    await api.post(`/integrations/${instanceId}/provision`, {}).catch(() => {});
+    await poll();
+  }
+
+  const state = prov?.provision_state || "starting";
+  const steps = prov?.steps || ["Connecting to your controller", "Verify your identity", "Securing an API key"];
+  const curStep = prov?.step ?? 0;
+  const done = !!prov?.done;
+  const error = !!prov?.error;
+  const needsOtp = !!prov?.needs_otp;
+
+  function stepStatus(i: number): "done" | "active" | "error" | "pending" {
+    if (done) return "done";
+    if (error && i === curStep) return "error";
+    if (i < curStep) return "done";
+    if (i === curStep) return "active";
+    return "pending";
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" style={{ maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread">
+          <div>
+            <h3 style={{ margin: 0 }}>Setting up {label}</h3>
+            <div className="faint" style={{ fontSize: 12 }}>Securely connecting through your appliance…</div>
+          </div>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="logout" size={14} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="stack" style={{ gap: 0 }}>
+            {steps.map((label2, i) => {
+              const s = stepStatus(i);
+              return (
+                <div key={i} className="row" style={{ gap: 12, alignItems: "flex-start", padding: "10px 0" }}>
+                  <div style={{ width: 26, height: 26, borderRadius: "50%", display: "grid", placeItems: "center",
+                                flexShrink: 0, background:
+                                  s === "done" ? "#2dbe60" : s === "error" ? "var(--danger-c,#f2545b)"
+                                  : s === "active" ? "#4f7cff" : "var(--inset)",
+                                color: s === "pending" ? "var(--text-faint)" : "#fff" }}>
+                    {s === "done" ? <Icon name="check" size={14} />
+                      : s === "error" ? <Icon name="alert" size={14} />
+                      : s === "active" ? <span className="spinner-dot" />
+                      : <span style={{ fontSize: 12 }}>{i + 1}</span>}
+                  </div>
+                  <div style={{ flex: 1, paddingTop: 3 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13.5,
+                                  color: s === "pending" ? "var(--text-faint)" : "var(--text)" }}>{label2}</div>
+                    {i === curStep && prov?.message && (
+                      <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>{prov.message}</div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {needsOtp && !done && (
+            <div style={{ marginTop: 10, borderTop: "1px solid var(--border-soft)", paddingTop: 14 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Enter your verification code</div>
+              {err && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 8 }}>{err}</div>}
+              <div className="row" style={{ gap: 8 }}>
+                <input className="input" autoFocus inputMode="numeric" placeholder="123456"
+                       value={otp} onChange={(e) => setOtp(e.target.value)}
+                       onKeyDown={(e) => { if (e.key === "Enter") void submitOtp(); }}
+                       style={{ letterSpacing: 3, fontSize: 16, flex: 1 }} />
+                <button className="btn primary sm" disabled={submitting || !otp.trim()} onClick={() => void submitOtp()}>
+                  {submitting ? "Verifying…" : "Verify"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {done && (
+            <div className="row" style={{ gap: 8, alignItems: "center", marginTop: 10, color: "#2dbe60" }}>
+              <Icon name="check" size={16} /> <b>Connected.</b>
+              <span className="faint" style={{ fontSize: 12.5 }}>Data will start flowing on the next poll.</span>
+            </div>
+          )}
+          {error && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12.5, marginBottom: 8 }}>
+                {prov?.message || "Setup didn't complete."}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="modal-foot">
+          <div style={{ flex: 1 }} />
+          {done ? (
+            <button className="btn primary sm" onClick={onDone}>Finish</button>
+          ) : error ? (
+            <>
+              <button className="btn sm" onClick={onClose}>Close</button>
+              <button className="btn primary sm" onClick={() => void retry()}>Try again</button>
+            </>
+          ) : (
+            <button className="btn sm" onClick={onClose}>Cancel</button>
+          )}
         </div>
       </div>
     </div>

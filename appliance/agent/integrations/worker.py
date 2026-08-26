@@ -23,6 +23,9 @@ class IntegrationWorker:
         self._headers = headers_getter
         self.log = log
         self._last_run: dict[str, float] = {}
+        # In-progress interactive auth sessions, keyed by instance id. Holds the
+        # open controller session between the login and the OTP submission.
+        self._sessions: dict[str, dict] = {}
 
     async def tick(self) -> None:
         base = self._base()
@@ -62,19 +65,9 @@ class IntegrationWorker:
         if runner is None:
             self.log.warning("no runner for integration type %s", itype)
             return
+        self.log.info("integration %s (%s): starting run", itype, str(inst.get("id", ""))[:8])
         config = inst.get("config") or {}
         creds = inst.get("credentials") or {}
-        cred_update = None
-        # Easy setup: mint/refresh a reusable credential the first time so future
-        # polls are headless (and the raw password can be discarded upstream).
-        if not creds.get("api_key") and hasattr(runner, "provision"):
-            try:
-                new_creds = runner.provision(config, creds, self.log)
-                if new_creds:
-                    cred_update = new_creds
-                    creds = {**creds, **new_creds}
-            except Exception as exc:  # noqa: BLE001
-                self.log.warning("%s provision failed: %s", itype, exc)
         report, status, error = {"clients": [], "apps": [], "usage": [], "stats": {}}, "ok", None
         try:
             report = runner.collect(config, creds, self.log)
@@ -91,8 +84,6 @@ class IntegrationWorker:
             "usage": report.get("usage", []),
             "stats": report.get("stats", {}),
         }
-        if cred_update:
-            payload["credentials_update"] = cred_update
         try:
             with httpx.Client(timeout=60) as c:
                 r = c.post(f"{base}/appliance/integrations/report",
@@ -104,3 +95,116 @@ class IntegrationWorker:
                     self.log.info("integration %s reported: %s", itype, report.get("stats", {}))
         except Exception as exc:  # noqa: BLE001
             self.log.warning("integration report POST failed for %s: %s", itype, exc)
+
+    # ------------------------------------------------------------------ #
+    # Interactive provisioning (OTP handshake with the controller)       #
+    # ------------------------------------------------------------------ #
+    async def provision_tick(self) -> None:
+        base = self._base()
+        pending = await self._provision_pending(base)
+        self._reap_sessions()
+        if not pending:
+            return
+        loop = asyncio.get_event_loop()
+        await asyncio.gather(*(loop.run_in_executor(None, self._provision_one, base, p)
+                               for p in pending), return_exceptions=True)
+
+    async def _provision_pending(self, base: str) -> list:
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                r = await c.get(f"{base}/appliance/integrations/provision/pending",
+                                headers=self._headers())
+                if r.status_code != 200:
+                    return []
+                return r.json().get("pending", []) or []
+        except Exception as exc:  # noqa: BLE001
+            self.log.debug("provision pending fetch failed: %s", exc)
+            return []
+
+    def _reap_sessions(self) -> None:
+        cutoff = time.time() - 600  # sessions are only valid for a few minutes
+        for iid in [k for k, v in self._sessions.items() if v.get("ts", 0) < cutoff]:
+            try:
+                self._sessions.pop(iid)["session"]["client"].close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _report_provision(self, base: str, iid: str, state: str,
+                          message: str | None = None, cred_update: dict | None = None) -> None:
+        payload = {"integration_id": iid, "provision_state": state, "message": message}
+        if cred_update:
+            payload["credentials_update"] = cred_update
+        try:
+            with httpx.Client(timeout=60) as c:
+                c.post(f"{base}/appliance/integrations/provision/report",
+                       json=payload, headers=self._headers())
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("provision report POST failed for %s: %s", iid, exc)
+
+    def _provision_one(self, base: str, p: dict) -> None:
+        iid = p.get("id")
+        itype = p.get("integration_type", "")
+        runner = get_runner(itype)
+        if runner is None or not hasattr(runner, "begin_auth"):
+            self._report_provision(base, iid, "error", "This integration can't be set up here.")
+            return
+        config = p.get("config") or {}
+        creds = p.get("credentials") or {}
+        action = p.get("action", "start")
+
+        if action == "otp":
+            entry = self._sessions.get(iid)
+            if not entry:
+                self._report_provision(base, iid, "error",
+                                       "Setup session expired — please start over.")
+                return
+            result = runner.submit_otp(entry["session"], creds, p.get("otp", ""), self.log)
+            if result.get("state") == "authenticated":
+                self._finish(base, iid, itype, entry.pop("session"), config)
+                self._sessions.pop(iid, None)
+            else:
+                # Keep the session so the user can retry the code.
+                self._report_provision(base, iid, "awaiting_otp",
+                                       result.get("message") or "That code didn't work — try again.")
+            return
+
+        # action == "start": begin the login.
+        self.log.info("integration %s (%s): beginning auth", itype, str(iid)[:8])
+        self._report_provision(base, iid, "authenticating", "Contacting your controller…")
+        try:
+            session, result = runner.begin_auth(config, creds, self.log)
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("%s begin_auth failed: %s", itype, exc)
+            self._report_provision(base, iid, "error", f"Could not reach the controller: {exc}")
+            return
+        state = result.get("state")
+        if state == "authenticated":
+            self._finish(base, iid, itype, session, config)
+        elif state == "mfa_required":
+            self._sessions[iid] = {"session": session, "ts": time.time()}
+            self._report_provision(base, iid, "awaiting_otp",
+                                   result.get("message") or "Enter your verification code.")
+        else:
+            if session:
+                try: session["client"].close()
+                except Exception: pass  # noqa: BLE001
+            self._report_provision(base, iid, "error",
+                                   result.get("message") or "Could not sign in to the controller.")
+
+    def _finish(self, base: str, iid: str, itype: str, session: dict, config: dict) -> None:
+        """Mint/persist a reusable credential and report success (or a clear error
+        if no durable credential could be secured)."""
+        try:
+            cred_update = get_runner(itype).finalize(session, config, self.log)
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("%s finalize failed: %s", itype, exc)
+            cred_update = None
+        finally:
+            try: session["client"].close()
+            except Exception: pass  # noqa: BLE001
+        if not cred_update or not (cred_update.get("api_key") or cred_update.get("cookies")):
+            self._report_provision(base, iid, "error",
+                                   "Signed in, but couldn't secure an API key on the controller.")
+            return
+        self.log.info("integration %s (%s): provisioning complete", itype, str(iid)[:8])
+        self._report_provision(base, iid, "done", "Connected and secured.", cred_update)

@@ -81,6 +81,8 @@ def _instance_view(inst: IntegrationInstance) -> dict:
         "status": inst.status,
         "poll_interval_minutes": inst.poll_interval_minutes,
         "host": (inst.config or {}).get("host", ""),
+        "provision_state": inst.provision_state or "idle",
+        "provision_message": inst.provision_message,
         "last_run_at": inst.last_run_at.isoformat() if inst.last_run_at else None,
         "last_success_at": inst.last_success_at.isoformat() if inst.last_success_at else None,
         "last_error": inst.last_error,
@@ -146,12 +148,17 @@ def create_instance(body: CreateInstance,
     host = creds.pop("host", "")
     config = {"host": host, "site": creds.pop("site", "default")}
     interval = int(body.poll_interval_minutes or spec.default_interval_minutes)
+    # Integrations that mint their own key start in an interactive provisioning
+    # handshake (which also covers MFA/OTP); others are ready to collect.
+    prov = "starting" if spec.auto_provision_key else "idle"
     inst = IntegrationInstance(
         tenant_id=principal.tenant_id, owner_user_id=principal.user_id,
         integration_type=body.integration_type, label=body.label or spec.display_name,
         runs_on=spec.runs_on, appliance_id=appliance_id, enabled=True,
         credentials=credstore.encrypt(principal.tenant_id, creds) if creds else None,
-        config=config, poll_interval_minutes=interval, status="pending")
+        config=config, poll_interval_minutes=interval, status="pending",
+        provision_state=prov, provision_message=("Contacting your controller…"
+                                                 if prov == "starting" else None))
     db.add(inst)
     db.commit()
     return _instance_view(inst)
@@ -181,9 +188,21 @@ def update_instance(iid: str, body: UpdateInstance,
         host = creds.pop("host", None)
         if host is not None:
             inst.config = {**(inst.config or {}), "host": host}
+        # Only the fields the user actually filled in are treated as changes.
+        creds = {k: v for k, v in creds.items() if v not in (None, "")}
         if creds:
+            # A fresh login was entered — replace the stored credential and drop
+            # any minted API key so the appliance re-provisions against it.
             inst.credentials = credstore.encrypt(principal.tenant_id, creds)
-            inst.status = "pending"  # re-provision with the new login
+            inst.status = "pending"
+            integ = get_integration(inst.integration_type)
+            if integ and integ.spec().auto_provision_key:
+                inst.provision_state = "starting"
+                inst.provision_message = "Contacting your controller…"
+                inst.provision_otp = None
+        elif host is not None:
+            # Host changed but the same key/login stays — re-validate on next poll.
+            inst.status = "pending"
     inst.updated_at = _now()
     db.commit()
     return _instance_view(inst)
@@ -208,6 +227,67 @@ def _owned_instance(db: Session, principal, iid: str) -> IntegrationInstance:
             or (inst.owner_user_id and inst.owner_user_id != principal.user_id):
         raise HTTPException(404, "integration not found")
     return inst
+
+
+# ---- Interactive provisioning (OTP handshake with the appliance) ------------
+_PROVISION_STEPS = ["Connecting to your controller", "Verify your identity", "Securing an API key"]
+_STATE_STEP = {"starting": 0, "authenticating": 0, "awaiting_otp": 1,
+               "verifying": 1, "done": 2, "error": 0}
+
+
+def _provision_view(inst: IntegrationInstance) -> dict:
+    state = inst.provision_state or "idle"
+    return {
+        "provision_state": state,
+        "message": inst.provision_message,
+        "needs_otp": state == "awaiting_otp",
+        "done": state == "done",
+        "error": state == "error",
+        "step": _STATE_STEP.get(state, 0),
+        "steps": _PROVISION_STEPS,
+    }
+
+
+@router.post("/{iid}/provision")
+def start_provision(iid: str,
+                    principal: security.Principal = Depends(security.get_principal),
+                    db: Session = Depends(get_db)):
+    """(Re)start the interactive setup handshake — the appliance attempts the
+    controller login and, if MFA is required, asks for a verification code."""
+    inst = _owned_instance(db, principal, iid)
+    inst.provision_state = "starting"
+    inst.provision_message = "Contacting your controller…"
+    inst.provision_otp = None
+    inst.status = "pending"
+    inst.updated_at = _now()
+    db.commit()
+    return _provision_view(inst)
+
+
+@router.get("/{iid}/provision")
+def get_provision(iid: str,
+                  principal: security.Principal = Depends(security.get_principal),
+                  db: Session = Depends(get_db)):
+    return _provision_view(_owned_instance(db, principal, iid))
+
+
+class OtpBody(BaseModel):
+    otp: str
+
+
+@router.post("/{iid}/provision/otp")
+def submit_provision_otp(iid: str, body: OtpBody,
+                         principal: security.Principal = Depends(security.get_principal),
+                         db: Session = Depends(get_db)):
+    inst = _owned_instance(db, principal, iid)
+    if inst.provision_state != "awaiting_otp":
+        raise HTTPException(409, "the integration is not waiting for a code")
+    inst.provision_otp = (body.otp or "").strip()
+    inst.provision_state = "verifying"
+    inst.provision_message = "Verifying your code…"
+    inst.updated_at = _now()
+    db.commit()
+    return _provision_view(inst)
 
 
 # ---- Drill-down data (clients / apps / shadow sources) ----------------------
@@ -370,10 +450,12 @@ def set_app_interest(body: AppInterest,
 def appliance_pull(appliance: Appliance = Depends(_agent_appliance),
                    db: Session = Depends(get_db)):
     """The integrations this appliance should run, with decrypted credentials
-    (delivered over the appliance's authenticated TLS channel)."""
+    (delivered over the appliance's authenticated TLS channel). Only fully
+    provisioned integrations collect data — ones mid-setup use the provision flow."""
     insts = (db.query(IntegrationInstance)
              .filter(IntegrationInstance.appliance_id == appliance.id,
-                     IntegrationInstance.enabled == True).all())  # noqa: E712
+                     IntegrationInstance.enabled == True,  # noqa: E712
+                     IntegrationInstance.provision_state.in_(("idle", "done"))).all())
     out = []
     for i in insts:
         try:
@@ -386,6 +468,70 @@ def appliance_pull(appliance: Appliance = Depends(_agent_appliance),
             "credentials": creds, "poll_interval_minutes": i.poll_interval_minutes,
         })
     return {"integrations": out}
+
+
+def _merge_credentials_update(tid: str, inst: IntegrationInstance, update: dict) -> None:
+    try:
+        cur = credstore.decrypt(tid, inst.credentials) if inst.credentials else {}
+    except Exception:
+        cur = {}
+    cur.update(update)
+    if cur.get("api_key"):  # a reusable key exists — the raw login isn't needed
+        cur.pop("password", None)
+    inst.credentials = credstore.encrypt(tid, cur)
+
+
+# ---- Interactive provisioning (appliance side) ------------------------------
+@agent_router.get("/provision/pending")
+def provision_pending(appliance: Appliance = Depends(_agent_appliance),
+                      db: Session = Depends(get_db)):
+    """Integrations on this appliance that need an auth action: begin the login
+    (``start``) or submit the user's verification code (``otp``)."""
+    insts = (db.query(IntegrationInstance)
+             .filter(IntegrationInstance.appliance_id == appliance.id,
+                     IntegrationInstance.provision_state.in_(("starting", "verifying"))).all())
+    out = []
+    for i in insts:
+        try:
+            creds = credstore.decrypt(i.tenant_id, i.credentials) if i.credentials else {}
+        except Exception:
+            creds = {}
+        out.append({
+            "id": i.id, "integration_type": i.integration_type,
+            "config": i.config or {}, "credentials": creds,
+            "action": "otp" if i.provision_state == "verifying" else "start",
+            "otp": i.provision_otp or "",
+        })
+    return {"pending": out}
+
+
+class ProvisionReport(BaseModel):
+    integration_id: str
+    provision_state: str  # authenticating | awaiting_otp | done | error
+    message: str | None = None
+    credentials_update: dict | None = None
+
+
+@agent_router.post("/provision/report")
+def provision_report(body: ProvisionReport,
+                     appliance: Appliance = Depends(_agent_appliance),
+                     db: Session = Depends(get_db)):
+    """The appliance reports progress of the interactive handshake."""
+    inst = db.get(IntegrationInstance, body.integration_id)
+    if not inst or inst.appliance_id != appliance.id:
+        raise HTTPException(404, "integration not found for this appliance")
+    inst.provision_state = body.provision_state
+    inst.provision_message = body.message
+    if body.credentials_update:
+        _merge_credentials_update(inst.tenant_id, inst, body.credentials_update)
+    if body.provision_state in ("awaiting_otp", "done", "error"):
+        inst.provision_otp = None  # consumed / no longer valid
+    if body.provision_state == "done":
+        inst.status = "pending"  # ready to collect on the next data poll
+        inst.last_error = None
+    inst.updated_at = _now()
+    db.commit()
+    return {"ok": True}
 
 
 class IntegrationReport(BaseModel):

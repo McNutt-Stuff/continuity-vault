@@ -466,6 +466,19 @@ class Agent:
 agent = Agent()
 
 
+def _integration_worker():
+    """Single shared integrations worker (its in-memory OTP sessions must persist
+    across the data + provisioning loops)."""
+    global _INTEG_WORKER
+    if _INTEG_WORKER is None:
+        from .integrations.worker import IntegrationWorker
+        _INTEG_WORKER = IntegrationWorker(agent._base, agent._headers, agent.log)
+    return _INTEG_WORKER
+
+
+_INTEG_WORKER = None
+
+
 @app.on_event("startup")
 async def startup() -> None:
     agent.log.info("appliance agent starting (v%s, model=%s)",
@@ -478,6 +491,7 @@ async def startup() -> None:
     if agent.activated:
         asyncio.create_task(_heartbeat_loop())
         asyncio.create_task(_integrations_loop())
+        asyncio.create_task(_provision_loop())
 
 
 async def _heartbeat_loop() -> None:
@@ -498,8 +512,7 @@ async def _integrations_loop() -> None:
     """Poll + run the appliance's enabled integrations in parallel, shipping
     results to the node / control plane. Independent of the heartbeat so a slow
     integration never delays signaling."""
-    from .integrations.worker import IntegrationWorker
-    worker = IntegrationWorker(agent._base, agent._headers, agent.log)
+    worker = _integration_worker()
     agent.log.info("integrations worker started")
     while True:
         try:
@@ -508,6 +521,19 @@ async def _integrations_loop() -> None:
             if not _cp_unavailable(exc):
                 agent.log.error("integrations tick error: %s", exc)
         await asyncio.sleep(60)  # re-evaluate which integrations are due each minute
+
+
+async def _provision_loop() -> None:
+    """Fast loop driving the interactive setup handshake (login + OTP). Shares the
+    worker so the in-flight controller session survives between steps."""
+    worker = _integration_worker()
+    while True:
+        try:
+            await worker.provision_tick()
+        except Exception as exc:  # noqa: BLE001
+            if not _cp_unavailable(exc):
+                agent.log.debug("provision tick error: %s", exc)
+        await asyncio.sleep(4)  # responsive during an active setup
 
 
 @app.get("/status")
@@ -537,6 +563,7 @@ async def activate_endpoint(body: dict):
     d = await agent.activate(code)
     asyncio.create_task(_heartbeat_loop())
     asyncio.create_task(_integrations_loop())
+    asyncio.create_task(_provision_loop())
     return {"activated": True, "appliance_id": d["appliance_id"]}
 
 

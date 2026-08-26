@@ -320,9 +320,6 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     return {"ok": True, **counts}
 
 
-# Instance runtime fields the node owns; config/enable/label/curation stay CP-side.
-_INSTANCE_PUSH_FIELDS = ("status", "last_run_at", "last_success_at", "last_error",
-                         "last_stats", "credentials")
 # Telemetry fields on network rows; monitor_state / of_interest are CP-curated.
 _CLIENT_TELEMETRY = ("name", "hostname", "ip", "mac", "is_wired", "is_guest",
                      "device_type", "tx_bytes", "rx_bytes", "total_bytes",
@@ -333,15 +330,10 @@ _APP_TELEMETRY = ("name", "category", "source_type", "tx_bytes", "rx_bytes",
 
 def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict) -> None:
     """Fold node-reported integration telemetry into the control-plane DB without
-    clobbering the user's monitor/interest curation or their instance config."""
+    clobbering the user's monitor/interest curation. Instances are node-authoritative
+    (portal calls are proxied there), so they upsert in full for the CP mirror."""
     for row in body.integration_instances:
-        kw = _deser(IntegrationInstance, row)
-        inst = db.get(IntegrationInstance, kw.get("id"))
-        if inst is None:
-            continue  # instance is created CP-side; nothing to attach runtime to
-        for f in _INSTANCE_PUSH_FIELDS:
-            if f in kw:
-                setattr(inst, f, kw[f])
+        _upsert(db, IntegrationInstance, row)
         counts["integrations"] += 1
     for row in body.network_clients:
         kw = _deser(NetworkClient, row)

@@ -50,6 +50,10 @@ def _should_proxy(method: str, path: str) -> bool:
         return True
     if path.startswith("/api/search/retrieve-status/"):
         return True
+    # Integrations (setup/OTP handshake + network telemetry) run against the
+    # node the appliance reports to, so the portal must operate on that same DB.
+    if path == "/api/integrations" or path.startswith("/api/integrations/"):
+        return True
     if path == "/api/recovered" or path.startswith("/api/recovered/"):
         return True
     if path == "/api/restore" or path.startswith("/api/restore/"):

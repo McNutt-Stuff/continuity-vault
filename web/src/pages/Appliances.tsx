@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import { Card, Pill, bytes, timeAgo, serverDate, fmtAbsolute, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
+import { SourceIcon } from "../components/SourceIcon";
 import { confirmDialog, notify, promptDialog } from "../components/dialog";
 import { VersionPill, ProductionVersion } from "../components/VersionBadge";
 import { ApplianceStatePill } from "./Dashboard";
@@ -556,7 +557,7 @@ function IntegrationsCard({ a }: { a: Appliance }) {
       {integs.map((i) => (
         <div key={i.id} className="result-row">
           <div className="result-icon" style={{ background: "var(--inset)", width: 34, height: 34 }}>
-            <Icon name="activity" size={16} />
+            <SourceIcon type={i.integration_type} fallback="activity" size={18} />
           </div>
           <div className="flex1">
             <div style={{ fontWeight: 600 }}>{i.label}</div>

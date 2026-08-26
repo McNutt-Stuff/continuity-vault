@@ -64,6 +64,8 @@ SOURCE_ICONS: dict[str, dict] = {
     "google_contacts": {"file": "Google Contacts icon.svg", "search": "Google Contacts icon"},
     "google_photos": {"file": "Google Photos icon (2020).svg", "search": "Google Photos logo"},
     "imessage":   {"file": "IMessage logo.svg", "search": "iMessage logo"},
+    # Integrations (network intelligence) — matched by integration_type.
+    "ubiquiti":   {"file": "Ubiquiti Logo 2023.svg", "search": "Ubiquiti logo"},
 }
 
 
