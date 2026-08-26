@@ -874,6 +874,12 @@ class NetworkClient(Base):
     # normal | ignored (out of scope) | monitored (family system, keep building)
     monitor_state = Column(String, default="normal", index=True)
     of_interest = Column(Boolean, default=False)  # "Client of Interest"
+    # User-set friendly name (overrides the source-reported name for display).
+    nickname = Column(String, default="")
+    # Whose device this is — drives per-user vs org/family insight scoping.
+    # "" (unassigned) | personal (mine) | family | organization
+    ownership = Column(String, default="", index=True)
+    owner_user_id = Column(String, nullable=True, index=True)  # set when ownership=personal
     total_bytes = Column(BigInteger, default=0)
     tx_bytes = Column(BigInteger, default=0)
     rx_bytes = Column(BigInteger, default=0)

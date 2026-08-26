@@ -4,7 +4,7 @@ import { api } from "../api";
 import { Card, Pill, bytes, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
-import { notify, confirmDialog } from "../components/dialog";
+import { notify, confirmDialog, promptDialog } from "../components/dialog";
 
 interface CredField { name: string; label: string; type: string; placeholder: string; required: boolean; help: string; }
 interface Spec {
@@ -26,9 +26,11 @@ interface ApplianceRef { id: string; name: string; state: string; online: boolea
 interface ListResp { available: Spec[]; instances: Instance[]; appliances: ApplianceRef[]; }
 
 interface NetClient {
-  id: string; name: string; hostname: string; ip: string; mac: string;
+  id: string; name: string; device_name: string; nickname: string;
+  hostname: string; ip: string; mac: string;
   device_type: string; is_wired: boolean; is_guest: boolean;
-  monitor_state: string; of_interest: boolean; total_bytes: number; last_seen: string | null;
+  monitor_state: string; of_interest: boolean; ownership: string; owner_user_id: string | null;
+  total_bytes: number; last_seen: string | null;
 }
 interface NetApp {
   app_key: string; name: string; category: string; source_type: string;
@@ -37,7 +39,8 @@ interface NetApp {
 interface ShadowSource { source_type: string; name: string; total_bytes: number; apps: number; }
 interface DataResp {
   clients: NetClient[]; apps: NetApp[]; shadow: ShadowSource[];
-  stats: { clients?: number; monitored?: number; ignored?: number; apps?: number; bytes?: number };
+  stats: { clients?: number; monitored?: number; ignored?: number; apps?: number; bytes?: number;
+           mine?: number; family?: number; organization?: number };
 }
 // Relationship drill-down rows (which clients use an app / which apps a client uses).
 interface UsageClient { client_key: string; id: string | null; name: string; device_type: string; ip: string; mac: string; monitor_state: string; total_bytes: number; }
@@ -451,7 +454,8 @@ function IntegrationDetail({ inst, spec, onBack, onChanged }: {
 
       <div className="insights-stats" style={{ marginBottom: 16 }}>
         <MiniStat icon="user" label="Clients seen" value={String(stats.clients || 0)} tint="#4f7cff" />
-        <MiniStat icon="shield" label="Monitored" value={String(stats.monitored || 0)} tint="#2dbe60" />
+        <MiniStat icon="shield" label="My devices" value={String(stats.mine || 0)} tint="#2dbe60" />
+        <MiniStat icon="grid" label="Family / org" value={String((stats.family || 0) + (stats.organization || 0))} tint="#35d0a5" />
         <MiniStat icon="activity" label="Apps & services" value={String(stats.apps || 0)} tint="#c56cf0" />
         <MiniStat icon="cloud" label="Traffic seen" value={bytes(stats.bytes || 0)} tint="#f5a623" />
       </div>
@@ -953,6 +957,20 @@ function ClientsTable({ iid, clients, onChanged }: { iid: string; clients: NetCl
     try { await api.post(`/integrations/clients/${c.id}`, { monitor_state }); onChanged(); }
     catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
   }
+  async function setOwnership(c: NetClient, ownership: string) {
+    try { await api.post(`/integrations/clients/${c.id}`, { ownership }); onChanged(); }
+    catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+  }
+  async function renameDevice(c: NetClient) {
+    const nickname = await promptDialog({
+      title: "Nickname this device", label: "Nickname",
+      message: `${c.device_name} · ${c.mac}`,
+      defaultValue: c.nickname || "", confirmLabel: "Save",
+    });
+    if (nickname == null) return;
+    try { await api.post(`/integrations/clients/${c.id}`, { nickname: nickname.trim() }); onChanged(); }
+    catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+  }
   async function toggleInterest(c: NetClient) {
     try { await api.post(`/integrations/clients/${c.id}`, { of_interest: !c.of_interest }); onChanged(); }
     catch { /* ignore */ }
@@ -962,7 +980,7 @@ function ClientsTable({ iid, clients, onChanged }: { iid: string; clients: NetCl
     t === "phone" ? "user" : t === "media" ? "activity" : t === "iot" ? "database" : "server";
   return (
     <table className="table">
-      <thead><tr><th style={{ width: 24 }}></th><th>Device</th><th>Type</th><th>IP</th><th>Traffic</th><th>Monitoring</th><th></th></tr></thead>
+      <thead><tr><th style={{ width: 24 }}></th><th>Device</th><th>Belongs to</th><th>IP</th><th>Traffic</th><th>Monitoring</th><th></th></tr></thead>
       <tbody>
         {clients.map((c) => {
           const isOpen = open === (c.mac || c.id);
@@ -981,13 +999,29 @@ function ClientsTable({ iid, clients, onChanged }: { iid: string; clients: NetCl
                 <td>
                   <div className="row" style={{ gap: 8, alignItems: "center" }}>
                     <Icon name={dtIcon(c.device_type)} size={14} />
-                    <div>
-                      <div style={{ fontWeight: 600 }}>{c.name}</div>
-                      <div className="faint" style={{ fontSize: 11 }}>{c.mac}{c.is_guest ? " · guest" : ""}</div>
+                    <div className="flex1">
+                      <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                        <span style={{ fontWeight: 600 }}>{c.name}</span>
+                        <button className="btn ghost sm" title="Set a nickname" style={{ padding: "1px 5px" }}
+                                onClick={() => void renameDevice(c)}>
+                          <Icon name="edit" size={11} />
+                        </button>
+                      </div>
+                      <div className="faint" style={{ fontSize: 11 }}>
+                        {c.nickname ? `${c.device_name} · ` : ""}{c.mac}{c.is_guest ? " · guest" : ""}
+                      </div>
                     </div>
                   </div>
                 </td>
-                <td className="faint" style={{ fontSize: 12 }}>{c.device_type || "—"}</td>
+                <td>
+                  <select className="input sm" value={c.ownership || ""}
+                          onChange={(e) => void setOwnership(c, e.target.value)} style={{ width: 130 }}>
+                    <option value="">Unassigned</option>
+                    <option value="personal">Me</option>
+                    <option value="family">Family</option>
+                    <option value="organization">Organization</option>
+                  </select>
+                </td>
                 <td className="faint" style={{ fontSize: 12 }}>{c.ip || "—"}</td>
                 <td>{bytes(c.total_bytes)}</td>
                 <td>

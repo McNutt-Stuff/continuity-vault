@@ -73,7 +73,7 @@ export default function App() {
             <Route path="/activity" element={<ActivityPage />} />
             <Route path="/snapshots" element={<Snapshots />} />
             <Route path="/appliances" element={<Appliances />} />
-            <Route path="/integrations" element={<Integrations />} />
+            {me.can_admin && <Route path="/integrations" element={<Integrations />} />}
             <Route path="/agents" element={<Agents />} />
             <Route path="/restore" element={<Restore />} />
             <Route path="/audit" element={<Audit />} />
@@ -100,6 +100,7 @@ function Sidebar() {
   }, []);
   const nav = NAV.filter((n) => {
     if (n.to === "/audit" && !me?.can_admin) return false;  // org-level, admin only
+    if (n.to === "/integrations" && !me?.can_admin) return false;  // org-level, admin only
     if (n.to === "/insights" && me?.features?.insights_enabled === false) return false;
     const req = NAV_REQUIRES[n.to];
     if (!req || !options || options.length === 0) return true;  // unconfigured → show all

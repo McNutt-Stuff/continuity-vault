@@ -34,7 +34,8 @@ from ..models import (
 )
 from .appliances import _agent_appliance
 
-router = APIRouter(prefix="/integrations", tags=["integrations"])
+router = APIRouter(prefix="/integrations", tags=["integrations"],
+                   dependencies=[Depends(security.require_org_admin)])
 agent_router = APIRouter(prefix="/appliance/integrations", tags=["appliance-integrations"])
 admin_router = APIRouter(prefix="/admin", tags=["admin-integrations"])
 
@@ -433,7 +434,7 @@ def integration_usage(iid: str, app_key: str | None = None,
         r = rows2.setdefault(u.client_key, {
             "client_key": u.client_key,
             "id": c.id if c else None,
-            "name": (c.name or c.hostname or c.mac) if c else u.client_key,
+            "name": (c.nickname or c.name or c.hostname or c.mac) if c else u.client_key,
             "device_type": c.device_type if c else "",
             "ip": c.ip if c else "", "mac": c.mac if c else u.client_key,
             "monitor_state": c.monitor_state if c else "normal",
@@ -471,6 +472,9 @@ def _drilldown(db: Session, principal, iids: list[str]) -> dict:
             "clients": len(clients),
             "monitored": sum(1 for c in clients if c.monitor_state == "monitored"),
             "ignored": len(ignored),
+            "mine": sum(1 for c in clients if c.ownership == "personal"),
+            "family": sum(1 for c in clients if c.ownership == "family"),
+            "organization": sum(1 for c in clients if c.ownership == "organization"),
             "apps": len(apps),
             "bytes": sum(a["total_bytes"] for a in apps),
         },
@@ -479,10 +483,13 @@ def _drilldown(db: Session, principal, iids: list[str]) -> dict:
 
 def _client_view(c: NetworkClient) -> dict:
     return {
-        "id": c.id, "name": c.name or c.hostname or c.mac, "hostname": c.hostname,
+        "id": c.id, "name": c.nickname or c.name or c.hostname or c.mac,
+        "device_name": c.name or c.hostname or c.mac, "nickname": c.nickname or "",
+        "hostname": c.hostname,
         "ip": c.ip, "mac": c.mac, "device_type": c.device_type,
         "is_wired": c.is_wired, "is_guest": c.is_guest,
         "monitor_state": c.monitor_state, "of_interest": c.of_interest,
+        "ownership": c.ownership or "", "owner_user_id": c.owner_user_id,
         "total_bytes": int(c.total_bytes or 0),
         "last_seen": c.last_seen.isoformat() if c.last_seen else None,
     }
@@ -491,6 +498,8 @@ def _client_view(c: NetworkClient) -> dict:
 class ClientState(BaseModel):
     monitor_state: str | None = None  # normal | ignored | monitored
     of_interest: bool | None = None
+    nickname: str | None = None
+    ownership: str | None = None  # "" | personal | family | organization
 
 
 @router.post("/clients/{cid}")
@@ -504,6 +513,16 @@ def set_client_state(cid: str, body: ClientState,
         c.monitor_state = body.monitor_state
     if body.of_interest is not None:
         c.of_interest = body.of_interest
+    if body.nickname is not None:
+        c.nickname = body.nickname.strip()[:120]
+    if body.ownership is not None:
+        owner = body.ownership.strip().lower()
+        if owner not in ("", "personal", "family", "organization"):
+            raise HTTPException(400, "invalid ownership")
+        c.ownership = owner
+        # "personal" (mine) binds the device to the assigning user; the broader
+        # scopes (family/organization) aren't tied to one person.
+        c.owner_user_id = principal.user_id if owner == "personal" else None
     c.updated_at = _now()
     db.commit()
     return _client_view(c)
