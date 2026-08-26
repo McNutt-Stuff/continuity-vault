@@ -247,34 +247,91 @@ def storage_data(sid: str,
     }
 
 
-# ---- Scenario 2 scaffold: guided auto-provisioning --------------------------
+# ---- Scenario 2: guided auto-provisioning -----------------------------------
 class ProvisionBody(BaseModel):
     provider: str
     name: str = ""
+    admin: dict = {}   # org-level credential — used once to provision, never stored
 
 
-@router.post("/provision/start")
+@router.post("/provision")
 def provision_start(body: ProvisionBody,
                     principal: security.Principal = Depends(security.get_principal),
                     db: Session = Depends(get_db)):
-    """Begin guided auto-provisioning (Scenario 2). Creates the instance in a
-    'provisioning' state; live per-provider resource/key creation is completed by
-    the provider connector (OAuth + IAM/bucket creation) — see roadmap. Until a
-    provider connector is enabled the user finishes with the existing-details
-    dialog, so this never blocks setup."""
+    """Auto-provision a dedicated bucket/container + scoped write & read
+    credentials from the customer's org-level admin credential. The admin
+    credential is used only for this call and never stored. Runs in the
+    background; the client polls GET /storage/{id}/provision for progress."""
     spec = cs_mod.provider_spec(body.provider)
     if spec is None:
         raise HTTPException(400, "unsupported provider")
+    for f in spec.get("provision", []):
+        if f.get("required") and not (body.admin or {}).get(f["name"]):
+            raise HTTPException(400, f"{f['label']} is required")
     cs = CustomerStorage(
         tenant_id=principal.tenant_id, owner_user_id=principal.user_id,
-        name=(body.name or "").strip() or f"{spec['display_name']} (new)",
+        name=(body.name or "").strip() or f"{spec['display_name']}",
         provider=body.provider.lower(), config={},
-        provision_mode="provisioned", provision_state="starting",
-        provision_message="Connect your cloud account to provision storage automatically.",
-        status="unknown")
+        provision_mode="provisioned", provision_state="provisioning",
+        provision_message="Starting…", status="unknown")
     db.add(cs)
     db.commit()
-    return {"id": cs.id, "provision_state": cs.provision_state,
-            "message": cs.provision_message,
-            "auth_url": None,  # populated once the provider OAuth connector is enabled
-            "manual_fallback": True}
+    _spawn_provision(cs.id, principal.tenant_id, body.provider.lower(), dict(body.admin or {}))
+    return {"id": cs.id, "provision_state": cs.provision_state}
+
+
+@router.get("/{sid}/provision")
+def provision_status(sid: str,
+                     principal: security.Principal = Depends(security.get_principal),
+                     db: Session = Depends(get_db)):
+    cs = _owned(db, principal, sid)
+    return {
+        "id": cs.id, "provision_state": cs.provision_state or "done",
+        "message": cs.provision_message,
+        "done": cs.provision_state == "done",
+        "error": cs.provision_state == "error",
+        "status": cs.status,
+    }
+
+
+def _spawn_provision(cs_id: str, tenant_id: str, provider: str, admin: dict) -> None:
+    import threading
+    from ..db import WorkerSessionLocal
+    from .. import storage_provision
+
+    def _go():
+        with WorkerSessionLocal() as wdb:
+            cs = wdb.get(CustomerStorage, cs_id)
+            if cs is None:
+                return
+
+            def progress(msg: str) -> None:
+                cs.provision_message = msg[:300]
+                cs.updated_at = _now()
+                wdb.commit()
+
+            try:
+                result = storage_provision.provision(provider, admin, tenant_id, progress)
+                cs_mod.apply_provision_result(wdb, cs, result)
+                cs.provision_message = "Verifying access…"
+                wdb.commit()
+                ok, err = cs_mod.test_storage_retry(wdb, cs)
+                cs.last_test_at = _now()
+                cs.last_test_ok = ok
+                cs.last_test_error = err or None
+                cs.status = "healthy" if ok else "degraded"
+                cs.provision_state = "done"
+                cs.provision_message = result.get("summary") or "Storage ready."
+                cs.updated_at = _now()
+                wdb.commit()
+            except Exception as exc:  # noqa: BLE001
+                import logging
+                logging.getLogger("cv.storage").exception("auto-provision failed")
+                cs.provision_state = "error"
+                cs.status = "error"
+                cs.provision_message = str(exc)[:400]
+                cs.updated_at = _now()
+                wdb.commit()
+
+    threading.Thread(target=_go, name=f"cv-storage-provision-{cs_id[:8]}", daemon=True).start()
+

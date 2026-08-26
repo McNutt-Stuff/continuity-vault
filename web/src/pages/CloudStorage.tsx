@@ -8,7 +8,7 @@ import { notify, confirmDialog } from "../components/dialog";
 interface ProviderField { name: string; label: string; placeholder?: string; required?: boolean; secret?: boolean; }
 interface ProviderSpec {
   provider: string; display_name: string; icon: string; color: string;
-  config: ProviderField[]; write: ProviderField[]; read: ProviderField[];
+  config: ProviderField[]; write: ProviderField[]; read: ProviderField[]; provision?: ProviderField[];
 }
 interface StorageInstance {
   id: string; name: string; provider: string; provider_display: string; icon: string; color: string;
@@ -52,7 +52,11 @@ export default function CloudStorage() {
     catch { /* ignore */ }
     finally { setLoading(false); }
   }
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    void load();
+    const t = setInterval(() => { void load(); }, 6000);
+    return () => clearInterval(t);
+  }, []);
 
   if (loading) return <Loading label="Loading cloud storage…" />;
 
@@ -114,6 +118,7 @@ export default function CloudStorage() {
 function StorageCard({ inst, onOpen, onChanged }: { inst: StorageInstance; onOpen: () => void; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const h = health(inst);
+  const provisioning = ["provisioning", "starting"].includes(inst.provision_state);
   async function test() {
     setBusy(true);
     try { await api.post(`/storage/${inst.id}/test`, {}); onChanged(); }
@@ -122,7 +127,8 @@ function StorageCard({ inst, onOpen, onChanged }: { inst: StorageInstance; onOpe
   }
   return (
     <Card className="insight-card">
-      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 8, cursor: "pointer" }} onClick={onOpen}>
+      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 8, cursor: provisioning ? "default" : "pointer" }}
+           onClick={() => { if (!provisioning) onOpen(); }}>
         <div className="insight-card-ic" style={{ background: `${inst.color}1e`, color: inst.color }}>
           <SourceIcon type={inst.provider} fallback="cloud" size={20} />
         </div>
@@ -130,28 +136,42 @@ function StorageCard({ inst, onOpen, onChanged }: { inst: StorageInstance; onOpe
           <div style={{ fontWeight: 700 }}>{inst.name}</div>
           <div className="faint" style={{ fontSize: 11 }}>{inst.provider_display}</div>
         </div>
-        <div className="row" style={{ gap: 6, alignItems: "center" }} title={h.label}>
-          <span style={{ width: 8, height: 8, borderRadius: "50%", background: h.dot, flexShrink: 0 }} />
-          <Pill tone={h.tone}>{h.label}</Pill>
-        </div>
+        {provisioning ? (
+          <Pill tone="info"><span className="spinner-dot" /> Setting up</Pill>
+        ) : (
+          <div className="row" style={{ gap: 6, alignItems: "center" }} title={h.label}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: h.dot, flexShrink: 0 }} />
+            <Pill tone={h.tone}>{h.label}</Pill>
+          </div>
+        )}
       </div>
-      {inst.last_test_error && (
-        <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 6 }}>{inst.last_test_error}</div>
+      {provisioning ? (
+        <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>{inst.provision_message || "Provisioning your cloud storage…"}</div>
+      ) : (
+        <>
+          {inst.last_test_error && (
+            <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 6 }}>{inst.last_test_error}</div>
+          )}
+          <div className="row" style={{ gap: 16, fontSize: 12.5, marginBottom: 6 }}>
+            <span className="faint">Stored <b style={{ color: "var(--text)" }}>{bytes(inst.used_bytes)}</b></span>
+            <span className="faint">Points <b style={{ color: "var(--text)" }}>{inst.recovery_points}</b></span>
+            <span className="faint">Items <b style={{ color: "var(--text)" }}>{inst.object_count.toLocaleString()}</b></span>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
+            {inst.last_test_at ? `Last tested ${fmtAgo(inst.last_test_at)}` : "Not tested yet"}
+            {!inst.enabled ? " · paused" : ""}
+          </div>
+        </>
       )}
-      <div className="row" style={{ gap: 16, fontSize: 12.5, marginBottom: 6 }}>
-        <span className="faint">Stored <b style={{ color: "var(--text)" }}>{bytes(inst.used_bytes)}</b></span>
-        <span className="faint">Points <b style={{ color: "var(--text)" }}>{inst.recovery_points}</b></span>
-        <span className="faint">Items <b style={{ color: "var(--text)" }}>{inst.object_count.toLocaleString()}</b></span>
-      </div>
-      <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
-        {inst.last_test_at ? `Last tested ${fmtAgo(inst.last_test_at)}` : "Not tested yet"}
-        {!inst.enabled ? " · paused" : ""}
-      </div>
       <div className="row" style={{ gap: 8, marginTop: "auto" }}>
-        <button className="btn sm" onClick={onOpen}><Icon name="search" size={13} /> Details</button>
-        <button className="btn ghost sm" disabled={busy} onClick={() => void test()}>
-          <Icon name="repeat" size={13} /> {busy ? "Testing…" : "Test"}
-        </button>
+        {!provisioning && (
+          <>
+            <button className="btn sm" onClick={onOpen}><Icon name="search" size={13} /> Details</button>
+            <button className="btn ghost sm" disabled={busy} onClick={() => void test()}>
+              <Icon name="repeat" size={13} /> {busy ? "Testing…" : "Test"}
+            </button>
+          </>
+        )}
       </div>
     </Card>
   );
@@ -321,10 +341,13 @@ function AddStorageModal({ providers, onClose, onDone }: {
   providers: ProviderSpec[]; onClose: () => void; onDone: () => void;
 }) {
   const [provider, setProvider] = useState<ProviderSpec | null>(null);
-  const [mode, setMode] = useState<"pick" | "existing">("pick");
+  const [mode, setMode] = useState<"pick" | "existing" | "provision">("pick");
 
   if (provider && mode === "existing") {
     return <SetupForm provider={provider} onClose={onClose} onDone={onDone} />;
+  }
+  if (provider && mode === "provision") {
+    return <ProvisionForm provider={provider} onClose={onClose} onDone={onDone} />;
   }
 
   return (
@@ -355,30 +378,171 @@ function AddStorageModal({ providers, onClose, onDone }: {
             </div>
           ) : (
             <div className="stack" style={{ gap: 12 }}>
-              <div className="dest-card" onClick={() => setMode("existing")}>
+              <div className="dest-card" onClick={() => setMode("provision")}>
                 <div className="row" style={{ gap: 10, alignItems: "center" }}>
-                  <Icon name="key" size={18} />
-                  <div>
-                    <div style={{ fontWeight: 650 }}>I already have storage</div>
-                    <div className="faint" style={{ fontSize: 12 }}>Enter your existing bucket + access keys.</div>
+                  <Icon name="sparkle" size={18} />
+                  <div className="flex1">
+                    <div style={{ fontWeight: 650 }}>Set it up for me <Pill tone="ok">Recommended</Pill></div>
+                    <div className="faint" style={{ fontSize: 12 }}>
+                      We create the bucket, keys and permissions for you — a write-only key for backups
+                      and a separate read-only key for restores.
+                    </div>
                   </div>
                 </div>
               </div>
-              <div className="dest-card" style={{ opacity: 0.72 }}
-                   onClick={() => notify({ title: "Guided setup",
-                     message: "Automatic provisioning connects your cloud account and creates the bucket + keys for you. It's rolling out per provider — for now, choose \"I already have storage\" to connect an existing bucket.",
-                     tone: "info" })}>
+              <div className="dest-card" onClick={() => setMode("existing")}>
                 <div className="row" style={{ gap: 10, alignItems: "center" }}>
-                  <Icon name="sparkle" size={18} />
-                  <div>
-                    <div style={{ fontWeight: 650 }}>Set it up for me <Pill tone="info">Guided</Pill></div>
-                    <div className="faint" style={{ fontSize: 12 }}>We create the bucket, keys and permissions automatically.</div>
+                  <Icon name="key" size={18} />
+                  <div className="flex1">
+                    <div style={{ fontWeight: 650 }}>I already have storage</div>
+                    <div className="faint" style={{ fontSize: 12 }}>Enter your existing bucket + access keys.</div>
                   </div>
                 </div>
               </div>
               <button className="btn ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setProvider(null)}>← Back</button>
             </div>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Scenario-2: collect the org-level admin credential (used once, never stored),
+// kick off provisioning, then watch it create the bucket + scoped keys live.
+function ProvisionForm({ provider, onClose, onDone }: {
+  provider: ProviderSpec; onClose: () => void; onDone: () => void;
+}) {
+  const [name, setName] = useState(`My ${provider.display_name}`);
+  const [admin, setAdmin] = useState<Record<string, string>>({});
+  const [starting, setStarting] = useState(false);
+  const [err, setErr] = useState("");
+  const [provId, setProvId] = useState<string | null>(null);
+  const fields = provider.provision || [];
+
+  async function start() {
+    for (const f of fields) {
+      if (f.required && !admin[f.name]) { setErr(`${f.label} is required.`); return; }
+    }
+    setStarting(true); setErr("");
+    try {
+      const res = await api.post<{ id: string }>("/storage/provision", {
+        provider: provider.provider, name, admin,
+      });
+      setProvId(res.id);
+    } catch (e) {
+      setErr((e as Error)?.message || "Could not start provisioning"); setStarting(false);
+    }
+  }
+
+  if (provId) {
+    return <ProvisionProgress storageId={provId} label={name} onClose={onClose} onDone={onDone} />;
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread">
+          <div>
+            <h3 style={{ margin: 0 }}>Provision {provider.display_name}</h3>
+            <div className="faint" style={{ fontSize: 12, maxWidth: 480 }}>
+              Sign in to your cloud console (with MFA), create an admin credential, and paste it below.
+              We use it once to create everything, then discard it — only the two scoped keys are kept.
+            </div>
+          </div>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="logout" size={14} /></button>
+        </div>
+        <div className="modal-body" style={{ maxHeight: "68vh", overflow: "auto" }}>
+          {err && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 10 }}>{err}</div>}
+          <label className="stack" style={{ marginBottom: 12 }}>
+            <span className="faint" style={{ fontSize: 11.5 }}>Display name</span>
+            <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, margin: "6px 0" }}>
+            Admin credential <span style={{ textTransform: "none" }}>· used once, never stored</span>
+          </div>
+          {fields.map((f) => (
+            <label key={f.name} className="stack" style={{ marginBottom: 12 }}>
+              <span className="faint" style={{ fontSize: 11.5 }}>{f.label}{f.required ? " *" : ""}</span>
+              <input className="input" type={f.secret ? "password" : "text"}
+                     placeholder={f.placeholder || ""} value={admin[f.name] || ""}
+                     onChange={(e) => setAdmin((a) => ({ ...a, [f.name]: e.target.value }))} />
+            </label>
+          ))}
+          <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
+            <Icon name="shield" size={12} /> We'll create a dedicated bucket, a write-only backup key,
+            and a read-only restore key scoped to just that bucket.
+          </div>
+        </div>
+        <div className="modal-foot">
+          <div style={{ flex: 1 }} />
+          <button className="btn sm" onClick={onClose}>Cancel</button>
+          <button className="btn primary sm" disabled={starting} onClick={() => void start()}>
+            {starting ? "Starting…" : "Provision storage"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface ProvStatus { provision_state: string; message: string | null; done: boolean; error: boolean; status: string; }
+
+function ProvisionProgress({ storageId, label, onClose, onDone }: {
+  storageId: string; label: string; onClose: () => void; onDone: () => void;
+}) {
+  const [prov, setProv] = useState<ProvStatus | null>(null);
+  useEffect(() => {
+    let stop = false;
+    async function poll() {
+      try {
+        const s = await api.get<ProvStatus>(`/storage/${storageId}/provision`);
+        if (stop) return;
+        setProv(s);
+        if (!s.done && !s.error) setTimeout(poll, 2000);
+      } catch { if (!stop) setTimeout(poll, 2500); }
+    }
+    void poll();
+    return () => { stop = true; };
+  }, [storageId]);
+
+  const done = !!prov?.done;
+  const error = !!prov?.error;
+  return (
+    <div className="modal-backdrop" onClick={done || error ? onClose : undefined}>
+      <div className="modal-panel" style={{ maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread">
+          <div>
+            <h3 style={{ margin: 0 }}>Setting up {label}</h3>
+            <div className="faint" style={{ fontSize: 12 }}>Provisioning in your cloud account…</div>
+          </div>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="logout" size={14} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="row" style={{ gap: 12, alignItems: "center", padding: "8px 0" }}>
+            <div style={{ width: 30, height: 30, borderRadius: "50%", display: "grid", placeItems: "center",
+                          flexShrink: 0, background: done ? "#2dbe60" : error ? "var(--danger-c,#f2545b)" : "#4f7cff", color: "#fff" }}>
+              {done ? <Icon name="check" size={16} /> : error ? <Icon name="alert" size={16} /> : <span className="spinner-dot" />}
+            </div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>
+                {done ? "Storage ready" : error ? "Provisioning failed" : (prov?.message || "Working…")}
+              </div>
+              {done && <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>{prov?.message}</div>}
+              {error && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginTop: 2 }}>{prov?.message}</div>}
+            </div>
+          </div>
+          {!done && !error && (
+            <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>
+              Creating the bucket and scoped keys can take up to a minute — cloud keys need a moment to activate.
+            </div>
+          )}
+        </div>
+        <div className="modal-foot">
+          <div style={{ flex: 1 }} />
+          {done ? <button className="btn primary sm" onClick={onDone}>Done</button>
+            : error ? <button className="btn sm" onClick={onDone}>Close</button>
+            : <button className="btn sm" onClick={onClose}>Run in background</button>}
         </div>
       </div>
     </div>

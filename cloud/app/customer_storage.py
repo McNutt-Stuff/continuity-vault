@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
 from typing import Optional, Tuple
 
 from . import credstore
@@ -48,6 +49,11 @@ PROVIDERS: dict[str, dict] = {
             {"name": "access_key_id", "label": "Read access key ID", "required": False},
             {"name": "secret_access_key", "label": "Read secret access key", "required": False, "secret": True},
         ],
+        "provision": [
+            {"name": "access_key_id", "label": "Admin access key ID", "required": True},
+            {"name": "secret_access_key", "label": "Admin secret access key", "required": True, "secret": True},
+            {"name": "region", "label": "Region", "placeholder": "us-east-1", "required": True},
+        ],
     },
     "azure": {
         "provider": "azure", "display_name": "Azure Blob Storage", "icon": "cloud", "color": "#0089D6",
@@ -64,6 +70,10 @@ PROVIDERS: dict[str, dict] = {
             {"name": "account_key", "label": "Read access key", "required": False, "secret": True},
             {"name": "connection_string", "label": "…or a read connection string", "required": False, "secret": True},
         ],
+        "provision": [
+            {"name": "account_name", "label": "Storage account name", "required": True},
+            {"name": "account_key", "label": "Admin account key", "required": True, "secret": True},
+        ],
     },
     "gcp": {
         "provider": "gcp", "display_name": "Google Cloud Storage", "icon": "cloud", "color": "#4285F4",
@@ -77,6 +87,11 @@ PROVIDERS: dict[str, dict] = {
         ],
         "read": [
             {"name": "service_account_json", "label": "Read service-account key (JSON)", "required": False, "secret": True},
+        ],
+        "provision": [
+            {"name": "service_account_json", "label": "Admin service-account key (JSON)", "required": True, "secret": True},
+            {"name": "project_id", "label": "Project ID", "required": True},
+            {"name": "location", "label": "Location", "placeholder": "US", "required": False},
         ],
     },
 }
@@ -135,6 +150,29 @@ def get_for_tenant(db, tenant_id: str, storage_id: str) -> Optional[CustomerStor
     if not cs or cs.tenant_id != tenant_id:
         return None
     return cs
+
+
+def apply_provision_result(db, cs: CustomerStorage, result: dict) -> None:
+    """Persist an auto-provisioning result onto the instance: the resolved routing
+    config + the two SCOPED credentials (write-only, read-only). Does not commit."""
+    cs.config = {**(cs.config or {}), **(result.get("config") or {})}
+    cs.write_credentials = enc_credentials(cs.tenant_id, result.get("write") or {})
+    cs.read_credentials = enc_credentials(cs.tenant_id, result.get("read") or {})
+
+
+def test_storage_retry(db, cs: CustomerStorage, attempts: int = 6,
+                       delay: float = 5.0) -> Tuple[bool, str]:
+    """Health test with retries — freshly minted cloud keys can take a few seconds
+    to become active (e.g. AWS IAM eventual consistency)."""
+    last = ""
+    for i in range(attempts):
+        ok, err = test_storage(db, cs)
+        if ok:
+            return True, ""
+        last = err
+        if i < attempts - 1:
+            time.sleep(delay)
+    return False, last
 
 
 def test_storage(db, cs: CustomerStorage) -> Tuple[bool, str]:

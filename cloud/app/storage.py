@@ -194,24 +194,28 @@ class AzureBlobDestination(ProtectionDestination):
 
     def __init__(self, container: str, connection_string: Optional[str] = None,
                  account_url: Optional[str] = None, account_name: Optional[str] = None,
-                 account_key: Optional[str] = None, access_tier: str = "Cool") -> None:
+                 account_key: Optional[str] = None, access_tier: str = "Cool",
+                 sas_token: Optional[str] = None) -> None:
         from azure.storage.blob import BlobServiceClient  # lazy import
 
         self.container = container
         self.access_tier = access_tier or "Cool"
+        url = account_url or (f"https://{account_name}.blob.core.windows.net"
+                              if account_name else None)
         if connection_string:
             self._svc = BlobServiceClient.from_connection_string(connection_string)
-        elif account_url and account_key:
-            self._svc = BlobServiceClient(account_url=account_url, credential=account_key)
-        elif account_name and account_key:
-            url = f"https://{account_name}.blob.core.windows.net"
+        elif sas_token and url:
+            # Scoped SAS (read-only or write-only) — the key never leaves Azure.
+            self._svc = BlobServiceClient(account_url=url, credential=sas_token.lstrip("?"))
+        elif url and account_key:
             self._svc = BlobServiceClient(account_url=url, credential=account_key)
         else:
-            raise ValueError("azure storage requires a connection string or account name + key")
+            raise ValueError("azure storage requires a connection string, a SAS token, "
+                             "or account name + key")
         try:
             self._svc.create_container(container)
         except Exception:
-            pass  # container already exists
+            pass  # container already exists / SAS lacks create (read-only) — fine
 
     def _blob(self, tenant_prefix: str, key: str):
         return self._svc.get_blob_client(self.container, f"{tenant_prefix}/{key}")
@@ -323,6 +327,7 @@ def destination_from_customer_storage(provider: str, config: dict,
             account_url=cfg.get("account_url") or None,
             account_name=cfg.get("account_name") or None,
             account_key=creds.get("account_key") or None,
+            sas_token=creds.get("sas_token") or None,
             access_tier=cfg.get("access_tier") or "Cool",
         )
     if provider == "gcp":
