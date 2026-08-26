@@ -46,13 +46,29 @@ interface Account {
   has_error?: boolean;
 }
 interface Vault { id: string; name: string; }
-interface Agent { id: string; name: string; hostname: string; collectors: string[]; enabled_collectors?: string[] }
+interface Agent {
+  id: string; name: string; hostname: string; collectors: string[];
+  enabled_collectors?: string[]; state?: string; last_heartbeat_at?: string | null;
+}
+// Agent-collected sources are Collections bound to a desktop agent (is_agent).
+interface AgentSource {
+  id: string; name: string; source_type: string; source_display: string;
+  is_agent: boolean; agent_id: string | null; agent_label: string | null;
+  last_backup_at: string | null; last_object_count: number; destinations: string[];
+}
+
+function agentOnline(a?: Agent): boolean {
+  if (!a || a.state === "quarantined" || !a.last_heartbeat_at) return false;
+  const iso = a.last_heartbeat_at.endsWith("Z") ? a.last_heartbeat_at : `${a.last_heartbeat_at}Z`;
+  return Date.now() - new Date(iso).getTime() < 90_000;
+}
 
 export default function Connectors() {
   const { me, stepUp } = useAuth();
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentSources, setAgentSources] = useState<AgentSource[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [setup, setSetup] = useState<CatalogItem | null>(null);
   const [toast, setToast] = useState("");
@@ -67,6 +83,8 @@ export default function Connectors() {
       setCatalog(await api.get<CatalogItem[]>("/connectors/catalog"));
       setAccounts(await api.get<Account[]>("/connectors/accounts"));
       setAgents(await api.get<Agent[]>("/agents").catch(() => [] as Agent[]));
+      const cols = await api.get<AgentSource[]>("/collections").catch(() => [] as AgentSource[]);
+      setAgentSources(cols.filter((c) => c.is_agent));
       const t = await api.get<{ vaults: Vault[] }>("/tenant");
       setVaults(t.vaults);
     } finally {
@@ -293,6 +311,54 @@ export default function Connectors() {
       await notify({ title: "Backup failed", message: (e as ApiError).message, tone: "danger" });
     }
     await load();
+  }
+
+  // --- Agent-collected sources (Collections bound to a desktop agent) --------
+  async function agentBackup(s: AgentSource) {
+    try {
+      await api.post(`/collections/${s.id}/sync`, {});
+      flash(`Collection queued on the agent for ${s.name}`);
+      await load();
+    } catch (e) {
+      const err = e as ApiError;
+      await notify({
+        title: "Couldn't collect", tone: "danger",
+        message: err.status === 409 ? "The desktop agent for this source is offline." : err.message,
+      });
+    }
+  }
+
+  async function renameAgentSource(s: AgentSource) {
+    const name = await promptDialog({
+      title: "Rename source", label: "Display name",
+      message: s.agent_label ? `Collected by ${s.agent_label}` : undefined,
+      defaultValue: s.name, confirmLabel: "Save",
+    });
+    const trimmed = name?.trim();
+    if (!trimmed || trimmed === s.name) return;
+    try {
+      await api.put(`/collections/${s.id}`, { name: trimmed });
+      flash("Source renamed");
+      await load();
+    } catch (e) {
+      await notify({ title: "Couldn't rename", message: (e as ApiError).message, tone: "danger" });
+    }
+  }
+
+  async function removeAgentSource(s: AgentSource) {
+    const ok = await confirmDialog({
+      title: `Remove ${s.name}?`,
+      message: "This deletes the source and its backup history from search. The agent stops collecting it. This cannot be undone.",
+      confirmLabel: "Remove", tone: "danger",
+    });
+    if (!ok) return;
+    try {
+      await api.del(`/collections/${s.id}`);
+      flash("Source removed");
+      await load();
+    } catch (e) {
+      await notify({ title: "Couldn't remove", message: (e as ApiError).message, tone: "danger" });
+    }
   }
 
   async function unlink(a: Account) {
@@ -522,12 +588,12 @@ export default function Connectors() {
 
       <Card>
         <div className="spread" style={{ marginBottom: 12 }}>
-          <h2>Linked accounts</h2>
+          <h2>Your sources</h2>
           <span className="faint" style={{ fontSize: 12 }}>
             Routing is managed in <a href="/mappings">Data Map</a>
           </span>
         </div>
-        {accounts.length === 0 && <div className="muted">No sources linked yet.</div>}
+        {accounts.length === 0 && agentSources.length === 0 && <div className="muted">No sources linked yet.</div>}
         {accounts.map((a) => {
           const c = catalog.find((x) => x.type === a.connector_type);
           const inactive = a.active === false;
@@ -597,6 +663,60 @@ export default function Connectors() {
             </div>
           );
         })}
+
+        {agentSources.length > 0 && (
+          <div style={{ marginTop: accounts.length ? 18 : 0 }}>
+            <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8,
+                  borderTop: accounts.length ? "1px solid var(--border-soft)" : undefined,
+                  paddingTop: accounts.length ? 14 : 0 }}>
+              <Icon name="user" size={14} />
+              <span style={{ fontWeight: 600, fontSize: 13 }}>Collected by a desktop agent</span>
+              <span className="faint" style={{ fontSize: 11.5 }}>Gathered locally on your device and pushed encrypted</span>
+            </div>
+            {agentSources.map((s) => {
+              const ag = agents.find((a) => a.id === s.agent_id);
+              const online = agentOnline(ag);
+              const collectorOff = !!ag && !(ag.enabled_collectors || []).includes(s.source_type);
+              const host = s.agent_label || ag?.hostname || ag?.name || "agent";
+              return (
+                <div key={s.id} className="result-row" style={collectorOff ? { borderLeft: "3px solid var(--warn)" } : undefined}>
+                  <div className="result-icon" style={{ background: brandForSource(s.source_type) ? "var(--inset)" : "var(--bg-elev-2)" }}>
+                    {brandForSource(s.source_type)
+                      ? <BrandIcon name={brandForSource(s.source_type)!} size={18} />
+                      : <Icon name="database" size={17} />}
+                  </div>
+                  <div className="flex1">
+                    <div className="row" style={{ gap: 6, alignItems: "baseline" }}>
+                      <span style={{ fontWeight: 600 }}>{s.name}</span>
+                      <span className="faint" style={{ fontSize: 12 }}>({host})</span>
+                    </div>
+                    <div className="faint" style={{ fontSize: 12 }}>
+                      {s.source_display} · last backup {timeAgo(s.last_backup_at)}
+                      {s.last_object_count
+                        ? ` · ${s.last_object_count.toLocaleString()} object${s.last_object_count === 1 ? "" : "s"} collected`
+                        : ""}
+                    </div>
+                    {collectorOff && (
+                      <div style={{ fontSize: 12, color: "var(--warn)", marginTop: 3, display: "flex", gap: 6, alignItems: "center" }}>
+                        <Icon name="alert" size={11} /> Collector turned off — enable it under <a href="/agents">Agents</a>
+                      </div>
+                    )}
+                  </div>
+                  <Pill tone="info">Desktop agent</Pill>
+                  <Pill tone={online ? "ok" : "warn"}>{online ? "Online" : "Offline"}</Pill>
+                  <button className="btn sm primary" onClick={() => agentBackup(s)}>Back up now</button>
+                  <Menu items={([
+                    { label: "Rename source", icon: "edit", onClick: () => renameAgentSource(s) },
+                    { label: "Agent settings", icon: "gear", onClick: () => window.location.assign("/agents") },
+                    ...(me?.features?.purge_enabled !== false
+                      ? ["divider", { label: "Remove source", icon: "trash", danger: true, onClick: () => removeAgentSource(s) }]
+                      : []),
+                  ] as MenuEntry[])} />
+                </div>
+              );
+            })}
+          </div>
+        )}
       </Card>
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
