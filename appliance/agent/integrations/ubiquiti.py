@@ -268,13 +268,6 @@ def _get(c: httpx.Client, base: str, path: str, headers: dict) -> list:
     return body.get("data", body) if isinstance(body, dict) else body
 
 
-def _post(c: httpx.Client, base: str, path: str, headers: dict, payload: dict) -> list:
-    r = c.post(f"{base}{path}", headers=headers, json=payload)
-    r.raise_for_status()
-    body = r.json()
-    return body.get("data", body) if isinstance(body, dict) else body
-
-
 def _device_type(name: str, oui: str, is_wired: bool) -> str:
     hay = f"{name} {oui}".lower()
     if any(k in hay for k in ("iphone", "ipad", "android", "pixel", "galaxy", "phone")):
@@ -345,7 +338,7 @@ def collect(config: dict, credentials: dict, log) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("ubiquiti: stat/sta failed: %s", exc)
 
-        # --- DPI per client (apps + traffic) — DPI stats are POST endpoints --
+        # --- Application traffic (DPI / Traffic Identification) ---------------
         apps_agg: dict[str, dict] = {}
         usage: list[dict] = []
 
@@ -355,30 +348,55 @@ def collect(config: dict, credentials: dict, log) -> dict:
             return (aname or cname or (f"App {aid}" if aid is not None else "Unknown"),
                     cname or "")
 
+        def _rows_from(raw) -> list:
+            """Coerce any endpoint response into a list of records."""
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, dict):
+                for k in ("data", "applications", "apps", "entries", "items", "by_app"):
+                    v = raw.get(k)
+                    if isinstance(v, list):
+                        return v
+            return []
+
+        def _shape(raw) -> str:
+            if isinstance(raw, list):
+                f = raw[0] if raw else None
+                keys = sorted(f.keys()) if isinstance(f, dict) else type(f).__name__
+                return f"list[{len(raw)}] first={keys}"
+            if isinstance(raw, dict):
+                return f"dict keys={sorted(raw.keys())}"
+            return type(raw).__name__
+
         def _fold_dpi(rows: list, per_client: bool) -> int:
-            """Fold a DPI response into apps_agg. Handles BOTH shapes seen across
-            firmwares: per-client nested ({mac, by_app:[...]}) and site-wide flat
-            ([{app, cat, rx_bytes, tx_bytes, clients}])."""
+            """Fold a DPI/traffic response into apps_agg. Tolerates the many field
+            names / shapes across classic + v2 UniFi APIs."""
             got = 0
             for entry in (rows or []):
                 if not isinstance(entry, dict):
                     continue
                 mac = (entry.get("mac") or "").lower() if per_client else ""
-                recs = entry.get("by_app")
+                recs = (entry.get("by_app") or entry.get("apps")
+                        or entry.get("applications"))
                 if recs is None:  # flat: the entry itself is an app record
-                    recs = [entry] if ("app" in entry or "application" in entry) else []
+                    recs = [entry]
                 for a in recs:
-                    aid = a.get("app", a.get("application"))
-                    cid = a.get("cat", a.get("category"))
-                    tx = int(a.get("tx_bytes", a.get("upload", 0)) or 0)
-                    rx = int(a.get("rx_bytes", a.get("download", 0)) or 0)
+                    if not isinstance(a, dict):
+                        continue
+                    aid = a.get("app", a.get("app_id", a.get("id")))
+                    cid = a.get("cat", a.get("category", a.get("cat_id")))
+                    tx = int(a.get("tx_bytes") or a.get("upload") or a.get("tx")
+                             or a.get("wan_tx_bytes") or 0)
+                    rx = int(a.get("rx_bytes") or a.get("download") or a.get("rx")
+                             or a.get("wan_rx_bytes") or 0)
                     if tx + rx <= 0:
                         continue
                     name, category = _name_for(aid, cid)
-                    inline = a.get("name") or a.get("app_name") or a.get("x_app_name")
+                    inline = (a.get("name") or a.get("app_name") or a.get("x_app_name")
+                              or a.get("application_name"))
                     if inline:
                         name = inline
-                    key = f"{cid}:{aid}"
+                    key = f"{cid}:{aid}" if aid is not None else f"name:{name}"
                     ag = apps_agg.setdefault(key, {
                         "app_key": key, "name": name, "category": category,
                         "tx_bytes": 0, "rx_bytes": 0, "total_bytes": 0,
@@ -386,6 +404,8 @@ def collect(config: dict, credentials: dict, log) -> dict:
                     ag["tx_bytes"] += tx
                     ag["rx_bytes"] += rx
                     ag["total_bytes"] += tx + rx
+                    if name and ag["name"].startswith("App "):
+                        ag["name"] = name
                     if mac:
                         ag["clients"].add(mac)
                         usage.append({"client_key": mac, "app_key": key,
@@ -398,30 +418,43 @@ def collect(config: dict, credentials: dict, log) -> dict:
                     got += 1
             return got
 
-        # Application traffic lives under different endpoints/shapes per firmware;
-        # try them in order and use the first that yields data (log each result).
+        # UDM/UniFi OS serve app traffic from the newer v2 API; classic stat/*dpi
+        # endpoints are often empty. Try both, use the first with data, and LOG
+        # each response's shape so the exact schema is visible in the logs.
         macs = list(by_mac.keys())
-        dpi_attempts = [
+        candidates = [
+            ("GET",  f"/proxy/network/v2/api/site/{site}/traffic/apps", None, False),
+            ("GET",  f"/proxy/network/v2/api/site/{site}/traffic/applications", None, False),
+            ("GET",  f"/proxy/network/v2/api/site/{site}/insights/applications", None, False),
+            ("GET",  f"/proxy/network/v2/api/site/{site}/dpi/apps", None, False),
             ("POST", f"/proxy/network/api/s/{site}/stat/sitedpi", {"type": "by_app"}, False),
             ("POST", f"/proxy/network/api/s/{site}/stat/dpi", {"type": "by_app"}, False),
+            ("GET",  f"/proxy/network/api/s/{site}/stat/dpi", None, False),
+            ("GET",  f"/proxy/network/api/s/{site}/stat/current-dpi", None, False),
             ("POST", f"/proxy/network/api/s/{site}/stat/stadpi",
-             {"type": "by_app", "macs": macs[:200]}, True),
+             {"type": "by_app", "macs": macs[:500]}, True),
         ]
-        for method, path, payload, per_client in dpi_attempts:
+        for method, path, payload, per_client in candidates:
             if apps_agg:
                 break
+            short = path.split("/proxy/network")[-1]
             try:
-                rows = (_post(c, base, path, headers, payload) if method == "POST"
-                        else _get(c, base, path, headers))
+                r = (c.post(f"{base}{path}", headers=headers, json=payload) if method == "POST"
+                     else c.get(f"{base}{path}", headers=headers))
+                if r.status_code >= 300:
+                    log.info("ubiquiti: %s → HTTP %s", short, r.status_code)
+                    continue
+                raw = r.json()
+                data = raw.get("data", raw) if isinstance(raw, dict) else raw
+                rows = _rows_from(data) or _rows_from(raw)
                 got = _fold_dpi(rows, per_client)
-                log.info("ubiquiti: %s → %d row(s) → %d app record(s)",
-                         path.rsplit("/", 1)[-1], len(rows or []), got)
+                log.info("ubiquiti: %s → %s → %d app record(s)", short, _shape(data), got)
             except Exception as exc:  # noqa: BLE001
-                log.warning("ubiquiti: %s failed: %s", path, exc)
+                log.warning("ubiquiti: %s failed: %s", short, exc)
 
         if not apps_agg:
-            log.warning("ubiquiti: no DPI app data returned by any endpoint — ensure "
-                        "Traffic Identification is on (it appears enabled in your UI)")
+            log.warning("ubiquiti: no application data from any endpoint (see the shape "
+                        "logs above to identify the right one)")
 
         apps = []
         for ag in apps_agg.values():
