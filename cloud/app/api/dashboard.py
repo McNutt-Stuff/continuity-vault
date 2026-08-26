@@ -74,11 +74,16 @@ def _source_meta(source_type: str) -> dict:
             "icon": _ICON_MAP.get(spec.icon, spec.icon), "color": spec.color}
 
 
-def _storage_meta(dest: str, stores: dict) -> dict:
+def _storage_meta(dest: str, stores: dict, byos: dict | None = None) -> dict:
     if dest in ("cv-cloud",):
         return {"id": dest, "label": "Arkive Cloud", "kind": "cloud", "icon": "cloud"}
     if dest in ("customer-s3",):
         return {"id": dest, "label": "Your S3 bucket", "kind": "cloud", "icon": "cloud"}
+    if dest.startswith("byos:"):
+        cs = (byos or {}).get(dest.split(":", 1)[1])
+        return {"id": dest, "label": cs.name if cs else "Your cloud storage",
+                "kind": "cloud", "icon": "cloud",
+                "provider": cs.provider if cs else None}
     if dest.startswith("store:"):
         s = stores.get(dest.split(":", 1)[1])
         return {"id": dest, "label": s.name if s else "Appliance storage",
@@ -184,6 +189,9 @@ def overview(scope: str = "me",
     # --- Vaults + storage destinations ---------------------------------------
     stores = {s.id: s for s in db.query(ApplianceStorage)
               .filter(ApplianceStorage.tenant_id == tenant.id).all()}
+    from ..models import CustomerStorage
+    byos = {cs.id: cs for cs in db.query(CustomerStorage)
+            .filter(CustomerStorage.tenant_id == tenant.id).all()}
     dest_ids: list[str] = []
     for c in collections:
         for d in (c.destinations or ["cv-cloud"]):
@@ -191,7 +199,7 @@ def overview(scope: str = "me",
                 dest_ids.append(d)
     if not dest_ids:
         dest_ids = ["cv-cloud"]
-    destinations = [_storage_meta(d, stores) for d in dest_ids]
+    destinations = [_storage_meta(d, stores, byos) for d in dest_ids]
 
     # --- Data stored at each location + how far back the history reaches ------
     # Bytes actually written (cumulative across recovery points), grouped into
@@ -203,7 +211,7 @@ def overview(scope: str = "me",
     for r in receipts:
         b = int(r.total_bytes or 0)
         dest = r.destination or ""
-        if dest == "customer-s3":
+        if dest == "customer-s3" or dest.startswith("byos:"):
             usage["customer"] += b
         elif dest == "cv-cloud":
             usage["cloud"] += b

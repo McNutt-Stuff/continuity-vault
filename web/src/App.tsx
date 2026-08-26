@@ -14,6 +14,7 @@ import Integrations from "./pages/Integrations";
 import Connectors from "./pages/Connectors";
 import Mappings from "./pages/Mappings";
 import Appliances from "./pages/Appliances";
+import CloudStorage from "./pages/CloudStorage";
 import Snapshots from "./pages/Snapshots";
 import Restore from "./pages/Restore";
 import Onboarding from "./pages/Onboarding";
@@ -33,6 +34,7 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/activity", label: "Activity", icon: "activity" },
   { to: "/snapshots", label: "Recovery Points", icon: "clock" },
   { to: "/appliances", label: "Appliances", icon: "server" },
+  { to: "/cloud-storage", label: "Cloud Storage", icon: "cloud" },
   { to: "/integrations", label: "Integrations", icon: "puzzle" },
   { to: "/agents", label: "Desktop Agents", icon: "user" },
   { to: "/restore", label: "Restore", icon: "restore" },
@@ -73,6 +75,7 @@ export default function App() {
             <Route path="/activity" element={<ActivityPage />} />
             <Route path="/snapshots" element={<Snapshots />} />
             <Route path="/appliances" element={<Appliances />} />
+            {me.can_admin && <Route path="/cloud-storage" element={<CloudStorage />} />}
             {me.can_admin && <Route path="/integrations" element={<Integrations />} />}
             <Route path="/agents" element={<Agents />} />
             <Route path="/restore" element={<Restore />} />
@@ -100,6 +103,7 @@ function Sidebar() {
   }, []);
   const nav = NAV.filter((n) => {
     if (n.to === "/audit" && !me?.can_admin) return false;  // org-level, admin only
+    if (n.to === "/cloud-storage" && !me?.can_admin) return false;  // protection setting, admin only
     if (n.to === "/integrations" && !me?.can_admin) return false;  // org-level, admin only
     if (n.to === "/insights" && me?.features?.insights_enabled === false) return false;
     const req = NAV_REQUIRES[n.to];

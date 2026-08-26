@@ -31,6 +31,7 @@ from ..models import (
     Collection,
     ConfigObject,
     ConnectorAccount,
+    CustomerStorage,
     DesktopAgent,
     IntegrationConfig,
     IntegrationInstance,
@@ -71,6 +72,7 @@ _PULL_ORDER = [
     ("appliances", Appliance),
     ("appliance_storages", ApplianceStorage),
     ("connector_accounts", ConnectorAccount),
+    ("customer_storages", CustomerStorage),
     ("collections", Collection),
 ]
 

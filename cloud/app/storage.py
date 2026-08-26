@@ -245,6 +245,105 @@ class AzureBlobDestination(ProtectionDestination):
         )
 
 
+class GCSDestination(ProtectionDestination):
+    """Google Cloud Storage destination. Objects are written already-encrypted,
+    mirroring the S3/Azure destinations. Auth via a service-account key JSON."""
+
+    name = "gcs"
+
+    def __init__(self, bucket: str, project: Optional[str] = None,
+                 credentials_json: Optional[dict] = None, location: str = "US") -> None:
+        from google.cloud import storage as gcs  # lazy import
+        if credentials_json:
+            from google.oauth2 import service_account
+            creds = service_account.Credentials.from_service_account_info(credentials_json)
+            self._client = gcs.Client(project=project or credentials_json.get("project_id"),
+                                      credentials=creds)
+        else:
+            self._client = gcs.Client(project=project)
+        self.bucket_name = bucket
+        b = self._client.bucket(bucket)
+        try:
+            if not b.exists():
+                b = self._client.create_bucket(bucket, location=location or "US")
+        except Exception:
+            pass  # bucket may exist but the caller lacks buckets.get — writes still work
+        self._bucket = b
+
+    def put_object(self, tenant_prefix, key, data, immutable=True) -> str:
+        blob = self._bucket.blob(f"{tenant_prefix}/{key}")
+        blob.upload_from_string(data)
+        return f"gs://{self.bucket_name}/{tenant_prefix}/{key}"
+
+    def get_object(self, tenant_prefix, key) -> bytes:
+        return self._bucket.blob(f"{tenant_prefix}/{key}").download_as_bytes()
+
+    def delete_object(self, tenant_prefix, key) -> None:
+        try:
+            self._bucket.blob(f"{tenant_prefix}/{key}").delete()
+        except Exception:
+            pass
+
+    def put_manifest(self, tenant_prefix, snapshot_id, manifest) -> str:
+        return self.put_object(
+            tenant_prefix, f"manifests/{snapshot_id}.json",
+            json.dumps(manifest).encode(), immutable=True,
+        )
+
+
+def destination_from_customer_storage(provider: str, config: dict,
+                                      credentials: dict) -> Optional[ProtectionDestination]:
+    """Build a live destination for a customer's own storage (bring-your-own).
+    ``config`` = non-secret routing (bucket/container/region/…); ``credentials`` =
+    the decrypted access keys (write OR read set, depending on the operation)."""
+    provider = (provider or "").lower()
+    cfg = config or {}
+    creds = credentials or {}
+    if provider == "aws":
+        bucket = (cfg.get("bucket") or "").strip().rstrip("/")
+        if not bucket:
+            return None
+        if "arn" in bucket.lower() and ":" in bucket:
+            bucket = bucket.rsplit(":", 1)[-1]
+        return CustomerS3Destination(
+            bucket=bucket,
+            region=cfg.get("region") or "us-east-1",
+            endpoint_url=cfg.get("endpoint_url") or None,
+            access_key=creds.get("access_key_id") or None,
+            secret_key=creds.get("secret_access_key") or None,
+            storage_class=cfg.get("storage_class") or "INTELLIGENT_TIERING",
+        )
+    if provider == "azure":
+        container = (cfg.get("container") or "").strip()
+        if not container:
+            return None
+        return AzureBlobDestination(
+            container=container,
+            connection_string=creds.get("connection_string") or None,
+            account_url=cfg.get("account_url") or None,
+            account_name=cfg.get("account_name") or None,
+            account_key=creds.get("account_key") or None,
+            access_tier=cfg.get("access_tier") or "Cool",
+        )
+    if provider == "gcp":
+        bucket = (cfg.get("bucket") or "").strip().rstrip("/")
+        if not bucket:
+            return None
+        sa = creds.get("service_account_json")
+        if isinstance(sa, str) and sa.strip():
+            try:
+                sa = json.loads(sa)
+            except Exception:
+                sa = None
+        return GCSDestination(
+            bucket=bucket,
+            project=cfg.get("project_id") or None,
+            credentials_json=sa if isinstance(sa, dict) else None,
+            location=cfg.get("location") or "US",
+        )
+    return None
+
+
 def destination_from_service(kind: str, cfg: dict) -> Optional[ProtectionDestination]:
     """Build a storage destination from a ServiceObject's merged config (linked
     ConfigObject credentials + non-secret settings). Returns None if the kind is

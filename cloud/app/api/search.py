@@ -111,8 +111,8 @@ def decrypt_recovered_units(db: Session, receipt: SnapshotReceipt, object_id: st
 
 
 def _location_label(destination: str, store_labels: dict[str, str] | None = None) -> str:
-    if destination.startswith("store:") and store_labels:
-        return store_labels.get(destination, "Appliance storage")
+    if (destination.startswith("store:") or destination.startswith("byos:")) and store_labels:
+        return store_labels.get(destination) or store_labels.get(destination, "Cloud storage")
     base = destination.split(":", 1)[0]
     return {
         "cv-cloud": "Arkive Cloud",
@@ -120,6 +120,7 @@ def _location_label(destination: str, store_labels: dict[str, str] | None = None
         "local-fs": "Local store",
         "appliance": "Appliance",
         "store": "Appliance storage",
+        "byos": "Your cloud storage",
     }.get(base, destination)
 
 
@@ -156,7 +157,8 @@ def _clean_meta(meta) -> dict:
 
 
 def _store_label_map(db: Session, tenant_id: str) -> dict[str, str]:
-    """Map ``store:<id>`` → "<appliance> · <storage>" for the tenant."""
+    """Map ``store:<id>`` → "<appliance> · <storage>" and ``byos:<id>`` → the
+    customer storage name, for the tenant."""
     out: dict[str, str] = {}
     appliances = {a.id: a for a in db.query(Appliance)
                   .filter(Appliance.tenant_id == tenant_id).all()}
@@ -164,6 +166,10 @@ def _store_label_map(db: Session, tenant_id: str) -> dict[str, str]:
               .filter(ApplianceStorage.tenant_id == tenant_id).all()):
         a = appliances.get(s.appliance_id)
         out[f"store:{s.id}"] = f"{a.name} · {s.name}" if a else s.name
+    from ..models import CustomerStorage
+    for cs in (db.query(CustomerStorage)
+               .filter(CustomerStorage.tenant_id == tenant_id).all()):
+        out[f"byos:{cs.id}"] = cs.name
     return out
 
 
@@ -595,13 +601,27 @@ def retrieve(body: RetrieveRequest,
                            "local approval may be required.",
                 "command_id": cmd.id}
 
-    # Cloud / customer-S3 / local: read the stored envelope and decrypt within the
-    # authorized key boundary (passkey step-up already required) so the caller can
-    # download the original content.
+    # Cloud / customer-S3 / customer-owned (byos) / local: read the stored
+    # envelope and decrypt within the authorized key boundary (passkey step-up
+    # already required) so the caller can download the original content.
     try:
-        dest = build_destination(body.destination if base in ("cv-cloud", "customer-s3") else "cv-cloud")
-        prefix = tenant.storage_prefix or tenant.id
+        if base == "byos":
+            # Customer's own storage — reads use the passkey-gated READ credential.
+            from .. import customer_storage as _cs
+            sid = _cs.storage_id_from_dest(body.destination)
+            cstore = _cs.get_for_tenant(db, tenant.id, sid) if sid else None
+            if cstore is None:
+                raise HTTPException(404, "customer storage not found")
+            dest = _cs.build_destination(db, cstore, "read")
+            if dest is None:
+                raise HTTPException(400, "no read credential configured for this storage")
+            prefix = _cs.object_prefix(cstore)
+        else:
+            dest = build_destination(body.destination if base in ("cv-cloud", "customer-s3") else "cv-cloud")
+            prefix = tenant.storage_prefix or tenant.id
         data = dest.get_object(prefix, f"{body.snapshot_id}/{body.object_id}")
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(404, f"object not found at {label}: {exc}")
 

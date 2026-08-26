@@ -27,6 +27,7 @@ from .api import (
     search,
     site,
     snapshots,
+    storage_instances,
     tenant,
     updates,
 )
@@ -68,6 +69,7 @@ app.include_router(connectors.router, prefix=API)
 app.include_router(collections.router, prefix=API)
 app.include_router(search.router, prefix=API)
 app.include_router(snapshots.router, prefix=API)
+app.include_router(storage_instances.router, prefix=API)
 app.include_router(restore.router, prefix=API)
 app.include_router(appliances.fleet_router, prefix=API)
 app.include_router(appliances.agent_router, prefix=API)

@@ -791,6 +791,42 @@ class ServiceObject(Base):
         return caps or list(STORAGE_CAPABILITIES)
 
 
+class CustomerStorage(Base):
+    """A customer's own cloud bucket/container used as a backup destination
+    (bring-your-own-storage), the third protection tier alongside Arkive Cloud
+    and on-prem appliances. Data is written already-encrypted (the same
+    quantum-safe envelope as every other destination) — the provider only ever
+    holds ciphertext.
+
+    Credentials are split by capability: the WRITE credential lives server-side
+    (encrypted at rest) so automated backups keep flowing unattended; the READ
+    credential is only decrypted/used to serve a restore, which requires a
+    passkey-verified session. Provider auto-provisioning (Scenario 2) drives the
+    ``provision_*`` fields; a customer supplying existing details (Scenario 1)
+    lands straight in ``provision_state='done'``."""
+
+    __tablename__ = "customer_storages"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    owner_user_id = Column(String, nullable=True, index=True)
+    name = Column(String, nullable=False)                 # user-facing label
+    provider = Column(String, nullable=False)             # aws | azure | gcp
+    config = Column(JSON, default=dict)                   # non-secret routing (bucket/region/prefix…)
+    write_credentials = Column(Text, nullable=True)       # credstore-encrypted — automated backups
+    read_credentials = Column(Text, nullable=True)        # credstore-encrypted — passkey-gated restores
+    provision_mode = Column(String, default="existing")   # existing | provisioned
+    provision_state = Column(String, default="done")      # done | starting | awaiting_otp | provisioning | error
+    provision_message = Column(Text, nullable=True)
+    status = Column(String, default="unknown")            # unknown | healthy | degraded | error
+    used_bytes = Column(BigInteger, default=0)
+    last_test_at = Column(DateTime, nullable=True)
+    last_test_ok = Column(Boolean, default=False)
+    last_test_error = Column(Text, nullable=True)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
 class UserInsights(Base):
     """Precomputed digital-footprint insights for one user, refreshed by a daily
     background job so the Insights page loads instantly. Holds the footprint

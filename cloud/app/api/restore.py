@@ -137,8 +137,18 @@ def execute(request_id: str,
 
     root_key = keybroker.release_vault_root_key(req.plan["vaultId"])
     hierarchy = EnvelopeKeyHierarchy(root_key)
-    dest = build_destination(receipt.destination)
-    prefix = _tenant_prefix(db, tenant.id)
+    if (receipt.destination or "").startswith("byos:"):
+        # Customer's own storage — reads use the passkey-gated read credential.
+        from .. import customer_storage as _cs
+        sid = _cs.storage_id_from_dest(receipt.destination)
+        cstore = _cs.get_for_tenant(db, tenant.id, sid) if sid else None
+        dest = _cs.build_destination(db, cstore, "read") if cstore else None
+        if dest is None:
+            raise HTTPException(400, "customer storage read credential is not configured")
+        prefix = _cs.object_prefix(cstore)
+    else:
+        dest = build_destination(receipt.destination)
+        prefix = _tenant_prefix(db, tenant.id)
     manifest = json.loads(dest.get_object(prefix, f"manifests/{req.snapshot_id}.json"))
     snapshot_key = hierarchy.snapshot_key(req.plan["vaultId"],
                                           receipt.collection_id, req.snapshot_id)

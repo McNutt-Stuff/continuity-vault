@@ -691,6 +691,24 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                                     json.dumps(obj).encode())
                 dest.put_manifest(tenant_prefix, snapshot_id, manifest)
                 recoverable = True
+            elif kind.startswith("byos:"):
+                # Customer's own cloud storage. The already-encrypted envelopes are
+                # written with the WRITE credential (automated backups run without a
+                # passkey); reads later require the passkey-gated read credential.
+                from .. import customer_storage as _cs
+                sid = _cs.storage_id_from_dest(kind)
+                cstore = _cs.get_for_tenant(db, collection.tenant_id, sid) if sid else None
+                if cstore is None or not cstore.enabled:
+                    raise ValueError(f"customer storage '{kind}' is unavailable")
+                dest = _cs.build_destination(db, cstore, "write")
+                if dest is None:
+                    raise ValueError(f"customer storage '{kind}' is not fully configured")
+                bp = _cs.object_prefix(cstore)
+                for obj in storage_units:
+                    dest.put_object(bp, f"{snapshot_id}/{obj['objectId']}",
+                                    json.dumps(obj).encode())
+                dest.put_manifest(bp, snapshot_id, manifest)
+                recoverable = True
             elif kind == "appliance" or kind.startswith("appliance:") or kind.startswith("store:"):
                 # Hand the (already-encrypted) objects to the appliance via a
                 # signed, sequenced OPEN_INGEST_WINDOW command. The appliance

@@ -66,6 +66,10 @@ SOURCE_ICONS: dict[str, dict] = {
     "imessage":   {"file": "IMessage logo.svg", "search": "iMessage logo"},
     # Integrations (network intelligence) — matched by integration_type.
     "ubiquiti":   {"file": "Ubiquiti Logo 2023.svg", "search": "Ubiquiti logo"},
+    # Bring-your-own cloud storage providers — matched by CustomerStorage.provider.
+    "aws":        {"file": "Amazon Web Services Logo.svg", "search": "Amazon Web Services logo"},
+    "azure":      {"file": "Microsoft Azure.svg", "search": "Microsoft Azure logo"},
+    "gcp":        {"file": "Google Cloud logo.svg", "search": "Google Cloud Platform logo"},
 }
 
 

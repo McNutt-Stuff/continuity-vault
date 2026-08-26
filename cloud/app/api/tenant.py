@@ -130,6 +130,20 @@ def storage_targets(principal: security.Principal = Depends(security.get_princip
             "label": f"Customer S3 — {settings.s3_bucket}",
             "detail": settings.s3_region or "customer-owned bucket",
         })
+    # Bring-your-own cloud storage the customer configured (AWS/Azure/GCP). These
+    # are explicitly set up as backup destinations, so they're always selectable
+    # (their own health/usage is shown on the Cloud Storage page).
+    from ..models import CustomerStorage
+    _prov = {"aws": "Amazon S3", "azure": "Azure Blob", "gcp": "Google Cloud Storage"}
+    for cstore in (db.query(CustomerStorage)
+                   .filter(CustomerStorage.tenant_id == tenant.id,
+                           CustomerStorage.enabled == True).all()):  # noqa: E712
+        targets.append({
+            "id": f"byos:{cstore.id}", "kind": "cloud",
+            "label": cstore.name,
+            "detail": f"{_prov.get(cstore.provider, cstore.provider)} · your storage",
+            "provider": cstore.provider, "health": cstore.status or "unknown",
+        })
     return targets
 
 

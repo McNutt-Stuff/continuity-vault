@@ -70,6 +70,10 @@ def start_scheduler() -> None:
                 _run_daily_insights()
             except Exception:  # noqa: BLE001
                 logger.exception("insight generation failed")
+            try:
+                _test_customer_storages()
+            except Exception:  # noqa: BLE001
+                logger.exception("customer storage health test failed")
             time.sleep(tick)
 
     _thread = threading.Thread(target=loop, name="cv-sync-scheduler", daemon=True)
@@ -79,6 +83,34 @@ def start_scheduler() -> None:
                 settings.node_name or settings.domain,
                 settings.node_role or "control-plane",
                 "federated" if settings.node_sync_scope else "single")
+
+
+_last_storage_test: datetime | None = None
+
+
+def _test_customer_storages() -> None:
+    """Periodically round-trip a probe against each enabled customer storage so
+    the Cloud Storage page reflects fresh health (at most every 30 minutes)."""
+    global _last_storage_test
+    now = datetime.utcnow()
+    if _last_storage_test and (now - _last_storage_test) < timedelta(minutes=30):
+        return
+    _last_storage_test = now
+    from .. import customer_storage as cs_mod
+    from ..models import CustomerStorage
+    with SessionLocal() as db:
+        for cs in (db.query(CustomerStorage)
+                   .filter(CustomerStorage.enabled == True).all()):  # noqa: E712
+            try:
+                ok, err = cs_mod.test_storage(db, cs)
+                cs.last_test_at = now
+                cs.last_test_ok = ok
+                cs.last_test_error = err or None
+                cs.status = "healthy" if ok else "error"
+                db.commit()
+            except Exception:  # noqa: BLE001
+                logger.exception("storage health test failed for %s", cs.id)
+                db.rollback()
 
 
 def _purge_cloud_unsubscribed() -> None:

@@ -34,6 +34,7 @@ from ..models import (
     Collection,
     ConfigObject,
     ConnectorAccount,
+    CustomerStorage,
     DesktopAgent,
     IntegrationConfig,
     IntegrationInstance,
@@ -173,6 +174,8 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
     # can serve its appliances' integration pull/report locally.
     integration_instances = (db.query(IntegrationInstance)
                               .filter(IntegrationInstance.tenant_id.in_(tids)).all())
+    customer_storages = (db.query(CustomerStorage)
+                         .filter(CustomerStorage.tenant_id.in_(tids)).all()) if tids else []
     return {
         "node_id": node.id,
         "assigned": len(tids),
@@ -189,6 +192,7 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "source_configs": [_ser(sc) for sc in db.query(SourceConfig).all()],
         "integration_configs": [_ser(ic) for ic in db.query(IntegrationConfig).all()],
         "integration_instances": [_ser(i) for i in integration_instances],
+        "customer_storages": [_ser(s) for s in customer_storages],
         "nodes": [_ser(n) for n in db.query(Node).all()],
         "pricing": _ser(pricing) if pricing else None,
         "pending_jobs": [_ser(j) for j in pending_jobs],
