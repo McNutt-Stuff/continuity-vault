@@ -238,20 +238,26 @@ def _load_dpi_names(c: httpx.Client, base: str, site: str, log) -> tuple[dict, d
     merged over the static fallback."""
     apps = dict(DPI_APPS)
     cats = dict(DPI_CATS)
+    loaded = 0
     for path in (f"/proxy/network/api/s/{site}/stat/dpiapp",
-                 f"/proxy/network/api/s/{site}/rest/dpiapp"):
+                 f"/proxy/network/api/s/{site}/rest/dpiapp",
+                 f"/proxy/network/v2/api/site/{site}/dpi/apps"):
         try:
             r = c.get(f"{base}{path}")
             if r.status_code < 300:
-                for row in (r.json().get("data") or []):
-                    aid, name = row.get("app"), row.get("name") or row.get("app_name")
+                body = r.json()
+                for row in (body.get("data") if isinstance(body, dict) else body) or []:
+                    aid = row.get("app", row.get("id"))
+                    name = row.get("name") or row.get("app_name")
                     if aid is not None and name:
                         apps[int(aid)] = name
-                    cid, cname = row.get("cat"), row.get("cat_name")
+                        loaded += 1
+                    cid, cname = row.get("cat"), row.get("cat_name") or row.get("category")
                     if cid is not None and cname:
                         cats[int(cid)] = cname
         except Exception as exc:  # noqa: BLE001
             log.debug("ubiquiti: dpi name load via %s failed: %s", path, exc)
+    log.info("ubiquiti: resolved %d DPI app name(s) from the controller", loaded)
     return apps, cats
 
 
@@ -349,53 +355,30 @@ def collect(config: dict, credentials: dict, log) -> dict:
             return (aname or cname or (f"App {aid}" if aid is not None else "Unknown"),
                     cname or "")
 
-        def _add(app_key: str, name: str, category: str, tx: int, rx: int, mac: str) -> None:
-            total = tx + rx
-            if total <= 0:
-                return
-            ag = apps_agg.setdefault(app_key, {
-                "app_key": app_key, "name": name, "category": category,
-                "tx_bytes": 0, "rx_bytes": 0, "total_bytes": 0,
-                "clients": set(), "client_count": 0, "last_seen": _now_iso()})
-            ag["tx_bytes"] += tx
-            ag["rx_bytes"] += rx
-            ag["total_bytes"] += total
-            if mac:
-                ag["clients"].add(mac)
-                usage.append({"client_key": mac, "app_key": app_key,
-                              "tx_bytes": tx, "rx_bytes": rx, "total_bytes": total,
-                              "last_seen": _now_iso()})
-
-        # Per-client DPI (best: gives usage edges). UniFi wants a POST body.
-        dpi: list = []
-        try:
-            dpi = _post(c, base, f"/proxy/network/api/s/{site}/stat/stadpi",
-                        headers, {"type": "by_app"})
-        except Exception as exc:  # noqa: BLE001
-            log.warning("ubiquiti: stat/stadpi failed: %s", exc)
-        for entry in dpi:
-            mac = (entry.get("mac") or "").lower()
-            for a in entry.get("by_app", []):
-                name, category = _name_for(a.get("app"), a.get("cat"))
-                _add(f"{a.get('cat')}:{a.get('app')}", name, category,
-                     int(a.get("tx_bytes", 0) or 0), int(a.get("rx_bytes", 0) or 0), mac)
-
-        # Fall back to site-wide DPI (no per-client breakdown) if per-client empty.
-        if not apps_agg:
-            try:
-                site_dpi = _post(c, base, f"/proxy/network/api/s/{site}/stat/sitedpi",
-                                 headers, {"type": "by_app"})
-            except Exception as exc:  # noqa: BLE001
-                log.warning("ubiquiti: stat/sitedpi failed: %s", exc)
-                site_dpi = []
-            for entry in site_dpi:
-                for a in entry.get("by_app", []):
-                    name, category = _name_for(a.get("app"), a.get("cat"))
-                    key = f"{a.get('cat')}:{a.get('app')}"
-                    tx = int(a.get("tx_bytes", 0) or 0)
-                    rx = int(a.get("rx_bytes", 0) or 0)
+        def _fold_dpi(rows: list, per_client: bool) -> int:
+            """Fold a DPI response into apps_agg. Handles BOTH shapes seen across
+            firmwares: per-client nested ({mac, by_app:[...]}) and site-wide flat
+            ([{app, cat, rx_bytes, tx_bytes, clients}])."""
+            got = 0
+            for entry in (rows or []):
+                if not isinstance(entry, dict):
+                    continue
+                mac = (entry.get("mac") or "").lower() if per_client else ""
+                recs = entry.get("by_app")
+                if recs is None:  # flat: the entry itself is an app record
+                    recs = [entry] if ("app" in entry or "application" in entry) else []
+                for a in recs:
+                    aid = a.get("app", a.get("application"))
+                    cid = a.get("cat", a.get("category"))
+                    tx = int(a.get("tx_bytes", a.get("upload", 0)) or 0)
+                    rx = int(a.get("rx_bytes", a.get("download", 0)) or 0)
                     if tx + rx <= 0:
                         continue
+                    name, category = _name_for(aid, cid)
+                    inline = a.get("name") or a.get("app_name") or a.get("x_app_name")
+                    if inline:
+                        name = inline
+                    key = f"{cid}:{aid}"
                     ag = apps_agg.setdefault(key, {
                         "app_key": key, "name": name, "category": category,
                         "tx_bytes": 0, "rx_bytes": 0, "total_bytes": 0,
@@ -403,13 +386,42 @@ def collect(config: dict, credentials: dict, log) -> dict:
                     ag["tx_bytes"] += tx
                     ag["rx_bytes"] += rx
                     ag["total_bytes"] += tx + rx
-                    n = a.get("clients") or a.get("num_clients") or 0
-                    if isinstance(n, int):
-                        ag["client_count"] = max(ag["client_count"], n)
+                    if mac:
+                        ag["clients"].add(mac)
+                        usage.append({"client_key": mac, "app_key": key,
+                                      "tx_bytes": tx, "rx_bytes": rx, "total_bytes": tx + rx,
+                                      "last_seen": _now_iso()})
+                    else:
+                        cc = a.get("clients", a.get("num_clients"))
+                        if isinstance(cc, int):
+                            ag["client_count"] = max(ag["client_count"], cc)
+                    got += 1
+            return got
+
+        # Application traffic lives under different endpoints/shapes per firmware;
+        # try them in order and use the first that yields data (log each result).
+        macs = list(by_mac.keys())
+        dpi_attempts = [
+            ("POST", f"/proxy/network/api/s/{site}/stat/sitedpi", {"type": "by_app"}, False),
+            ("POST", f"/proxy/network/api/s/{site}/stat/dpi", {"type": "by_app"}, False),
+            ("POST", f"/proxy/network/api/s/{site}/stat/stadpi",
+             {"type": "by_app", "macs": macs[:200]}, True),
+        ]
+        for method, path, payload, per_client in dpi_attempts:
+            if apps_agg:
+                break
+            try:
+                rows = (_post(c, base, path, headers, payload) if method == "POST"
+                        else _get(c, base, path, headers))
+                got = _fold_dpi(rows, per_client)
+                log.info("ubiquiti: %s → %d row(s) → %d app record(s)",
+                         path.rsplit("/", 1)[-1], len(rows or []), got)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ubiquiti: %s failed: %s", path, exc)
 
         if not apps_agg:
-            log.warning("ubiquiti: no DPI app data — enable Deep Packet Inspection "
-                        "(Settings → Traffic Identification) on the controller")
+            log.warning("ubiquiti: no DPI app data returned by any endpoint — ensure "
+                        "Traffic Identification is on (it appears enabled in your UI)")
 
         apps = []
         for ag in apps_agg.values():
