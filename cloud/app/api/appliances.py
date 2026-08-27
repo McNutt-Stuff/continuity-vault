@@ -192,7 +192,8 @@ def get_appliance(appliance_id: str,
                               ApplianceAssignment.user_id == principal.user_id).first())
         if not assignment:
             raise HTTPException(404, "appliance not found")
-    commands = (db.query(ApplianceCommand)
+    commands = (db.query(ApplianceCommand.command_type, ApplianceCommand.status,
+                         ApplianceCommand.sequence, ApplianceCommand.created_at)
                 .filter(ApplianceCommand.appliance_id == a.id)
                 .order_by(ApplianceCommand.created_at.desc()).limit(20).all())
     view = _appliance_view(a)
@@ -764,6 +765,7 @@ def heartbeat(body: HeartbeatRequest,
             if c.created_at else 0.0
         if age > ttl:
             c.status = "expired"  # signed command no longer valid; appliance would reject it
+            c.envelope = {}       # free the (possibly huge, inline-ciphertext) payload
             continue
         if c.status == "pending" or age > redeliver_after:
             c.status = "delivered"
@@ -837,6 +839,9 @@ def command_result(body: CommandResultRequest,
             logger.warning("recovery staging failed for %s: %s", cmd.id, exc)
             result.setdefault("error", f"staging failed: {exc}")
     cmd.result = result
+    # The command is terminal now — drop the inline-ciphertext envelope so completed
+    # commands don't bloat appliance_commands (its payload was already delivered).
+    cmd.envelope = {}
     db.commit()
     audit.record(db, actor=f"appliance:{appliance.serial}",
                  action="appliance.command_result", tenant_id=appliance.tenant_id,

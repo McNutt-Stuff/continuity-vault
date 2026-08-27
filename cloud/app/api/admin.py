@@ -739,75 +739,90 @@ def get_user(uid: str,
     if not u:
         raise HTTPException(404, "user not found")
     t = db.get(Tenant, u.tenant_id)
-    from .billing import get_pricing
-    pricing = get_pricing(db)
+    from .billing import bulk_user_usage, user_plan_from_usage
     ttype = (t.tenant_type if t else "dedicated") or "dedicated"
 
     view = _user_view(u)
     view["tenant"] = ({"id": t.id, "name": t.name, "tenant_type": ttype,
                        "plan": t.plan, "status": t.status} if t else None)
-    view["billing"] = _user_billing(db, u, t, pricing) if t else None
+
+    # ONE deduped usage scan drives both billing and the object count (was two
+    # separate SearchDocument scans that made this page slow / time out).
+    total, used_bytes, by_bucket = bulk_user_usage(db, [uid]).get(uid, (0, 0, {}))
+    try:
+        view["billing"] = user_plan_from_usage(db, u, t, total, used_bytes, by_bucket) if t else None
+    except Exception:  # noqa: BLE001
+        view["billing"] = None
 
     vaults = db.query(Vault).filter(Vault.owner_user_id == uid).all()
     vault_ids = [v.id for v in vaults]
 
     storage = {"cloud_bytes": 0, "appliance_bytes": 0, "customer_bytes": 0}
     recovery_points = 0
-    objects = 0
     activity: list = []
     sources: list = []
-    if vault_ids:
-        for dest, byts, cnt in (db.query(
-                SnapshotReceipt.destination,
-                func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0),
-                func.count(SnapshotReceipt.id))
-                .filter(SnapshotReceipt.vault_id.in_(vault_ids))
-                .group_by(SnapshotReceipt.destination).all()):
-            b = int(byts or 0)
-            d = dest or ""
-            if d == "customer-s3" or d.startswith("byos:"):
-                storage["customer_bytes"] += b
-            elif d == "cv-cloud":
-                storage["cloud_bytes"] += b
-            else:
-                storage["appliance_bytes"] += b
-            recovery_points += int(cnt or 0)
-        objects = db.query(func.count(distinct(SearchDocument.object_id))).filter(
-            SearchDocument.vault_id.in_(vault_ids)).scalar() or 0
-        colls = db.query(Collection).filter(Collection.vault_id.in_(vault_ids)).all()
-        for c in colls:
-            acct = (db.get(ConnectorAccount, c.connector_account_id)
-                    if c.connector_account_id else None)
-            sources.append({
-                "id": c.id, "name": (acct.account_label if acct else c.name),
-                "source_type": c.source_type,
-                "last_backup_at": c.last_backup_at.isoformat() if c.last_backup_at else None,
-                "object_count": int(c.last_object_count or 0),
-            })
-        sources.sort(key=lambda s: s["object_count"], reverse=True)
-        colls_by_id = {c.id: c for c in colls}
-        for rc in (db.query(SnapshotReceipt)
-                   .filter(SnapshotReceipt.vault_id.in_(vault_ids))
-                   .order_by(SnapshotReceipt.created_at.desc()).limit(15).all()):
-            c = colls_by_id.get(rc.collection_id)
-            activity.append({
-                "source": (c.name if c else rc.collection_id),
-                "source_type": (c.source_type if c else ""),
-                "destination": rc.destination,
-                "object_count": int(rc.object_count or 0),
-                "total_bytes": int(rc.total_bytes or 0),
-                "recoverable": bool(rc.recoverable),
-                "at": rc.created_at.isoformat() if rc.created_at else None,
-            })
+    # The heavy rollups are best-effort: a slow/failing scan degrades to the core
+    # profile rather than 500-ing the whole detail page.
+    try:
+        if vault_ids:
+            for dest, byts, cnt in (db.query(
+                    SnapshotReceipt.destination,
+                    func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0),
+                    func.count(SnapshotReceipt.id))
+                    .filter(SnapshotReceipt.vault_id.in_(vault_ids))
+                    .group_by(SnapshotReceipt.destination).all()):
+                b = int(byts or 0)
+                d = dest or ""
+                if d == "customer-s3" or d.startswith("byos:"):
+                    storage["customer_bytes"] += b
+                elif d == "cv-cloud":
+                    storage["cloud_bytes"] += b
+                else:
+                    storage["appliance_bytes"] += b
+                recovery_points += int(cnt or 0)
+            colls = db.query(Collection).filter(Collection.vault_id.in_(vault_ids)).all()
+            for c in colls:
+                acct = (db.get(ConnectorAccount, c.connector_account_id)
+                        if c.connector_account_id else None)
+                sources.append({
+                    "id": c.id, "name": (acct.account_label if acct else c.name),
+                    "source_type": c.source_type,
+                    "last_backup_at": c.last_backup_at.isoformat() if c.last_backup_at else None,
+                    "object_count": int(c.last_object_count or 0),
+                })
+            sources.sort(key=lambda s: s["object_count"], reverse=True)
+            colls_by_id = {c.id: c for c in colls}
+            # Select only the columns we need (skip the big receipt JSON blob).
+            for rc in (db.query(
+                        SnapshotReceipt.collection_id, SnapshotReceipt.destination,
+                        SnapshotReceipt.object_count, SnapshotReceipt.total_bytes,
+                        SnapshotReceipt.recoverable, SnapshotReceipt.created_at)
+                       .filter(SnapshotReceipt.vault_id.in_(vault_ids))
+                       .order_by(SnapshotReceipt.created_at.desc()).limit(15).all()):
+                c = colls_by_id.get(rc.collection_id)
+                activity.append({
+                    "source": (c.name if c else rc.collection_id),
+                    "source_type": (c.source_type if c else ""),
+                    "destination": rc.destination,
+                    "object_count": int(rc.object_count or 0),
+                    "total_bytes": int(rc.total_bytes or 0),
+                    "recoverable": bool(rc.recoverable),
+                    "at": rc.created_at.isoformat() if rc.created_at else None,
+                })
+    except Exception:  # noqa: BLE001
+        db.rollback()
 
     from ..models import Passkey
-    passkeys = db.query(func.count(Passkey.id)).filter(Passkey.user_id == uid).scalar() or 0
+    try:
+        passkeys = db.query(func.count(Passkey.id)).filter(Passkey.user_id == uid).scalar() or 0
+    except Exception:  # noqa: BLE001
+        passkeys = 0
 
     view["vaults"] = [{"id": v.id, "name": v.name,
                        "key_ownership_model": v.key_ownership_model} for v in vaults]
     view["storage"] = storage
     view["counts"] = {
-        "objects": int(objects), "recovery_points": recovery_points,
+        "objects": int(total), "recovery_points": recovery_points,
         "sources": len(sources), "vaults": len(vaults), "passkeys": int(passkeys),
     }
     view["sources"] = sources

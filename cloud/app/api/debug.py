@@ -266,6 +266,33 @@ def db_maintenance(body: Maint):
     return {"ok": True, "ran": stmt, "ms": round((time.perf_counter() - t0) * 1000, 2)}
 
 
+@router.post("/db/prune-appliance-commands", dependencies=[Depends(require_debug_key)])
+def prune_appliance_commands(db: Session = Depends(get_db)):
+    """Free the inline-ciphertext payload from completed appliance commands and
+    delete long-terminal rows — the usual reason appliance_commands is huge. Run
+    VACUUM afterwards to reclaim the freed space on disk."""
+    from datetime import timedelta
+    from ..models import ApplianceCommand
+    now = datetime.utcnow()
+    freed = (db.query(ApplianceCommand)
+             .filter(ApplianceCommand.status.in_(["acked", "rejected", "expired"]),
+                     ApplianceCommand.envelope.isnot(None))
+             .update({ApplianceCommand.envelope: {}}, synchronize_session=False))
+    stale = (db.query(ApplianceCommand)
+             .filter(ApplianceCommand.status.in_(["pending", "delivered"]),
+                     ApplianceCommand.created_at < now - timedelta(days=1))
+             .update({ApplianceCommand.status: "expired", ApplianceCommand.envelope: {}},
+                     synchronize_session=False))
+    deleted = (db.query(ApplianceCommand)
+               .filter(ApplianceCommand.status.in_(["acked", "rejected", "expired"]),
+                       ApplianceCommand.created_at < now - timedelta(days=7))
+               .delete(synchronize_session=False))
+    db.commit()
+    return {"ok": True, "envelopes_freed": int(freed), "stale_expired": int(stale),
+            "old_deleted": int(deleted),
+            "note": "run VACUUM (ANALYZE) to reclaim the freed space on disk"}
+
+
 @router.get("/health", dependencies=[Depends(require_debug_key)])
 def health(db: Session = Depends(get_db)):
     """Fast liveness snapshot: DB ping, pools, worker/scheduler state."""

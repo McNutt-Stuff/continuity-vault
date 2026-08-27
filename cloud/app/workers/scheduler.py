@@ -67,6 +67,10 @@ def start_scheduler() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("cloud-unsubscribe purge failed")
             try:
+                _prune_appliance_commands()
+            except Exception:  # noqa: BLE001
+                logger.exception("appliance command prune failed")
+            try:
                 _run_daily_insights()
             except Exception:  # noqa: BLE001
                 logger.exception("insight generation failed")
@@ -157,6 +161,41 @@ def _purge_recovered() -> None:
         n = purge_expired(db)
         if n:
             logger.info("purged %d expired recovery window(s)", n)
+
+
+_last_cmd_prune: datetime | None = None
+
+
+def _prune_appliance_commands() -> None:
+    """Keep appliance_commands from growing without bound (its inline-ciphertext
+    envelopes make it the biggest table). Hourly: expire + free stale never-acked
+    commands (a dead appliance never heartbeats to TTL-expire them) and delete
+    long-terminal rows outright."""
+    global _last_cmd_prune
+    now = datetime.utcnow()
+    if _last_cmd_prune and (now - _last_cmd_prune) < timedelta(hours=1):
+        return
+    _last_cmd_prune = now
+    from ..models import ApplianceCommand
+    with SessionLocal() as db:
+        try:
+            stale = now - timedelta(days=1)
+            n1 = (db.query(ApplianceCommand)
+                  .filter(ApplianceCommand.status.in_(["pending", "delivered"]),
+                          ApplianceCommand.created_at < stale)
+                  .update({ApplianceCommand.status: "expired", ApplianceCommand.envelope: {}},
+                          synchronize_session=False))
+            old = now - timedelta(days=7)
+            n2 = (db.query(ApplianceCommand)
+                  .filter(ApplianceCommand.status.in_(["acked", "rejected", "expired"]),
+                          ApplianceCommand.created_at < old)
+                  .delete(synchronize_session=False))
+            db.commit()
+            if n1 or n2:
+                logger.info("appliance command prune: expired %d stale, deleted %d old", n1, n2)
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            logger.exception("appliance command prune failed")
 
 
 def _run_daily_insights() -> None:

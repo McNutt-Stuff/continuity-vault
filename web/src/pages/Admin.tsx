@@ -2072,6 +2072,7 @@ function DebugAdmin() {
           <h3 style={{ margin: 0, fontSize: 15 }}>Database</h3>
           <div className="row" style={{ gap: 8 }}>
             <button className="btn ghost sm" disabled={busy === "stats"} onClick={() => void run("stats", async () => setStats(await dbg("GET", "/debug/db/stats")))}>{busy === "stats" ? "Loading…" : "Load stats"}</button>
+            <button className="btn ghost sm" disabled={!!busy} onClick={() => void run("prune", async () => { const r = await dbg<any>("POST", "/debug/db/prune-appliance-commands"); flash(`freed ${r.envelopes_freed}, expired ${r.stale_expired}, deleted ${r.old_deleted}`); setStats(await dbg("GET", "/debug/db/stats")); })}>Prune commands</button>
             <button className="btn ghost sm" disabled={!!busy} onClick={() => void maintenance("analyze")}>ANALYZE</button>
             <button className="btn ghost sm" disabled={!!busy} onClick={() => void maintenance("vacuum")}>VACUUM ANALYZE</button>
           </div>
