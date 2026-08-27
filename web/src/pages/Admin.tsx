@@ -4,6 +4,7 @@ import { api } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo, fmtAbsolute } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
+import { DestIcon } from "../components/DestIcon";
 import { FilterBar } from "../components/FilterBar";
 import { promptDialog, formDialog, confirmDialog, notify } from "../components/dialog";
 import { Ring, Sparkline, AreaChart } from "../components/charts";
@@ -319,6 +320,7 @@ function Users() {
   const [typeF, setTypeF] = useState("");
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 }>({ key: "email", dir: 1 });
   const [loading, setLoading] = useState(false);
+  const [sel, setSel] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -362,6 +364,8 @@ function Users() {
     );
   }
   const totalBilling = rows.reduce((s, u) => s + (u.billing_monthly || 0), 0);
+
+  if (sel) return <UserDetail id={sel} backLabel="Users" onBack={() => { setSel(null); void load(); }} />;
 
   return (
     <>
@@ -429,7 +433,7 @@ function Users() {
                 <td style={{ textAlign: "right" }}>
                   <button className="btn ghost sm" title="Generate a digital-footprint insights report"
                           onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /> Insights</button>{" "}
-                  <button className="btn ghost sm" onClick={async () => { try { if (await editUserDialog(u, u.tenant_type === "shared")) void load(); } catch { /* ignore */ } }}>Manage</button>
+                  <button className="btn ghost sm" onClick={() => setSel(u.id)}>Manage</button>
                 </td>
               </tr>
             ))}
@@ -441,10 +445,171 @@ function Users() {
   );
 }
 
+// Full-page account detail — profile, plan/billing, storage, sources, activity
+// and the management actions (Edit/Reset/Delete/Insights). Extensible: new
+// sections are just more <Card>s. `backLabel` powers the standard "← back" link
+// (Users list, or the parent tenant when drilled in from a tenant).
+function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void; backLabel: string }) {
+  const [u, setU] = useState<any>(null);
+  const [err, setErr] = useState("");
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3200); }
+  async function load() {
+    try { setErr(""); setU(await api.get<any>(`/admin/users/${id}`)); }
+    catch (e) { setErr((e as { message?: string }).message || "Failed to load user"); }
+  }
+  useEffect(() => { void load(); }, [id]);
+
+  const money = (n: number) => "$" + (Math.round((n || 0) * 100) / 100)
+    .toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+
+  const isShared = () => u?.tenant?.tenant_type === "shared";
+  async function edit() {
+    try { if (await editUserDialog(u, isShared())) { flash("Saved"); await load(); } }
+    catch { flash("Update failed"); }
+  }
+  async function reset() {
+    if (!await confirmDialog({ title: "Reset access?", message: `Revoke ${u.email}'s passkeys and email a fresh sign-in code.`, confirmLabel: "Reset" })) return;
+    try { const res = await api.post<any>(`/admin/users/${id}/reset`, {}); flash(res.invite?.dev_code ? `Reset · code ${res.invite.dev_code}` : "Access reset & emailed"); await load(); }
+    catch { flash("Reset failed"); }
+  }
+  async function del() {
+    if (!await confirmDialog({ title: "Delete user?", message: `Permanently remove ${u.email}.`, tone: "danger", confirmLabel: "Delete" })) return;
+    try { await api.del(`/admin/users/${id}`); onBack(); }
+    catch (e) { flash((e as { message?: string }).message || "Delete failed"); }
+  }
+
+  if (!u) return (
+    <Card>
+      <button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 10 }}>← {backLabel}</button>
+      {err ? <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 13 }}>Couldn't load user: {err}</div>
+           : <div className="muted">Loading user…</div>}
+    </Card>
+  );
+
+  const b = u.billing;
+  const s = u.storage || {};
+  const c = u.counts || {};
+  const name = u.full_name || u.display_name || u.email;
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <button className="btn ghost sm" onClick={onBack}>← {backLabel}</button>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn sm" onClick={edit}>Edit</button>
+          <button className="btn ghost sm" onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /> Insights</button>
+          <button className="btn ghost sm" onClick={reset}>Reset access</button>
+          <button className="btn danger sm" onClick={del}>Delete</button>
+        </div>
+      </div>
+
+      <Card style={{ marginBottom: 16 }}>
+        <div className="spread">
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            <div className="brand-logo" style={{ width: 44, height: 44, fontSize: 16 }}>
+              {name.slice(0, 2).toUpperCase()}
+            </div>
+            <div>
+              <h3 style={{ margin: 0 }}>{name}</h3>
+              <div className="faint" style={{ fontSize: 12 }}>
+                {u.email}{u.phone ? ` · ${u.phone}` : ""}
+                {u.tenant ? ` · ${u.tenant.name}` : ""}
+              </div>
+            </div>
+          </div>
+          <div className="row" style={{ gap: 6 }}>
+            <Pill tone={u.status === "active" ? "ok" : "warn"} dot>{u.status}</Pill>
+            {u.tenant && <Pill tone={TENANT_TYPE_TONE[u.tenant.tenant_type] || "info"}>{TENANT_TYPE_LABEL[u.tenant.tenant_type] || u.tenant.tenant_type}</Pill>}
+            {u.is_platform_admin && <Pill tone="info">platform admin</Pill>}
+          </div>
+        </div>
+        <div className="grid grid-4" style={{ gap: 12, marginTop: 14 }}>
+          <Mini label={isShared() ? "Plan" : "Role"} value={isShared() ? (b?.plan?.name || "Personal") : u.role} />
+          <Mini label="Last login" value={u.last_login_at ? timeAgo(u.last_login_at) : "Never"} />
+          <Mini label="Created" value={u.created_at ? timeAgo(u.created_at) : "—"} />
+          <Mini label="Passkeys" value={c.passkeys ?? 0} />
+        </div>
+      </Card>
+
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ margin: "0 0 12px" }}>Usage & storage</h3>
+        <div className="grid grid-4" style={{ gap: 12, marginBottom: 14 }}>
+          <Mini label="Objects protected" value={(c.objects ?? 0).toLocaleString()} />
+          <Mini label="Recovery points" value={c.recovery_points ?? 0} />
+          <Mini label="Sources" value={c.sources ?? 0} />
+          <Mini label="Vaults" value={c.vaults ?? 0} />
+          <Mini label="Data stored" value={bytes((s.cloud_bytes || 0) + (s.appliance_bytes || 0) + (s.customer_bytes || 0))} />
+          {b && <Mini label="Billing" value={`${money(b.total_monthly || 0)}/mo`} />}
+        </div>
+        <table className="table">
+          <thead><tr><th>Storage channel</th><th>Stored</th></tr></thead>
+          <tbody>
+            <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="cv-cloud" size={13} /> Arkive Cloud</span></td><td>{bytes(s.cloud_bytes || 0)}</td></tr>
+            <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="appliance" size={13} /> Appliance storage</span></td><td>{bytes(s.appliance_bytes || 0)}</td></tr>
+            <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="byos:x" size={13} /> Your cloud bucket</span></td><td>{bytes(s.customer_bytes || 0)}</td></tr>
+          </tbody>
+        </table>
+      </Card>
+
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ margin: "0 0 12px" }}>Sources</h3>
+        {(u.sources || []).length === 0 ? (
+          <div className="muted">No sources mapped for this account yet.</div>
+        ) : (
+          <table className="table">
+            <thead><tr><th>Source</th><th>Type</th><th style={{ textAlign: "right" }}>Objects</th><th>Last backup</th></tr></thead>
+            <tbody>
+              {u.sources.map((src: any) => (
+                <tr key={src.id}>
+                  <td>
+                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                      {brandForSource(src.source_type)
+                        ? <BrandIcon name={brandForSource(src.source_type)!} size={16} />
+                        : <Icon name="database" size={15} />}
+                      <span style={{ fontWeight: 600 }}>{src.name}</span>
+                    </div>
+                  </td>
+                  <td className="faint" style={{ fontSize: 12 }}>{src.source_type}</td>
+                  <td style={{ textAlign: "right" }}>{(src.object_count || 0).toLocaleString()}</td>
+                  <td className="faint" style={{ fontSize: 12 }}>{src.last_backup_at ? timeAgo(src.last_backup_at) : "never"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <Card style={{ marginBottom: 16 }}>
+        <h3 style={{ margin: "0 0 12px" }}>Recent activity</h3>
+        {(u.activity || []).length === 0 ? (
+          <div className="muted">No backup activity yet.</div>
+        ) : (
+          <div className="stack" style={{ gap: 8 }}>
+            {u.activity.map((e: any, i: number) => (
+              <div key={i} className="row" style={{ gap: 8, fontSize: 12.5, alignItems: "center", flexWrap: "wrap" }}>
+                {brandForSource(e.source_type)
+                  ? <BrandIcon name={brandForSource(e.source_type)!} size={15} />
+                  : <Icon name="database" size={14} />}
+                <span style={{ fontWeight: 600 }}>{e.source}</span>
+                <span className="faint row" style={{ gap: 5 }}><DestIcon dest={e.destination} size={12} /> {e.object_count} objects · {bytes(e.total_bytes || 0)}</span>
+                <Pill tone={e.recoverable ? "ok" : "warn"} dot>{e.recoverable ? "recoverable" : "sealing"}</Pill>
+                <span className="faint" style={{ marginLeft: "auto" }}>{e.at ? timeAgo(e.at) : ""}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+}
+
 function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [t, setT] = useState<any>(null);
   const [err, setErr] = useState("");
   const [toast, setToast] = useState("");
+  const [userSel, setUserSel] = useState<string | null>(null);
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3200); }
   async function load() {
     try { setErr(""); setT(await api.get<any>(`/admin/tenants/${id}`)); }
@@ -553,6 +718,8 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
     </Card>
   );
   const licensedTb = ((t.licensed_bytes || 0) / (1024 ** 4)).toFixed(2);
+
+  if (userSel) return <UserDetail id={userSel} backLabel={t.name} onBack={() => { setUserSel(null); void load(); }} />;
 
   return (
     <>
@@ -681,7 +848,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
                     <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                       <button className="btn ghost sm" onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /></button>{" "}
-                      <button className="btn ghost sm" onClick={() => editUser(u)}>Manage</button>{" "}
+                      <button className="btn ghost sm" onClick={() => setUserSel(u.id)}>Manage</button>{" "}
                       <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
                       <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
                     </td>
@@ -702,7 +869,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
                   <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
                   <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                     <button className="btn ghost sm" onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /></button>{" "}
-                    <button className="btn ghost sm" onClick={() => editUser(u)}>Manage</button>{" "}
+                    <button className="btn ghost sm" onClick={() => setUserSel(u.id)}>Manage</button>{" "}
                     <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
                     <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
                   </td>

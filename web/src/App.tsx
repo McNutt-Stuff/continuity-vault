@@ -26,8 +26,9 @@ import Settings from "./pages/Settings";
 import Organization from "./pages/Organization";
 
 const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
-  { to: "/", label: "Overview", icon: "grid", group: "Home" },
-  { to: "/insights", label: "Insights", icon: "insights", group: "Home" },
+  { to: "/", label: "Overview", icon: "grid", group: "" },
+  { to: "/insights", label: "Insights", icon: "insights", group: "" },
+  { to: "/search", label: "Unified Search", icon: "search", group: "" },
   { to: "/connectors", label: "Sources", icon: "link", group: "Data sources" },
   { to: "/agents", label: "Desktop Agents", icon: "user", group: "Data sources" },
   { to: "/integrations", label: "Integrations", icon: "puzzle", group: "Data sources" },
@@ -36,8 +37,7 @@ const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
   { to: "/activity", label: "Activity", icon: "activity", group: "Protection" },
   { to: "/cloud-storage", label: "Cloud Storage", icon: "cloud", group: "Storage" },
   { to: "/appliances", label: "Appliances", icon: "server", group: "Storage" },
-  { to: "/search", label: "Unified Search", icon: "search", group: "Recover" },
-  { to: "/restore", label: "Restore", icon: "restore", group: "Recover" },
+  { to: "/restore", label: "Restore", icon: "restore", group: "Storage" },
   { to: "/audit", label: "Audit Log", icon: "shield", group: "Account" },
 ];
 
@@ -142,7 +142,7 @@ function Sidebar() {
         <>
           {nav.map((n, i) => (
             <Fragment key={n.to}>
-              {nav[i - 1]?.group !== n.group && (
+              {n.group && nav[i - 1]?.group !== n.group && (
                 <div className="nav-section">{n.group}</div>
               )}
               <NavLink
