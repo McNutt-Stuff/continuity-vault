@@ -39,7 +39,6 @@ const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
   { to: "/search", label: "Unified Search", icon: "search", group: "Recover" },
   { to: "/restore", label: "Restore", icon: "restore", group: "Recover" },
   { to: "/audit", label: "Audit Log", icon: "shield", group: "Account" },
-  { to: "/settings", label: "Settings", icon: "gear", group: "Account" },
 ];
 
 // A nav item is hidden when the tenant has chosen storage tiers that don't
@@ -156,15 +155,6 @@ function Sidebar() {
               </NavLink>
             </Fragment>
           ))}
-          {me?.can_admin && (
-            <>
-              <div className="nav-section">Organization</div>
-              <NavLink to="/organization" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-                <Icon name="user" />
-                Organization Admin
-              </NavLink>
-            </>
-          )}
           {me?.is_platform_admin && (
             <>
               <div className="nav-section">Platform</div>
@@ -244,6 +234,11 @@ function AccountMenu() {
             <button className="account-menu-item" onClick={() => go("/settings")}>
               <Icon name="gear" size={15} /> Settings
             </button>
+            {me?.can_admin && (
+              <button className="account-menu-item" onClick={() => go("/organization")}>
+                <Icon name="user" size={15} /> Organization Admin
+              </button>
+            )}
             <div className="account-menu-sep" />
             <button className="account-menu-item danger" onClick={() => { setOpen(false); logout(); }}>
               <Icon name="logout" size={15} /> Sign out
