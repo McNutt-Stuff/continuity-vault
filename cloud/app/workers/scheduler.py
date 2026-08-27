@@ -176,6 +176,10 @@ def _ensure_perf_indexes() -> None:
     stmts = [
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_appliance_commands_appliance_status "
         "ON appliance_commands (appliance_id, status)",
+        # audit.record() fetches the newest row (ORDER BY created_at DESC) on every
+        # audited action — without this it full-scans + sorts the whole ledger each write.
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_audit_events_created_at "
+        "ON audit_events (created_at)",
     ]
     for s in stmts:
         try:

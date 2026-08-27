@@ -565,7 +565,7 @@ class AuditEvent(Base):
     category = Column(String, default="activity")  # activity | security | credential | admin | system
     prev_hash = Column(String, default="")
     entry_hash = Column(String, default="")
-    created_at = Column(DateTime, default=_now)
+    created_at = Column(DateTime, default=_now, index=True)
 
 
 class PricingConfig(Base):
