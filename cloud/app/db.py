@@ -273,17 +273,11 @@ def _apply_additive_migrations() -> None:
         # Done in SQL so the giant JSON is never loaded into Python.
         "UPDATE desktop_agents SET last_scan = NULL, fs_expansions = NULL "
         "WHERE last_scan IS NOT NULL AND length(CAST(last_scan AS TEXT)) > 4000000",
-        # appliance_commands is the #1 bloat source: every appliance ingest/recovery
-        # command stored its FULL inline-ciphertext envelope and terminal commands
-        # were never cleaned up. Index the hot (appliance_id,status) drain, null the
-        # envelope on completed commands (idempotent — skips already-emptied rows so
-        # it doesn't churn), and delete old terminal rows. Follow with VACUUM.
-        "CREATE INDEX IF NOT EXISTS ix_appliance_commands_appliance_status "
-        "ON appliance_commands(appliance_id, status)",
-        "UPDATE appliance_commands SET envelope = '{}'::json "
-        "WHERE status IN ('acked','rejected','expired') AND envelope::text <> '{}'",
-        "DELETE FROM appliance_commands "
-        "WHERE status IN ('acked','rejected','expired') AND created_at < now() - interval '7 days'",
+        # NOTE: appliance_commands cleanup (its huge inline-ciphertext envelopes are
+        # the #1 bloat) is deliberately NOT done here — a full-table UPDATE/DELETE on
+        # a multi-GB table would stall startup and fail the deploy health check. It
+        # runs in the BACKGROUND shortly after boot instead (workers/pruning.prune_all
+        # + the concurrent index in workers/scheduler._ensure_perf_indexes).
     ]
     for statement in statements:
         try:

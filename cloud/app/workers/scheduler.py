@@ -67,9 +67,9 @@ def start_scheduler() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("cloud-unsubscribe purge failed")
             try:
-                _prune_appliance_commands()
+                _prune_db()
             except Exception:  # noqa: BLE001
-                logger.exception("appliance command prune failed")
+                logger.exception("db prune failed")
             try:
                 _run_daily_insights()
             except Exception:  # noqa: BLE001
@@ -164,38 +164,42 @@ def _purge_recovered() -> None:
 
 
 _last_cmd_prune: datetime | None = None
+_indexes_ensured = False
 
 
-def _prune_appliance_commands() -> None:
-    """Keep appliance_commands from growing without bound (its inline-ciphertext
-    envelopes make it the biggest table). Hourly: expire + free stale never-acked
-    commands (a dead appliance never heartbeats to TTL-expire them) and delete
-    long-terminal rows outright."""
-    global _last_cmd_prune
+def _ensure_perf_indexes() -> None:
+    """Build heavy indexes CONCURRENTLY (outside the startup path + no write lock)
+    so a huge table can never stall boot / fail the deploy health check."""
+    from ..db import worker_engine
+    if worker_engine.dialect.name != "postgresql":
+        return
+    stmts = [
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_appliance_commands_appliance_status "
+        "ON appliance_commands (appliance_id, status)",
+    ]
+    for s in stmts:
+        try:
+            with worker_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                conn.exec_driver_sql(s)
+        except Exception:  # noqa: BLE001
+            logger.exception("ensure perf index failed: %s", s)
+
+
+def _prune_db() -> None:
+    """Keep high-churn tables bounded (appliance_commands, sync_jobs, integration_runs,
+    backup_runs, pending_actions, network_usage, node_metrics). At most once a day.
+    Also builds perf indexes once, in the background (never during startup)."""
+    global _last_cmd_prune, _indexes_ensured
     now = datetime.utcnow()
-    if _last_cmd_prune and (now - _last_cmd_prune) < timedelta(hours=1):
+    if _last_cmd_prune and (now - _last_cmd_prune) < timedelta(hours=24):
         return
     _last_cmd_prune = now
-    from ..models import ApplianceCommand
+    from .pruning import prune_all
     with SessionLocal() as db:
-        try:
-            stale = now - timedelta(days=1)
-            n1 = (db.query(ApplianceCommand)
-                  .filter(ApplianceCommand.status.in_(["pending", "delivered"]),
-                          ApplianceCommand.created_at < stale)
-                  .update({ApplianceCommand.status: "expired", ApplianceCommand.envelope: {}},
-                          synchronize_session=False))
-            old = now - timedelta(days=7)
-            n2 = (db.query(ApplianceCommand)
-                  .filter(ApplianceCommand.status.in_(["acked", "rejected", "expired"]),
-                          ApplianceCommand.created_at < old)
-                  .delete(synchronize_session=False))
-            db.commit()
-            if n1 or n2:
-                logger.info("appliance command prune: expired %d stale, deleted %d old", n1, n2)
-        except Exception:  # noqa: BLE001
-            db.rollback()
-            logger.exception("appliance command prune failed")
+        prune_all(db)
+    if not _indexes_ensured:
+        _indexes_ensured = True
+        _ensure_perf_indexes()
 
 
 def _run_daily_insights() -> None:

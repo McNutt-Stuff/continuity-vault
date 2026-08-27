@@ -82,6 +82,59 @@ def _is_pg() -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Self-describing manifest — lets an LLM / automated agent discover and drive  #
+# the debug surface without out-of-band docs.                                  #
+# --------------------------------------------------------------------------- #
+_MANIFEST = {
+    "service": "arkive-debug",
+    "auth": {"header": "X-Debug-Key",
+             "how": "Send the admin-set debug key in the X-Debug-Key header on every /debug call. "
+                    "403 if the key is unset or wrong."},
+    "base_path": "/api/debug",
+    "workflow": [
+        "GET /api/debug/health — quick liveness (db ping, pools).",
+        "GET /api/debug/db/stats — find bloat (high dead_ratio) or idle-in-transaction.",
+        "POST /api/debug/db/prune — bound high-churn tables, then POST /api/debug/db/maintenance {action:'vacuum'} to reclaim.",
+        "POST /api/debug/db/benchmark — confirm queries are fast again.",
+        "POST /api/debug/query {sql} — read-only SELECT/WITH/EXPLAIN/SHOW to inspect data.",
+        "GET /api/debug/nodes — per-node DB health across the fleet.",
+    ],
+    "endpoints": [
+        {"method": "GET", "path": "/api/debug", "desc": "This manifest."},
+        {"method": "GET", "path": "/api/debug/health", "desc": "DB ping, pool status, node/role."},
+        {"method": "GET", "path": "/api/debug/db/stats",
+         "desc": "DB size, per-table live/dead tuples + bloat ratio + size + last analyze, connection states, pools."},
+        {"method": "POST", "path": "/api/debug/db/benchmark", "body": {"iterations": 3},
+         "desc": "Time representative queries; returns per-query ms + a 'slow' list."},
+        {"method": "POST", "path": "/api/debug/query",
+         "body": {"sql": "SELECT ...", "limit": 200, "timeout_ms": 15000},
+         "desc": "Run ONE read-only query (SELECT/WITH/EXPLAIN/SHOW). Returns columns + rows + ms."},
+        {"method": "POST", "path": "/api/debug/db/maintenance",
+         "body": {"action": "analyze|vacuum|vacuum_full", "table": "optional"},
+         "desc": "Reclaim bloat / refresh planner stats (autocommit)."},
+        {"method": "POST", "path": "/api/debug/db/prune",
+         "desc": "Prune all bounded-retention tables (safe; never touches audit/recovery points)."},
+        {"method": "POST", "path": "/api/debug/db/prune-appliance-commands",
+         "desc": "Free inline-ciphertext envelopes + delete old terminal appliance commands."},
+        {"method": "GET", "path": "/api/debug/nodes",
+         "desc": "Fan out DB health to every fleet node (via the fleet secret) to find the slow one."},
+    ],
+    "notes": [
+        "All responses are JSON. Query/maintenance are read-only or explicitly guarded — safe on production.",
+        "Deletes/updates only mark rows dead; a VACUUM (autovacuum or the maintenance endpoint) reclaims disk.",
+        "Never prunes the audit log (hash-chained) or snapshot receipts (recovery points).",
+    ],
+}
+
+
+@router.get("", dependencies=[Depends(require_debug_key)])
+def manifest():
+    """Machine-readable catalog of the debug API so an LLM/automation can discover
+    and drive it. Requires the debug key like every other endpoint."""
+    return _MANIFEST
+
+
+# --------------------------------------------------------------------------- #
 # Database stats / health                                                     #
 # --------------------------------------------------------------------------- #
 def _pool_status(eng) -> dict:
@@ -290,6 +343,17 @@ def prune_appliance_commands(db: Session = Depends(get_db)):
     db.commit()
     return {"ok": True, "envelopes_freed": int(freed), "stale_expired": int(stale),
             "old_deleted": int(deleted),
+            "note": "run VACUUM (ANALYZE) to reclaim the freed space on disk"}
+
+
+@router.post("/db/prune", dependencies=[Depends(require_debug_key)])
+def prune_db(db: Session = Depends(get_db)):
+    """Prune every bounded-retention table (appliance_commands, sync_jobs,
+    integration_runs, backup_runs, pending_actions, network_usage, node_metrics).
+    Never touches the audit log or recovery points. Follow with VACUUM to reclaim."""
+    from ..workers.pruning import prune_all
+    counts = prune_all(db)
+    return {"ok": True, "pruned": counts,
             "note": "run VACUUM (ANALYZE) to reclaim the freed space on disk"}
 
 
