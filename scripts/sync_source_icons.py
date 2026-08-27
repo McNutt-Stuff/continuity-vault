@@ -69,7 +69,7 @@ SOURCE_ICONS: dict[str, dict] = {
     # Bring-your-own cloud storage providers — matched by CustomerStorage.provider.
     "aws":        {"file": "Amazon Web Services Logo.svg", "search": "Amazon Web Services logo"},
     "azure":      {"file": "Microsoft Azure.svg", "search": "Microsoft Azure logo"},
-    "gcp":        {"file": "Google Cloud storage.svg", "search": "Google Cloud Storage icon"},
+    "gcp":        {"file": "Google Cloud icon (2026).svg", "search": "Google Cloud icon 2026"},
 }
 
 

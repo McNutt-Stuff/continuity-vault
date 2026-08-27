@@ -173,6 +173,15 @@ def _store_label_map(db: Session, tenant_id: str) -> dict[str, str]:
     return out
 
 
+def _byos_provider_map(db: Session, tenant_id: str) -> dict[str, str]:
+    """Map ``byos:<id>`` → the provider (aws|azure|gcp) so the UI can show the
+    right brand icon for a customer's own cloud storage destination."""
+    from ..models import CustomerStorage
+    return {f"byos:{cs.id}": cs.provider
+            for cs in (db.query(CustomerStorage)
+                       .filter(CustomerStorage.tenant_id == tenant_id).all())}
+
+
 @router.get("/taxonomy")
 def taxonomy(principal: security.Principal = Depends(security.get_principal)):
     """The canonical information model (categories + kinds) used across sources."""
@@ -483,6 +492,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
             receipts_by_snap.setdefault(rc.snapshot_id, []).append(rc)
 
     store_labels = _store_label_map(db, tenant.id)
+    byos_providers = _byos_provider_map(db, tenant.id)
 
     # Version history per object (content-addressed versioning): identical
     # re-collections dedupe; real changes accrue versions so tampering, edits, or
@@ -514,6 +524,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
                 out[rc.destination] = {
                     "destination": rc.destination,
                     "label": _location_label(rc.destination, store_labels),
+                    "provider": byos_providers.get(rc.destination),
                     "recoverable": bool(rc.recoverable),
                 }
         return list(out.values())

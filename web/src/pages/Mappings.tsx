@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import { Card, Pill, bytes, serverDate, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
+import { DestIcon } from "../components/DestIcon";
 import { JobKindBadge } from "../components/JobKindBadge";
 import { confirmDialog, notify } from "../components/dialog";
 import { FolderPicker, FolderNode } from "../components/FolderPicker";
@@ -12,7 +13,7 @@ interface Agent { id: string; name: string; hostname: string; collectors: string
 interface Vault { id: string; name: string; }
 interface StorageTarget {
   id: string; kind: string; label: string; detail?: string;
-  state?: string; online?: boolean;
+  state?: string; online?: boolean; provider?: string;
 }
 interface FileConfig {
   roots?: string[]; excludeExts?: string[]; maxSizeBytes?: number;
@@ -380,7 +381,7 @@ export default function Mappings() {
                 onClick={() => toggleDest(t.id)}
                 title={t.detail}
               >
-                <Icon name={t.kind === "appliance" ? "server" : "cloud"} size={13} />
+                <DestIcon dest={t.id} provider={t.provider} size={13} />
                 {t.label}
                 {t.kind === "appliance" && t.online === false && (
                   <span className="faint" style={{ marginLeft: 4 }}>· offline</span>
@@ -426,7 +427,9 @@ export default function Mappings() {
                 {!editing && (
                   <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
                     {(m.destinations || []).map((d) => (
-                      <Pill key={d} tone={isApplianceDest(d) ? "ok" : "info"}>{destLabel(d)}</Pill>
+                      <Pill key={d} tone={isApplianceDest(d) ? "ok" : "info"}>
+                        <DestIcon dest={d} provider={targets.find((t) => t.id === d)?.provider} size={11} /> {destLabel(d)}
+                      </Pill>
                     ))}
                     <Pill tone={m.backup_interval_minutes === 0 ? "warn" : "info"}>
                       <Icon name="clock" size={11} /> {scheduleLabel(m)}
@@ -535,7 +538,7 @@ export default function Mappings() {
                               <div style={{ maxHeight: 200, overflowY: "auto" }} className="stack">
                                 {evs.map((e, i) => (
                                   <div key={i} className="row" style={{ gap: 6, fontSize: 12, flexWrap: "wrap", alignItems: "center" }}>
-                                    <Icon name={isApplianceDest(e.destination || "") ? "server" : "cloud"} size={12} />
+                                    <DestIcon dest={e.destination || "cv-cloud"} provider={targets.find((t) => t.id === e.destination)?.provider} size={12} />
                                     <span className="faint">{destLabel(e.destination || "cv-cloud")}</span>
                                     <span className="faint">· {e.object_count ?? 0} objects · {bytes(e.total_bytes ?? 0)}</span>
                                     <Pill tone={e.status === "recoverable" ? "ok" : "warn"}>
@@ -564,7 +567,7 @@ export default function Mappings() {
                             onClick={() => toggleEditDest(t.id)}
                             title={t.detail}
                           >
-                            <Icon name={t.kind === "appliance" ? "server" : "cloud"} size={13} />
+                            <DestIcon dest={t.id} provider={t.provider} size={13} />
                             {t.label}
                             {t.kind === "appliance" && t.online === false && (
                               <span className="faint" style={{ marginLeft: 4 }}>· offline</span>

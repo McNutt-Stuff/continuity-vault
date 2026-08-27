@@ -5,11 +5,12 @@ import { useAuth } from "../auth";
 import { Card, Pill, bytes, Loading, groupScope } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
+import { DestIcon } from "../components/DestIcon";
 import { PhotoPickerModal } from "../components/PhotoPicker";
 
 interface SourceType { type: string; displayName: string; icon: string; color: string; count: number; }
 interface ObjectBucket { key: string; label: string; icon: string; color: string; count: number; }
-interface StorageDest { id: string; label: string; kind: string; icon: string; }
+interface StorageDest { id: string; label: string; kind: string; icon: string; provider?: string; }
 interface Overview {
   sources: { count: number; types: SourceType[] };
   objects: { total: number; breakdown: ObjectBucket[]; by_source: ObjectBucket[] };
@@ -323,7 +324,7 @@ export default function Dashboard() {
               <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
                 {ov.storage.destinations.map((d) => (
                   <span key={d.id} className="row" style={{ gap: 5, fontSize: 12 }}>
-                    <Icon name={iconName(d.icon)} size={13} /> {d.label}
+                    <DestIcon dest={d.id} provider={d.provider} size={13} /> {d.label}
                   </span>
                 ))}
               </div>

@@ -29,18 +29,24 @@ router = APIRouter(tags=["activity"])
 
 
 def _dest_labeler(db: Session, tenant_id: str):
-    """Return a fn mapping a destination id to a friendly label (resolving
-    store:<id> to "<appliance> · <storage>")."""
+    """Return (label_fn, provider_fn): label maps a destination id to a friendly
+    name (resolving store:<id> and byos:<id>); provider maps a byos destination
+    to its cloud provider (aws|azure|gcp) for brand icons."""
+    from ..models import CustomerStorage
     appliances = {a.id: a for a in db.query(Appliance)
                   .filter(Appliance.tenant_id == tenant_id).all()}
     stores = {f"store:{s.id}": s for s in db.query(ApplianceStorage)
               .filter(ApplianceStorage.tenant_id == tenant_id).all()}
+    byos = {f"byos:{cs.id}": cs for cs in db.query(CustomerStorage)
+            .filter(CustomerStorage.tenant_id == tenant_id).all()}
 
     def label(dest: str) -> str:
         if dest == "cv-cloud":
             return "Arkive Cloud"
         if dest == "customer-s3":
             return "Customer S3"
+        if dest in byos:
+            return byos[dest].name
         if dest in stores:
             s = stores[dest]
             a = appliances.get(s.appliance_id)
@@ -48,7 +54,12 @@ def _dest_labeler(db: Session, tenant_id: str):
         if dest.startswith("appliance"):
             return "Appliance"
         return dest
-    return label
+
+    def provider(dest: str) -> str | None:
+        cs = byos.get(dest)
+        return cs.provider if cs else None
+
+    return label, provider
 
 
 @router.get("/activity")
@@ -97,7 +108,7 @@ def activity(limit: int = 40,
                         SnapshotReceipt.vault_id.in_(allowed))
                 .order_by(SnapshotReceipt.created_at.desc())
                 .limit(receipt_limit).all()) if allowed else []
-    dest_label = _dest_labeler(db, tenant.id)
+    dest_label, dest_provider = _dest_labeler(db, tenant.id)
     events = [{
         "kind": "backup",
         "collection_id": rc.collection_id,
@@ -106,6 +117,7 @@ def activity(limit: int = 40,
         "source_type": _source_type(rc.collection_id),
         "destination": rc.destination,
         "destination_label": dest_label(rc.destination),
+        "destination_provider": dest_provider(rc.destination),
         "object_count": rc.object_count,
         "total_bytes": rc.total_bytes,
         "status": "recoverable" if rc.recoverable else "pending",

@@ -25,21 +25,21 @@ import ActivityPage from "./pages/Activity";
 import Settings from "./pages/Settings";
 import Organization from "./pages/Organization";
 
-const NAV: { to: string; label: string; icon: IconName }[] = [
-  { to: "/", label: "Overview", icon: "grid" },
-  { to: "/insights", label: "Insights", icon: "insights" },
-  { to: "/search", label: "Unified Search", icon: "search" },
-  { to: "/connectors", label: "Sources", icon: "link" },
-  { to: "/mappings", label: "Data Map", icon: "database" },
-  { to: "/activity", label: "Activity", icon: "activity" },
-  { to: "/snapshots", label: "Recovery Points", icon: "clock" },
-  { to: "/appliances", label: "Appliances", icon: "server" },
-  { to: "/cloud-storage", label: "Cloud Storage", icon: "cloud" },
-  { to: "/integrations", label: "Integrations", icon: "puzzle" },
-  { to: "/agents", label: "Desktop Agents", icon: "user" },
-  { to: "/restore", label: "Restore", icon: "restore" },
-  { to: "/audit", label: "Audit Log", icon: "shield" },
-  { to: "/settings", label: "Settings", icon: "gear" },
+const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
+  { to: "/", label: "Overview", icon: "grid", group: "Home" },
+  { to: "/insights", label: "Insights", icon: "insights", group: "Home" },
+  { to: "/connectors", label: "Sources", icon: "link", group: "Data sources" },
+  { to: "/agents", label: "Desktop Agents", icon: "user", group: "Data sources" },
+  { to: "/integrations", label: "Integrations", icon: "puzzle", group: "Data sources" },
+  { to: "/mappings", label: "Data Map", icon: "database", group: "Protection" },
+  { to: "/snapshots", label: "Recovery Points", icon: "clock", group: "Protection" },
+  { to: "/activity", label: "Activity", icon: "activity", group: "Protection" },
+  { to: "/cloud-storage", label: "Cloud Storage", icon: "cloud", group: "Storage" },
+  { to: "/appliances", label: "Appliances", icon: "server", group: "Storage" },
+  { to: "/search", label: "Unified Search", icon: "search", group: "Recover" },
+  { to: "/restore", label: "Restore", icon: "restore", group: "Recover" },
+  { to: "/audit", label: "Audit Log", icon: "shield", group: "Account" },
+  { to: "/settings", label: "Settings", icon: "gear", group: "Account" },
 ];
 
 // A nav item is hidden when the tenant has chosen storage tiers that don't
@@ -141,16 +141,20 @@ function Sidebar() {
         </>
       ) : (
         <>
-          {nav.map((n) => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              end={n.to === "/"}
-              className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
-            >
-              <Icon name={n.icon} />
-              {n.label}
-            </NavLink>
+          {nav.map((n, i) => (
+            <Fragment key={n.to}>
+              {nav[i - 1]?.group !== n.group && (
+                <div className="nav-section">{n.group}</div>
+              )}
+              <NavLink
+                to={n.to}
+                end={n.to === "/"}
+                className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
+              >
+                <Icon name={n.icon} />
+                {n.label}
+              </NavLink>
+            </Fragment>
           ))}
           {me?.can_admin && (
             <>

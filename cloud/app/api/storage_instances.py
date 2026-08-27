@@ -247,6 +247,57 @@ def storage_data(sid: str,
     }
 
 
+@router.get("/arkive-cloud")
+def arkive_cloud(principal: security.Principal = Depends(security.get_principal),
+                 tenant: Tenant = Depends(security.get_tenant),
+                 db: Session = Depends(get_db)):
+    """Read-only usage view of Arkive's own hosted cloud (cv-cloud): how much the
+    tenant stores with us and which sources land there. No controls — Arkive Cloud
+    is managed by us, unlike a customer's bring-your-own bucket."""
+    from ..api.billing import user_protection_options
+    from ..models import User
+
+    enabled = "cv-cloud" in set(user_protection_options(db.get(User, principal.user_id), tenant))
+    receipts = (db.query(SnapshotReceipt)
+                .filter(SnapshotReceipt.tenant_id == principal.tenant_id,
+                        SnapshotReceipt.destination == "cv-cloud").all())
+    colls = {c.id: c for c in db.query(Collection).filter(
+        Collection.tenant_id == principal.tenant_id).all()}
+    by_coll: dict = {}
+    total_bytes = 0
+    last_at = None
+    for r in receipts:
+        c = colls.get(r.collection_id)
+        g = by_coll.setdefault(r.collection_id, {
+            "collection_id": r.collection_id,
+            "name": c.name if c else r.collection_id,
+            "source_type": c.source_type if c else "",
+            "recovery_points": 0, "objects": 0, "bytes": 0,
+            "recoverable": 0, "last_at": None})
+        g["recovery_points"] += 1
+        g["objects"] += int(r.object_count or 0)
+        g["bytes"] += int(r.total_bytes or 0)
+        if r.recoverable:
+            g["recoverable"] += 1
+        if r.created_at and (g["last_at"] is None or r.created_at > g["last_at"]):
+            g["last_at"] = r.created_at
+        if r.created_at and (last_at is None or r.created_at > last_at):
+            last_at = r.created_at
+        total_bytes += int(r.total_bytes or 0)
+    sources = sorted(by_coll.values(), key=lambda s: -s["bytes"])
+    for s in sources:
+        s["last_at"] = s["last_at"].isoformat() if s["last_at"] else None
+    return {
+        "enabled": enabled,
+        "used_bytes": total_bytes,
+        "recovery_points": sum(s["recovery_points"] for s in sources),
+        "object_count": sum(s["objects"] for s in sources),
+        "source_count": len(sources),
+        "last_backup_at": last_at.isoformat() if last_at else None,
+        "sources": sources,
+    }
+
+
 # ---- Scenario 2: guided auto-provisioning -----------------------------------
 class ProvisionBody(BaseModel):
     provider: str

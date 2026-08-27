@@ -5,6 +5,7 @@ import { useAuth } from "../auth";
 import { Card, Pill, bytes, fmtAbsolute, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
+import { DestIcon } from "../components/DestIcon";
 import { notify } from "../components/dialog";
 
 interface Recovered {
@@ -91,7 +92,7 @@ interface Result {
   size_bytes: number;
   modified_at: string | null;
   first_ingested_at: string | null;
-  locations?: { destination: string; label: string; recoverable: boolean }[];
+  locations?: { destination: string; label: string; recoverable: boolean; provider?: string }[];
   versions?: { version: number; snapshot_id: string; size_bytes: number; created_at: string | null; is_current: boolean }[];
   version_count?: number;
 }
@@ -1135,7 +1136,7 @@ export default function Search() {
                       title={`Recover from ${loc.label}`}
                       onClick={() => retrieve(r, loc)}
                     >
-                      <Icon name={/^(appliance|store:)/.test(loc.destination) ? "server" : "cloud"} size={12} />
+                      <DestIcon dest={loc.destination} provider={loc.provider} size={12} />
                       {loc.label}
                     </button>
                   ))}

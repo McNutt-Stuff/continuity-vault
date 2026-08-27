@@ -3,11 +3,12 @@ import { api } from "../api";
 import { Card, Pill, Stat, bytes, serverDate, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
+import { DestIcon } from "../components/DestIcon";
 import { JobKindBadge } from "../components/JobKindBadge";
 
 interface Event {
   kind: string; source: string; source_username?: string | null; source_type?: string; destination?: string;
-  destination_label?: string; object_count?: number; total_bytes?: number; status: string;
+  destination_label?: string; destination_provider?: string | null; object_count?: number; total_bytes?: number; status: string;
   snapshot_id?: string; at?: string; command?: string;
 }
 interface Job {
@@ -160,7 +161,7 @@ export default function ActivityPage() {
             <div className="flex1">
               <div style={{ fontWeight: 600 }}>{e.source}{e.source_username && e.source_username !== e.source ? <span className="faint" style={{ fontWeight: 400 }}> ({e.source_username})</span> : null}</div>
               <div className="faint" style={{ fontSize: 12.5 }}>
-                <Icon name={isAppliance(e.destination) ? "server" : "cloud"} size={12} /> {destLabel(e)}
+                <DestIcon dest={e.destination} provider={e.destination_provider || undefined} size={12} /> {destLabel(e)}
                 {" · "}{e.object_count ?? 0} objects · {bytes(e.total_bytes ?? 0)}
               </div>
             </div>

@@ -308,7 +308,6 @@ function InstanceCard({ inst, spec, onOpen, onChanged }: {
           <div className="faint" style={{ fontSize: 11 }}>{inst.host || inst.integration_type}</div>
         </div>
         <div className="row" style={{ gap: 6, alignItems: "center" }} title={h.label}>
-          <span style={{ width: 8, height: 8, borderRadius: "50%", background: h.dot, flexShrink: 0 }} />
           <Pill tone={h.tone}>{h.label}</Pill>
         </div>
       </div>

@@ -23,6 +23,10 @@ interface StorageSource {
   objects: number; bytes: number; recoverable: number; last_at: string | null;
 }
 interface DataResp { storage: StorageInstance; sources: StorageSource[]; }
+interface ArkiveCloud {
+  enabled: boolean; used_bytes: number; recovery_points: number; object_count: number;
+  source_count: number; last_backup_at: string | null; sources: StorageSource[];
+}
 
 const HEALTH: Record<string, { tone: "ok" | "warn" | "info" | "danger"; label: string; dot: string }> = {
   healthy: { tone: "ok", label: "Healthy", dot: "#2dbe60" },
@@ -70,13 +74,21 @@ function FieldInput({ f, value, onChange, placeholder, showRequired = true }: {
 
 export default function CloudStorage() {
   const [list, setList] = useState<ListResp | null>(null);
+  const [arkive, setArkive] = useState<ArkiveCloud | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [arkiveDetail, setArkiveDetail] = useState(false);
 
   async function load() {
-    try { setList(await api.get<ListResp>("/storage")); }
-    catch { /* ignore */ }
+    try {
+      const [l, a] = await Promise.all([
+        api.get<ListResp>("/storage"),
+        api.get<ArkiveCloud>("/storage/arkive-cloud").catch(() => null),
+      ]);
+      setList(l);
+      setArkive(a);
+    } catch { /* ignore */ }
     finally { setLoading(false); }
   }
   useEffect(() => {
@@ -92,6 +104,9 @@ export default function CloudStorage() {
     return <StorageDetail inst={detail} providers={list?.providers || []}
                           onBack={() => { setDetailId(null); void load(); }} onChanged={load} />;
   }
+  if (arkiveDetail && arkive) {
+    return <ArkiveCloudDetail data={arkive} onBack={() => { setArkiveDetail(false); void load(); }} />;
+  }
 
   return (
     <>
@@ -99,9 +114,23 @@ export default function CloudStorage() {
         <div className="stack">
           <h2 style={{ margin: 0 }}>Cloud Storage</h2>
           <div className="faint" style={{ fontSize: 12.5, maxWidth: 640 }}>
-            Bring your own cloud bucket — AWS, Azure or Google Cloud — as a backup destination.
-            Data is encrypted with our quantum-safe cipher before it ever leaves Arkive; your
-            provider only ever holds ciphertext. Route sources to it in the <a href="/mappings">Data Map</a>.
+            Where your protected data lives in the cloud — Arkive's fully-managed hosted service,
+            plus any of your own AWS, Azure or Google Cloud buckets. Everything is encrypted with our
+            quantum-safe cipher before it leaves Arkive, so providers only ever hold ciphertext.
+          </div>
+        </div>
+      </div>
+
+      {/* Arkive Cloud — our hosted, fully-managed tier. Read-only: usage only. */}
+      <ArkiveCloudRow data={arkive} onOpen={() => setArkiveDetail(true)} />
+
+      {/* Bring your own storage — customer-owned buckets with full controls. */}
+      <div className="spread" style={{ margin: "24px 0 12px", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
+        <div className="stack">
+          <h3 style={{ margin: 0 }}>Bring your own storage</h3>
+          <div className="faint" style={{ fontSize: 12.5, maxWidth: 560 }}>
+            Add your own cloud bucket as a backup destination and route sources to it in the{" "}
+            <a href="/mappings">Data Map</a>.
           </div>
         </div>
         <button className="btn primary" onClick={() => setShowAdd(true)}>
@@ -121,9 +150,9 @@ export default function CloudStorage() {
             <div className="insight-card-ic" style={{ background: "#0559c91e", color: "#0559c9", width: 48, height: 48 }}>
               <Icon name="cloud" size={22} />
             </div>
-            <div style={{ fontWeight: 700, fontSize: 15 }}>No cloud storage yet</div>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>No bring-your-own storage yet</div>
             <div className="faint" style={{ fontSize: 12.5, maxWidth: 440 }}>
-              Connect your own AWS, Azure or Google Cloud storage so backups land in infrastructure
+              Connect your own AWS, Azure or Google Cloud storage so backups also land in infrastructure
               you control — protected end-to-end by Arkive.
             </div>
             <button className="btn primary sm" onClick={() => setShowAdd(true)}>
@@ -138,6 +167,110 @@ export default function CloudStorage() {
                          onClose={() => setShowAdd(false)}
                          onDone={() => { setShowAdd(false); void load(); }} />
       )}
+    </>
+  );
+}
+
+// Arkive Cloud is our fully-managed hosted tier — a distinct full-width row, not
+// a customer card. Read-only: we surface usage + the sources landing here; there
+// are no credentials, health tests or controls to manage (Arkive runs it).
+function ArkiveCloudRow({ data, onOpen }: { data: ArkiveCloud | null; onOpen: () => void }) {
+  const inUse = !!data && (data.enabled || data.used_bytes > 0 || data.source_count > 0);
+  return (
+    <Card style={{ borderLeft: "3px solid #0559c9" }}>
+      <div className="row" style={{ gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+        <div className="insight-card-ic" style={{ background: "linear-gradient(135deg,#0559c9,#35d0a5)", color: "#fff", width: 46, height: 46 }}>
+          <Icon name="cloud" size={24} />
+        </div>
+        <div className="flex1" style={{ minWidth: 200 }}>
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>Arkive Cloud</div>
+            <Pill tone="info">Managed by Arkive</Pill>
+          </div>
+          <div className="faint" style={{ fontSize: 12 }}>
+            Our hosted, multi-region cloud — fully managed, nothing to configure.
+          </div>
+        </div>
+        {inUse ? (
+          <div className="row" style={{ gap: 20, fontSize: 12.5 }}>
+            <span className="faint">Stored <b style={{ color: "var(--text)" }}>{bytes(data!.used_bytes)}</b></span>
+            <span className="faint">Points <b style={{ color: "var(--text)" }}>{data!.recovery_points}</b></span>
+            <span className="faint">Items <b style={{ color: "var(--text)" }}>{data!.object_count.toLocaleString()}</b></span>
+            <span className="faint">Sources <b style={{ color: "var(--text)" }}>{data!.source_count}</b></span>
+            <button className="btn sm" onClick={onOpen}><Icon name="search" size={13} /> View details</button>
+          </div>
+        ) : (
+          <div className="faint" style={{ fontSize: 12.5, maxWidth: 320 }}>
+            {data && !data.enabled
+              ? <>Not enabled — turn on Arkive Cloud in <a href="/onboarding">Protection Setup</a> to store data with us.</>
+              : "No data stored with Arkive Cloud yet."}
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+// Read-only drill-in for Arkive Cloud: usage + the sources stored with us. No
+// controls — Arkive manages this tier.
+function ArkiveCloudDetail({ data, onBack }: { data: ArkiveCloud; onBack: () => void }) {
+  return (
+    <>
+      <button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 12 }}>← Cloud Storage</button>
+      <div className="row" style={{ gap: 12, alignItems: "center", marginBottom: 16 }}>
+        <div className="insight-card-ic" style={{ background: "linear-gradient(135deg,#0559c9,#35d0a5)", color: "#fff", width: 44, height: 44 }}>
+          <Icon name="cloud" size={24} />
+        </div>
+        <div className="stack" style={{ gap: 2 }}>
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <h2 style={{ margin: 0 }}>Arkive Cloud</h2>
+            <Pill tone="info">Managed by Arkive</Pill>
+          </div>
+          <div className="faint" style={{ fontSize: 12.5 }}>
+            Hosted, multi-region cloud storage
+            {data.last_backup_at ? ` · last backup ${fmtAgo(data.last_backup_at)}` : ""}
+          </div>
+        </div>
+      </div>
+
+      <div className="insights-stats" style={{ marginBottom: 16 }}>
+        <MiniStat icon="cloud" label="Data stored" value={bytes(data.used_bytes)} tint="#0559c9" />
+        <MiniStat icon="clock" label="Recovery points" value={String(data.recovery_points)} tint="#2dbe60" />
+        <MiniStat icon="database" label="Items protected" value={data.object_count.toLocaleString()} tint="#c56cf0" />
+        <MiniStat icon="shield" label="Encryption" value="Quantum-safe" tint="#35d0a5" />
+      </div>
+
+      <Card>
+        <div className="row" style={{ gap: 8, marginBottom: 12, alignItems: "center" }}>
+          <Icon name="database" size={15} />
+          <h3 style={{ margin: 0, fontSize: 15 }}>Sources stored here</h3>
+        </div>
+        {data.sources.length === 0 ? (
+          <div className="muted" style={{ padding: 8 }}>
+            No data has landed in Arkive Cloud yet. Route a source to Arkive Cloud in the <a href="/mappings">Data Map</a>.
+          </div>
+        ) : (
+          <table className="table">
+            <thead><tr><th>Source</th><th>Recovery points</th><th>Items</th><th>Stored</th><th>Last backup</th></tr></thead>
+            <tbody>
+              {data.sources.map((s) => (
+                <tr key={s.collection_id}>
+                  <td>
+                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                      <SourceIcon type={s.source_type} fallback="database" size={16} />
+                      <div style={{ fontWeight: 600 }}>{s.name}</div>
+                    </div>
+                  </td>
+                  <td>{s.recovery_points}{s.recoverable ? <span className="faint" style={{ fontSize: 11 }}> · {s.recoverable} recoverable</span> : ""}</td>
+                  <td>{s.objects.toLocaleString()}</td>
+                  <td>{bytes(s.bytes)}</td>
+                  <td className="faint" style={{ fontSize: 12 }}>{fmtAgo(s.last_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
     </>
   );
 }
