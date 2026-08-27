@@ -608,7 +608,7 @@ export default function Search() {
       const url = URL.createObjectURL(blob);
       if (mime.startsWith("image/")) {
         // Browsers can't decode HEIC/HEIF natively — convert to JPEG on the fly.
-        const isHeic = /hei[cf]/i.test(mime) || /\.hei[cf]$/i.test(item.filename || item.title || "");
+        const isHeic = /hei[cf]/i.test(mime) || /\.hei[cf]$/i.test(item.title || "");
         if (isHeic) {
           try {
             const heic2any = (await import("heic2any")).default;
