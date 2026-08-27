@@ -317,6 +317,68 @@ def _user_usage(db: Session, user) -> tuple[int, int, dict]:
     return total, used_bytes, by_bucket
 
 
+def bulk_user_usage(db: Session, user_ids: list[str]) -> dict:
+    """One pass (objects, bytes, by_bucket) per user for a whole batch of accounts,
+    so the admin Users list doesn't run a separate index scan per user (which made
+    the page time out). Dedup is per (owner, source_type, object_id)."""
+    out: dict = {uid: (0, 0, {}) for uid in user_ids}
+    if not user_ids:
+        return out
+    vrows = (db.query(Vault.id, Vault.owner_user_id)
+             .filter(Vault.owner_user_id.in_(user_ids)).all())
+    vault_owner = {vid: oid for vid, oid in vrows}
+    vault_ids = list(vault_owner.keys())
+    if not vault_ids:
+        return out
+    dq = (db.query(SearchDocument.vault_id, SearchDocument.source_type,
+                   SearchDocument.object_id, SearchDocument.size_bytes,
+                   SearchDocument.doc_type)
+          .filter(SearchDocument.vault_id.in_(vault_ids)))
+    if db.bind is not None and db.bind.dialect.name == "postgresql":
+        rows = (dq.distinct(SearchDocument.vault_id, SearchDocument.source_type,
+                            SearchDocument.object_id)
+                  .order_by(SearchDocument.vault_id, SearchDocument.source_type,
+                            SearchDocument.object_id, SearchDocument.created_at.desc()).all())
+    else:
+        rows = dq.order_by(SearchDocument.created_at.desc()).all()
+    agg: dict = {}
+    seen: set = set()
+    for vid, st, oid, sz, dt in rows:
+        owner = vault_owner.get(vid)
+        if not owner:
+            continue
+        key = (owner, st, oid)
+        if key in seen:
+            continue
+        seen.add(key)
+        a = agg.setdefault(owner, {"total": 0, "bytes": 0, "buckets": {}})
+        a["total"] += 1
+        a["bytes"] += int(sz or 0)
+        bk = _bucket_for(dt)["key"]
+        a["buckets"][bk] = a["buckets"].get(bk, 0) + 1
+    for uid, a in agg.items():
+        out[uid] = (a["total"], a["bytes"], a["buckets"])
+    return out
+
+
+def user_plan_from_usage(db: Session, user, tenant: Tenant,
+                         total: int, used_bytes: int, by_bucket: dict) -> dict:
+    """Same canonical per-account plan as user_plan(), but with usage supplied by
+    the caller (see bulk_user_usage) so a batch view needn't rescan per user."""
+    p = get_pricing(db)
+    shared = (tenant.tenant_type or "dedicated") == "shared"
+    plan = effective_plan(p, "personal" if shared else tenant.plan)
+    out = _price_breakdown(
+        p, plan=plan,
+        licensed_bytes=used_bytes if shared else int(tenant.licensed_bytes or 0),
+        options=list(user.protection_options or []) if shared else list(tenant.protection_options or []),
+        appliance_plan=[] if shared else list(tenant.appliance_plan or []),
+        used_bytes=used_bytes, by_bucket=by_bucket,
+        charge_on="used" if shared else "licensed")
+    out["objects_total"] = total
+    return out
+
+
 def user_protection_options(user, tenant: Tenant) -> list[str]:
     """Protection destinations for this account. Shared-tenant personal accounts
     each own their selection (the tenant is a pool of unrelated accounts); org

@@ -144,7 +144,7 @@ def list_all_users(q: str = "", tenant_id: str = "", plan: str = "",
     """Global directory of every account across all tenants — filterable and
     searchable, with the plan, tenant, last-login, usage and billing each
     account rolls up to. Also backs the broadcast-recipient chooser."""
-    from .billing import get_pricing, effective_plan
+    from .billing import get_pricing, effective_plan, bulk_user_usage, user_plan_from_usage
     pricing = get_pricing(db)
     tenants = {t.id: t for t in db.query(Tenant).all()}
     query = db.query(User)
@@ -153,7 +153,10 @@ def list_all_users(q: str = "", tenant_id: str = "", plan: str = "",
     if status:
         query = query.filter(User.status == status)
     needle = (q or "").strip().lower()
-    out = []
+    # Filter first (cheap), then compute usage/billing for the matching set in a
+    # SINGLE index pass — previously each user triggered its own SearchDocument
+    # scan (_user_billing), so the page timed out on any real user count.
+    matched: list = []
     for u in query.order_by(User.email.asc()).all():
         t = tenants.get(u.tenant_id)
         ttype = (t.tenant_type if t else "dedicated") or "dedicated"
@@ -169,7 +172,17 @@ def list_all_users(q: str = "", tenant_id: str = "", plan: str = "",
                             (t.name if t else "")]).lower()
             if needle not in hay:
                 continue
-        billing = _user_billing(db, u, t, pricing) if t else None
+        matched.append((u, t, pl))
+    usage = bulk_user_usage(db, [u.id for (u, _t, _pl) in matched])
+    out = []
+    for u, t, pl in matched:
+        total, used_bytes, by_bucket = usage.get(u.id, (0, 0, {}))
+        monthly = 0.0
+        if t is not None:
+            try:
+                monthly = user_plan_from_usage(db, u, t, total, used_bytes, by_bucket)["costs"]["total_monthly"]
+            except Exception:  # noqa: BLE001 - never fail the list on a pricing edge
+                monthly = 0.0
         out.append({
             "id": u.id, "email": u.email, "display_name": u.display_name,
             "full_name": u.full_name, "first_name": u.first_name or "",
@@ -179,12 +192,12 @@ def list_all_users(q: str = "", tenant_id: str = "", plan: str = "",
             "email_verified": bool(u.email_verified),
             "feature_flags": u.feature_flags or {},
             "tenant_id": u.tenant_id, "tenant_name": (t.name if t else ""),
-            "tenant_type": ttype,
+            "tenant_type": (t.tenant_type if t else "dedicated") or "dedicated",
             "plan": {"id": pl.get("id"), "name": pl.get("name")},
             "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
             "created_at": u.created_at.isoformat() if u.created_at else None,
-            "usage_bytes": (billing["used_bytes"] if billing else 0),
-            "billing_monthly": (billing["total_monthly"] if billing else 0),
+            "usage_bytes": used_bytes,
+            "billing_monthly": monthly,
             "currency": pricing.currency,
         })
     return out
@@ -491,6 +504,45 @@ def feature_flag_catalog():
     from .. import features
     return [{"name": k, "label": features.LABELS.get(k, k), "default": v}
             for k, v in features.FLAGS.items()]
+
+
+@router.get("/debug-key")
+def get_debug_key_admin(principal: security.Principal = Depends(security.require_platform_admin),
+                        db: Session = Depends(get_db)):
+    """The debug-API key (platform admin only). The key gates /debug — share it
+    only with operators who should be able to query/benchmark the live system."""
+    from .debug import get_debug_key
+    key = get_debug_key(db)
+    return {"enabled": bool(key), "key": key}
+
+
+class DebugKeyUpdate(BaseModel):
+    key: str | None = None   # explicit key; if omitted with rotate=True we generate one
+    rotate: bool = False
+
+
+@router.put("/debug-key")
+def set_debug_key_admin(body: DebugKeyUpdate,
+                        principal: security.Principal = Depends(security.require_platform_admin),
+                        db: Session = Depends(get_db)):
+    from .debug import set_debug_key, rotate_debug_key
+    if body.rotate or not body.key:
+        key = rotate_debug_key(db)
+    else:
+        key = set_debug_key(db, body.key.strip())
+    audit.record(db, actor=principal.user_id, action="admin.debug_key_set",
+                 category="admin", severity="warning", detail={})
+    return {"enabled": bool(key), "key": key}
+
+
+@router.delete("/debug-key")
+def disable_debug_key_admin(principal: security.Principal = Depends(security.require_platform_admin),
+                            db: Session = Depends(get_db)):
+    from .debug import set_debug_key
+    set_debug_key(db, "")
+    audit.record(db, actor=principal.user_id, action="admin.debug_key_disabled",
+                 category="admin", severity="warning", detail={})
+    return {"enabled": False}
 
 
 class FlagsUpdate(BaseModel):

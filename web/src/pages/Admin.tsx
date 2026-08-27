@@ -1,6 +1,6 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { api } from "../api";
+import { api, getToken } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo, fmtAbsolute } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
@@ -125,6 +125,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "fleet", label: "Appliance fleet", icon: "server", group: "Infrastructure" },
   { key: "crypto", label: "Crypto", icon: "lock", group: "Infrastructure" },
   { key: "updates", label: "Updates", icon: "clock", group: "Infrastructure" },
+  { key: "debug", label: "Debug", icon: "activity", group: "Infrastructure" },
   { key: "audit", label: "Audit log", icon: "shield", group: "Infrastructure" },
 ];
 
@@ -151,6 +152,7 @@ export default function Admin() {
       {s === "crypto" && <Crypto />}
       {s === "audit" && <Audit />}
       {s === "updates" && <Updates />}
+      {s === "debug" && <DebugAdmin />}
     </>
   );
 }
@@ -1929,6 +1931,228 @@ function Audit() {
         </tbody>
       </table>
     </Card>
+  );
+}
+
+// ---- Debug / diagnostics (key-gated live troubleshooting) ------------------
+function DebugAdmin() {
+  const [key, setKey] = useState<string | null>(null);
+  const [reveal, setReveal] = useState(false);
+  const [stats, setStats] = useState<any>(null);
+  const [health, setHealth] = useState<any>(null);
+  const [bench, setBench] = useState<any>(null);
+  const [nodes, setNodes] = useState<any>(null);
+  const [sql, setSql] = useState("SELECT relname, n_live_tup, n_dead_tup FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 20");
+  const [qres, setQres] = useState<any>(null);
+  const [qerr, setQerr] = useState("");
+  const [busy, setBusy] = useState("");
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3200); }
+
+  async function loadKey() {
+    try { const r = await api.get<{ enabled: boolean; key: string }>("/admin/debug-key"); setKey(r.key || ""); }
+    catch { setKey(""); }
+  }
+  useEffect(() => { void loadKey(); }, []);
+
+  // Debug endpoints require the X-Debug-Key header (in addition to the admin session).
+  async function dbg<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const res = await fetch(`/api${path}`, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+        "X-Debug-Key": key || "",
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) { let d = res.statusText; try { d = (await res.json()).detail ?? d; } catch { /* */ } throw new Error(d); }
+    return res.json() as Promise<T>;
+  }
+
+  async function generate() {
+    try { const r = await api.put<{ key: string }>("/admin/debug-key", { rotate: true }); setKey(r.key); flash("Debug key generated"); }
+    catch (e) { await notify({ message: (e as Error).message, tone: "danger" }); }
+  }
+  async function disable() {
+    if (!await confirmDialog({ title: "Disable debug API?", message: "This clears the key and disables all /debug endpoints.", tone: "danger", confirmLabel: "Disable" })) return;
+    try { await api.del("/admin/debug-key"); setKey(""); setStats(null); setHealth(null); flash("Debug API disabled"); }
+    catch (e) { await notify({ message: (e as Error).message, tone: "danger" }); }
+  }
+  async function run(name: string, fn: () => Promise<void>) {
+    setBusy(name);
+    try { await fn(); }
+    catch (e) { await notify({ title: "Debug call failed", message: (e as Error).message, tone: "danger" }); }
+    finally { setBusy(""); }
+  }
+  async function maintenance(action: string) {
+    if (action !== "analyze" && !await confirmDialog({ title: "Run VACUUM?", message: "VACUUM reclaims dead-tuple bloat and refreshes planner stats. Safe to run live but can take a while on large tables.", confirmLabel: "Run" })) return;
+    await run(`maint-${action}`, async () => { const r = await dbg<any>("POST", "/debug/db/maintenance", { action }); flash(`${r.ran} · ${r.ms}ms`); const s = await dbg<any>("GET", "/debug/db/stats"); setStats(s); });
+  }
+
+  if (key === null) return <Card><div className="muted">Loading…</div></Card>;
+
+  if (!key) return (
+    <>
+      <h3 style={{ marginTop: 0 }}>Debug &amp; diagnostics</h3>
+      <Card>
+        <div className="stack" style={{ alignItems: "center", gap: 12, padding: "26px 12px", textAlign: "center" }}>
+          <div className="insight-card-ic" style={{ background: "var(--inset)", width: 48, height: 48 }}><Icon name="activity" size={22} /></div>
+          <div style={{ fontWeight: 700 }}>The debug API is disabled</div>
+          <div className="faint" style={{ fontSize: 12.5, maxWidth: 460 }}>
+            Generate a debug key to unlock live diagnostics — DB stats, query benchmarks, a read-only
+            SQL console, maintenance (VACUUM/ANALYZE) and per-node fleet health. The key gates every
+            <code> /debug</code> endpoint; keep it secret and rotate it when you're done.
+          </div>
+          <button className="btn primary" onClick={generate}><Icon name="key" size={14} /> Generate debug key</button>
+        </div>
+      </Card>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <h3 style={{ margin: 0 }}>Debug &amp; diagnostics</h3>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn ghost sm" onClick={generate}>Rotate key</button>
+          <button className="btn danger sm" onClick={disable}>Disable</button>
+        </div>
+      </div>
+
+      <Card style={{ marginBottom: 14 }}>
+        <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <Icon name="key" size={15} />
+          <span style={{ fontWeight: 600, fontSize: 13 }}>Debug key</span>
+          <code style={{ fontSize: 12, background: "var(--inset)", padding: "3px 8px", borderRadius: 6 }}>
+            {reveal ? key : `${key.slice(0, 8)}${"•".repeat(16)}`}
+          </code>
+          <button className="btn ghost sm" onClick={() => setReveal((r) => !r)}>{reveal ? "Hide" : "Reveal"}</button>
+          <button className="btn ghost sm" onClick={() => { void navigator.clipboard?.writeText(key); flash("Copied"); }}>Copy</button>
+          <span className="faint" style={{ fontSize: 11.5 }}>Send as <code>X-Debug-Key</code> header to call <code>/api/debug/*</code>.</span>
+        </div>
+      </Card>
+
+      <div className="grid grid-2" style={{ gap: 14, marginBottom: 14 }}>
+        <Card>
+          <div className="spread" style={{ marginBottom: 8 }}>
+            <h3 style={{ margin: 0, fontSize: 15 }}>Health</h3>
+            <button className="btn ghost sm" disabled={busy === "health"} onClick={() => void run("health", async () => setHealth(await dbg("GET", "/debug/health")))}>Check</button>
+          </div>
+          {health ? (
+            <div className="stack" style={{ gap: 4, fontSize: 12.5 }}>
+              <div className="row" style={{ gap: 8 }}><Pill tone={health.db_ok ? "ok" : "danger"} dot>{health.db_ok ? "DB up" : "DB down"}</Pill><span className="faint">ping {health.db_ping_ms} ms</span><span className="faint">· {health.dialect}</span></div>
+              <div className="faint">web pool: {health.pools?.web?.checked_out}/{health.pools?.web?.size} out · worker pool: {health.pools?.worker?.checked_out}/{health.pools?.worker?.size} out</div>
+              <div className="faint">role {health.node_role} · federated {String(health.federated)} · sync {String(health.sync_enabled)}</div>
+            </div>
+          ) : <div className="muted" style={{ fontSize: 12.5 }}>Run a health check.</div>}
+        </Card>
+        <Card>
+          <div className="spread" style={{ marginBottom: 8 }}>
+            <h3 style={{ margin: 0, fontSize: 15 }}>Query benchmark</h3>
+            <button className="btn ghost sm" disabled={busy === "bench"} onClick={() => void run("bench", async () => setBench(await dbg("POST", "/debug/db/benchmark", { iterations: 3 })))}>{busy === "bench" ? "Running…" : "Run"}</button>
+          </div>
+          {bench ? (
+            <table className="table"><tbody>
+              {bench.results.map((r: any) => (
+                <tr key={r.name}>
+                  <td style={{ fontSize: 12 }}>{r.name}</td>
+                  <td style={{ textAlign: "right" }}>{r.ok ? <span style={{ color: (r.ms > 250) ? "var(--warn)" : undefined }}>{r.ms} ms</span> : <span style={{ color: "var(--danger-c)" }}>err</span>}</td>
+                  <td className="faint" style={{ textAlign: "right", fontSize: 11 }}>{r.rows ?? ""}</td>
+                </tr>
+              ))}
+            </tbody></table>
+          ) : <div className="muted" style={{ fontSize: 12.5 }}>Time representative queries to find slow paths.</div>}
+        </Card>
+      </div>
+
+      <Card style={{ marginBottom: 14 }}>
+        <div className="spread" style={{ marginBottom: 8 }}>
+          <h3 style={{ margin: 0, fontSize: 15 }}>Database</h3>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn ghost sm" disabled={busy === "stats"} onClick={() => void run("stats", async () => setStats(await dbg("GET", "/debug/db/stats")))}>{busy === "stats" ? "Loading…" : "Load stats"}</button>
+            <button className="btn ghost sm" disabled={!!busy} onClick={() => void maintenance("analyze")}>ANALYZE</button>
+            <button className="btn ghost sm" disabled={!!busy} onClick={() => void maintenance("vacuum")}>VACUUM ANALYZE</button>
+          </div>
+        </div>
+        {stats ? (
+          <>
+            <div className="row" style={{ gap: 16, marginBottom: 10, fontSize: 12.5, flexWrap: "wrap" }}>
+              {stats.database_size_bytes != null && <span className="faint">DB size <b style={{ color: "var(--text)" }}>{bytes(stats.database_size_bytes)}</b></span>}
+              {stats.idle_in_transaction != null && <span className="faint">idle-in-tx <b style={{ color: stats.idle_in_transaction > 0 ? "var(--warn)" : "var(--text)" }}>{stats.idle_in_transaction}</b></span>}
+              {(stats.connections || []).map((c: any) => <span key={c.state} className="faint">{c.state}: <b style={{ color: "var(--text)" }}>{c.count}</b>{c.longest_xact_s ? ` (${c.longest_xact_s}s)` : ""}</span>)}
+            </div>
+            <table className="table">
+              <thead><tr><th>Table</th><th style={{ textAlign: "right" }}>Live</th><th style={{ textAlign: "right" }}>Dead</th><th style={{ textAlign: "right" }}>Bloat</th><th style={{ textAlign: "right" }}>Size</th><th>Last analyze</th></tr></thead>
+              <tbody>
+                {(stats.tables || []).map((t: any) => (
+                  <tr key={t.table}>
+                    <td style={{ fontSize: 12 }}>{t.table}</td>
+                    <td style={{ textAlign: "right" }}>{(t.live ?? t.rows ?? 0).toLocaleString?.() ?? t.rows}</td>
+                    <td style={{ textAlign: "right" }}>{(t.dead ?? 0).toLocaleString?.() ?? ""}</td>
+                    <td style={{ textAlign: "right", color: (t.dead_ratio ?? 0) > 0.2 ? "var(--warn)" : undefined }}>{t.dead_ratio != null ? `${Math.round(t.dead_ratio * 100)}%` : ""}</td>
+                    <td style={{ textAlign: "right" }}>{t.total_bytes != null ? bytes(t.total_bytes) : ""}</td>
+                    <td className="faint" style={{ fontSize: 11 }}>{t.last_analyze ? timeAgo(t.last_analyze) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        ) : <div className="muted" style={{ fontSize: 12.5 }}>Load DB stats to see table sizes, dead-tuple bloat and connection activity (a high bloat % or idle-in-transaction count explains broad slowness — run VACUUM ANALYZE).</div>}
+      </Card>
+
+      <Card style={{ marginBottom: 14 }}>
+        <div className="spread" style={{ marginBottom: 8 }}>
+          <h3 style={{ margin: 0, fontSize: 15 }}>Read-only SQL console</h3>
+          <button className="btn primary sm" disabled={busy === "query"} onClick={() => void run("query", async () => { setQerr(""); try { setQres(await dbg("POST", "/debug/query", { sql })); } catch (e) { setQerr((e as Error).message); setQres(null); } })}>{busy === "query" ? "Running…" : "Run query"}</button>
+        </div>
+        <textarea className="input" style={{ fontFamily: "monospace", fontSize: 12.5, minHeight: 80 }} value={sql} onChange={(e) => setSql(e.target.value)} />
+        {qerr && <div style={{ color: "var(--danger-c)", fontSize: 12, marginTop: 6 }}>{qerr}</div>}
+        {qres && (
+          <div style={{ marginTop: 10, overflowX: "auto" }}>
+            <div className="faint" style={{ fontSize: 11.5, marginBottom: 4 }}>{qres.row_count} row(s) · {qres.ms} ms{qres.truncated ? " · truncated" : ""}</div>
+            <table className="table">
+              <thead><tr>{(qres.columns || []).map((c: string) => <th key={c}>{c}</th>)}</tr></thead>
+              <tbody>
+                {(qres.rows || []).map((row: any[], i: number) => (
+                  <tr key={i}>{row.map((v, j) => <td key={j} className="mono" style={{ fontSize: 11.5, maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v === null ? <span className="faint">null</span> : String(v)}</td>)}</tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div className="spread" style={{ marginBottom: 8 }}>
+          <h3 style={{ margin: 0, fontSize: 15 }}>Fleet DB health</h3>
+          <button className="btn ghost sm" disabled={busy === "nodes"} onClick={() => void run("nodes", async () => setNodes(await dbg("GET", "/debug/nodes")))}>{busy === "nodes" ? "Probing…" : "Probe nodes"}</button>
+        </div>
+        {nodes ? (
+          <table className="table">
+            <thead><tr><th>Node</th><th>Reachable</th><th style={{ textAlign: "right" }}>DB size</th><th style={{ textAlign: "right" }}>Idle-in-tx</th><th>Top table</th></tr></thead>
+            <tbody>
+              {(nodes.nodes || []).map((n: any) => {
+                const st = n.stats || {};
+                const top = (st.top_tables || [])[0];
+                return (
+                  <tr key={n.id}>
+                    <td style={{ fontWeight: 600 }}>{n.name}<div className="faint" style={{ fontSize: 11 }}>{n.role}{n.is_self ? " · self" : ""}</div></td>
+                    <td>{n.reachable === false ? <Pill tone="danger" dot>unreachable</Pill> : n.reachable ? <Pill tone="ok" dot>ok</Pill> : <Pill tone="warn">—</Pill>}{n.error && <div className="faint" style={{ fontSize: 10.5, color: "var(--warn)" }}>{String(n.error).slice(0, 60)}</div>}</td>
+                    <td style={{ textAlign: "right" }}>{st.database_size_bytes != null ? bytes(st.database_size_bytes) : "—"}</td>
+                    <td style={{ textAlign: "right", color: st.idle_in_transaction > 0 ? "var(--warn)" : undefined }}>{st.idle_in_transaction ?? "—"}</td>
+                    <td className="faint" style={{ fontSize: 11.5 }}>{top ? `${top.table} · ${bytes(top.total_bytes || 0)}` : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ) : <div className="muted" style={{ fontSize: 12.5 }}>Probe every fleet node's database (via the fleet secret) to find which one is slow.</div>}
+      </Card>
+
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
   );
 }
 

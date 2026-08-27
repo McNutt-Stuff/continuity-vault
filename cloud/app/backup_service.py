@@ -275,9 +275,20 @@ def run_backup_once(db) -> Optional[dict]:
     node_name = (node.name if node else (s.node_name or s.domain)) or "node"
     role = (node.role if node else s.node_role) or "control-plane"
 
-    # A new run means any prior "running" run for this node is dead — reap it so
-    # the dashboard never shows a phantom in-progress backup.
-    reap_stale_runs(db, node_id=node_id, node_name=node_name)
+    # A new run means any prior "running" run for this node is dead — but only
+    # if it's genuinely STALE. Reaping a fresh, still-in-progress run (pg_dump can
+    # take tens of minutes on a busy DB) is exactly what produced the spurious
+    # "interrupted" failures, so only reap runs older than the pg_dump timeout.
+    reap_stale_runs(db, node_id=node_id, node_name=node_name, older_than_minutes=40)
+    # If a backup for this node is already in progress, don't start a second one:
+    # a concurrent run would race and could mark the first "interrupted".
+    running = (db.query(BackupRun)
+               .filter(BackupRun.status == "running")
+               .filter(BackupRun.node_id == node_id if node_id else BackupRun.node_name == node_name)
+               .order_by(BackupRun.started_at.desc()).first())
+    if running:
+        logger.info("backup: a run is already in progress for %s — not starting another", node_name)
+        return _run_view(running)
 
     run = BackupRun(node_id=node_id, node_name=node_name, role=role, kind="node",
                     status="running", started_at=_now(), components=[], destinations=[])
@@ -311,20 +322,29 @@ def _execute_backup(db, run, node, node_name: str, role: str) -> None:
     (no value) on skip / fatal build error; run.status carries the outcome."""
     from .models import ServiceObject
     svc_ids = list((node.backup_service_ids or []) if node else [])
-    services = []
+    # Capture everything we need from the ORM (incl. decrypted destination config)
+    # WHILE the session is open, then release it — the pg_dump + upload below can
+    # take minutes, and holding an open transaction the whole time leaves the
+    # connection "idle in transaction", which blocks autovacuum (→ table bloat →
+    # slow control-plane queries) and pins a pooled connection.
+    svc_meta: list = []  # (id, name, kind, config)
     for sid in svc_ids:
         svc = db.get(ServiceObject, sid)
         if svc and svc.enabled and svc.kind.startswith("storage-") and "backup" in svc.storage_capabilities():
-            services.append(svc)
-    if not services:
+            svc_meta.append((svc.id, svc.name, svc.kind, _service_config(db, svc)))
+    if not svc_meta:
         run.status = "skipped"
         run.message = "No backup destinations assigned"
         run.finished_at = _now()
+        db.commit()
         logger.info("backup: %s has no backup destinations — skipped", node_name)
         return
 
-    logger.info("backup: %s destination(s): %s", len(services),
-                ", ".join(sv.name for sv in services))
+    run_id = run.id  # capture before releasing the session (avoids a mid-backup reload)
+    logger.info("backup: %d destination(s): %s", len(svc_meta),
+                ", ".join(m[1] for m in svc_meta))
+    db.commit()  # release the transaction/connection for the duration of the dump+upload
+
     version = ""
     try:
         with open("/etc/arkive/version") as fh:
@@ -340,40 +360,41 @@ def _execute_backup(db, run, node, node_name: str, role: str) -> None:
         run.status = "failed"
         run.error = str(exc)[:500]
         run.finished_at = _now()
+        db.commit()
         return
 
-    run.components = components
-    run.message = note
     # The database holds config, tenants, receipts and the search index — it is the
     # critical component, so a bundle without it must never look like a clean success.
     db_captured = "database" in components
     # A distinct object per run (timestamp + run id) so every backup is retained
     # as its own snapshot on the storage service rather than overwriting the last.
     ts = _now().strftime("%Y%m%dT%H%M%SZ")
-    key = f"node-backups/{_safe(node_name)}/{ts}-{(run.id or '')[:8]}.arkbak"
+    key = f"node-backups/{_safe(node_name)}/{ts}-{(run_id or '')[:8]}.arkbak"
     size = len(encrypted)
 
     results = []
     ok_count = 0
-    for svc in services:
-        entry = {"service_id": svc.id, "name": svc.name, "kind": svc.kind,
+    for sid, name, kind, cfg in svc_meta:
+        entry = {"service_id": sid, "name": name, "kind": kind,
                  "status": "pending", "bytes": 0, "key": key, "error": None}
         try:
-            dest = destination_from_service(svc.kind, _service_config(db, svc))
+            dest = destination_from_service(kind, cfg)
             if dest is None:
                 entry.update(status="failed", error="missing required settings (bucket/container)")
-                logger.warning("backup: %s has no usable destination config", svc.name)
+                logger.warning("backup: %s has no usable destination config", name)
             else:
-                logger.info("backup: uploading %d bytes to %s (%s)…", size, svc.name, svc.kind)
+                logger.info("backup: uploading %d bytes to %s (%s)…", size, name, kind)
                 dest.put_object(_BACKUP_PREFIX, key, encrypted, immutable=True)
                 entry.update(status="ok", bytes=size)
                 ok_count += 1
-                logger.info("backup: %s uploaded %d bytes to %s", node_name, size, svc.name)
+                logger.info("backup: %s uploaded %d bytes to %s", node_name, size, name)
         except Exception as exc:  # noqa: BLE001
             entry.update(status="failed", error=str(exc)[:300])
-            logger.warning("backup: upload to %s failed: %s", svc.name, exc)
+            logger.warning("backup: upload to %s failed: %s", name, exc)
         results.append(entry)
 
+    run.components = components
+    run.message = note
     run.destinations = results
     run.total_bytes = size if ok_count else 0
     if not db_captured:
@@ -384,13 +405,14 @@ def _execute_backup(db, run, node, node_name: str, role: str) -> None:
         logger.error("backup: %s produced NO database dump (%s)", node_name, note)
     if ok_count == 0:
         run.status = "failed"
-    elif ok_count == len(services) and db_captured:
+    elif ok_count == len(svc_meta) and db_captured:
         run.status = "success"
     else:
         run.status = "partial"
     run.finished_at = _now()
+    db.commit()
     logger.info("backup: %s complete — %s (%d/%d destinations, db=%s, %d bytes)",
-                node_name, run.status, ok_count, len(services), db_captured, size)
+                node_name, run.status, ok_count, len(svc_meta), db_captured, size)
 
 
 def _run_view(run) -> dict:

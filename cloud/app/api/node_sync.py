@@ -491,6 +491,15 @@ def node_keys(authorization: str = Header(default=""), db: Session = Depends(get
     return out
 
 
+@router.get("/debug")
+def node_debug(authorization: str = Header(default=""), db: Session = Depends(get_db)):
+    """Fleet-authenticated DB health for this node (used by the control plane's
+    debug API to diagnose which node's database is slow)."""
+    _require_fleet(authorization)
+    from .debug import _brief_stats
+    return _brief_stats(db)
+
+
 class ControlReq(BaseModel):
     action: str
     unit: str = ""

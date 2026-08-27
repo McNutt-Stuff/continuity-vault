@@ -663,6 +663,16 @@ class BackupRun(Base):
     created_at = Column(DateTime, default=_now, index=True)
 
 
+class SystemSetting(Base):
+    """Tiny key/value store for platform-wide runtime settings (e.g. the debug-API
+    key). Auto-created by create_all; no migration needed."""
+
+    __tablename__ = "system_settings"
+    key = Column(String, primary_key=True)
+    value = Column(Text, default="")
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
 
 class NodeMetric(Base):
     """Time-series health sample for a node (~1/min), retained 90 days on the

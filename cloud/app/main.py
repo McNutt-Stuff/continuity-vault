@@ -17,6 +17,7 @@ from .api import (
     collections,
     connectors,
     dashboard,
+    debug,
     insights,
     integrations,
     org,
@@ -76,6 +77,7 @@ app.include_router(appliances.agent_router, prefix=API)
 app.include_router(agents.fleet_router, prefix=API)
 app.include_router(agents.agent_router, prefix=API)
 app.include_router(admin.router, prefix=API)
+app.include_router(debug.router, prefix=API)
 app.include_router(activity.router, prefix=API)
 app.include_router(recovery.router, prefix=API)
 app.include_router(photos.router, prefix=API)
