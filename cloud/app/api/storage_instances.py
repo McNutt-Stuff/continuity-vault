@@ -20,7 +20,7 @@ from ..db import get_db
 from ..models import Collection, CustomerStorage, SnapshotReceipt, Tenant
 
 router = APIRouter(prefix="/storage", tags=["customer-storage"],
-                   dependencies=[Depends(security.require_org_admin)])
+                   dependencies=[Depends(security.require_feature("cloud_storage_enabled"))])
 
 
 def _now() -> datetime:
@@ -77,6 +77,10 @@ def _owned(db: Session, principal, sid: str) -> CustomerStorage:
     cs = db.get(CustomerStorage, sid)
     if not cs or cs.tenant_id != principal.tenant_id:
         raise HTTPException(404, "storage not found")
+    # On a shared tenant (pooled personal accounts) each user only sees their own.
+    t = db.get(Tenant, principal.tenant_id)
+    if t and (t.tenant_type or "") == "shared" and cs.owner_user_id != principal.user_id:
+        raise HTTPException(404, "storage not found")
     return cs
 
 
@@ -92,9 +96,12 @@ def list_providers(principal: security.Principal = Depends(security.get_principa
 @router.get("")
 def list_storages(principal: security.Principal = Depends(security.get_principal),
                   db: Session = Depends(get_db)):
-    rows = (db.query(CustomerStorage)
-            .filter(CustomerStorage.tenant_id == principal.tenant_id)
-            .order_by(CustomerStorage.created_at.desc()).all())
+    q = (db.query(CustomerStorage)
+         .filter(CustomerStorage.tenant_id == principal.tenant_id))
+    t = db.get(Tenant, principal.tenant_id)
+    if t and (t.tenant_type or "") == "shared":
+        q = q.filter(CustomerStorage.owner_user_id == principal.user_id)
+    rows = q.order_by(CustomerStorage.created_at.desc()).all()
     usage = _usage_map(db, principal.tenant_id)
     return {
         "providers": list(cs_mod.PROVIDERS.values()),

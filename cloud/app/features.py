@@ -17,12 +17,16 @@ from __future__ import annotations
 FLAGS: dict[str, bool] = {
     "purge_enabled": True,   # may the account delete (purge) its protected data?
     "insights_enabled": True,  # show the Insights page (digital-footprint findings)?
+    "cloud_storage_enabled": True,  # show/allow Cloud Storage (bring-your-own buckets)?
+    "integrations_enabled": True,   # show/allow Integrations (network intelligence)?
 }
 
 # Human labels for the admin UI.
 LABELS = {
     "purge_enabled": "Allow data purge",
     "insights_enabled": "Digital-footprint Insights",
+    "cloud_storage_enabled": "Cloud Storage (bring-your-own)",
+    "integrations_enabled": "Integrations (network intelligence)",
 }
 
 

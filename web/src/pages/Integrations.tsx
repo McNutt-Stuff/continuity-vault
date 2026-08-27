@@ -139,6 +139,7 @@ export default function Integrations() {
 
       {showAdd && (
         <AddIntegrationModal available={list?.available || []}
+                             hasAppliance={(list?.appliances || []).length > 0}
                              onClose={() => setShowAdd(false)}
                              onPick={(s) => { setShowAdd(false); setSetupSpec(s); }} />
       )}
@@ -153,8 +154,8 @@ export default function Integrations() {
 }
 
 // Catalog modal (mirrors the Sources page): pick an integration to set up.
-function AddIntegrationModal({ available, onClose, onPick }: {
-  available: Spec[]; onClose: () => void; onPick: (s: Spec) => void;
+function AddIntegrationModal({ available, hasAppliance, onClose, onPick }: {
+  available: Spec[]; hasAppliance: boolean; onClose: () => void; onPick: (s: Spec) => void;
 }) {
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
@@ -179,8 +180,14 @@ function AddIntegrationModal({ available, onClose, onPick }: {
                  onChange={(e) => setQuery(e.target.value)}
                  style={{ marginBottom: 14, width: "100%" }} />
           <div className="grid grid-3">
-            {shown.map((s) => (
-              <div key={s.integration_type} className="dest-card" onClick={() => onPick(s)}>
+            {shown.map((s) => {
+              const locked = s.needs_appliance && !hasAppliance;
+              return (
+              <div key={s.integration_type}
+                   className="dest-card"
+                   style={locked ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
+                   title={locked ? "Requires an appliance on your network" : undefined}
+                   onClick={() => { if (!locked) onPick(s); }}>
                 <div className="spread" style={{ marginBottom: 10 }}>
                   <div className="row" style={{ gap: 10, alignItems: "center" }}>
                     <div className="insight-card-ic" style={{ background: `${s.color}1e`, color: s.color, width: 34, height: 34 }}>
@@ -194,8 +201,14 @@ function AddIntegrationModal({ available, onClose, onPick }: {
                   <Pill tone="info">{s.runs_on === "appliance" ? "Appliance" : "Cloud"}</Pill>
                 </div>
                 <div className="faint" style={{ fontSize: 12, lineHeight: 1.45 }}>{s.description}</div>
+                {locked && (
+                  <div style={{ fontSize: 11.5, color: "var(--warn)", marginTop: 8, display: "flex", gap: 6, alignItems: "center" }}>
+                    <Icon name="alert" size={12} /> Needs an appliance on your network
+                  </div>
+                )}
               </div>
-            ))}
+              );
+            })}
             {shown.length === 0 && <div className="muted">No integrations match “{query}”.</div>}
           </div>
         </div>

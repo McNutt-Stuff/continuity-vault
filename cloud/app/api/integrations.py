@@ -35,7 +35,7 @@ from ..models import (
 from .appliances import _agent_appliance
 
 router = APIRouter(prefix="/integrations", tags=["integrations"],
-                   dependencies=[Depends(security.require_org_admin)])
+                   dependencies=[Depends(security.require_feature("integrations_enabled"))])
 agent_router = APIRouter(prefix="/appliance/integrations", tags=["appliance-integrations"])
 admin_router = APIRouter(prefix="/admin", tags=["admin-integrations"])
 

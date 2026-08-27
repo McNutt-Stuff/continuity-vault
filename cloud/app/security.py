@@ -207,6 +207,22 @@ def require_owner(principal: Principal = Depends(get_principal)) -> Principal:
     return principal
 
 
+def require_feature(flag: str):
+    """Gate a router/endpoint on an admin-controlled feature flag (default ON).
+    Unlike role gates, this lets personal/shared accounts use the capability while
+    still letting an admin disable it per user or per tenant."""
+    def _dep(principal: Principal = Depends(get_principal),
+             tenant: Tenant = Depends(get_tenant),
+             db: Session = Depends(get_db)) -> Principal:
+        from . import features
+        from .models import User
+        user = db.get(User, principal.user_id)
+        if not features.resolve(user, tenant, flag):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"the '{flag}' feature is disabled")
+        return principal
+    return _dep
+
+
 def content_vault_ids(db: Session, principal: Principal) -> list[str]:
     """Vaults whose *content* the principal may read. Content is never shared
     across users — even org admins only see their own vaults' items. Aggregate

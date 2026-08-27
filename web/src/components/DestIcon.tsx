@@ -22,7 +22,15 @@ export function destBrand(dest?: string, provider?: string): string {
 export function DestIcon({ dest, provider, size = 13, fallback = "cloud" }:
   { dest?: string; provider?: string; size?: number; fallback?: IconName }) {
   const b = destBrand(dest, provider);
-  if (BRANDS.has(b)) return <SourceIcon type={b} fallback={fallback} size={size} />;
-  if (b === "appliance") return <Icon name="server" size={size} />;
-  return <Icon name="cloud" size={size} />;
+  const inner = BRANDS.has(b)
+    ? <SourceIcon type={b} fallback={fallback} size={size} />
+    : b === "appliance"
+      ? <Icon name="server" size={size} />
+      : <Icon name="cloud" size={size} />;
+  // Inline-flex wrapper so a block <img> brand mark still aligns with adjacent text.
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", flex: "none", verticalAlign: "middle" }}>
+      {inner}
+    </span>
+  );
 }

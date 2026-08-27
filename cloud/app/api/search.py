@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from cv_crypto.envelope import EnvelopeKeyHierarchy, decrypt_object, unwrap_key
@@ -190,15 +191,29 @@ def taxonomy(principal: security.Principal = Depends(security.get_principal)):
 
 @router.get("/thread")
 def thread(chat_id: str, source_type: str = "imessage",
+           date_from: str | None = None, date_to: str | None = None,
            principal: security.Principal = Depends(security.require_passkey),
            tenant: Tenant = Depends(security.get_tenant),
            db: Session = Depends(get_db)):
     """Reassemble a whole message conversation from its indexed messages +
     attachments (linked by chat_id / message_guid) so the user can read the full
-    thread. Uses indexed metadata only — no content decryption/step-up needed."""
+    thread. Uses indexed metadata only — no content decryption/step-up needed.
+    Optional date_from/date_to (YYYY-MM-DD) limit the window rebuilt."""
     vault_ids = security.content_vault_ids(db, principal)
     if not vault_ids:
         return {"chat_id": chat_id, "chat_name": "", "messages": []}
+
+    def _parse_day(s: str | None, end: bool):
+        if not s:
+            return None
+        try:
+            d = datetime.fromisoformat(s.replace("Z", "").split("T")[0])
+            return d.replace(hour=23, minute=59, second=59) if end else d
+        except Exception:  # noqa: BLE001
+            return None
+    dt_from = _parse_day(date_from, False)
+    dt_to = _parse_day(date_to, True)
+
     rows = (db.query(SearchDocument)
             .filter(SearchDocument.tenant_id == tenant.id,
                     SearchDocument.vault_id.in_(vault_ids),
@@ -218,12 +233,20 @@ def thread(chat_id: str, source_type: str = "imessage",
         if str(meta.get("chat_id")) != str(chat_id):
             continue
         chat_name = chat_name or meta.get("chat_name") or ""
+        if r.modified_at is not None:
+            if dt_from and r.modified_at < dt_from:
+                continue
+            if dt_to and r.modified_at > dt_to:
+                continue
         when = r.modified_at.isoformat() if r.modified_at else None
         if r.doc_type == "message":
             messages.append({
                 "object_id": r.object_id,
                 "message_guid": meta.get("message_guid"),
                 "title": r.title, "preview": r.preview,
+                # `title` holds the message text (first 80 chars) captured at
+                # collection; the composed preview is metadata only.
+                "text": r.title,
                 "from": meta.get("from"), "direction": meta.get("direction"),
                 "service": meta.get("service"), "date": when,
                 "has_attachments": bool(meta.get("has_attachments")),
@@ -269,10 +292,31 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     # Data partitioning: search only ever returns items from the user's own
     # vaults — never another member's content.
     allowed = security.content_vault_ids(db, principal)
-    all_docs = (db.query(SearchDocument)
-                .filter(SearchDocument.tenant_id == tenant.id,
-                        SearchDocument.vault_id.in_(allowed))
-                .order_by(SearchDocument.created_at.desc()).all()) if allowed else []
+    # PERF: the free-text query is pushed to the DB (server-side filter) and the
+    # heavy `search_blob` column is NEVER transferred — we select only the fields
+    # the dedup, facets and result rows need. This keeps search responsive on
+    # large indexes (previously every row incl. the full search text was hauled
+    # into Python and filtered there).
+    ql = q.lower().strip() if q else ""
+    _cols = (SearchDocument.source_type, SearchDocument.object_id,
+             SearchDocument.snapshot_id, SearchDocument.collection_id,
+             SearchDocument.vault_id, SearchDocument.doc_type,
+             SearchDocument.title, SearchDocument.preview, SearchDocument.meta,
+             SearchDocument.labels, SearchDocument.size_bytes,
+             SearchDocument.modified_at, SearchDocument.created_at)
+    if allowed:
+        _base = (db.query(*_cols)
+                 .filter(SearchDocument.tenant_id == tenant.id,
+                         SearchDocument.vault_id.in_(allowed)))
+        if ql:
+            _like = f"%{ql}%"
+            _base = _base.filter(or_(
+                func.lower(SearchDocument.search_blob).like(_like),
+                func.lower(SearchDocument.title).like(_like),
+                func.lower(SearchDocument.preview).like(_like)))
+        all_docs = _base.order_by(SearchDocument.created_at.desc()).all()
+    else:
+        all_docs = []
 
     unique: list[SearchDocument] = []
     seen: set[tuple] = set()
@@ -299,7 +343,6 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     # options), while its own filter is excluded. Categories are normalized via
     # the current taxonomy so stale stored rows (e.g. images once tagged "media")
     # are corrected on read.
-    ql = q.lower().strip() if q else ""
 
     # Optional date-range filter, scoped to either the object's own date
     # ("date") or its capture/ingest date ("captured").
@@ -373,10 +416,6 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
             return False
         if not _in_range(r):
             return False
-        if ql:
-            hay = " ".join([r.title or "", r.preview or "", r.search_blob or ""]).lower()
-            if ql not in hay:
-                return False
         return True
 
     by_source: dict[str, int] = {}

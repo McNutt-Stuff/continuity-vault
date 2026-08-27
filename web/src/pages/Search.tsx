@@ -50,7 +50,7 @@ interface CalendarView {
 }
 interface ChatAttachment { filename?: string; kind?: string; mime?: string }
 interface ChatMsgView {
-  text?: string; service?: string; date?: string; chatName?: string;
+  text?: string; service?: string; date?: string; chatName?: string; chatId?: string;
   isGroup?: boolean; isFromMe?: boolean;
   from?: { name?: string; handle?: string };
   to?: { name?: string; handle?: string }[];
@@ -112,7 +112,7 @@ interface SearchResp {
 }
 
 interface ThreadMsg {
-  object_id: string; message_guid?: string; title: string; preview: string;
+  object_id: string; message_guid?: string; title: string; preview: string; text?: string;
   from?: string; direction?: string; service?: string; date: string | null;
   has_attachments: boolean;
   attachments: { object_id: string; filename: string; kind: string; mime?: string }[];
@@ -407,7 +407,7 @@ function parseCalendar(d: any): CalendarView {
 function parseMessage(d: any): ChatMsgView {
   return {
     text: d.text, service: d.service, date: d.date,
-    chatName: d.chat_name, isGroup: d.is_group, isFromMe: d.is_from_me,
+    chatName: d.chat_name, chatId: d.chat_id, isGroup: d.is_group, isFromMe: d.is_from_me,
     from: d.from, to: d.to, attachments: d.attachments,
   };
 }
@@ -490,11 +490,14 @@ export default function Search() {
   const [thread, setThread] = useState<ThreadResp | null>(null);
   const [threadLoading, setThreadLoading] = useState(false);
 
-  async function openThread(chatId: string, sourceType: string) {
+  async function openThread(chatId: string, sourceType: string, dateFrom?: string, dateTo?: string) {
     setThreadLoading(true);
     setThread({ chat_id: chatId, chat_name: "", count: 0, messages: [] });
     try {
-      const t = await api.get<ThreadResp>(`/search/thread?source_type=${encodeURIComponent(sourceType)}&chat_id=${encodeURIComponent(chatId)}`);
+      let url = `/search/thread?source_type=${encodeURIComponent(sourceType)}&chat_id=${encodeURIComponent(chatId)}`;
+      if (dateFrom) url += `&date_from=${encodeURIComponent(dateFrom)}`;
+      if (dateTo) url += `&date_to=${encodeURIComponent(dateTo)}`;
+      const t = await api.get<ThreadResp>(url);
       setThread(t);
     } catch (e) {
       await notify({ title: "Couldn't load thread", message: (e as Error).message, tone: "danger" });
@@ -604,6 +607,18 @@ export default function Search() {
       const mime = item.mime || blob.type;
       const url = URL.createObjectURL(blob);
       if (mime.startsWith("image/")) {
+        // Browsers can't decode HEIC/HEIF natively — convert to JPEG on the fly.
+        const isHeic = /hei[cf]/i.test(mime) || /\.hei[cf]$/i.test(item.filename || item.title || "");
+        if (isHeic) {
+          try {
+            const heic2any = (await import("heic2any")).default;
+            const out = await heic2any({ blob, toType: "image/jpeg", quality: 0.9 });
+            const jpeg = Array.isArray(out) ? out[0] : out;
+            setViewing({ item, kind: "image", url: URL.createObjectURL(jpeg) });
+            await loadRecovered();
+            return;
+          } catch { /* fall through to the raw blob (may not render) */ }
+        }
         setViewing({ item, kind: "image", url });
         await loadRecovered();
         return;
@@ -1094,13 +1109,6 @@ export default function Search() {
               <div className="stack" style={{ alignItems: "flex-end", gap: 6 }}>
                 <div className="row" style={{ gap: 6 }}>
                   {r.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
-                  {r.category === "message" && Boolean(r.meta?.chat_id) && (
-                    <button className="btn sm ghost" style={{ padding: "1px 8px", fontSize: 11 }}
-                            title="View the whole conversation"
-                            onClick={() => openThread(String(r.meta.chat_id), r.source_type)}>
-                      <Icon name="mail" size={11} /> View thread
-                    </button>
-                  )}
                   {(r.version_count ?? 0) > 1 && (
                     <button className="btn sm ghost" style={{ padding: "1px 8px", fontSize: 11 }}
                             title="View version history" onClick={() => setVersionsFor(r)}>
@@ -1204,7 +1212,8 @@ export default function Search() {
                 <CalendarCard data={viewing.calendar} title={viewing.item.title} />
               )}
               {viewing.kind === "imessage" && viewing.message && (
-                <ChatCard data={viewing.message} />
+                <ChatCard data={viewing.message}
+                          onViewThread={(cid, from, to) => { closeViewer(); void openThread(cid, "imessage", from, to); }} />
               )}
               {viewing.kind === "contact" && viewing.contact && (
                 <ContactCard data={viewing.contact} title={viewing.item.title} />
@@ -1350,14 +1359,19 @@ export default function Search() {
               )}
               {thread.messages.map((m) => {
                 const sent = m.direction === "sent";
+                const body = (m.text || m.title || "").trim();
+                const isPlaceholder = body === "(message)" || /^\[\d+ attachment/.test(body);
                 return (
                   <div key={m.object_id} style={{ display: "flex", justifyContent: sent ? "flex-end" : "flex-start", marginBottom: 8 }}>
-                    <div style={{ maxWidth: "78%", background: sent ? "var(--accent-soft, var(--inset))" : "var(--inset)", borderRadius: 12, padding: "8px 12px" }}>
-                      <div className="faint" style={{ fontSize: 11, marginBottom: 2 }}>
+                    <div style={{ maxWidth: "78%",
+                          background: sent ? "#0b93f6" : "var(--inset)",
+                          color: sent ? "#fff" : "var(--text)",
+                          borderRadius: 14, padding: "8px 12px" }}>
+                      <div style={{ fontSize: 11, marginBottom: 2, opacity: 0.7 }}>
                         {sent ? "Me" : (m.from || "Unknown")} · {m.date ? fmtAbsolute(m.date) : ""}
                       </div>
-                      <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>
-                        {(m.preview || "").replace(/^[^:]+:\s*/, "") || <span className="faint">(no text)</span>}
+                      <div style={{ fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                        {isPlaceholder || !body ? <span style={{ opacity: 0.6 }}>(no text)</span> : body}
                       </div>
                       {m.attachments.length > 0 && (
                         <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
@@ -1590,9 +1604,11 @@ function CalendarCard({ data, title }: { data: CalendarView; title: string }) {
 }
 
 // Recovered iMessage/SMS — rendered as a single chat bubble with thread context.
-function ChatCard({ data }: { data: ChatMsgView }) {
+function ChatCard({ data, onViewThread }: { data: ChatMsgView; onViewThread?: (chatId: string, from?: string, to?: string) => void }) {
   const mine = !!data.isFromMe;
   const who = mine ? "Me" : (data.from?.name || data.from?.handle || "Unknown");
+  const [tFrom, setTFrom] = useState("");
+  const [tTo, setTTo] = useState("");
   return (
     <div style={{ maxHeight: "62vh", overflow: "auto" }}>
       <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 12,
@@ -1619,8 +1635,8 @@ function ChatCard({ data }: { data: ChatMsgView }) {
           )}
           {data.text && (
             <div style={{
-              background: mine ? "#0b93f6" : "var(--panel-2,#1b2740)",
-              color: mine ? "#fff" : "inherit",
+              background: mine ? "#0b93f6" : "var(--inset)",
+              color: mine ? "#fff" : "var(--text)",
               borderRadius: 16, padding: "8px 13px", fontSize: 14, lineHeight: 1.4,
               overflowWrap: "anywhere", whiteSpace: "pre-wrap",
             }}>
@@ -1631,7 +1647,7 @@ function ChatCard({ data }: { data: ChatMsgView }) {
             <div style={{ marginTop: 6, display: "grid", gap: 4 }}>
               {data.attachments.map((a, i) => (
                 <div key={i} className="row" style={{ gap: 6, alignItems: "center", fontSize: 12,
-                      background: "var(--panel-2,#1b2740)", borderRadius: 10, padding: "6px 10px" }}>
+                      background: "var(--inset)", borderRadius: 10, padding: "6px 10px" }}>
                   <Icon name={a.kind === "image" ? "image" : a.kind === "video" ? "activity" : "file"} size={13} />
                   <span style={{ overflowWrap: "anywhere" }}>{a.filename || "attachment"}</span>
                 </div>
@@ -1644,6 +1660,33 @@ function ChatCard({ data }: { data: ChatMsgView }) {
       {data.to && data.to.length > 0 && (
         <div className="faint" style={{ fontSize: 11, marginTop: 14, textAlign: "center" }}>
           To: {data.to.map((t) => t.name || t.handle).filter(Boolean).join(", ")}
+        </div>
+      )}
+
+      {/* Rebuild the whole conversation, optionally limited to a date range. */}
+      {data.chatId && onViewThread && (
+        <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
+          <div className="faint" style={{ fontSize: 11.5, marginBottom: 8 }}>
+            View the whole conversation — optionally limit it to a time range.
+          </div>
+          <div className="row" style={{ gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <label className="stack" style={{ gap: 3 }}>
+              <span className="faint" style={{ fontSize: 10.5 }}>From</span>
+              <input type="date" className="input" value={tFrom} onChange={(e) => setTFrom(e.target.value)}
+                     style={{ padding: "6px 8px", width: 150 }} />
+            </label>
+            <label className="stack" style={{ gap: 3 }}>
+              <span className="faint" style={{ fontSize: 10.5 }}>To</span>
+              <input type="date" className="input" value={tTo} onChange={(e) => setTTo(e.target.value)}
+                     style={{ padding: "6px 8px", width: 150 }} />
+            </label>
+            <button className="btn sm primary" onClick={() => onViewThread(data.chatId!, tFrom || undefined, tTo || undefined)}>
+              <Icon name="mail" size={13} /> View conversation
+            </button>
+            {(tFrom || tTo) && (
+              <button className="btn sm ghost" onClick={() => { setTFrom(""); setTTo(""); }}>Clear</button>
+            )}
+          </div>
         </div>
       )}
     </div>
