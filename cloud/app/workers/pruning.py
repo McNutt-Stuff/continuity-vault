@@ -28,13 +28,27 @@ R_NETWORK_USAGE = 60     # stale device×app usage edges
 R_NODE_METRICS = 90      # telemetry time-series (also pruned by telemetry.py)
 
 
+# Advisory-lock key so a scheduled prune and a manually-triggered one can never run
+# at the same time (concurrent full-table writes stacked on locks were a cause of
+# control-plane sluggishness).
+_PRUNE_LOCK_KEY = 44710823
+
+
 def prune_all(db) -> dict:
     """Prune every bounded-retention table. Each table is committed independently
-    so one failure can't abort the rest. Returns per-table row counts."""
+    so one failure can't abort the rest. Returns per-table row counts. A session
+    advisory lock ensures only one prune runs at a time (skips if already running)."""
     from ..models import (ApplianceCommand, BackupRun, IntegrationRun, NetworkUsage,
                           NodeMetric, PendingAction, SyncJob)
     now = datetime.utcnow()
     counts: dict = {}
+
+    is_pg = db.bind is not None and db.bind.dialect.name == "postgresql"
+    if is_pg:
+        got = db.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _PRUNE_LOCK_KEY}).scalar()
+        if not got:
+            logger.info("db prune: another prune holds the lock — skipping")
+            return {"skipped": "locked"}
 
     def _do(name: str, fn):
         try:
@@ -45,14 +59,12 @@ def prune_all(db) -> dict:
             logger.exception("prune %s failed", name)
             counts[name] = None
 
-    # appliance_commands — the #1 bloat source: free inline-ciphertext payloads on
-    # completed commands, expire never-acked stragglers, delete long-terminal rows.
-    # The envelope-free uses a guarded raw UPDATE so it only touches rows that still
-    # carry a payload (idempotent — no daily churn re-writing already-emptied rows).
-    if db.bind is not None and db.bind.dialect.name == "postgresql":
-        _do("appliance_command_envelopes_freed", lambda: db.execute(text(
-            "UPDATE appliance_commands SET envelope = '{}'::json "
-            "WHERE status IN ('acked','rejected','expired') AND envelope::text <> '{}'")).rowcount)
+    # appliance_commands — the #1 bloat source. Envelopes are freed on-transition
+    # (see api/appliances.py) and terminal rows are DELETEd after R_CMD_TERMINAL days,
+    # so their payloads drain naturally. We deliberately do NOT run a full-table
+    # envelope UPDATE here: the `envelope::text <> '{}'` predicate detoasts the entire
+    # (multi-GB) TOAST every run, generating a WAL storm — it was the direct cause of
+    # a 9-minute lock pile-up. Expire never-acked stragglers, then delete long-terminal rows.
     _do("appliance_commands_expired_stale", lambda: db.query(ApplianceCommand).filter(
         ApplianceCommand.status.in_(["pending", "delivered"]),
         ApplianceCommand.created_at < now - timedelta(days=R_CMD_STALE)).update(
@@ -89,6 +101,13 @@ def prune_all(db) -> dict:
     _do("node_metrics_deleted", lambda: db.query(NodeMetric).filter(
         NodeMetric.ts < now - timedelta(days=R_NODE_METRICS)).delete(
             synchronize_session=False))
+
+    if is_pg:
+        try:
+            db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _PRUNE_LOCK_KEY})
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
 
     nonzero = {k: v for k, v in counts.items() if v}
     if nonzero:
