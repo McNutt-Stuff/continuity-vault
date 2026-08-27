@@ -93,6 +93,8 @@ class User(Base):
     # Shared/personal account's pending Arkive Cloud deletion (30-day grace, see Tenant).
     cloud_delete_at = Column(DateTime, nullable=True)
     last_login_at = Column(DateTime, nullable=True)
+    # NULL until the account finishes (or an admin re-triggers) the setup wizard.
+    setup_completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 
     tenant = relationship("Tenant", back_populates="users")

@@ -6,7 +6,7 @@ import { SourceIcon } from "../components/SourceIcon";
 import { notify, confirmDialog } from "../components/dialog";
 
 interface ProviderField { name: string; label: string; placeholder?: string; required?: boolean; secret?: boolean; options?: { value: string; label: string }[]; }
-interface ProviderSpec {
+export interface ProviderSpec {
   provider: string; display_name: string; icon: string; color: string; help?: string[];
   config: ProviderField[]; write: ProviderField[]; read: ProviderField[]; provision?: ProviderField[];
 }
@@ -490,7 +490,7 @@ function MiniStat({ icon, label, value, tint }: { icon: IconName; label: string;
 }
 
 // Add flow: pick provider → pick setup mode → the credential form.
-function AddStorageModal({ providers, onClose, onDone }: {
+export function AddStorageModal({ providers, onClose, onDone }: {
   providers: ProviderSpec[]; onClose: () => void; onDone: () => void;
 }) {
   const [provider, setProvider] = useState<ProviderSpec | null>(null);

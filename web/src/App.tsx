@@ -24,6 +24,7 @@ import Audit from "./pages/Audit";
 import ActivityPage from "./pages/Activity";
 import Settings from "./pages/Settings";
 import Organization from "./pages/Organization";
+import SetupWizard from "./pages/SetupWizard";
 
 const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
   { to: "/", label: "Overview", icon: "grid", group: "" },
@@ -60,6 +61,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <DialogHost />
+      {me.needs_setup && <SetupWizard onDone={() => { /* refresh() hides it via me */ }} />}
       <Sidebar />
       <div className="main">
         <TopBar />

@@ -478,6 +478,11 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
     try { await api.del(`/admin/users/${id}`); onBack(); }
     catch (e) { flash((e as { message?: string }).message || "Delete failed"); }
   }
+  async function rerunSetup() {
+    if (!await confirmDialog({ title: "Re-run setup wizard?", message: `${u.email} will be walked through the first-run setup wizard again on their next visit.`, confirmLabel: "Re-run" })) return;
+    try { await api.post(`/admin/users/${id}/reset-setup`, {}); flash("Setup wizard will re-run for this user"); await load(); }
+    catch { flash("Couldn't reset setup"); }
+  }
 
   if (!u) return (
     <Card>
@@ -498,6 +503,7 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
         <div className="row" style={{ gap: 8 }}>
           <button className="btn sm" onClick={edit}>Edit</button>
           <button className="btn ghost sm" onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /> Insights</button>
+          <button className="btn ghost sm" onClick={rerunSetup}><Icon name="restore" size={13} /> Re-run setup</button>
           <button className="btn ghost sm" onClick={reset}>Reset access</button>
           <button className="btn danger sm" onClick={del}>Delete</button>
         </div>
@@ -519,6 +525,7 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
           </div>
           <div className="row" style={{ gap: 6 }}>
             <Pill tone={u.status === "active" ? "ok" : "warn"} dot>{u.status}</Pill>
+            {!u.setup_completed_at && <Pill tone="warn">Setup pending</Pill>}
             {u.tenant && <Pill tone={TENANT_TYPE_TONE[u.tenant.tenant_type] || "info"}>{TENANT_TYPE_LABEL[u.tenant.tenant_type] || u.tenant.tenant_type}</Pill>}
             {u.is_platform_admin && <Pill tone="info">platform admin</Pill>}
           </div>

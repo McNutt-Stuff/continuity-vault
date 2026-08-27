@@ -152,6 +152,12 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE users ADD COLUMN feature_flags JSON",
         "ALTER TABLE users ADD COLUMN protection_options JSON",
         "ALTER TABLE users ADD COLUMN cloud_delete_at TIMESTAMP",
+        # Setup wizard completion. Existing accounts (created before this shipped)
+        # are marked done so only genuinely-new accounts see the wizard; the
+        # cutoff makes the backfill a one-time no-op for future users.
+        "ALTER TABLE users ADD COLUMN setup_completed_at TIMESTAMP",
+        "UPDATE users SET setup_completed_at = COALESCE(created_at, CURRENT_TIMESTAMP) "
+        "WHERE setup_completed_at IS NULL AND created_at < '2026-08-28'",
         "ALTER TABLE tenants ADD COLUMN feature_flags JSON",
         "ALTER TABLE tenants ADD COLUMN cloud_delete_at TIMESTAMP",
         "ALTER TABLE recovered_items ADD COLUMN object_modified_at TIMESTAMP",

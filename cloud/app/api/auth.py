@@ -520,7 +520,20 @@ def me(principal: security.Principal = Depends(security.get_principal),
         "is_owner": security.is_owner(user.role),
         "email_verified": user.email_verified,
         "passkey_verified": principal.passkey_verified,
+        "needs_setup": user.setup_completed_at is None,
         "features": _features.effective(user, tenant),
         "passkeys": [{"id": p.id, "label": p.label, "transport": p.transport}
                      for p in user.passkeys],
     }
+
+
+@router.post("/complete-setup")
+def complete_setup(principal: security.Principal = Depends(security.get_principal),
+                   db: Session = Depends(get_db)):
+    """Mark the account's one-time setup wizard as finished so it won't show again."""
+    from datetime import datetime, timezone
+    user = db.get(User, principal.user_id)
+    if user and user.setup_completed_at is None:
+        user.setup_completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.commit()
+    return {"ok": True}

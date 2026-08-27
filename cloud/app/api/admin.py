@@ -612,6 +612,7 @@ def _user_view(u: User) -> dict:
             "tenant_id": u.tenant_id,
             "feature_flags": u.feature_flags or {},
             "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
+            "setup_completed_at": u.setup_completed_at.isoformat() if u.setup_completed_at else None,
             "created_at": u.created_at.isoformat() if u.created_at else None}
 
 
@@ -820,6 +821,21 @@ def generate_user_insights(uid: str,
             "generated_at": row.generated_at.isoformat() if row.generated_at else None,
             "object_count": stats.get("object_count", 0),
             "card_count": len(row.cards or [])}
+
+
+@router.post("/users/{uid}/reset-setup")
+def reset_user_setup(uid: str,
+                     principal: security.Principal = Depends(security.require_platform_admin),
+                     db: Session = Depends(get_db)):
+    """Re-trigger the one-time setup wizard for a user (clears completion)."""
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "user not found")
+    u.setup_completed_at = None
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.user_setup_reset",
+                 tenant_id=u.tenant_id, category="admin", detail={"email": u.email})
+    return {"ok": True}
 
 
 @router.delete("/users/{uid}")
