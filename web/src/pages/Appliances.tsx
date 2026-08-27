@@ -403,7 +403,7 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
                 <Icon name="shield" size={13} /> Verify integrity
               </button>
               {a.state === "QUARANTINED"
-                ? <Pill tone="danger">Quarantined</Pill>
+                ? <Pill tone="danger" dot>Quarantined</Pill>
                 : <button className="btn sm danger" onClick={() => onCommand(a, "QUARANTINE")}>
                     <Icon name="lock" size={13} /> Quarantine
                   </button>}
@@ -568,7 +568,7 @@ function IntegrationsCard({ a }: { a: Appliance }) {
             </div>
           </div>
           <div className="stack" style={{ alignItems: "flex-end", gap: 2 }}>
-            <Pill tone={tone(i.status)}>{i.status}</Pill>
+            <Pill tone={tone(i.status)} dot>{i.status}</Pill>
             {i.last_stats?.clients != null && (
               <div className="faint" style={{ fontSize: 11 }}>
                 {i.last_stats.clients} clients · {i.last_stats.apps ?? 0} apps

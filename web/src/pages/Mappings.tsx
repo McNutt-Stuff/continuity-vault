@@ -425,35 +425,46 @@ export default function Mappings() {
                     : " · never synced"}
                 </div>
                 {!editing && (
-                  <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                    {(m.destinations || []).map((d) => (
-                      <Pill key={d} tone={isApplianceDest(d) ? "ok" : "info"}>
-                        <DestIcon dest={d} provider={targets.find((t) => t.id === d)?.provider} size={11} /> {destLabel(d)}
-                      </Pill>
-                    ))}
-                    <Pill tone={m.backup_interval_minutes === 0 ? "warn" : "info"}>
-                      <Icon name="clock" size={11} /> {scheduleLabel(m)}
-                    </Pill>
-                    {m.source_type === "endpoint_files" && (
-                      <Pill tone={(m.config?.roots?.length || 0) > 0 ? "info" : "warn"}>
-                        <Icon name="database" size={11} /> {m.config?.roots?.length || 0} folders
-                      </Pill>
-                    )}
-                    {!m.is_agent && browsableFor(m.source_type) && (m.config?.roots?.length || 0) > 0 && (
-                      <Pill tone="info">
-                        <Icon name="database" size={11} /> {m.config?.roots?.length} folders
-                      </Pill>
-                    )}
-                    {m.source_type === "gmail" && (m.config?.excludeFolders?.length || 0) > 0 && (
-                      <Pill tone="warn">
-                        <Icon name="mail" size={11} /> skipping {m.config?.excludeFolders?.length}
-                      </Pill>
-                    )}
-                    {(m.index_fields && m.index_fields.length ? m.index_fields : m.available_fields)
-                      .slice(0, 6).map((f) => (
-                        <span key={f} className="chip" style={{ padding: "1px 8px", fontSize: 10.5 }}>{f}</span>
+                  <div className="stack" style={{ gap: 8, marginTop: 8 }}>
+                    {/* Storage destinations — where this source's recovery points land. */}
+                    <div className="map-dests">
+                      <span className="map-dests-label">Stored to</span>
+                      {(m.destinations || []).length === 0 && (
+                        <span className="faint" style={{ fontSize: 11.5 }}>No destination set</span>
+                      )}
+                      {(m.destinations || []).map((d) => (
+                        <span key={d} className="dest-chip">
+                          <DestIcon dest={d} provider={targets.find((t) => t.id === d)?.provider} size={13} />
+                          {destLabel(d)}
+                        </span>
                       ))}
-                    {m.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
+                    </div>
+                    {/* Settings — schedule, scope and indexing (kept apart from storage). */}
+                    <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                      <Pill tone={m.backup_interval_minutes === 0 ? "warn" : "info"}>
+                        <Icon name="clock" size={11} /> {scheduleLabel(m)}
+                      </Pill>
+                      {m.source_type === "endpoint_files" && (
+                        <Pill tone={(m.config?.roots?.length || 0) > 0 ? "info" : "warn"}>
+                          <Icon name="database" size={11} /> {m.config?.roots?.length || 0} folders
+                        </Pill>
+                      )}
+                      {!m.is_agent && browsableFor(m.source_type) && (m.config?.roots?.length || 0) > 0 && (
+                        <Pill tone="info">
+                          <Icon name="database" size={11} /> {m.config?.roots?.length} folders
+                        </Pill>
+                      )}
+                      {m.source_type === "gmail" && (m.config?.excludeFolders?.length || 0) > 0 && (
+                        <Pill tone="warn">
+                          <Icon name="mail" size={11} /> skipping {m.config?.excludeFolders?.length}
+                        </Pill>
+                      )}
+                      {(m.index_fields && m.index_fields.length ? m.index_fields : m.available_fields)
+                        .slice(0, 6).map((f) => (
+                          <span key={f} className="chip" style={{ padding: "1px 8px", fontSize: 10.5 }}>{f}</span>
+                        ))}
+                      {m.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
+                    </div>
                   </div>
                 )}
                 {!editing && (() => {

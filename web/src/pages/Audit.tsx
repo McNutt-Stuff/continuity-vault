@@ -69,7 +69,7 @@ export default function Audit() {
             </div>
           </div>
           {data && (
-            <Pill tone={data.chain_valid ? "ok" : "danger"}>
+            <Pill tone={data.chain_valid ? "ok" : "danger"} dot>
               <Icon name={data.chain_valid ? "lock" : "alert"} size={12} />
               {data.chain_valid ? "Chain verified" : "Chain broken"}
             </Pill>

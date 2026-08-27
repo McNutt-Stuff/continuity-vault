@@ -308,7 +308,7 @@ function InstanceCard({ inst, spec, onOpen, onChanged }: {
           <div className="faint" style={{ fontSize: 11 }}>{inst.host || inst.integration_type}</div>
         </div>
         <div className="row" style={{ gap: 6, alignItems: "center" }} title={h.label}>
-          <Pill tone={h.tone}>{h.label}</Pill>
+          <Pill tone={h.tone} dot>{h.label}</Pill>
         </div>
       </div>
       {provisioning && (
@@ -413,7 +413,7 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
           <div className="stack" style={{ gap: 2 }}>
             <div className="row" style={{ gap: 8, alignItems: "center" }}>
               <h2 style={{ margin: 0 }}>{inst.label}</h2>
-              <Pill tone={(HEALTH[inst.health] || HEALTH.pending).tone}>
+              <Pill tone={(HEALTH[inst.health] || HEALTH.pending).tone} dot>
                 {(HEALTH[inst.health] || HEALTH.pending).label}
               </Pill>
             </div>

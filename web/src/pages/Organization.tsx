@@ -253,7 +253,7 @@ export default function Organization() {
                   <button className="btn sm ghost" onClick={() => assign(a)}><Icon name="user" size={13} /> Assign member</button>
                 </div>
                 <div className="faint" style={{ fontSize: 12, margin: "2px 0 8px" }}>
-                  {a.serial} · <Pill tone={a.online ? "ok" : "warn"}>{a.online ? "online" : "offline"}</Pill> · {bytes(a.used_bytes)} of {bytes(a.capacity_bytes)}
+                  {a.serial} · <Pill tone={a.online ? "ok" : "warn"} dot>{a.online ? "online" : "offline"}</Pill> · {bytes(a.used_bytes)} of {bytes(a.capacity_bytes)}
                 </div>
                 <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
                   {a.assignments.length === 0 && <span className="faint" style={{ fontSize: 12 }}>No members assigned.</span>}
@@ -289,7 +289,7 @@ export default function Organization() {
                   {k.root_key_hash ? ` · ${k.root_key_hash.slice(0, 16)}…` : ""}
                 </div>
               </div>
-              <Pill tone={k.status === "active" ? "ok" : "warn"}>{k.status}</Pill>
+              <Pill tone={k.status === "active" ? "ok" : "warn"} dot>{k.status}</Pill>
               <button className="btn sm ghost" onClick={() => recoverKey(k)} disabled={!k.provisioned}>
                 <Icon name="restore" size={13} /> Recover
               </button>

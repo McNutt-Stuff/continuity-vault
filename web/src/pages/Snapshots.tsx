@@ -37,7 +37,7 @@ export default function Snapshots() {
               <td>{s.object_count}</td>
               <td>{bytes(s.total_bytes)}</td>
               <td className="mono faint">{s.manifest_hash.slice(0, 10)}…</td>
-              <td>{s.recoverable ? <Pill tone="ok">Recoverable</Pill> : <Pill tone="warn">Pending</Pill>}</td>
+              <td>{s.recoverable ? <Pill tone="ok" dot>Recoverable</Pill> : <Pill tone="warn" dot>Pending</Pill>}</td>
               <td className="faint">{timeAgo(s.created_at)}</td>
             </tr>
           ))}

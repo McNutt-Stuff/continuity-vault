@@ -168,6 +168,20 @@ h3 { font-size: 15px; }
 .pill.info { color: var(--brand-2); border-color: rgba(79,124,255,.4); background: rgba(79,124,255,.08); }
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 
+/* Storage destinations on a Data Map card — set apart from settings pills. */
+.map-dests { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.map-dests-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--faint); font-weight: 600; }
+.dest-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+  font-size: 12px; font-weight: 600; border-radius: 8px;
+  border: 1px solid var(--border-soft); background: var(--inset); }
+.dest-chip img, .dest-chip svg { flex: none; }
+
+/* Theme-adaptive Arkive app mark (Cloud Storage → Arkive Cloud). */
+.arkive-mark { border-radius: 22%; display: block; object-fit: contain; }
+[data-theme="dark"] .arkive-mark--light { display: none; }
+[data-theme="light"] .arkive-mark--dark { display: none; }
+
 /* Inputs */
 .input, select.input, textarea.input {
   width: 100%; padding: 10px 13px; border-radius: var(--radius-sm);

@@ -482,7 +482,7 @@ export default function Connectors() {
     return a.localeCompare(b);
   });
 
-  if (!loaded && catalog.length === 0) return <Loading label="Loading sources…" />;
+  if (!loaded) return <Loading label="Loading sources…" />;
 
   return (
     <>
@@ -646,7 +646,7 @@ export default function Connectors() {
                 </>
               ) : (
                 <>
-                  <Pill tone={err ? "warn" : "ok"}>{a.needs_reauth ? "Reconnect needed" : err ? "Issue" : "Healthy"}</Pill>
+                  <Pill tone={err ? "warn" : "ok"} dot>{a.needs_reauth ? "Reconnect needed" : err ? "Issue" : "Healthy"}</Pill>
                   {a.needs_reauth
                     ? <button className="btn sm primary" onClick={() => reconnect(a)}><Icon name="key" size={13} /> Reconnect</button>
                     : (a.connector_type === "google_photos"
@@ -703,7 +703,7 @@ export default function Connectors() {
                     )}
                   </div>
                   <Pill tone="info">Desktop agent</Pill>
-                  <Pill tone={online ? "ok" : "warn"}>{online ? "Online" : "Offline"}</Pill>
+                  <Pill tone={online ? "ok" : "warn"} dot>{online ? "Online" : "Offline"}</Pill>
                   <button className="btn sm primary" onClick={() => agentBackup(s)}>Back up now</button>
                   <Menu items={([
                     { label: "Rename source", icon: "edit", onClick: () => renameAgentSource(s) },

@@ -45,6 +45,16 @@ const fmtAgo = (s: string | null): string => {
 };
 const health = (s: StorageInstance) => HEALTH[s.enabled ? (s.status || "unknown") : "unknown"] || HEALTH.unknown;
 
+// Arkive's own app mark, swapped by theme via CSS (icon-dark on dark, icon-light on light).
+function ArkiveMark({ size = 46 }: { size?: number }) {
+  return (
+    <>
+      <img className="arkive-mark arkive-mark--dark" src="/logos/icon-dark.png" width={size} height={size} alt="Arkive" />
+      <img className="arkive-mark arkive-mark--light" src="/logos/icon-light.png" width={size} height={size} alt="Arkive" />
+    </>
+  );
+}
+
 // Pre-fill dropdown fields with their first option so required selects aren't "".
 function selectDefaults(fields: ProviderField[]): Record<string, string> {
   const d: Record<string, string> = {};
@@ -179,9 +189,7 @@ function ArkiveCloudRow({ data, onOpen }: { data: ArkiveCloud | null; onOpen: ()
   return (
     <Card style={{ borderLeft: "3px solid #0559c9" }}>
       <div className="row" style={{ gap: 14, alignItems: "center", flexWrap: "wrap" }}>
-        <div className="insight-card-ic" style={{ background: "linear-gradient(135deg,#0559c9,#35d0a5)", color: "#fff", width: 46, height: 46 }}>
-          <Icon name="cloud" size={24} />
-        </div>
+        <ArkiveMark size={46} />
         <div className="flex1" style={{ minWidth: 200 }}>
           <div className="row" style={{ gap: 8, alignItems: "center" }}>
             <div style={{ fontWeight: 700, fontSize: 15 }}>Arkive Cloud</div>
@@ -218,9 +226,7 @@ function ArkiveCloudDetail({ data, onBack }: { data: ArkiveCloud; onBack: () => 
     <>
       <button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 12 }}>← Cloud Storage</button>
       <div className="row" style={{ gap: 12, alignItems: "center", marginBottom: 16 }}>
-        <div className="insight-card-ic" style={{ background: "linear-gradient(135deg,#0559c9,#35d0a5)", color: "#fff", width: 44, height: 44 }}>
-          <Icon name="cloud" size={24} />
-        </div>
+        <ArkiveMark size={44} />
         <div className="stack" style={{ gap: 2 }}>
           <div className="row" style={{ gap: 8, alignItems: "center" }}>
             <h2 style={{ margin: 0 }}>Arkive Cloud</h2>
@@ -291,7 +297,7 @@ function StorageCard({ inst, onOpen }: { inst: StorageInstance; onOpen: () => vo
         </div>
         {provisioning
           ? <Pill tone="info"><span className="spinner-dot" /> Setting up</Pill>
-          : <Pill tone={h.tone}>{h.label}</Pill>}
+          : <Pill tone={h.tone} dot>{h.label}</Pill>}
       </div>
       {provisioning ? (
         <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>{inst.provision_message || "Provisioning your cloud storage…"}</div>
@@ -373,7 +379,7 @@ function StorageDetail({ inst, providers, onBack, onChanged }: {
           <div className="stack" style={{ gap: 2 }}>
             <div className="row" style={{ gap: 8, alignItems: "center" }}>
               <h2 style={{ margin: 0 }}>{cur.name}</h2>
-              <Pill tone={h.tone}>{h.label}</Pill>
+              <Pill tone={h.tone} dot>{h.label}</Pill>
             </div>
             <div className="faint" style={{ fontSize: 12.5 }}>
               {cur.provider_display}{cfg.bucket ? ` · ${cfg.bucket}` : cfg.container ? ` · ${cfg.container}` : ""}

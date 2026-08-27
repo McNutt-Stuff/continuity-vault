@@ -121,8 +121,8 @@ export default function Settings() {
                 {k.root_key_hash ? ` · ${k.root_key_hash.slice(0, 16)}…` : ""}
               </div>
             </div>
-            <Pill tone={k.pq_hybrid ? "ok" : "info"}>{k.pq_hybrid ? "quantum-safe" : "classical"}</Pill>
-            <Pill tone={k.status === "active" ? "ok" : "warn"}>{k.status}</Pill>
+            <Pill tone={k.pq_hybrid ? "ok" : "info"} dot>{k.pq_hybrid ? "quantum-safe" : "classical"}</Pill>
+            <Pill tone={k.status === "active" ? "ok" : "warn"} dot>{k.status}</Pill>
           </div>
         ))}
         {keys.length === 0 && <div className="muted" style={{ fontSize: 12.5 }}>No keys provisioned yet.</div>}
@@ -149,7 +149,7 @@ export default function Settings() {
                 <div style={{ fontWeight: 600 }}>{p.label}</div>
                 <div className="faint" style={{ fontSize: 12 }}>{p.transport}</div>
               </div>
-              <Pill tone="ok">active</Pill>
+              <Pill tone="ok" dot>active</Pill>
             </div>
           ))}
           <div className="row" style={{ marginTop: 12, gap: 8 }}>

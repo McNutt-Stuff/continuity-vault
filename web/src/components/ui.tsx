@@ -15,10 +15,12 @@ export function Stat({ label, value, hint }: { label: string; value: ReactNode; 
 }
 
 type Tone = "ok" | "warn" | "danger" | "info";
-export function Pill({ tone = "info", children }: { tone?: Tone; children: ReactNode }) {
+// The tone already colors the pill; the dot is reserved for genuine health/status
+// badges (opt in with `dot`) so ordinary informational chips stay quiet.
+export function Pill({ tone = "info", dot = false, children }: { tone?: Tone; dot?: boolean; children: ReactNode }) {
   return (
     <span className={`pill ${tone}`}>
-      <span className="dot" />
+      {dot && <span className="dot" />}
       {children}
     </span>
   );

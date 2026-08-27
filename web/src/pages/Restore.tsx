@@ -105,8 +105,8 @@ export default function RestorePage() {
 }
 
 function StatusPill({ status }: { status: string }) {
-  if (status === "completed") return <Pill tone="ok">Completed</Pill>;
-  if (status === "approved") return <Pill tone="info">Approved</Pill>;
-  if (status.includes("recovery-window")) return <Pill tone="warn">Awaiting local approval</Pill>;
-  return <Pill tone="warn">Pending approval</Pill>;
+  if (status === "completed") return <Pill tone="ok" dot>Completed</Pill>;
+  if (status === "approved") return <Pill tone="info" dot>Approved</Pill>;
+  if (status.includes("recovery-window")) return <Pill tone="warn" dot>Awaiting local approval</Pill>;
+  return <Pill tone="warn" dot>Pending approval</Pill>;
 }

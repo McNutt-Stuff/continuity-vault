@@ -200,7 +200,7 @@ function TopBar() {
         <ThemeToggle />
         {me?.can_admin && <AlertBell />}
         {me?.passkey_verified ? (
-          <Pill tone="ok">
+          <Pill tone="ok" dot>
             <Icon name="lock" size={13} /> Unlocked
           </Pill>
         ) : (

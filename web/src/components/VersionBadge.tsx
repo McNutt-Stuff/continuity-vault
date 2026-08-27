@@ -15,8 +15,8 @@ export function VersionPill({ version, updateAvailable }: {
     <span className="row" style={{ gap: 6, alignItems: "center" }}>
       <span className="mono" style={{ fontSize: 11.5 }}>v{short(version)}</span>
       {updateAvailable
-        ? <Pill tone="warn">Update available</Pill>
-        : <Pill tone="ok">Up to date</Pill>}
+        ? <Pill tone="warn" dot>Update available</Pill>
+        : <Pill tone="ok" dot>Up to date</Pill>}
     </span>
   );
 }

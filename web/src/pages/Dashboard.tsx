@@ -97,7 +97,7 @@ export default function Dashboard() {
           </h2>
           <div className="row" style={{ gap: 8 }}>
             <Pill tone="info"><Icon name="key" size={12} /> Keys: {tenant?.key_ownership_model}</Pill>
-            <Pill tone={health?.pq_available ? "ok" : "warn"}>
+            <Pill tone={health?.pq_available ? "ok" : "warn"} dot>
               {health?.pq_available ? "Post-quantum active" : "PQC fallback (dev)"}
             </Pill>
           </div>
@@ -401,10 +401,10 @@ function Sparkline({ values, color, width = 120, height = 30 }: { values: number
 }
 
 export function ApplianceStatePill({ state, isolation, ok }: { state: string; isolation: string; ok: boolean }) {
-  if (!ok) return <Pill tone="danger">Attestation failed</Pill>;
-  if (state === "SEALED" && isolation === "sealed") return <Pill tone="ok">Offline & sealed</Pill>;
-  if (state.startsWith("UNSEALED")) return <Pill tone="warn">Recovery session</Pill>;
-  if (state === "ONLINE_STAGING") return <Pill tone="info">Online staging</Pill>;
-  if (state === "QUARANTINED") return <Pill tone="danger">Quarantined</Pill>;
-  return <Pill tone="info">{state}</Pill>;
+  if (!ok) return <Pill tone="danger" dot>Attestation failed</Pill>;
+  if (state === "SEALED" && isolation === "sealed") return <Pill tone="ok" dot>Offline & sealed</Pill>;
+  if (state.startsWith("UNSEALED")) return <Pill tone="warn" dot>Recovery session</Pill>;
+  if (state === "ONLINE_STAGING") return <Pill tone="info" dot>Online staging</Pill>;
+  if (state === "QUARANTINED") return <Pill tone="danger" dot>Quarantined</Pill>;
+  return <Pill tone="info" dot>{state}</Pill>;
 }
