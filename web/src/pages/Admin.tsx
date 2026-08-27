@@ -2832,11 +2832,17 @@ function StorageUsageAdmin() {
 interface BackupDest { service_id: string; name: string; kind: string; status: string; bytes: number; error?: string | null; }
 interface BackupRunView { id: string; status: string; total_bytes: number; components: string[]; destinations: BackupDest[]; message?: string; error?: string; has_log?: boolean; created_at?: string | null; finished_at?: string | null; }
 interface BackupNode { id: string; name: string; role: string; category: string; is_self: boolean; backup_service_ids: string[]; backup_services: string[]; last_backup: BackupRunView | null; }
-interface BackupService { id: string; name: string; kind: string; kind_label: string; enabled: boolean; settings: Record<string, string>; nodes: string[]; bytes: number; backed_up_nodes: number; }
+interface BackupService { id: string; name: string; kind: string; kind_label: string; enabled: boolean; settings: Record<string, string>; nodes: string[]; bytes: number; backup_count?: number; backed_up_nodes: number; }
+interface StoredBackup {
+  id: string; node_name: string; role: string; status: string; total_bytes: number;
+  components: string[]; has_log?: boolean; created_at?: string | null; finished_at?: string | null;
+  destinations: { name: string; kind: string; bytes: number; key?: string }[];
+}
 interface BackupsData {
   summary: { nodes_total: number; nodes_protected: number; total_stored_bytes: number; success_24h: number; failed_24h: number; interval_minutes: number; last_run_at: string | null };
   nodes: BackupNode[];
   services: BackupService[];
+  stored_backups: StoredBackup[];
   recent: { id: string; node_name: string; role: string; status: string; total_bytes: number; message?: string; error?: string; has_log?: boolean; destinations: BackupDest[]; components: string[]; created_at?: string | null; finished_at?: string | null }[];
 }
 
@@ -2855,6 +2861,7 @@ function BackupsAdmin() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
   const [logRun, setLogRun] = useState<any | null>(null);
+  const [showStored, setShowStored] = useState(false);
 
   async function load() {
     try { setD(await api.get<BackupsData>("/admin/backups")); } catch { /* ignore */ }
@@ -2914,7 +2921,12 @@ function BackupsAdmin() {
       </div>
 
       <Card style={{ marginTop: 16 }}>
-        <h3 style={{ marginTop: 0 }}>Backup storage services</h3>
+        <div className="spread" style={{ marginBottom: 4 }}>
+          <h3 style={{ margin: 0 }}>Backup storage services</h3>
+          <button className="btn ghost sm" onClick={() => setShowStored(true)}>
+            <Icon name="database" size={13} /> View stored backups ({d.stored_backups.length})
+          </button>
+        </div>
         <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>
           Storage backends holding infrastructure backups, and the nodes that write to each. Assign
           destinations per node below — use different services so no single failure loses every copy.
@@ -2930,7 +2942,7 @@ function BackupsAdmin() {
                     <div className="faint" style={{ fontSize: 11.5 }}>{s.kind_label}</div>
                   </div>
                 </div>
-                <Pill tone={s.nodes.length ? "ok" : "warn"}>{s.nodes.length ? `${bytes(s.bytes)} · ${s.backed_up_nodes} node(s)` : "Unused"}</Pill>
+                <Pill tone={s.bytes ? "ok" : "warn"}>{s.bytes ? `${bytes(s.bytes)} · ${s.backup_count ?? 0} backup${(s.backup_count ?? 0) === 1 ? "" : "s"}` : "Unused"}</Pill>
               </div>
               <div className="faint" style={{ fontSize: 12 }}>
                 {s.settings.bucket ? `bucket ${s.settings.bucket}` : s.settings.container ? `container ${s.settings.container}` : "—"}
@@ -3070,12 +3082,52 @@ function BackupsAdmin() {
         </div>
       )}
 
+      {showStored && (
+        <div className="modal-backdrop" onClick={() => setShowStored(false)}>
+          <div className="modal-panel" style={{ width: "min(920px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <div>
+                <h3 style={{ margin: 0 }}>Stored backups</h3>
+                <div className="faint" style={{ fontSize: 12 }}>
+                  {d.stored_backups.length} backup{d.stored_backups.length === 1 ? "" : "s"} retained · {bytes(sum.total_stored_bytes)} total
+                </div>
+              </div>
+              <button className="btn ghost sm" onClick={() => setShowStored(false)}>Close</button>
+            </div>
+            <div className="modal-body" style={{ maxHeight: "68vh", overflow: "auto" }}>
+              <table className="table">
+                <thead><tr><th>Node</th><th>Status</th><th>Components</th><th>Stored on</th><th style={{ textAlign: "right" }}>Size</th><th>When</th></tr></thead>
+                <tbody>
+                  {d.stored_backups.map((r) => (
+                    <tr key={r.id}>
+                      <td style={{ fontWeight: 600 }}>{r.node_name}<div className="faint" style={{ fontSize: 11 }}>{r.role}</div></td>
+                      <td><Pill tone={backupTone(r.status)}>{r.status}</Pill></td>
+                      <td className="faint" style={{ fontSize: 12 }}>{(r.components || []).join(", ") || "—"}</td>
+                      <td>
+                        <div className="stack" style={{ gap: 2 }}>
+                          {r.destinations.map((x, i) => (
+                            <span key={i} className="faint" style={{ fontSize: 11.5 }}>
+                              {x.name} · {bytes(x.bytes)}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                      <td style={{ textAlign: "right" }}>{bytes(r.total_bytes)}</td>
+                      <td className="faint" style={{ fontSize: 11, whiteSpace: "nowrap" }} title={r.created_at ? fmtAbsolute(r.created_at) : ""}>{r.created_at ? timeAgo(r.created_at) : ""}</td>
+                    </tr>
+                  ))}
+                  {d.stored_backups.length === 0 && <tr><td colSpan={6} className="muted">No stored backups yet.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
 }
-
-// ---- Integrations (platform enable/disable) --------------------------------
 function IntegrationsAdmin() {
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);

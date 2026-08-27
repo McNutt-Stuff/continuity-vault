@@ -347,8 +347,10 @@ def _execute_backup(db, run, node, node_name: str, role: str) -> None:
     # The database holds config, tenants, receipts and the search index — it is the
     # critical component, so a bundle without it must never look like a clean success.
     db_captured = "database" in components
+    # A distinct object per run (timestamp + run id) so every backup is retained
+    # as its own snapshot on the storage service rather than overwriting the last.
     ts = _now().strftime("%Y%m%dT%H%M%SZ")
-    key = f"node-backups/{_safe(node_name)}/{ts}.arkbak"
+    key = f"node-backups/{_safe(node_name)}/{ts}-{(run.id or '')[:8]}.arkbak"
     size = len(encrypted)
 
     results = []

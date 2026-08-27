@@ -2150,17 +2150,19 @@ def backups_overview(db: Session = Depends(get_db)):
         })
     node_rows.sort(key=lambda x: (not x["is_self"], x["name"] or ""))
 
-    # Storage totals per backup service (latest successful run per node counts once).
+    # Storage totals per backup service: sum EVERY retained backup object (each
+    # run is stored under its own key, so they accumulate) — not just the latest.
     svc_totals: dict = {}
-    for key, r in latest.items():
+    for r in runs:
         if r.status not in ("success", "partial"):
             continue
         for d in (r.destinations or []):
             if d.get("status") != "ok":
                 continue
             sid = d.get("service_id")
-            agg = svc_totals.setdefault(sid, {"bytes": 0, "nodes": set()})
+            agg = svc_totals.setdefault(sid, {"bytes": 0, "count": 0, "nodes": set()})
             agg["bytes"] += int(d.get("bytes") or 0)
+            agg["count"] += 1
             agg["nodes"].add(r.node_name)
 
     svc_used: dict = {}  # which nodes ASSIGN each service for backup
@@ -2171,7 +2173,7 @@ def backups_overview(db: Session = Depends(get_db)):
     for s in db.query(ServiceObject).filter(ServiceObject.kind.like("storage-%")).all():
         if "backup" not in s.storage_capabilities():
             continue
-        tot = svc_totals.get(s.id, {"bytes": 0, "nodes": set()})
+        tot = svc_totals.get(s.id, {"bytes": 0, "count": 0, "nodes": set()})
         services.append({
             "id": s.id, "name": s.name, "kind": s.kind,
             "kind_label": _SERVICE_KINDS.get(s.kind, {}).get("label", s.kind),
@@ -2179,7 +2181,29 @@ def backups_overview(db: Session = Depends(get_db)):
             "capabilities": s.storage_capabilities(),
             "settings": s.settings or {},
             "nodes": svc_used.get(s.id, []),
-            "bytes": tot["bytes"], "backed_up_nodes": len(tot["nodes"]),
+            "bytes": tot["bytes"], "backup_count": tot["count"],
+            "backed_up_nodes": len(tot["nodes"]),
+        })
+
+    # Every retained backup object (one row per stored run) with its size, so the
+    # UI can list them in a table. Newest first.
+    stored_backups = []
+    for r in runs:
+        if r.status not in ("success", "partial"):
+            continue
+        dests = [d for d in (r.destinations or []) if d.get("status") == "ok"]
+        if not dests:
+            continue
+        stored_backups.append({
+            "id": r.id, "node_name": r.node_name, "role": r.role, "status": r.status,
+            "total_bytes": int(r.total_bytes or 0),
+            "components": r.components or [],
+            "has_log": bool(r.log),
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            "destinations": [{"name": d.get("name"), "kind": d.get("kind"),
+                              "bytes": int(d.get("bytes") or 0), "key": d.get("key")}
+                             for d in dests],
         })
 
     now = _now()
@@ -2204,6 +2228,7 @@ def backups_overview(db: Session = Depends(get_db)):
         },
         "nodes": node_rows,
         "services": services,
+        "stored_backups": stored_backups,
         "recent": [{
             "id": r.id, "node_name": r.node_name, "role": r.role, "status": r.status,
             "total_bytes": r.total_bytes or 0, "message": r.message or "", "error": r.error or "",
