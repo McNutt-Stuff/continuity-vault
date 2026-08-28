@@ -554,3 +554,29 @@ h3 { font-size: 15px; }
 /* Support ticket thread messages */
 .ticket-msg { border: 1px solid var(--border-soft); border-radius: 12px; padding: 12px 14px; background: var(--panel); }
 .ticket-msg.staff { border-color: rgba(79,124,255,.35); background: rgba(79,124,255,.07); }
+
+/* Rich-text editor (docs CMS) */
+.rte { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg-elev); }
+.rte-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  padding: 7px 8px; border-bottom: 1px solid var(--border-soft); background: var(--bg-elev-2); }
+.rte-btn { min-width: 30px; height: 28px; padding: 0 8px; display: inline-flex; align-items: center;
+  justify-content: center; gap: 4px; border: 1px solid var(--border-soft); border-radius: 7px;
+  background: var(--panel); color: var(--text); cursor: pointer; font-size: 13.5px; }
+.rte-btn:hover { background: var(--bg-elev-2); border-color: var(--border); }
+.rte-sel { height: 28px; padding: 0 6px; border: 1px solid var(--border-soft); border-radius: 7px;
+  background: var(--panel); color: var(--text); font-size: 12.5px; }
+.rte-div { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
+.rte-body { padding: 14px 16px; min-height: 340px; outline: none; font-size: 14.5px; line-height: 1.7; color: var(--text); }
+.rte-body:focus { box-shadow: inset 0 0 0 2px rgba(79,124,255,.25); }
+.rte-body h1 { font-size: 24px; margin: 18px 0 10px; }
+.rte-body h2 { font-size: 20px; margin: 18px 0 8px; }
+.rte-body h3 { font-size: 16px; margin: 14px 0 6px; }
+.rte-body p { margin: 0 0 12px; }
+.rte-body ul, .rte-body ol { margin: 0 0 12px; padding-left: 22px; }
+.rte-body li { margin: 3px 0; }
+.rte-body a { color: var(--brand); }
+.rte-body blockquote { margin: 0 0 12px; padding: 8px 14px; border-left: 3px solid var(--brand);
+  background: var(--bg-elev-2); border-radius: 0 8px 8px 0; color: var(--text-dim); }
+.rte-body code { font-family: ui-monospace, Menlo, monospace; font-size: 13px;
+  background: var(--bg-elev-2); border: 1px solid var(--border-soft); border-radius: 5px; padding: 1px 5px; }
+.rte-body:empty::before { content: "Write the page content…"; color: var(--faint); }

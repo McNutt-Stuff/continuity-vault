@@ -19,6 +19,17 @@ _SECURITY = 50
 _BILLING = 60
 _HELP = 70
 
+# First-class sections (nav groups). Docs reference a section by its name.
+DEFAULT_SUPPORT_SECTIONS = [
+    {"name": "Getting Started", "order": _GETTING_STARTED, "icon": "sparkle"},
+    {"name": "Your Data", "order": _YOUR_DATA, "icon": "grid"},
+    {"name": "Sources & Connections", "order": _SOURCES, "icon": "link"},
+    {"name": "Storage & Recovery", "order": _STORAGE, "icon": "cloud"},
+    {"name": "Security & Account", "order": _SECURITY, "icon": "shield"},
+    {"name": "Billing", "order": _BILLING, "icon": "credit-card"},
+    {"name": "Help", "order": _HELP, "icon": "help"},
+]
+
 
 def _doc(slug, title, section, section_order, nav_order, icon, summary, body,
          help_routes=None):

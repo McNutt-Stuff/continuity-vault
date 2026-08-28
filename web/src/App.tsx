@@ -262,9 +262,9 @@ function HelpMenu() {
   const nav = useNavigate();
   const [open, setOpen] = useState(false);
   // The support site is served by the Public Web Node under /support. Derive its
-  // origin from the portal host (vault.arkive.life → arkive.life); ?for=<route>
+  // origin from the portal host (vault.arkive.life → www.arkive.life); ?for=<route>
   // opens the page's contextual help.
-  const base = `${location.protocol}//${location.host.replace(/^vault\./, "")}/support`;
+  const base = `${location.protocol}//${location.host.replace(/^vault\./, "www.")}/support`;
   const docsForPage = `${base}?for=${encodeURIComponent(loc.pathname)}`;
   return (
     <div style={{ position: "relative" }}>

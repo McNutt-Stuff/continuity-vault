@@ -59,6 +59,7 @@ export default function Dashboard() {
   const [actions, setActions] = useState<PendingAction[]>([]);
   const [pickerAccount, setPickerAccount] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [trendsLoaded, setTrendsLoaded] = useState(false);
   const [scope, setScope] = useState<"me" | "org">("me");
 
   function reloadActions() { api.get<PendingAction[]>("/actions").then(setActions).catch(() => {}); }
@@ -78,12 +79,14 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    api.get<Trends>(`/overview/trends?period=${period}&scope=${scope}`).then(setTrends).catch(() => {});
+    api.get<Trends>(`/overview/trends?period=${period}&scope=${scope}`).then(setTrends).catch(() => {}).finally(() => setTrendsLoaded(true));
   }, [period, scope]);
 
   const objTotal = ov?.objects.breakdown.reduce((s, b) => s + b.count, 0) || 0;
 
-  if (!loaded && !ov) return <Loading label="Loading your dashboard…" />;
+  // Hold the first paint until both the overview and its trend data are ready, so
+  // the “What's protected” card appears together with the rest (not a beat later).
+  if ((!loaded && !ov) || !trendsLoaded) return <Loading label="Loading your dashboard…" />;
 
   return (
     <>

@@ -25,8 +25,8 @@ from sqlalchemy.orm import Session
 
 from .. import audit, emailer, security
 from ..db import get_db
-from ..models import SupportDoc, SupportTicket, TicketMessage, Tenant, User
-from ..support_defaults import DEFAULT_SUPPORT_DOCS
+from ..models import (SupportDoc, SupportSection, SupportTicket, TicketMessage, Tenant, User)
+from ..support_defaults import DEFAULT_SUPPORT_DOCS, DEFAULT_SUPPORT_SECTIONS
 
 # Public docs (no auth) + customer tickets (logged-in) share this prefix.
 public_router = APIRouter(prefix="/support", tags=["support"])
@@ -75,14 +75,33 @@ def _doc_public(d: SupportDoc) -> dict:
     }
 
 
-def _build_tree(docs: list[SupportDoc]) -> list[dict]:
-    """Group docs into ordered sections for the nav."""
+def _section_orders(db: Session) -> dict:
+    """Map section name -> nav order from the first-class section table."""
+    return {s.name: s.order for s in db.query(SupportSection).all()}
+
+
+def _ensure_section(db: Session, name: str) -> None:
+    """Auto-create a section row for an ad-hoc section name so it becomes
+    manageable (renamed / reordered) like any other."""
+    name = (name or "").strip() or "General"
+    if db.query(SupportSection).filter(SupportSection.name == name).first():
+        return
+    top = db.query(SupportSection).order_by(SupportSection.order.desc()).first()
+    db.add(SupportSection(name=name, order=(top.order + 10) if top else 100, icon="book"))
+
+
+def _build_tree(docs: list[SupportDoc], order_map: dict | None = None) -> list[dict]:
+    """Group docs into ordered sections for the nav (section order comes from the
+    section table when available, else the doc's own section_order)."""
+    order_map = order_map or {}
     sections: dict[str, dict] = {}
     for d in docs:
-        s = sections.setdefault(d.section or "General",
-                                {"section": d.section or "General",
-                                 "order": d.section_order, "docs": []})
-        s["order"] = min(s["order"], d.section_order)
+        name = d.section or "General"
+        s = sections.setdefault(name, {"section": name,
+                                       "order": order_map.get(name, d.section_order),
+                                       "docs": []})
+        if name not in order_map:
+            s["order"] = min(s["order"], d.section_order)
         s["docs"].append({"slug": d.slug, "title": d.title, "icon": d.icon or "book",
                           "summary": d.summary or "", "nav_order": d.nav_order})
     out = sorted(sections.values(), key=lambda s: (s["order"], s["section"]))
@@ -98,7 +117,7 @@ def support_content(db: Session = Depends(get_db)):
     docs = (db.query(SupportDoc).filter(SupportDoc.published.is_(True))
             .order_by(SupportDoc.section_order, SupportDoc.nav_order).all())
     return {
-        "tree": _build_tree(docs),
+        "tree": _build_tree(docs, _section_orders(db)),
         "docs": {d.slug: _doc_public(d) for d in docs},
         "updated_at": max((d.updated_at for d in docs if d.updated_at), default=None).isoformat()
         if docs else None,
@@ -122,11 +141,22 @@ def _doc_admin(d: SupportDoc) -> dict:
     return {**_doc_public(d), "id": d.id, "published": bool(d.published)}
 
 
+def _section_out(s: SupportSection, count: int) -> dict:
+    return {"id": s.id, "name": s.name, "order": s.order, "icon": s.icon or "book", "count": count}
+
+
 @admin_router.get("/docs", dependencies=[Depends(security.require_platform_admin)])
 def admin_list_docs(db: Session = Depends(get_db)):
     docs = (db.query(SupportDoc)
             .order_by(SupportDoc.section_order, SupportDoc.nav_order).all())
-    return {"docs": [_doc_admin(d) for d in docs], "tree": _build_tree(docs)}
+    order_map = _section_orders(db)
+    counts: dict = {}
+    for d in docs:
+        counts[d.section or "General"] = counts.get(d.section or "General", 0) + 1
+    sections = [_section_out(s, counts.get(s.name, 0))
+                for s in db.query(SupportSection).order_by(SupportSection.order, SupportSection.name).all()]
+    return {"docs": [_doc_admin(d) for d in docs],
+            "tree": _build_tree(docs, order_map), "sections": sections}
 
 
 class DocIn(BaseModel):
@@ -160,6 +190,7 @@ def admin_create_doc(body: DocIn, principal: security.Principal = Depends(securi
         section_order=body.section_order, nav_order=body.nav_order, icon=body.icon,
         summary=body.summary, body=body.body, help_routes=body.help_routes,
         published=body.published)
+    _ensure_section(db, body.section)
     db.add(d)
     db.commit()
     db.refresh(d)
@@ -189,6 +220,7 @@ def admin_update_doc(doc_id: str, body: DocIn,
     d.body = body.body
     d.help_routes = body.help_routes
     d.published = body.published
+    _ensure_section(db, body.section)
     db.commit()
     db.refresh(d)
     audit.record(db, actor=principal.user_id, action="admin.support_doc_updated",
@@ -216,6 +248,9 @@ def admin_seed_docs(principal: security.Principal = Depends(security.require_pla
     """Create any missing default documentation pages (idempotent — never
     overwrites edits to existing slugs)."""
     created = 0
+    for spec in DEFAULT_SUPPORT_SECTIONS:
+        if not db.query(SupportSection).filter(SupportSection.name == spec["name"]).first():
+            db.add(SupportSection(**spec))
     for spec in DEFAULT_SUPPORT_DOCS:
         if db.query(SupportDoc).filter(SupportDoc.slug == spec["slug"]).first():
             continue
@@ -225,6 +260,107 @@ def admin_seed_docs(principal: security.Principal = Depends(security.require_pla
     audit.record(db, actor=principal.user_id, action="admin.support_docs_seeded",
                  category="admin", detail={"created": created})
     return {"ok": True, "created": created}
+
+
+# --------------------------------------------------------------------------- #
+# Documentation admin — sections                                              #
+# --------------------------------------------------------------------------- #
+
+@admin_router.get("/sections", dependencies=[Depends(security.require_platform_admin)])
+def admin_list_sections(db: Session = Depends(get_db)):
+    counts: dict = {}
+    for (name,) in db.query(SupportDoc.section).all():
+        counts[name or "General"] = counts.get(name or "General", 0) + 1
+    return {"sections": [_section_out(s, counts.get(s.name, 0))
+                         for s in db.query(SupportSection)
+                         .order_by(SupportSection.order, SupportSection.name).all()]}
+
+
+class SectionIn(BaseModel):
+    name: str
+    order: int | None = None
+    icon: str = "book"
+
+
+@admin_router.post("/sections", dependencies=[Depends(security.require_platform_admin)])
+def admin_create_section(body: SectionIn,
+                         principal: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    if db.query(SupportSection).filter(SupportSection.name == name).first():
+        raise HTTPException(400, "a section with that name already exists")
+    if body.order is None:
+        top = db.query(SupportSection).order_by(SupportSection.order.desc()).first()
+        order = (top.order + 10) if top else 100
+    else:
+        order = body.order
+    s = SupportSection(name=name, order=order, icon=body.icon or "book")
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+    audit.record(db, actor=principal.user_id, action="admin.support_section_created",
+                 category="admin", resource=name)
+    return _section_out(s, 0)
+
+
+class SectionUpdate(BaseModel):
+    name: str | None = None
+    order: int | None = None
+    icon: str | None = None
+
+
+@admin_router.put("/sections/{section_id}", dependencies=[Depends(security.require_platform_admin)])
+def admin_update_section(section_id: str, body: SectionUpdate,
+                         principal: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    s = db.get(SupportSection, section_id)
+    if s is None:
+        raise HTTPException(404, "not found")
+    moved = 0
+    if body.name and body.name.strip() and body.name.strip() != s.name:
+        new_name = body.name.strip()
+        if db.query(SupportSection).filter(SupportSection.name == new_name,
+                                           SupportSection.id != s.id).first():
+            raise HTTPException(400, "a section with that name already exists")
+        old_name = s.name
+        s.name = new_name
+        # Rename cascades to every doc that referenced the old section name.
+        moved = (db.query(SupportDoc).filter(SupportDoc.section == old_name)
+                 .update({SupportDoc.section: new_name}, synchronize_session=False))
+    if body.order is not None:
+        s.order = body.order
+        # Keep docs' own section_order aligned so the nav order is consistent
+        # even where the section table isn't consulted.
+        db.query(SupportDoc).filter(SupportDoc.section == s.name).update(
+            {SupportDoc.section_order: body.order}, synchronize_session=False)
+    if body.icon:
+        s.icon = body.icon
+    db.commit()
+    db.refresh(s)
+    audit.record(db, actor=principal.user_id, action="admin.support_section_updated",
+                 category="admin", resource=s.name, detail={"docs_moved": int(moved)})
+    n = db.query(SupportDoc).filter(SupportDoc.section == s.name).count()
+    return _section_out(s, n)
+
+
+@admin_router.delete("/sections/{section_id}", dependencies=[Depends(security.require_platform_admin)])
+def admin_delete_section(section_id: str,
+                         principal: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    s = db.get(SupportSection, section_id)
+    if s is None:
+        raise HTTPException(404, "not found")
+    n = db.query(SupportDoc).filter(SupportDoc.section == s.name).count()
+    if n:
+        raise HTTPException(400, f"{n} page(s) are still in this section — move or delete them first")
+    name = s.name
+    db.delete(s)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.support_section_deleted",
+                 category="admin", resource=name)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- #

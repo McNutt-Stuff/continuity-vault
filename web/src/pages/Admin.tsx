@@ -10,6 +10,8 @@ import { promptDialog, formDialog, confirmDialog, notify } from "../components/d
 import { Ring, Sparkline, AreaChart } from "../components/charts";
 import { VersionPill, ProductionVersion } from "../components/VersionBadge";
 import { JobKindBadge } from "../components/JobKindBadge";
+import { RichTextEditor } from "../components/RichTextEditor";
+import { toEditorHtml } from "../md";
 
 export interface AdminSection { key: string; label: string; icon: IconName; group: string; }
 
@@ -3559,15 +3561,18 @@ interface AdminDoc {
   nav_order: number; icon: string; summary: string; body: string;
   help_routes: string[]; published: boolean;
 }
+interface AdminSectionRow { id: string; name: string; order: number; icon: string; count: number; }
 
 function SupportDocsAdmin() {
   const [docs, setDocs] = useState<AdminDoc[] | null>(null);
+  const [sections, setSections] = useState<AdminSectionRow[]>([]);
   const [editing, setEditing] = useState<AdminDoc | "new" | null>(null);
 
   async function load() {
     try {
-      const r = await api.get<{ docs: AdminDoc[] }>("/admin/support/docs");
+      const r = await api.get<{ docs: AdminDoc[]; sections: AdminSectionRow[] }>("/admin/support/docs");
       setDocs(r.docs);
+      setSections(r.sections || []);
     } catch (e: any) {
       notify({ message: e.message || "Could not load docs", tone: "danger" });
       setDocs([]);
@@ -3587,19 +3592,35 @@ function SupportDocsAdmin() {
     try { await api.del(`/admin/support/docs/${d.id}`); void load(); }
     catch (e: any) { notify({ message: e.message, tone: "danger" }); }
   }
+  // Create a section inline (from the editor's section dropdown) and return its name.
+  async function createSection(): Promise<string | null> {
+    const name = await promptDialog({ title: "New section", label: "Section name",
+      placeholder: "e.g. Getting Started", confirmLabel: "Create" });
+    if (!name || !name.trim()) return null;
+    try {
+      await api.post("/admin/support/sections", { name: name.trim() });
+      await load();
+      return name.trim();
+    } catch (e: any) { notify({ message: e.message, tone: "danger" }); return null; }
+  }
 
   if (editing) {
     return (
       <DocEditor
         doc={editing === "new" ? null : editing}
+        sections={sections}
+        onCreateSection={createSection}
         onDone={() => { setEditing(null); void load(); }}
         onCancel={() => setEditing(null)}
       />
     );
   }
 
+  // Order the doc groups by the managed section order.
+  const orderOf = (name: string) => sections.find((s) => s.name === name)?.order ?? 999;
   const groups: Record<string, AdminDoc[]> = {};
   (docs || []).forEach((d) => { (groups[d.section] ||= []).push(d); });
+  const orderedGroups = Object.entries(groups).sort((a, b) => orderOf(a[0]) - orderOf(b[0]));
 
   return (
     <>
@@ -3612,6 +3633,9 @@ function SupportDocsAdmin() {
           <button className="btn sm primary" onClick={() => setEditing("new")}><Icon name="edit" size={14} /> New page</button>
         </div>
       </div>
+
+      <SectionManager sections={sections} reload={load} />
+
       {docs === null ? (
         <Card><div className="muted">Loading…</div></Card>
       ) : docs.length === 0 ? (
@@ -3619,11 +3643,11 @@ function SupportDocsAdmin() {
           No documentation yet. Use <b>Seed defaults</b> to publish the starter Help Center, then edit freely.
         </div></Card>
       ) : (
-        Object.entries(groups).map(([section, items]) => (
+        orderedGroups.map(([section, items]) => (
           <Card key={section} style={{ marginBottom: 12 }}>
             <div style={{ fontWeight: 700, marginBottom: 6 }}>{section}</div>
             <div className="stack" style={{ gap: 0 }}>
-              {items.map((d) => (
+              {items.sort((a, b) => a.nav_order - b.nav_order).map((d) => (
                 <div key={d.id} className="spread"
                      style={{ padding: "9px 0", borderTop: "1px solid var(--border-soft)", alignItems: "center" }}>
                   <div style={{ minWidth: 0 }}>
@@ -3650,13 +3674,75 @@ function SupportDocsAdmin() {
   );
 }
 
-function DocEditor({ doc, onDone, onCancel }: {
-  doc: AdminDoc | null; onDone: () => void; onCancel: () => void;
+function SectionManager({ sections, reload }: { sections: AdminSectionRow[]; reload: () => void }) {
+  async function add() {
+    const name = await promptDialog({ title: "New section", label: "Section name",
+      placeholder: "e.g. Getting Started", confirmLabel: "Create" });
+    if (!name || !name.trim()) return;
+    try { await api.post("/admin/support/sections", { name: name.trim() }); reload(); }
+    catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
+  async function rename(s: AdminSectionRow) {
+    const name = await promptDialog({ title: "Rename section", label: "New name",
+      defaultValue: s.name, confirmLabel: "Rename" });
+    if (!name || !name.trim() || name.trim() === s.name) return;
+    try { await api.put(`/admin/support/sections/${s.id}`, { name: name.trim() }); reload(); }
+    catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
+  async function del(s: AdminSectionRow) {
+    if (s.count > 0) { notify({ message: `Move or delete the ${s.count} page(s) in “${s.name}” first.`, tone: "danger" }); return; }
+    if (!(await confirmDialog({ title: `Delete section “${s.name}”?`, tone: "danger", confirmLabel: "Delete" }))) return;
+    try { await api.del(`/admin/support/sections/${s.id}`); reload(); }
+    catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
+  async function move(i: number, dir: number) {
+    const j = i + dir;
+    if (j < 0 || j >= sections.length) return;
+    const a = sections[i], b = sections[j];
+    try {
+      await api.put(`/admin/support/sections/${a.id}`, { order: b.order });
+      await api.put(`/admin/support/sections/${b.id}`, { order: a.order });
+      reload();
+    } catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
+  return (
+    <Card style={{ marginBottom: 14 }}>
+      <div className="spread" style={{ marginBottom: 8, alignItems: "center" }}>
+        <div style={{ fontWeight: 700 }}>Sections</div>
+        <button className="btn sm" onClick={add}><Icon name="edit" size={13} /> New section</button>
+      </div>
+      <div className="stack" style={{ gap: 0 }}>
+        {sections.map((s, i) => (
+          <div key={s.id} className="spread"
+               style={{ padding: "8px 0", borderTop: "1px solid var(--border-soft)", alignItems: "center" }}>
+            <div className="row" style={{ gap: 8, alignItems: "baseline" }}>
+              <span style={{ fontWeight: 600 }}>{s.name}</span>
+              <span className="faint" style={{ fontSize: 12 }}>{s.count} page{s.count === 1 ? "" : "s"}</span>
+            </div>
+            <div className="row" style={{ gap: 4 }}>
+              <button className="btn sm ghost" title="Move up" disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
+              <button className="btn sm ghost" title="Move down" disabled={i === sections.length - 1} onClick={() => move(i, 1)}>↓</button>
+              <button className="btn sm ghost" onClick={() => rename(s)}>Rename</button>
+              <button className="btn sm ghost" title="Delete" onClick={() => del(s)}><Icon name="trash" size={13} /></button>
+            </div>
+          </div>
+        ))}
+        {sections.length === 0 && <div className="muted" style={{ fontSize: 13, padding: "6px 0" }}>No sections yet — “Seed defaults” or add one.</div>}
+      </div>
+    </Card>
+  );
+}
+
+function DocEditor({ doc, sections, onCreateSection, onDone, onCancel }: {
+  doc: AdminDoc | null; sections: AdminSectionRow[];
+  onCreateSection: () => Promise<string | null>;
+  onDone: () => void; onCancel: () => void;
 }) {
   const [f, setF] = useState<AdminDoc>(doc || {
-    id: "", slug: "", title: "", section: "General", section_order: 100,
+    id: "", slug: "", title: "", section: sections[0]?.name || "General", section_order: 100,
     nav_order: 100, icon: "book", summary: "", body: "", help_routes: [], published: true,
   });
+  const [body, setBody] = useState(toEditorHtml(doc?.body || ""));
   const [routes, setRoutes] = useState((doc?.help_routes || []).join(", "));
   const [busy, setBusy] = useState(false);
   const set = (k: keyof AdminDoc, v: any) => setF((s) => ({ ...s, [k]: v }));
@@ -3664,10 +3750,11 @@ function DocEditor({ doc, onDone, onCancel }: {
   async function save() {
     if (!f.title.trim()) { notify({ message: "Title is required", tone: "danger" }); return; }
     setBusy(true);
+    const sectOrder = sections.find((s) => s.name === f.section)?.order ?? f.section_order ?? 100;
     const payload = {
       slug: f.slug || undefined, title: f.title, section: f.section || "General",
-      section_order: Number(f.section_order) || 100, nav_order: Number(f.nav_order) || 100,
-      icon: f.icon || "book", summary: f.summary, body: f.body, published: f.published,
+      section_order: sectOrder, nav_order: Number(f.nav_order) || 100,
+      icon: f.icon || "book", summary: f.summary, body, published: f.published,
       help_routes: routes.split(",").map((r) => r.trim()).filter(Boolean),
     };
     try {
@@ -3677,6 +3764,8 @@ function DocEditor({ doc, onDone, onCancel }: {
     } catch (e: any) { notify({ message: e.message, tone: "danger" }); }
     finally { setBusy(false); }
   }
+
+  const knownSection = sections.some((s) => s.name === f.section);
 
   return (
     <Card>
@@ -3690,49 +3779,51 @@ function DocEditor({ doc, onDone, onCancel }: {
       <div className="stack" style={{ gap: 12 }}>
         <label className="stack" style={{ gap: 5 }}>
           <span className="faint" style={{ fontSize: 12 }}>Title</span>
-          <input value={f.title} onChange={(e) => set("title", e.target.value)} />
+          <input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} />
         </label>
         <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
           <label className="stack flex1" style={{ gap: 5, minWidth: 200 }}>
             <span className="faint" style={{ fontSize: 12 }}>Slug (URL key, optional)</span>
-            <input value={f.slug} placeholder="auto from title" onChange={(e) => set("slug", e.target.value)} />
+            <input className="input" value={f.slug} placeholder="auto from title" onChange={(e) => set("slug", e.target.value)} />
           </label>
-          <label className="stack flex1" style={{ gap: 5, minWidth: 160 }}>
+          <label className="stack flex1" style={{ gap: 5, minWidth: 180 }}>
             <span className="faint" style={{ fontSize: 12 }}>Section</span>
-            <input value={f.section} onChange={(e) => set("section", e.target.value)} />
+            <select className="input" value={f.section} onChange={(e) => {
+              if (e.target.value === "__new__") { onCreateSection().then((n) => { if (n) set("section", n); }); }
+              else set("section", e.target.value);
+            }}>
+              {sections.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}
+              {!knownSection && f.section && <option value={f.section}>{f.section}</option>}
+              <option value="__new__">+ New section…</option>
+            </select>
+          </label>
+          <label className="stack" style={{ gap: 5, width: 120 }}>
+            <span className="faint" style={{ fontSize: 12 }}>Page order</span>
+            <input className="input" type="number" value={f.nav_order} onChange={(e) => set("nav_order", e.target.value)} />
           </label>
         </div>
-        <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
-          <label className="stack" style={{ gap: 5, width: 130 }}>
-            <span className="faint" style={{ fontSize: 12 }}>Section order</span>
-            <input type="number" value={f.section_order} onChange={(e) => set("section_order", e.target.value)} />
+        <div className="row" style={{ gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <label className="stack flex1" style={{ gap: 5, minWidth: 200 }}>
+            <span className="faint" style={{ fontSize: 12 }}>Summary (one line)</span>
+            <input className="input" value={f.summary} onChange={(e) => set("summary", e.target.value)} />
           </label>
-          <label className="stack" style={{ gap: 5, width: 130 }}>
-            <span className="faint" style={{ fontSize: 12 }}>Page order</span>
-            <input type="number" value={f.nav_order} onChange={(e) => set("nav_order", e.target.value)} />
+          <label className="stack" style={{ gap: 5, width: 120 }}>
+            <span className="faint" style={{ fontSize: 12 }}>Nav icon</span>
+            <input className="input" value={f.icon} onChange={(e) => set("icon", e.target.value)} />
           </label>
-          <label className="stack flex1" style={{ gap: 5, minWidth: 140 }}>
-            <span className="faint" style={{ fontSize: 12 }}>Icon</span>
-            <input value={f.icon} onChange={(e) => set("icon", e.target.value)} />
-          </label>
-          <label className="row" style={{ gap: 8, alignItems: "center", marginTop: 20 }}>
+          <label className="row" style={{ gap: 8, alignItems: "center", height: 34 }}>
             <input type="checkbox" checked={f.published} onChange={(e) => set("published", e.target.checked)} />
             <span style={{ fontSize: 13 }}>Published</span>
           </label>
         </div>
         <label className="stack" style={{ gap: 5 }}>
-          <span className="faint" style={{ fontSize: 12 }}>Summary (one line)</span>
-          <input value={f.summary} onChange={(e) => set("summary", e.target.value)} />
-        </label>
-        <label className="stack" style={{ gap: 5 }}>
           <span className="faint" style={{ fontSize: 12 }}>Contextual help routes (comma‑separated portal paths, e.g. /search, /restore)</span>
-          <input value={routes} onChange={(e) => setRoutes(e.target.value)} placeholder="/search, /restore" />
+          <input className="input" value={routes} onChange={(e) => setRoutes(e.target.value)} placeholder="/search, /restore" />
         </label>
-        <label className="stack" style={{ gap: 5 }}>
-          <span className="faint" style={{ fontSize: 12 }}>Body (Markdown)</span>
-          <textarea rows={18} style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }}
-                    value={f.body} onChange={(e) => set("body", e.target.value)} />
-        </label>
+        <div className="stack" style={{ gap: 5 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Page content</span>
+          <RichTextEditor value={body} onChange={setBody} />
+        </div>
       </div>
     </Card>
   );
@@ -3867,13 +3958,13 @@ function AdminTicketDetail({ ticket, onBack, onChange }: {
           <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
             <label className="stack" style={{ gap: 4 }}>
               <span className="faint" style={{ fontSize: 11 }}>Status</span>
-              <select value={ticket.status} onChange={(e) => update({ status: e.target.value })}>
+              <select className="input" value={ticket.status} onChange={(e) => update({ status: e.target.value })}>
                 {TICKET_STATUSES.map((st) => <option key={st} value={st}>{st}</option>)}
               </select>
             </label>
             <label className="stack" style={{ gap: 4 }}>
               <span className="faint" style={{ fontSize: 11 }}>Priority</span>
-              <select value={ticket.priority} onChange={(e) => update({ priority: e.target.value })}>
+              <select className="input" value={ticket.priority} onChange={(e) => update({ priority: e.target.value })}>
                 {TICKET_PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
               </select>
             </label>
@@ -3897,7 +3988,7 @@ function AdminTicketDetail({ ticket, onBack, onChange }: {
 
       <Card>
         <div className="stack" style={{ gap: 10 }}>
-          <textarea rows={4} value={reply} onChange={(e) => setReply(e.target.value)}
+          <textarea className="input" rows={4} value={reply} onChange={(e) => setReply(e.target.value)}
                     placeholder="Reply to the customer… (they'll be emailed)" />
           <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
             <button className="btn sm" disabled={busy} onClick={() => update({ status: "resolved" })}>

@@ -98,3 +98,13 @@ export function renderMarkdown(md: string): string {
   flushPara();
   return out.join("\n");
 }
+
+// A stored body is HTML (authored in the rich-text editor) if it contains any
+// HTML tag; otherwise it's Markdown. renderDoc picks the right path.
+export function isHtml(body: string): boolean {
+  return /<[a-z][^>]*>/i.test(body || "");
+}
+
+export function renderDoc(body: string): string {
+  return isHtml(body) ? (body || "") : renderMarkdown(body);
+}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { loadSupport, slugForRoute, SupportContent } from "../support";
-import { renderMarkdown } from "../md";
+import { renderDoc } from "../md";
 import { site } from "../content";
 
 export default function Support() {
@@ -123,7 +123,7 @@ export default function Support() {
             <div
               className="support-body"
               onClick={onContentClick}
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(doc.body) }}
+              dangerouslySetInnerHTML={{ __html: renderDoc(doc.body) }}
             />
             {doc.updated_at && (
               <div className="support-updated">

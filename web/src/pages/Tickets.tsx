@@ -171,26 +171,26 @@ function NewTicket({ cats, priorities, onCancel, onCreated }: {
       <div className="stack" style={{ gap: 12 }}>
         <label className="stack" style={{ gap: 5 }}>
           <span className="faint" style={{ fontSize: 12 }}>Subject</span>
-          <input value={subject} onChange={(e) => setSubject(e.target.value)}
+          <input className="input" value={subject} onChange={(e) => setSubject(e.target.value)}
                  placeholder="Briefly, what do you need help with?" />
         </label>
         <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
           <label className="stack flex1" style={{ gap: 5, minWidth: 200 }}>
             <span className="faint" style={{ fontSize: 12 }}>Category</span>
-            <select value={category} onChange={(e) => setCategory(e.target.value)}>
+            <select className="input" value={category} onChange={(e) => setCategory(e.target.value)}>
               {cats.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
             </select>
           </label>
           <label className="stack flex1" style={{ gap: 5, minWidth: 160 }}>
             <span className="faint" style={{ fontSize: 12 }}>Priority</span>
-            <select value={priority} onChange={(e) => setPriority(e.target.value)}>
+            <select className="input" value={priority} onChange={(e) => setPriority(e.target.value)}>
               {priorities.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
           </label>
         </div>
         <label className="stack" style={{ gap: 5 }}>
           <span className="faint" style={{ fontSize: 12 }}>Describe the issue</span>
-          <textarea rows={6} value={body} onChange={(e) => setBody(e.target.value)}
+          <textarea className="input" rows={6} value={body} onChange={(e) => setBody(e.target.value)}
                     placeholder="What were you doing, what did you expect, and what happened?" />
         </label>
         <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
@@ -296,7 +296,7 @@ function TicketDetail({ id }: { id: string }) {
           </div>
         ) : null}
         <div className="stack" style={{ gap: 10 }}>
-          <textarea rows={4} value={reply} onChange={(e) => setReply(e.target.value)}
+          <textarea className="input" rows={4} value={reply} onChange={(e) => setReply(e.target.value)}
                     placeholder="Write a reply…" />
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn primary" disabled={busy || !reply.trim()} onClick={sendReply}>

@@ -288,41 +288,65 @@ def trends(period: str = "week", scope: str = "me",
     """Cumulative count of protected objects over time, per object type, so the
     dashboard can draw a growth trend line per category over a rolling window."""
     vault_ids, _eff = security.scoped_vault_ids(db, principal, scope)
-    # Earliest row per object is all trends needs; DISTINCT ON (Postgres) fetches
-    # just those instead of every version. SQLite falls back to the full scan.
-    docs = []
-    if vault_ids:
-        dq = (db.query(SearchDocument.source_type, SearchDocument.object_id,
-                       SearchDocument.doc_type, SearchDocument.created_at)
-              .filter(SearchDocument.tenant_id == tenant.id,
-                      SearchDocument.vault_id.in_(vault_ids)))
-        if db.bind is not None and db.bind.dialect.name == "postgresql":
-            docs = (dq.distinct(SearchDocument.source_type, SearchDocument.object_id)
-                      .order_by(SearchDocument.source_type, SearchDocument.object_id,
-                                SearchDocument.created_at.asc()).all())
-        else:
-            docs = dq.order_by(SearchDocument.created_at.asc()).all()
-    # First time each logical object was protected + its bucket.
-    first: dict[tuple, tuple] = {}
-    earliest = None
-    for st, oid, doc_type, created in docs:
-        key = (st, oid)
-        if key in first or created is None:
-            continue
-        first[key] = (created, _bucket_for(doc_type)["key"])
-        earliest = created if earliest is None else min(earliest, created)
-
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    if earliest is None:
-        earliest = now - timedelta(days=7)
-    edges = _bucket_edges(period if period in _PERIODS or period == "all" else "week", now, earliest)
-
+    per = period if (period in _PERIODS or period == "all") else "week"
     counts: dict[str, list[int]] = {}
-    for created, bk in first.values():
-        row = counts.setdefault(bk, [0] * len(edges))
-        for i, edge in enumerate(edges):
-            if created <= edge:
-                row[i] += 1  # cumulative — present at/after first ingest
+    edges: list = []
+
+    if vault_ids and db.bind is not None and db.bind.dialect.name == "postgresql":
+        # One aggregate — earliest-ingest day per object grouped by day + type — so
+        # trends never pulls the whole index into Python (it now loads as fast as
+        # the rest of the overview). min(doc_type) is the object's stable type.
+        from sqlalchemy import text, bindparam
+        sql = text(
+            "WITH firsts AS ("
+            "  SELECT min(created_at) AS fc, min(doc_type) AS dt"
+            "  FROM search_documents"
+            "  WHERE tenant_id = :tid AND vault_id IN :vids"
+            "  GROUP BY source_type, object_id)"
+            " SELECT dt, date_trunc('day', fc) AS d, count(*) AS n"
+            " FROM firsts GROUP BY dt, date_trunc('day', fc)"
+        ).bindparams(bindparam("vids", expanding=True))
+        rows = db.execute(sql, {"tid": tenant.id, "vids": list(vault_ids)}).all()
+        day_rows: list = []
+        earliest = None
+        for dt, d, n in rows:
+            if d is None:
+                continue
+            d = d.replace(tzinfo=None) if getattr(d, "tzinfo", None) else d
+            bk = _bucket_for(dt)["key"]
+            day_rows.append((bk, d, int(n)))
+            earliest = d if earliest is None else min(earliest, d)
+        edges = _bucket_edges(per, now, earliest or now - timedelta(days=7))
+        for bk, d, n in day_rows:
+            row = counts.setdefault(bk, [0] * len(edges))
+            for i, edge in enumerate(edges):
+                if d <= edge:
+                    row[i] += n
+    elif vault_ids:
+        # SQLite (dev): earliest row per object via an ordered scan + Python dedup.
+        docs = (db.query(SearchDocument.source_type, SearchDocument.object_id,
+                         SearchDocument.doc_type, SearchDocument.created_at)
+                .filter(SearchDocument.tenant_id == tenant.id,
+                        SearchDocument.vault_id.in_(vault_ids))
+                .order_by(SearchDocument.created_at.asc()).all())
+        first: dict[tuple, tuple] = {}
+        earliest = None
+        for st, oid, doc_type, created in docs:
+            key = (st, oid)
+            if key in first or created is None:
+                continue
+            first[key] = (created, _bucket_for(doc_type)["key"])
+            earliest = created if earliest is None else min(earliest, created)
+        edges = _bucket_edges(per, now, earliest or now - timedelta(days=7))
+        for created, bk in first.values():
+            row = counts.setdefault(bk, [0] * len(edges))
+            for i, edge in enumerate(edges):
+                if created <= edge:
+                    row[i] += 1
+    else:
+        edges = _bucket_edges(per, now, now - timedelta(days=7))
+
     series = []
     for b in _OBJECT_BUCKETS:
         vals = counts.get(b["key"])

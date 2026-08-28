@@ -746,6 +746,20 @@ class SupportDoc(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+class SupportSection(Base):
+    """A documentation section (nav group). First-class so sections can be
+    created, renamed, reordered and left empty independent of the docs in them.
+    Docs reference a section by its ``name``."""
+
+    __tablename__ = "support_sections"
+    id = Column(String, primary_key=True, default=_uuid)
+    name = Column(String, nullable=False, unique=True)
+    order = Column(Integer, default=100)
+    icon = Column(String, default="book")
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
 class SupportTicket(Base):
     """A customer support request. Lives on the control plane (auth-protected).
     Threaded messages are stored in TicketMessage."""
