@@ -82,24 +82,18 @@ def _dated(objs: list["_Obj"]) -> list["_Obj"]:
 
 
 def _collect_objects(db: Session, vault_ids: list[str], tenant_id: str) -> list[_Obj]:
-    """Deduplicated logical objects (latest row per source_type+object_id)."""
+    """Deduplicated logical objects (the current row per source_type+object_id)."""
     if not vault_ids:
         return []
-    rows = (db.query(SearchDocument)
+    rows = (db.query(SearchDocument.source_type, SearchDocument.doc_type,
+                     SearchDocument.category, SearchDocument.size_bytes,
+                     SearchDocument.modified_at, SearchDocument.title)
             .filter(SearchDocument.tenant_id == tenant_id,
-                    SearchDocument.vault_id.in_(vault_ids))
-            .order_by(SearchDocument.created_at.desc()).all())
-    seen: set[tuple] = set()
-    out: list[_Obj] = []
-    for r in rows:
-        key = (r.source_type, r.object_id)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(_Obj(r.source_type or "", (r.doc_type or "").lower(),
-                        (r.category or "").lower(), int(r.size_bytes or 0),
-                        r.modified_at, r.title or ""))
-    return out
+                    SearchDocument.vault_id.in_(vault_ids),
+                    SearchDocument.is_current.is_(True)).all())
+    return [_Obj(st or "", (dt or "").lower(), (cat or "").lower(),
+                 int(sz or 0), mod, title or "")
+            for st, dt, cat, sz, mod, title in rows]
 
 
 def _build_timeline(objs: list[_Obj]) -> dict:

@@ -139,36 +139,27 @@ def overview(scope: str = "me",
                     for t, n in sorted(type_counts.items(), key=lambda kv: -kv[1])]
 
     # --- Objects protected (deduped per logical object) + type breakdown -----
-    # On Postgres, push the "newest row per (source, object)" to the DB via
-    # DISTINCT ON so we don't haul every version/destination row into Python;
-    # SQLite (dev) falls back to the ordered scan + the Python dedup below.
-    docs = []
-    if vault_ids:
-        dq = (db.query(SearchDocument.source_type, SearchDocument.object_id,
-                       SearchDocument.size_bytes, SearchDocument.doc_type)
-              .filter(SearchDocument.tenant_id == tenant.id,
-                      SearchDocument.vault_id.in_(vault_ids)))
-        if db.bind is not None and db.bind.dialect.name == "postgresql":
-            docs = (dq.distinct(SearchDocument.source_type, SearchDocument.object_id)
-                      .order_by(SearchDocument.source_type, SearchDocument.object_id,
-                                SearchDocument.created_at.desc()).all())
-        else:
-            docs = dq.order_by(SearchDocument.created_at.desc()).all()
-    seen: set[tuple] = set()
+    # One current row per (source, object) via is_current, aggregated in the DB —
+    # no per-version rows are hauled into Python.
     bucket_counts: dict[str, int] = {}
     source_obj_counts: dict[str, int] = {}
     protected_bytes = 0
     object_total = 0
-    for d in docs:
-        key = (d.source_type, d.object_id)
-        if key in seen:
-            continue
-        seen.add(key)
-        object_total += 1
-        protected_bytes += int(d.size_bytes or 0)
-        bucket_counts[_bucket_for(d.doc_type)["key"]] = \
-            bucket_counts.get(_bucket_for(d.doc_type)["key"], 0) + 1
-        source_obj_counts[d.source_type] = source_obj_counts.get(d.source_type, 0) + 1
+    if vault_ids:
+        for st, dt, cnt, sz in (
+                db.query(SearchDocument.source_type, SearchDocument.doc_type,
+                         func.count(), func.coalesce(func.sum(SearchDocument.size_bytes), 0))
+                .filter(SearchDocument.tenant_id == tenant.id,
+                        SearchDocument.vault_id.in_(vault_ids),
+                        SearchDocument.is_current.is_(True))
+                .group_by(SearchDocument.source_type, SearchDocument.doc_type).all()):
+            n = int(cnt)
+            object_total += n
+            protected_bytes += int(sz or 0)
+            bk = _bucket_for(dt)["key"]
+            bucket_counts[bk] = bucket_counts.get(bk, 0) + n
+            if st:
+                source_obj_counts[st] = source_obj_counts.get(st, 0) + n
     object_breakdown = [
         {"key": b["key"], "label": b["label"], "icon": b["icon"], "color": b["color"],
          "count": bucket_counts.get(b["key"], 0)}

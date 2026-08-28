@@ -15,6 +15,8 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import text
+
 from ..config import get_settings
 from ..connectors import get_connector
 from ..db import WorkerSessionLocal as SessionLocal
@@ -180,6 +182,10 @@ def _ensure_perf_indexes() -> None:
         # audited action — without this it full-scans + sorts the whole ledger each write.
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_audit_events_created_at "
         "ON audit_events (created_at)",
+        # Unified search + billing/dashboard/org read one current row per object;
+        # this partial index serves both the facet GROUP BYs and the newest-first page.
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_search_documents_current "
+        "ON search_documents (tenant_id, vault_id, modified_at) WHERE is_current",
     ]
     for s in stmts:
         try:
@@ -189,10 +195,35 @@ def _ensure_perf_indexes() -> None:
             logger.exception("ensure perf index failed: %s", s)
 
 
+def _backfill_search_current() -> None:
+    """One-time: clear is_current on superseded search_documents rows so exactly one
+    current row remains per (tenant, source_type, object_id). New writes maintain the
+    flag going forward; this repairs legacy rows. Runs in the background (never at
+    startup) and only once, guarded by a persisted flag."""
+    from ..db import worker_engine
+    from ..models import SystemSetting
+    if worker_engine.dialect.name != "postgresql":
+        return
+    with SessionLocal() as db:
+        flag = db.get(SystemSetting, "search_is_current_backfilled")
+        if flag and flag.value == "1":
+            return
+        db.execute(text(
+            "UPDATE search_documents s SET is_current = FALSE "
+            "WHERE s.is_current AND EXISTS (SELECT 1 FROM search_documents n "
+            "WHERE n.tenant_id = s.tenant_id AND n.source_type = s.source_type "
+            "AND n.object_id = s.object_id AND (n.created_at > s.created_at "
+            "OR (n.created_at = s.created_at AND n.id > s.id)))"))
+        db.merge(SystemSetting(key="search_is_current_backfilled", value="1"))
+        db.commit()
+        logger.info("search is_current backfill complete")
+
+
 def _prune_db() -> None:
     """Keep high-churn tables bounded (appliance_commands, sync_jobs, integration_runs,
     backup_runs, pending_actions, network_usage, node_metrics). At most once a day.
-    Also builds perf indexes once, in the background (never during startup)."""
+    Also builds perf indexes + the search is_current backfill once, in the background
+    (never during startup)."""
     global _last_cmd_prune, _indexes_ensured
     now = datetime.utcnow()
     if _last_cmd_prune and (now - _last_cmd_prune) < timedelta(hours=24):
@@ -203,6 +234,10 @@ def _prune_db() -> None:
         prune_all(db)
     if not _indexes_ensured:
         _indexes_ensured = True
+        try:
+            _backfill_search_current()
+        except Exception:  # noqa: BLE001
+            logger.exception("search is_current backfill failed")
         _ensure_perf_indexes()
 
 

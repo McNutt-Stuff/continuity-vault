@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, nullslast
 from sqlalchemy.orm import Session
 
 from cv_crypto.envelope import EnvelopeKeyHierarchy, decrypt_object, unwrap_key
@@ -264,6 +264,235 @@ def thread(chat_id: str, source_type: str = "imessage",
             "messages": messages}
 
 
+# High-cardinality facets (labels, meta attributes) are sampled from the newest
+# rows — computing them over a 500k+ index is the dominant cost and they aren't
+# meaningful in full at that scale.
+_FACET_SAMPLE = 4000
+
+
+def _search_fast(db: Session, tenant: Tenant, allowed: list[str], *, q: str,
+                 source_type: str | None, doc_type: str | None, cat_set: set,
+                 coll_set: set, date_from: str | None, date_to: str | None,
+                 date_field: str | None, sort: str, direction: str, limit: int) -> dict:
+    """SQL-driven search for the common case (no label/attribute filter). Reads one
+    current row per object via ``is_current`` — facets come from GROUP BY and the
+    page from ORDER BY/LIMIT, so the whole index is never pulled into Python. The
+    response shape matches the full endpoint."""
+    ql = q.lower().strip() if q else ""
+    scope_captured = (date_field == "captured")
+    date_col = SearchDocument.created_at if scope_captured else SearchDocument.modified_at
+
+    def _bound(val: str | None, end: bool):
+        if not val:
+            return None
+        try:
+            d = datetime.fromisoformat(val.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if d.tzinfo is not None:
+            d = d.astimezone(timezone.utc).replace(tzinfo=None)
+        if len(val.strip()) <= 10:
+            d = d.replace(hour=23, minute=59, second=59, microsecond=999999) if end \
+                else d.replace(hour=0, minute=0, second=0, microsecond=0)
+        return d
+    dt_from, dt_to = _bound(date_from, False), _bound(date_to, True)
+
+    base = [SearchDocument.tenant_id == tenant.id,
+            SearchDocument.vault_id.in_(allowed),
+            SearchDocument.is_current.is_(True)]
+    if ql:
+        like = f"%{ql}%"
+        base.append(or_(func.lower(SearchDocument.search_blob).like(like),
+                        func.lower(SearchDocument.title).like(like),
+                        func.lower(SearchDocument.preview).like(like)))
+
+    # A category filter is applied as the concrete doc_types that map to it, so the
+    # canonical taxonomy (derived from doc_type) stays authoritative.
+    cat_doc_types: set | None = None
+    if cat_set:
+        present = [dt for (dt,) in db.query(SearchDocument.doc_type).filter(*base).distinct().all()]
+        cat_doc_types = {dt for dt in present if category_for_kind(dt) in cat_set} or {"__none__"}
+
+    def _filters(skip: str = ""):
+        conds = list(base)
+        if skip != "source":
+            if source_type:
+                conds.append(SearchDocument.source_type == source_type)
+            if coll_set:
+                conds.append(SearchDocument.collection_id.in_(coll_set))
+        if skip != "type" and doc_type:
+            conds.append(SearchDocument.doc_type == doc_type)
+        if skip != "category" and cat_doc_types is not None:
+            conds.append(SearchDocument.doc_type.in_(cat_doc_types))
+        if dt_from is not None:
+            conds.append(date_col >= dt_from)
+        if dt_to is not None:
+            conds.append(date_col <= dt_to)
+        return conds
+
+    # Total indexed objects matching the text query (before facet filters), matching
+    # the full endpoint's semantics. One current row per object ⇒ a plain count.
+    total_indexed = int(db.query(func.count()).filter(*base).scalar() or 0)
+
+    def _group(col, skip):
+        return {k: int(v) for k, v in
+                db.query(col, func.count()).filter(*_filters(skip)).group_by(col).all() if k}
+    by_source = _group(SearchDocument.source_type, "source")
+    by_type = _group(SearchDocument.doc_type, "type")
+    by_category: dict[str, int] = {}
+    for dt, c in _group(SearchDocument.doc_type, "category").items():
+        cat = category_for_kind(dt)
+        by_category[cat] = by_category.get(cat, 0) + c
+
+    acct_counts = (db.query(SearchDocument.source_type, SearchDocument.collection_id, func.count())
+                   .filter(*_filters("source"))
+                   .group_by(SearchDocument.source_type, SearchDocument.collection_id).all())
+
+    # Label + attribute facets from a bounded newest-first sample.
+    by_label: dict[str, int] = {}
+    meta_facets: dict[str, dict[str, int]] = {}
+    for labels, meta in (db.query(SearchDocument.labels, SearchDocument.meta)
+                         .filter(*_filters())
+                         .order_by(nullslast(date_col.desc()), SearchDocument.created_at.desc())
+                         .limit(_FACET_SAMPLE).all()):
+        for lbl in (labels or []):
+            if isinstance(lbl, dict):
+                lbl = lbl.get("name") or lbl.get("title") or ""
+            if isinstance(lbl, str) and lbl:
+                by_label[lbl] = by_label.get(lbl, 0) + 1
+        for k, v in (meta or {}).items():
+            if k == "client_encrypted" or v in (None, "", [], {}):
+                continue
+            for val in (v if isinstance(v, (list, tuple)) else [v]):
+                sval = str(val)
+                if sval and len(sval) <= 60:
+                    meta_facets.setdefault(k, {})
+                    meta_facets[k][sval] = meta_facets[k].get(sval, 0) + 1
+    meta_facets = {k: dict(sorted(vals.items(), key=lambda kv: kv[1], reverse=True)[:8])
+                   for k, vals in meta_facets.items() if len(vals) > 1}
+
+    # Result page (already one row per object).
+    order = nullslast(date_col.asc()) if direction == "asc" else nullslast(date_col.desc())
+    rows = (db.query(SearchDocument).filter(*_filters())
+            .order_by(order, SearchDocument.created_at.desc()).limit(limit).all())
+
+    # Friendly source/account labels for the referenced collections.
+    coll_ids = {r.collection_id for r in rows if r.collection_id} | {c for (_, c, _) in acct_counts if c}
+    coll_label: dict[str, str] = {}
+    coll_username: dict[str, str] = {}
+    coll_display: dict[str, str] = {}
+    if coll_ids:
+        for c in db.query(Collection).filter(Collection.id.in_(coll_ids)).all():
+            account = (db.get(ConnectorAccount, c.connector_account_id)
+                       if c.connector_account_id else None)
+            coll_label[c.id] = account.account_label if account else c.name
+            if account and account.account_username:
+                coll_username[c.id] = account.account_username
+            conn = get_connector(c.source_type)
+            coll_display[c.id] = conn.display_name if conn else c.source_type
+    source_display: dict[str, str] = {}
+    for st in set(by_source) | {r.source_type for r in rows}:
+        conn = get_connector(st)
+        source_display[st] = conn.display_name if conn else st
+
+    source_accounts: dict[str, list] = {}
+    for st, cid, cnt in acct_counts:
+        source_accounts.setdefault(st, []).append({
+            "id": cid, "label": coll_label.get(cid) or source_display.get(st, st),
+            "username": coll_username.get(cid), "count": int(cnt)})
+    for st in source_accounts:
+        source_accounts[st].sort(key=lambda a: a["count"], reverse=True)
+
+    # Page-scoped enrichment: first-ingested date + every snapshot the object is in
+    # (for "stored at" locations), across all of its versions.
+    page_oids = list({r.object_id for r in rows})
+    first_ingested: dict[tuple, object] = {}
+    object_snapshots: dict[tuple, set] = {}
+    if page_oids:
+        for st, oid, mn, snaps in (
+                db.query(SearchDocument.source_type, SearchDocument.object_id,
+                         func.min(SearchDocument.created_at),
+                         func.array_agg(SearchDocument.snapshot_id))
+                .filter(SearchDocument.tenant_id == tenant.id,
+                        SearchDocument.object_id.in_(page_oids))
+                .group_by(SearchDocument.source_type, SearchDocument.object_id).all()):
+            first_ingested[(st, oid)] = mn
+            object_snapshots[(st, oid)] = {s for s in (snaps or []) if s}
+
+    all_snap_ids: set = set()
+    for s in object_snapshots.values():
+        all_snap_ids |= s
+    receipts_by_snap: dict[str, list] = {}
+    if all_snap_ids:
+        for rc in (db.query(SnapshotReceipt)
+                   .filter(SnapshotReceipt.tenant_id == tenant.id,
+                           SnapshotReceipt.snapshot_id.in_(all_snap_ids)).all()):
+            receipts_by_snap.setdefault(rc.snapshot_id, []).append(rc)
+    store_labels = _store_label_map(db, tenant.id)
+    byos_providers = _byos_provider_map(db, tenant.id)
+
+    versions_by_oid: dict[tuple, list] = {}
+    if page_oids:
+        for ov in (db.query(ObjectVersion)
+                   .filter(ObjectVersion.tenant_id == tenant.id,
+                           ObjectVersion.object_id.in_(page_oids)).all()):
+            versions_by_oid.setdefault((ov.source_type, ov.object_id), []).append(ov)
+
+    def _locations_for(r):
+        out: dict[str, dict] = {}
+        for snap in object_snapshots.get((r.source_type, r.object_id), set()):
+            for rc in receipts_by_snap.get(snap, []):
+                if out.get(rc.destination, {}).get("recoverable"):
+                    continue
+                out[rc.destination] = {
+                    "destination": rc.destination,
+                    "label": _location_label(rc.destination, store_labels),
+                    "provider": byos_providers.get(rc.destination),
+                    "recoverable": bool(rc.recoverable)}
+        return list(out.values())
+
+    def _versions_for(r):
+        ovs = sorted(versions_by_oid.get((r.source_type, r.object_id), []),
+                     key=lambda v: v.version, reverse=True)
+        return [{"version": v.version, "snapshot_id": v.snapshot_id, "size_bytes": v.size_bytes,
+                 "created_at": v.created_at.isoformat() if v.created_at else None,
+                 "is_current": bool(v.is_current)} for v in ovs]
+
+    results = [{
+        "object_id": r.object_id,
+        "snapshot_id": r.snapshot_id,
+        "collection_id": r.collection_id,
+        "source_type": r.source_type,
+        "source_label": coll_label.get(r.collection_id, source_display.get(r.source_type, r.source_type)),
+        "source_username": coll_username.get(r.collection_id),
+        "source_display": coll_display.get(r.collection_id, source_display.get(r.source_type, r.source_type)),
+        "doc_type": r.doc_type,
+        "category": category_for_kind(r.doc_type),
+        "sensitivity": sensitivity_for(category_for_kind(r.doc_type)),
+        "title": r.title,
+        "preview": r.preview,
+        "meta": _clean_meta(r.meta),
+        "labels": _clean_labels(r.labels),
+        "size_bytes": r.size_bytes,
+        "modified_at": r.modified_at.isoformat() if r.modified_at else None,
+        "first_ingested_at": (first_ingested.get((r.source_type, r.object_id)).isoformat()
+                              if first_ingested.get((r.source_type, r.object_id)) else None),
+        "locations": _locations_for(r),
+        "versions": _versions_for(r),
+        "version_count": len(versions_by_oid.get((r.source_type, r.object_id), [])),
+    } for r in rows]
+
+    return {
+        "count": len(results),
+        "total_indexed": total_indexed,
+        "results": results,
+        "facets": {"source": by_source, "type": by_type, "category": by_category,
+                   "label": by_label, "attributes": meta_facets,
+                   "source_accounts": source_accounts},
+        "source_display": source_display,
+    }
+
+
 @router.get("")
 def search(q: str = "", source_type: str | None = None, doc_type: str | None = None,
            category: list[str] | None = Query(None), label: list[str] | None = Query(None),
@@ -292,6 +521,15 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     # Data partitioning: search only ever returns items from the user's own
     # vaults — never another member's content.
     allowed = security.content_vault_ids(db, principal)
+    # Fast path: for everything except label/attribute filters, faceting and
+    # pagination run in the DB against one current row per object (is_current),
+    # instead of hauling the whole index into Python. Those two filters need the
+    # JSON columns, so they fall through to the (correct) in-Python path below.
+    if allowed and not label_set and not attr_key:
+        return _search_fast(
+            db, tenant, allowed, q=q, source_type=source_type, doc_type=doc_type,
+            cat_set=cat_set, coll_set=coll_set, date_from=date_from, date_to=date_to,
+            date_field=date_field, sort=sort, direction=direction, limit=limit)
     # PERF: the free-text query is pushed to the DB (server-side filter) and the
     # heavy `search_blob` column is NEVER transferred — we select only the fields
     # the dedup, facets and result rows need. This keeps search responsive on
@@ -307,7 +545,8 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     if allowed:
         _base = (db.query(*_cols)
                  .filter(SearchDocument.tenant_id == tenant.id,
-                         SearchDocument.vault_id.in_(allowed)))
+                         SearchDocument.vault_id.in_(allowed),
+                         SearchDocument.is_current.is_(True)))
         if ql:
             _like = f"%{ql}%"
             _base = _base.filter(or_(

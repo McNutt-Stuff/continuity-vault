@@ -434,6 +434,10 @@ class SearchDocument(Base):
     # which version this index row represents.
     content_hash = Column(String, index=True)
     version = Column(Integer, default=1)
+    # Exactly one current row per (tenant, source_type, object_id): set False on
+    # prior rows when a new version is indexed, so reads filter to the current row
+    # instead of de-duplicating the whole index. Backfilled for legacy rows.
+    is_current = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime, default=_now)
 
 

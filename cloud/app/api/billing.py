@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .. import audit, security
@@ -140,34 +141,27 @@ def pricing_public(p: PricingConfig) -> dict:
     }
 
 
+def _agg_by_doctype(db: Session, *conds) -> tuple[int, int, dict]:
+    """(objects, protected bytes, per-bucket counts) over the CURRENT row of each
+    logical object (is_current ⇒ one row per object) — a single GROUP BY instead of
+    hauling every version/destination row into Python to de-duplicate."""
+    total = 0
+    used_bytes = 0
+    by_bucket: dict = {}
+    for dt, cnt, sz in (db.query(SearchDocument.doc_type, func.count(),
+                                 func.coalesce(func.sum(SearchDocument.size_bytes), 0))
+                        .filter(SearchDocument.is_current.is_(True), *conds)
+                        .group_by(SearchDocument.doc_type).all()):
+        total += int(cnt)
+        used_bytes += int(sz or 0)
+        bk = _bucket_for(dt)["key"]
+        by_bucket[bk] = by_bucket.get(bk, 0) + int(cnt)
+    return total, used_bytes, by_bucket
+
+
 def _usage(db: Session, tenant_id: str) -> tuple[int, int, dict]:
     """Deduped object count, protected bytes, and per-bucket counts."""
-    # Only the columns the aggregation needs, and on Postgres let the DB dedup to
-    # the newest row per (source, object) via DISTINCT ON — avoids hauling every
-    # version/destination row (and the heavy TEXT columns) into Python.
-    dq = (db.query(SearchDocument.source_type, SearchDocument.object_id,
-                   SearchDocument.size_bytes, SearchDocument.doc_type)
-          .filter(SearchDocument.tenant_id == tenant_id))
-    if db.bind is not None and db.bind.dialect.name == "postgresql":
-        docs = (dq.distinct(SearchDocument.source_type, SearchDocument.object_id)
-                  .order_by(SearchDocument.source_type, SearchDocument.object_id,
-                            SearchDocument.created_at.desc()).all())
-    else:
-        docs = dq.order_by(SearchDocument.created_at.desc()).all()
-    seen: set = set()
-    used_bytes = 0
-    total = 0
-    by_bucket: dict = {}
-    for d in docs:
-        key = (d.source_type, d.object_id)
-        if key in seen:
-            continue
-        seen.add(key)
-        total += 1
-        used_bytes += int(d.size_bytes or 0)
-        bk = _bucket_for(d.doc_type)["key"]
-        by_bucket[bk] = by_bucket.get(bk, 0) + 1
-    return total, used_bytes, by_bucket
+    return _agg_by_doctype(db, SearchDocument.tenant_id == tenant_id)
 
 
 @router.get("/pricing")
@@ -292,29 +286,7 @@ def _user_usage(db: Session, user) -> tuple[int, int, dict]:
                  db.query(Vault.id).filter(Vault.owner_user_id == user.id).all()]
     if not vault_ids:
         return 0, 0, {}
-    dq = (db.query(SearchDocument.source_type, SearchDocument.object_id,
-                   SearchDocument.size_bytes, SearchDocument.doc_type)
-          .filter(SearchDocument.vault_id.in_(vault_ids)))
-    if db.bind is not None and db.bind.dialect.name == "postgresql":
-        docs = (dq.distinct(SearchDocument.source_type, SearchDocument.object_id)
-                  .order_by(SearchDocument.source_type, SearchDocument.object_id,
-                            SearchDocument.created_at.desc()).all())
-    else:
-        docs = dq.order_by(SearchDocument.created_at.desc()).all()
-    seen: set = set()
-    used_bytes = 0
-    total = 0
-    by_bucket: dict = {}
-    for d in docs:
-        key = (d.source_type, d.object_id)
-        if key in seen:
-            continue
-        seen.add(key)
-        total += 1
-        used_bytes += int(d.size_bytes or 0)
-        bk = _bucket_for(d.doc_type)["key"]
-        by_bucket[bk] = by_bucket.get(bk, 0) + 1
-    return total, used_bytes, by_bucket
+    return _agg_by_doctype(db, SearchDocument.vault_id.in_(vault_ids))
 
 
 def bulk_user_usage(db: Session, user_ids: list[str]) -> dict:
@@ -330,32 +302,21 @@ def bulk_user_usage(db: Session, user_ids: list[str]) -> dict:
     vault_ids = list(vault_owner.keys())
     if not vault_ids:
         return out
-    dq = (db.query(SearchDocument.vault_id, SearchDocument.source_type,
-                   SearchDocument.object_id, SearchDocument.size_bytes,
-                   SearchDocument.doc_type)
-          .filter(SearchDocument.vault_id.in_(vault_ids)))
-    if db.bind is not None and db.bind.dialect.name == "postgresql":
-        rows = (dq.distinct(SearchDocument.vault_id, SearchDocument.source_type,
-                            SearchDocument.object_id)
-                  .order_by(SearchDocument.vault_id, SearchDocument.source_type,
-                            SearchDocument.object_id, SearchDocument.created_at.desc()).all())
-    else:
-        rows = dq.order_by(SearchDocument.created_at.desc()).all()
     agg: dict = {}
-    seen: set = set()
-    for vid, st, oid, sz, dt in rows:
+    for vid, dt, cnt, sz in (db.query(
+                SearchDocument.vault_id, SearchDocument.doc_type, func.count(),
+                func.coalesce(func.sum(SearchDocument.size_bytes), 0))
+            .filter(SearchDocument.vault_id.in_(vault_ids),
+                    SearchDocument.is_current.is_(True))
+            .group_by(SearchDocument.vault_id, SearchDocument.doc_type).all()):
         owner = vault_owner.get(vid)
         if not owner:
             continue
-        key = (owner, st, oid)
-        if key in seen:
-            continue
-        seen.add(key)
         a = agg.setdefault(owner, {"total": 0, "bytes": 0, "buckets": {}})
-        a["total"] += 1
+        a["total"] += int(cnt)
         a["bytes"] += int(sz or 0)
         bk = _bucket_for(dt)["key"]
-        a["buckets"][bk] = a["buckets"].get(bk, 0) + 1
+        a["buckets"][bk] = a["buckets"].get(bk, 0) + int(cnt)
     for uid, a in agg.items():
         out[uid] = (a["total"], a["bytes"], a["buckets"])
     return out

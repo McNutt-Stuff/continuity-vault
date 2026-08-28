@@ -39,7 +39,8 @@ ASSIGNABLE_ROLES = ("member", "admin", "owner")
 
 def _object_counts_by_vault(db: Session, tenant_id: str) -> dict[str, int]:
     rows = (db.query(SearchDocument.vault_id, func.count(SearchDocument.id))
-            .filter(SearchDocument.tenant_id == tenant_id)
+            .filter(SearchDocument.tenant_id == tenant_id,
+                    SearchDocument.is_current.is_(True))
             .group_by(SearchDocument.vault_id).all())
     return {vid: int(n) for vid, n in rows if vid}
 
@@ -47,7 +48,8 @@ def _object_counts_by_vault(db: Session, tenant_id: str) -> dict[str, int]:
 def _bytes_by_vault(db: Session, tenant_id: str) -> dict[str, int]:
     rows = (db.query(SearchDocument.vault_id,
                      func.coalesce(func.sum(SearchDocument.size_bytes), 0))
-            .filter(SearchDocument.tenant_id == tenant_id)
+            .filter(SearchDocument.tenant_id == tenant_id,
+                    SearchDocument.is_current.is_(True))
             .group_by(SearchDocument.vault_id).all())
     return {vid: int(n) for vid, n in rows if vid}
 

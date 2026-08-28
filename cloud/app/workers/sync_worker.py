@@ -766,6 +766,16 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
 
     for ov in new_versions:
         db.add(ov)
+    # A new index row supersedes any prior rows for the same object: clear their
+    # is_current flag so reads filter to one current row per object instead of
+    # de-duplicating the whole index. (New rows below default is_current=True.)
+    reindexed = {r.object_id for r in index_rows}
+    if reindexed:
+        db.query(SearchDocument).filter(
+            SearchDocument.tenant_id == collection.tenant_id,
+            SearchDocument.source_type == collection.source_type,
+            SearchDocument.object_id.in_(reindexed),
+        ).update({SearchDocument.is_current: False}, synchronize_session=False)
     for row in index_rows:
         db.add(row)
     db.commit()
