@@ -33,6 +33,8 @@ type IconName =
   | "moon"
   | "insights"
   | "sparkle"
+  | "help"
+  | "credit-card"
   | "puzzle";
 
 const paths: Record<IconName, ReactNode> = {
@@ -198,6 +200,19 @@ const paths: Record<IconName, ReactNode> = {
     </>
   ),
   sparkle: <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />,
+  help: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.2 9.2a2.8 2.8 0 015.4 1c0 1.8-2.6 2.2-2.6 4" />
+      <path d="M12 17.2h.01" />
+    </>
+  ),
+  "credit-card": (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2.5" />
+      <path d="M3 10h18" />
+    </>
+  ),
   puzzle: <path d="M10 3.5a2 2 0 014 0V5h2.5a1 1 0 011 1V8.5a2 2 0 010 4V17a1 1 0 01-1 1H12v-1.5a2 2 0 00-4 0V18H5a1 1 0 01-1-1v-4.5a2 2 0 000-4V6a1 1 0 011-1h4V3.5z" />,
 };
 

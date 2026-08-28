@@ -29,6 +29,7 @@ from .api import (
     site,
     snapshots,
     storage_instances,
+    support,
     tenant,
     updates,
 )
@@ -84,6 +85,9 @@ app.include_router(photos.router, prefix=API)
 app.include_router(photos.actions_router, prefix=API)
 app.include_router(site.public_router, prefix=API)
 app.include_router(site.admin_router, prefix=API)
+app.include_router(support.public_router, prefix=API)
+app.include_router(support.tickets_router, prefix=API)
+app.include_router(support.admin_router, prefix=API)
 app.include_router(node_sync.router, prefix=API)
 app.include_router(updates.router, prefix=API)
 app.include_router(updates.public_router, prefix=API)

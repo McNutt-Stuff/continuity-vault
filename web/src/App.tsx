@@ -24,6 +24,7 @@ import Audit from "./pages/Audit";
 import ActivityPage from "./pages/Activity";
 import Settings from "./pages/Settings";
 import Organization from "./pages/Organization";
+import Tickets from "./pages/Tickets";
 import SetupWizard from "./pages/SetupWizard";
 
 const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
@@ -82,6 +83,8 @@ export default function App() {
             <Route path="/restore" element={<Restore />} />
             <Route path="/audit" element={<Audit />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/support/tickets" element={<Tickets />} />
+            <Route path="/support/tickets/:id" element={<Tickets />} />
             {me.can_admin && <Route path="/organization" element={<Organization />} />}
             {me.is_platform_admin && <Route path="/admin" element={<Navigate to="/admin/overview" replace />} />}
             {me.is_platform_admin && <Route path="/admin/:section" element={<Admin />} />}
@@ -184,11 +187,13 @@ function TopBar() {
     ? (ADMIN_SECTIONS.find((s) => s.key === adminKey)?.label ?? "Admin center")
     : (NAV.find((n) => n.to === loc.pathname)?.label ??
       (loc.pathname === "/onboarding" ? "Protection Setup"
+        : loc.pathname.startsWith("/support/tickets") ? "Support"
         : loc.pathname === "/organization" ? "Organization Admin" : "Arkive"));
   return (
     <div className="topbar">
       <h1>{title}</h1>
       <div className="row" style={{ gap: 14 }}>
+        <HelpMenu />
         <ThemeToggle />
         {me?.can_admin && <AlertBell />}
         {me?.passkey_verified ? (
@@ -244,6 +249,50 @@ function AccountMenu() {
             <div className="account-menu-sep" />
             <button className="account-menu-item danger" onClick={() => { setOpen(false); logout(); }}>
               <Icon name="logout" size={15} /> Sign out
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function HelpMenu() {
+  const loc = useLocation();
+  const nav = useNavigate();
+  const [open, setOpen] = useState(false);
+  // The support site is served by the Public Web Node under /support. Derive its
+  // origin from the portal host (vault.arkive.life → arkive.life); ?for=<route>
+  // opens the page's contextual help.
+  const base = `${location.protocol}//${location.host.replace(/^vault\./, "")}/support`;
+  const docsForPage = `${base}?for=${encodeURIComponent(loc.pathname)}`;
+  return (
+    <div style={{ position: "relative" }}>
+      <button className="btn ghost sm" title="Help & support" onClick={() => setOpen((o) => !o)}>
+        <Icon name="help" size={16} />
+      </button>
+      {open && (
+        <>
+          <div className="fs-overlay" onClick={() => setOpen(false)} />
+          <div className="account-menu">
+            <div className="account-menu-head">
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Help &amp; support</div>
+              <div className="faint" style={{ fontSize: 11 }}>Docs, guides and tickets</div>
+            </div>
+            <a className="account-menu-item" href={docsForPage} target="_blank" rel="noopener noreferrer"
+               onClick={() => setOpen(false)}>
+              <Icon name="info" size={15} /> Help for this page
+            </a>
+            <a className="account-menu-item" href={base} target="_blank" rel="noopener noreferrer"
+               onClick={() => setOpen(false)}>
+              <Icon name="grid" size={15} /> Browse all docs
+            </a>
+            <div className="account-menu-sep" />
+            <button className="account-menu-item" onClick={() => { setOpen(false); nav("/support/tickets"); }}>
+              <Icon name="mail" size={15} /> My support tickets
+            </button>
+            <button className="account-menu-item" onClick={() => { setOpen(false); nav("/support/tickets?new=1"); }}>
+              <Icon name="edit" size={15} /> Open a ticket
             </button>
           </div>
         </>

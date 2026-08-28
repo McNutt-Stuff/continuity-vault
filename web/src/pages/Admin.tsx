@@ -127,6 +127,8 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "updates", label: "Updates", icon: "clock", group: "Infrastructure" },
   { key: "debug", label: "Debug", icon: "activity", group: "Infrastructure" },
   { key: "audit", label: "Audit log", icon: "shield", group: "Infrastructure" },
+  { key: "support-tickets", label: "Support tickets", icon: "help", group: "Support" },
+  { key: "support-docs", label: "Documentation", icon: "file", group: "Support" },
 ];
 
 export default function Admin() {
@@ -153,6 +155,8 @@ export default function Admin() {
       {s === "audit" && <Audit />}
       {s === "updates" && <Updates />}
       {s === "debug" && <DebugAdmin />}
+      {s === "support-tickets" && <SupportTicketsAdmin />}
+      {s === "support-docs" && <SupportDocsAdmin />}
     </>
   );
 }
@@ -3543,5 +3547,368 @@ function AdminStat({ icon, label, value, tint }: { icon: IconName; label: string
         <div className="faint" style={{ fontSize: 11.5 }}>{label}</div>
       </div>
     </div>
+  );
+}
+
+// ===========================================================================
+// Support — documentation CMS
+// ===========================================================================
+
+interface AdminDoc {
+  id: string; slug: string; title: string; section: string; section_order: number;
+  nav_order: number; icon: string; summary: string; body: string;
+  help_routes: string[]; published: boolean;
+}
+
+function SupportDocsAdmin() {
+  const [docs, setDocs] = useState<AdminDoc[] | null>(null);
+  const [editing, setEditing] = useState<AdminDoc | "new" | null>(null);
+
+  async function load() {
+    try {
+      const r = await api.get<{ docs: AdminDoc[] }>("/admin/support/docs");
+      setDocs(r.docs);
+    } catch (e: any) {
+      notify({ message: e.message || "Could not load docs", tone: "danger" });
+      setDocs([]);
+    }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function seed() {
+    try {
+      const r = await api.post<{ created: number }>("/admin/support/seed", {});
+      notify({ message: `Published ${r.created} starter page(s).`, tone: "ok" });
+      void load();
+    } catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
+  async function remove(d: AdminDoc) {
+    if (!(await confirmDialog({ title: `Delete “${d.title}”?`, message: "This removes the page from the public Help Center.", tone: "danger", confirmLabel: "Delete" }))) return;
+    try { await api.del(`/admin/support/docs/${d.id}`); void load(); }
+    catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
+
+  if (editing) {
+    return (
+      <DocEditor
+        doc={editing === "new" ? null : editing}
+        onDone={() => { setEditing(null); void load(); }}
+        onCancel={() => setEditing(null)}
+      />
+    );
+  }
+
+  const groups: Record<string, AdminDoc[]> = {};
+  (docs || []).forEach((d) => { (groups[d.section] ||= []).push(d); });
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 14, alignItems: "center" }}>
+        <div className="muted" style={{ fontSize: 13, maxWidth: 560 }}>
+          Manage the public Help Center. Published pages sync to the support site on the next node heartbeat.
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn sm" onClick={seed}><Icon name="sparkle" size={14} /> Seed defaults</button>
+          <button className="btn sm primary" onClick={() => setEditing("new")}><Icon name="edit" size={14} /> New page</button>
+        </div>
+      </div>
+      {docs === null ? (
+        <Card><div className="muted">Loading…</div></Card>
+      ) : docs.length === 0 ? (
+        <Card><div className="muted" style={{ padding: "10px 0" }}>
+          No documentation yet. Use <b>Seed defaults</b> to publish the starter Help Center, then edit freely.
+        </div></Card>
+      ) : (
+        Object.entries(groups).map(([section, items]) => (
+          <Card key={section} style={{ marginBottom: 12 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{section}</div>
+            <div className="stack" style={{ gap: 0 }}>
+              {items.map((d) => (
+                <div key={d.id} className="spread"
+                     style={{ padding: "9px 0", borderTop: "1px solid var(--border-soft)", alignItems: "center" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                      <span style={{ fontWeight: 600 }}>{d.title}</span>
+                      {!d.published && <Pill tone="warn">draft</Pill>}
+                      {(d.help_routes || []).length > 0 && <Pill tone="info">contextual</Pill>}
+                    </div>
+                    <div className="faint" style={{ fontSize: 12 }}>
+                      /{d.slug}{d.summary ? ` · ${d.summary}` : ""}
+                    </div>
+                  </div>
+                  <div className="row" style={{ gap: 6 }}>
+                    <button className="btn sm ghost" onClick={() => setEditing(d)}><Icon name="edit" size={13} /> Edit</button>
+                    <button className="btn sm ghost" onClick={() => remove(d)} title="Delete"><Icon name="trash" size={13} /></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        ))
+      )}
+    </>
+  );
+}
+
+function DocEditor({ doc, onDone, onCancel }: {
+  doc: AdminDoc | null; onDone: () => void; onCancel: () => void;
+}) {
+  const [f, setF] = useState<AdminDoc>(doc || {
+    id: "", slug: "", title: "", section: "General", section_order: 100,
+    nav_order: 100, icon: "book", summary: "", body: "", help_routes: [], published: true,
+  });
+  const [routes, setRoutes] = useState((doc?.help_routes || []).join(", "));
+  const [busy, setBusy] = useState(false);
+  const set = (k: keyof AdminDoc, v: any) => setF((s) => ({ ...s, [k]: v }));
+
+  async function save() {
+    if (!f.title.trim()) { notify({ message: "Title is required", tone: "danger" }); return; }
+    setBusy(true);
+    const payload = {
+      slug: f.slug || undefined, title: f.title, section: f.section || "General",
+      section_order: Number(f.section_order) || 100, nav_order: Number(f.nav_order) || 100,
+      icon: f.icon || "book", summary: f.summary, body: f.body, published: f.published,
+      help_routes: routes.split(",").map((r) => r.trim()).filter(Boolean),
+    };
+    try {
+      if (doc) await api.put(`/admin/support/docs/${doc.id}`, payload);
+      else await api.post("/admin/support/docs", payload);
+      onDone();
+    } catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <Card>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <h3 style={{ margin: 0 }}>{doc ? "Edit page" : "New page"}</h3>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn sm ghost" onClick={onCancel}>Cancel</button>
+          <button className="btn sm primary" disabled={busy} onClick={save}>{busy ? "Saving…" : "Save"}</button>
+        </div>
+      </div>
+      <div className="stack" style={{ gap: 12 }}>
+        <label className="stack" style={{ gap: 5 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Title</span>
+          <input value={f.title} onChange={(e) => set("title", e.target.value)} />
+        </label>
+        <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+          <label className="stack flex1" style={{ gap: 5, minWidth: 200 }}>
+            <span className="faint" style={{ fontSize: 12 }}>Slug (URL key, optional)</span>
+            <input value={f.slug} placeholder="auto from title" onChange={(e) => set("slug", e.target.value)} />
+          </label>
+          <label className="stack flex1" style={{ gap: 5, minWidth: 160 }}>
+            <span className="faint" style={{ fontSize: 12 }}>Section</span>
+            <input value={f.section} onChange={(e) => set("section", e.target.value)} />
+          </label>
+        </div>
+        <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+          <label className="stack" style={{ gap: 5, width: 130 }}>
+            <span className="faint" style={{ fontSize: 12 }}>Section order</span>
+            <input type="number" value={f.section_order} onChange={(e) => set("section_order", e.target.value)} />
+          </label>
+          <label className="stack" style={{ gap: 5, width: 130 }}>
+            <span className="faint" style={{ fontSize: 12 }}>Page order</span>
+            <input type="number" value={f.nav_order} onChange={(e) => set("nav_order", e.target.value)} />
+          </label>
+          <label className="stack flex1" style={{ gap: 5, minWidth: 140 }}>
+            <span className="faint" style={{ fontSize: 12 }}>Icon</span>
+            <input value={f.icon} onChange={(e) => set("icon", e.target.value)} />
+          </label>
+          <label className="row" style={{ gap: 8, alignItems: "center", marginTop: 20 }}>
+            <input type="checkbox" checked={f.published} onChange={(e) => set("published", e.target.checked)} />
+            <span style={{ fontSize: 13 }}>Published</span>
+          </label>
+        </div>
+        <label className="stack" style={{ gap: 5 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Summary (one line)</span>
+          <input value={f.summary} onChange={(e) => set("summary", e.target.value)} />
+        </label>
+        <label className="stack" style={{ gap: 5 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Contextual help routes (comma‑separated portal paths, e.g. /search, /restore)</span>
+          <input value={routes} onChange={(e) => setRoutes(e.target.value)} placeholder="/search, /restore" />
+        </label>
+        <label className="stack" style={{ gap: 5 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Body (Markdown)</span>
+          <textarea rows={18} style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }}
+                    value={f.body} onChange={(e) => set("body", e.target.value)} />
+        </label>
+      </div>
+    </Card>
+  );
+}
+
+// ===========================================================================
+// Support — ticket triage
+// ===========================================================================
+
+interface AdminTicketMsg { id: string; author_name: string; is_staff: boolean; body: string; created_at: string | null; }
+interface AdminTicket {
+  id: string; ref: string; subject: string; category: string; priority: string; status: string;
+  requester_email: string; requester_name: string; assignee_user_id: string | null;
+  last_activity_at: string | null; created_at: string | null; message_count: number;
+  messages?: AdminTicketMsg[];
+}
+
+const TICKET_STATUSES = ["open", "pending", "resolved", "closed"];
+const TICKET_PRIORITIES = ["low", "normal", "high", "urgent"];
+const T_STATUS_TONE: Record<string, "info" | "ok" | "warn" | "danger"> = {
+  open: "info", pending: "warn", resolved: "ok", closed: "info",
+};
+const T_PRIORITY_TONE: Record<string, "info" | "ok" | "warn" | "danger"> = {
+  low: "info", normal: "info", high: "warn", urgent: "danger",
+};
+
+function SupportTicketsAdmin() {
+  const [status, setStatus] = useState("open");
+  const [list, setList] = useState<AdminTicket[] | null>(null);
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const [active, setActive] = useState<AdminTicket | null>(null);
+
+  async function load() {
+    try {
+      const r = await api.get<{ tickets: AdminTicket[]; counts: Record<string, number> }>(
+        `/admin/support/tickets?status=${status}`);
+      setList(r.tickets);
+      setCounts(r.counts || {});
+    } catch (e: any) {
+      notify({ message: e.message || "Could not load tickets", tone: "danger" });
+      setList([]);
+    }
+  }
+  useEffect(() => { void load(); }, [status]);
+
+  async function openTicket(id: string) {
+    try { setActive(await api.get<AdminTicket>(`/admin/support/tickets/${id}`)); }
+    catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
+
+  if (active) {
+    return <AdminTicketDetail ticket={active} onBack={() => { setActive(null); void load(); }} onChange={setActive} />;
+  }
+
+  return (
+    <>
+      <div className="row" style={{ gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+        {TICKET_STATUSES.map((st) => (
+          <button key={st}
+                  className={`btn sm ${status === st ? "primary" : "ghost"}`}
+                  onClick={() => setStatus(st)}>
+            {st} {counts[st] ? `(${counts[st]})` : ""}
+          </button>
+        ))}
+      </div>
+      {list === null ? (
+        <Card><div className="muted">Loading…</div></Card>
+      ) : list.length === 0 ? (
+        <Card><div className="muted" style={{ padding: "10px 0" }}>No {status} tickets.</div></Card>
+      ) : (
+        <div className="stack" style={{ gap: 8 }}>
+          {list.map((t) => (
+            <Card key={t.id} onClick={() => openTicket(t.id)}>
+              <div className="spread" style={{ alignItems: "flex-start", gap: 12, cursor: "pointer" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                    <span className="faint" style={{ fontSize: 12, fontFamily: "ui-monospace, monospace" }}>{t.ref}</span>
+                    <span style={{ fontWeight: 600 }}>{t.subject}</span>
+                  </div>
+                  <div className="faint" style={{ fontSize: 12, marginTop: 3 }}>
+                    {t.requester_name} &lt;{t.requester_email}&gt; · {t.category} · updated {timeAgo(t.last_activity_at)}
+                  </div>
+                </div>
+                <div className="row" style={{ gap: 6 }}>
+                  <Pill tone={T_PRIORITY_TONE[t.priority] || "info"}>{t.priority}</Pill>
+                  <Pill tone={T_STATUS_TONE[t.status] || "info"} dot>{t.status}</Pill>
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function AdminTicketDetail({ ticket, onBack, onChange }: {
+  ticket: AdminTicket; onBack: () => void; onChange: (t: AdminTicket) => void;
+}) {
+  const [reply, setReply] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function sendReply() {
+    if (!reply.trim()) return;
+    setBusy(true);
+    try { onChange(await api.post<AdminTicket>(`/admin/support/tickets/${ticket.id}/reply`, { body: reply })); setReply(""); }
+    catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+    finally { setBusy(false); }
+  }
+  async function update(patch: Record<string, string>) {
+    try { onChange(await api.put<AdminTicket>(`/admin/support/tickets/${ticket.id}`, patch)); }
+    catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
+
+  return (
+    <>
+      <button className="btn sm ghost" style={{ marginBottom: 12 }} onClick={onBack}>
+        <Icon name="logout" size={13} /> All tickets
+      </button>
+      <Card style={{ marginBottom: 12 }}>
+        <div className="spread" style={{ alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <span className="faint" style={{ fontSize: 12.5, fontFamily: "ui-monospace, monospace" }}>{ticket.ref}</span>
+              <Pill tone={T_STATUS_TONE[ticket.status] || "info"} dot>{ticket.status}</Pill>
+            </div>
+            <h3 style={{ margin: "8px 0 2px" }}>{ticket.subject}</h3>
+            <div className="faint" style={{ fontSize: 12 }}>
+              {ticket.requester_name} &lt;{ticket.requester_email}&gt; · {ticket.category} · opened {fmtAbsolute(ticket.created_at)}
+            </div>
+          </div>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <label className="stack" style={{ gap: 4 }}>
+              <span className="faint" style={{ fontSize: 11 }}>Status</span>
+              <select value={ticket.status} onChange={(e) => update({ status: e.target.value })}>
+                {TICKET_STATUSES.map((st) => <option key={st} value={st}>{st}</option>)}
+              </select>
+            </label>
+            <label className="stack" style={{ gap: 4 }}>
+              <span className="faint" style={{ fontSize: 11 }}>Priority</span>
+              <select value={ticket.priority} onChange={(e) => update({ priority: e.target.value })}>
+                {TICKET_PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </label>
+          </div>
+        </div>
+      </Card>
+
+      <div className="stack" style={{ gap: 10, marginBottom: 12 }}>
+        {(ticket.messages || []).map((m) => (
+          <div key={m.id} className={`ticket-msg ${m.is_staff ? "staff" : ""}`}>
+            <div className="spread" style={{ marginBottom: 6 }}>
+              <span style={{ fontWeight: 600, fontSize: 13 }}>
+                {m.is_staff && <Icon name="shield" size={12} />} {m.author_name || (m.is_staff ? "Arkive Support" : "Customer")}
+              </span>
+              <span className="faint" style={{ fontSize: 11.5 }}>{fmtAbsolute(m.created_at)}</span>
+            </div>
+            <div style={{ fontSize: 14, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{m.body}</div>
+          </div>
+        ))}
+      </div>
+
+      <Card>
+        <div className="stack" style={{ gap: 10 }}>
+          <textarea rows={4} value={reply} onChange={(e) => setReply(e.target.value)}
+                    placeholder="Reply to the customer… (they'll be emailed)" />
+          <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+            <button className="btn sm" disabled={busy} onClick={() => update({ status: "resolved" })}>
+              <Icon name="check" size={13} /> Mark resolved
+            </button>
+            <button className="btn primary" disabled={busy || !reply.trim()} onClick={sendReply}>
+              {busy ? "Sending…" : "Send reply"}
+            </button>
+          </div>
+        </div>
+      </Card>
+    </>
   );
 }

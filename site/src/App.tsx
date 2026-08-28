@@ -10,6 +10,7 @@ import Security from "./pages/Security";
 import About from "./pages/About";
 import Privacy from "./pages/Privacy";
 import Contact from "./pages/Contact";
+import Support from "./pages/Support";
 
 export default function App() {
   // Pull published CMS content over the bundled defaults, then re-render.
@@ -26,6 +27,8 @@ export default function App() {
         <Route path="/about" element={<About />} />
         <Route path="/privacy" element={<Privacy />} />
         <Route path="/contact" element={<Contact />} />
+        <Route path="/support" element={<Support />} />
+        <Route path="/support/:slug" element={<Support />} />
         <Route path="*" element={<Home />} />
       </Routes>
     </Layout>

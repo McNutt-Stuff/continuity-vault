@@ -1128,7 +1128,7 @@ export default function Search() {
             </div>
             {/* Footer: source (left) aligned with storage locations (right). */}
             <div className="spread" style={{ alignItems: "center", gap: 10, flexWrap: "wrap", paddingLeft: 48 }}>
-              <span className="src-tag" style={{ borderColor: sm?.color ?? "var(--border)", color: sm?.color ?? "var(--faint)" }}>
+              <span className="src-tag">
                 {brand ? <BrandIcon name={brand} size={11} /> : sm ? <Icon name={sm.icon} size={11} /> : null}
                 {r.source_label || r.source_display || r.source_type}
                 {r.source_username && r.source_username !== r.source_label ? ` (${r.source_username})` : ""}

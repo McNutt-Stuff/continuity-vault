@@ -370,10 +370,13 @@ h3 { font-size: 15px; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
 
-/* Source tag shown on each search result */
-.src-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px;
-  font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid;
-  background: var(--hover); white-space: nowrap; }
+/* Source tag shown on each search result — deliberately uniform (no per-source
+   colour; the icon identifies the source) and a solid soft-rectangle so it reads
+   differently from the round, outlined label chips. */
+.src-tag { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px;
+  font-weight: 600; padding: 2px 9px; border-radius: 6px; border: 1px solid var(--border-soft);
+  background: var(--bg-elev-2); color: var(--text-dim); white-space: nowrap; }
+.src-tag svg { color: var(--text-dim); }
 
 /* Collection track badge: recent "Sync" vs deep-history "Backfill" */
 .job-kind { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px;
@@ -547,3 +550,7 @@ h3 { font-size: 15px; }
   background: var(--panel); display: flex; flex-direction: column; }
 .drill-row > td { background: var(--inset); border-top: none; }
 .input.sm { padding: 5px 8px; font-size: 12.5px; }
+
+/* Support ticket thread messages */
+.ticket-msg { border: 1px solid var(--border-soft); border-radius: 12px; padding: 12px 14px; background: var(--panel); }
+.ticket-msg.staff { border-color: rgba(79,124,255,.35); background: rgba(79,124,255,.07); }

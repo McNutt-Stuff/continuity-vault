@@ -106,7 +106,33 @@ def send_heartbeat() -> dict | None:
     # served same-origin and survives control-plane downtime.
     if s.node_role == "public-web":
         _mirror_site_content(s)
+        _mirror_support_content(s)
     return data
+
+
+def _mirror_support_content(s) -> None:
+    """Mirror the published support docs to a local JSON file (support.json) so the
+    Public Web Node serves /support same-origin and offline. Defaults next to the
+    site mirror when a dedicated path isn't configured."""
+    dest = getattr(s, "support_content_path", None) or ""
+    if not dest:
+        site_dest = getattr(s, "site_content_path", None) or ""
+        if not site_dest:
+            return
+        import os
+        dest = os.path.join(os.path.dirname(site_dest), "support.json")
+    url = s.control_plane_url.rstrip("/") + "/api/support/content"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            body = resp.read()
+        import os
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        tmp = dest + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(body)
+        os.replace(tmp, dest)  # atomic swap so the site never reads a partial file
+    except Exception as e:
+        print(f"[heartbeat] could not mirror support content: {e}", file=sys.stderr)
 
 
 def _mirror_site_content(s) -> None:

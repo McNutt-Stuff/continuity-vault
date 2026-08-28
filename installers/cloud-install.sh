@@ -284,7 +284,8 @@ EOF
   local k v
   for kv in "CV_NODE_ROLE=${CV_NODE_ROLE}" "CV_NODE_NAME=${CV_NODE_NAME}" \
             "CV_NODE_SECRET=${CV_NODE_SECRET}" "CV_CONTROL_PLANE_URL=${CV_CONTROL_PLANE_URL}" \
-            "CV_SITE_CONTENT_PATH=${INSTALL_DIR}/site/dist/site.json"; do
+            "CV_SITE_CONTENT_PATH=${INSTALL_DIR}/site/dist/site.json" \
+            "CV_SUPPORT_CONTENT_PATH=${INSTALL_DIR}/site/dist/support.json"; do
     k="${kv%%=*}"; v="${kv#*=}"
     if grep -q "^${k}=" /etc/continuity-vault.env; then
       sed -i "s#^${k}=.*#${k}=${v}#" /etc/continuity-vault.env

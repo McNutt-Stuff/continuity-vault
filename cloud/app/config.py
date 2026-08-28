@@ -125,6 +125,7 @@ class Settings(BaseSettings):
     node_secret: str | None = None         # shared secret for node heartbeat auth
     control_plane_url: str | None = None   # base URL of the control plane (for non-CP nodes)
     site_content_path: str = ""            # public-web: where to mirror CMS content (site.json)
+    support_content_path: str = ""         # public-web: where to mirror support docs (support.json)
     # Federated data planes: a customer-tenant node keeps its OWN local database
     # + search index for the tenants assigned to it, replicates their config from
     # the control plane (which it cannot reach at the DB level), runs sync

@@ -20,6 +20,7 @@ export function Layout({ children }: { children: ReactNode }) {
                 {n.label}
               </NavLink>
             ))}
+            <NavLink to="/support" className={({ isActive }) => (isActive ? "active" : "")}>Support</NavLink>
           </nav>
           <div className="nav-cta">
             <a className="btn ghost" href={site.appUrl}>Sign in</a>
@@ -29,6 +30,7 @@ export function Layout({ children }: { children: ReactNode }) {
         </div>
         <div className={`mobile-menu ${open ? "open" : ""}`}>
           {site.nav.map((n) => <Link key={n.to} to={n.to}>{n.label}</Link>)}
+          <Link to="/support">Support</Link>
           <Link to="/pricing">Get started</Link>
           <a href={site.appUrl}>Sign in</a>
         </div>
@@ -56,6 +58,7 @@ export function Layout({ children }: { children: ReactNode }) {
               <h4>Company</h4>
               <Link to="/about">About</Link>
               <Link to="/contact">Contact</Link>
+              <Link to="/support">Support</Link>
               <a href={site.appUrl}>Sign in</a>
             </div>
             <div>

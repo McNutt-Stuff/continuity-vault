@@ -723,6 +723,68 @@ class SiteContent(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+class SupportDoc(Base):
+    """A single wiki/documentation page for the public support site. Managed via
+    the Control Plane admin CMS and mirrored to the Public Web Node (like
+    SiteContent). Pages are organized into sections and ordered for the nav."""
+
+    __tablename__ = "support_docs"
+    id = Column(String, primary_key=True, default=_uuid)
+    slug = Column(String, nullable=False, unique=True, index=True)  # url key, e.g. "getting-started"
+    title = Column(String, nullable=False)
+    section = Column(String, default="General")   # nav group heading
+    section_order = Column(Integer, default=100)  # order of the section in the nav
+    nav_order = Column(Integer, default=100)      # order of this page within its section
+    icon = Column(String, default="book")         # frontend Icon name for the nav
+    summary = Column(Text, default="")            # one-line description (search/cards)
+    body = Column(Text, default="")               # Markdown content
+    # Portal routes this doc is the contextual help for (e.g. ["/search","/recover"]),
+    # so the portal Help icon can deep-link to the right page.
+    help_routes = Column(JSON, default=list)
+    published = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class SupportTicket(Base):
+    """A customer support request. Lives on the control plane (auth-protected).
+    Threaded messages are stored in TicketMessage."""
+
+    __tablename__ = "support_tickets"
+    id = Column(String, primary_key=True, default=_uuid)
+    ref = Column(String, unique=True, index=True)  # short human reference, e.g. "ARK-4F2A"
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    subject = Column(String, nullable=False)
+    category = Column(String, default="other")   # billing | technical | feature_request | account | other
+    priority = Column(String, default="normal")  # low | normal | high | urgent
+    status = Column(String, default="open", index=True)  # open | pending | resolved | closed
+    # Denormalized for the admin list without a user join.
+    requester_email = Column(String, default="")
+    requester_name = Column(String, default="")
+    assignee_user_id = Column(String, nullable=True)
+    last_activity_at = Column(DateTime, default=_now, index=True)
+    created_at = Column(DateTime, default=_now)
+
+    messages = relationship("TicketMessage", back_populates="ticket",
+                            cascade="all, delete-orphan", order_by="TicketMessage.created_at")
+
+
+class TicketMessage(Base):
+    """One message in a support ticket thread (customer or staff)."""
+
+    __tablename__ = "ticket_messages"
+    id = Column(String, primary_key=True, default=_uuid)
+    ticket_id = Column(String, ForeignKey("support_tickets.id"), nullable=False, index=True)
+    author_user_id = Column(String, nullable=True)  # NULL = system note
+    author_name = Column(String, default="")
+    is_staff = Column(Boolean, default=False)  # posted by support/admin
+    body = Column(Text, default="")
+    created_at = Column(DateTime, default=_now)
+
+    ticket = relationship("SupportTicket", back_populates="messages")
+
+
 class ConfigObject(Base):
     """A named, encrypted key-value credential/config bundle managed by platform
     admins (OAuth client id/secret, API keys, SES creds…). Linked to platform

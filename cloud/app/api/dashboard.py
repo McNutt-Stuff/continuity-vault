@@ -214,6 +214,7 @@ def overview(scope: str = "me",
     oldest = (db.query(func.min(SearchDocument.modified_at))
               .filter(SearchDocument.tenant_id == tenant.id,
                       SearchDocument.vault_id.in_(vault_ids),
+                      SearchDocument.is_current.is_(True),
                       SearchDocument.modified_at.isnot(None),
                       SearchDocument.doc_type != "event").scalar()) if vault_ids else None
 
