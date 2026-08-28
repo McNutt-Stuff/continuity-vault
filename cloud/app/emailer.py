@@ -18,9 +18,11 @@ import logging
 import smtplib
 import ssl
 import time
+import uuid
 from email.message import EmailMessage
 from typing import Iterable, Optional
 
+from . import comms
 from .config import get_settings
 
 settings = get_settings()
@@ -228,49 +230,64 @@ def _send_smtp(cfg: dict, to: str, subject: str, html: str, text: str) -> None:
         server.send_message(msg)
 
 
-def send_verbose(to: str, subject: str, *, html: str, text: str = "") -> dict:
+def send_verbose(to: str, subject: str, *, html: str, text: str = "",
+                 category: str = "email") -> dict:
     """Send one branded email, returning {channel, error, provider}. ``channel``
     is 'ses'|'smtp'|'log'|'error'; ``error`` holds the provider message on failure
     (surfaced by the admin test so misconfig — sandbox, unverified sender — is
-    diagnosable instead of silently swallowed)."""
+    diagnosable instead of silently swallowed). Every message is recorded in the
+    communications history and carries a 1x1 open-tracking pixel."""
     cfg = _config()
     text = text or "Please view this message in an HTML-capable email client."
     provider = cfg["provider"] if cfg["enabled"] else "log"
+    # Communications history + open tracking: id the message, inject the pixel,
+    # and record the send (status/provider/body) globally.
+    cid = uuid.uuid4().hex
+    error: Optional[str] = None
+    try:
+        html = comms.inject_pixel(html, cid)
+    except Exception:  # noqa: BLE001
+        pass
     if provider in ("ses", "smtp") and not (provider == "smtp" and not settings.smtp_host):
         try:
             if provider == "ses":
                 _send_ses(cfg, to, subject, html, text)
             else:
                 _send_smtp(cfg, to, subject, html, text)
-            return {"channel": provider, "error": None, "provider": provider}
+            channel = provider
         except Exception as exc:  # never raise into request paths
             log.error("email send failed (%s -> %s): %s", provider, to, exc)
-            return {"channel": "error", "error": str(exc), "provider": provider}
-    # Log mode (no live provider): emit the subject plus each body line as its
-    # own short, tagged record so sign-in codes are always readable/greppable in
-    # the service logs (journalctl -u cv-cloud), regardless of line-length limits.
-    log.warning("EMAIL (provider=log) -> %s | %s", to, subject)
-    for line in text.splitlines():
-        line = line.strip()
-        if line:
-            log.warning("EMAIL body> %s", line)
-    return {"channel": "log", "error": None, "provider": "log"}
+            channel, error = "error", str(exc)
+    else:
+        # Log mode (no live provider): emit the subject plus each body line as its
+        # own short, tagged record so sign-in codes are always readable/greppable
+        # in the service logs (journalctl -u cv-cloud), regardless of line length.
+        log.warning("EMAIL (provider=log) -> %s | %s", to, subject)
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                log.warning("EMAIL body> %s", line)
+        channel = "log"
+    comms.record(cid, to_email=to, subject=subject, body_html=html, body_text=text,
+                 category=category, channel=channel, provider=provider, error=error)
+    return {"channel": channel, "error": error, "provider": provider}
 
 
-def send(to: str, subject: str, *, html: str, text: str = "") -> str:
+def send(to: str, subject: str, *, html: str, text: str = "",
+         category: str = "email") -> str:
     """Send one branded email. Returns the delivery channel used ('ses'|'smtp'|'log')."""
-    return send_verbose(to, subject, html=html, text=text)["channel"]
+    return send_verbose(to, subject, html=html, text=text, category=category)["channel"]
 
 
 def send_bulk(recipients: Iterable[str], subject: str, *, html: str,
-              text: str = "") -> dict:
+              text: str = "", category: str = "broadcast") -> dict:
     """Send the same branded email individually to each recipient (no shared To/
     CC, so addresses are never disclosed to each other). Returns a summary."""
     sent = 0
     failed = 0
     channel = "log"
     for addr in recipients:
-        ch = send(addr, subject, html=html, text=text)
+        ch = send(addr, subject, html=html, text=text, category=category)
         if ch in ("ses", "smtp", "log"):
             sent += 1
             if ch != "log":
@@ -285,6 +302,7 @@ def send_bulk(recipients: Iterable[str], subject: str, *, html: str,
 # Back-compat helper for the auth code emails                                 #
 # --------------------------------------------------------------------------- #
 
-def send_email(to: str, subject: str, body: str) -> str:
+def send_email(to: str, subject: str, body: str, *, category: str = "email") -> str:
     """Legacy plain-body entry point — now branded. Used by auth code delivery."""
-    return send(to, subject, html=render(subject, text_to_html(body)), text=body)
+    return send(to, subject, html=render(subject, text_to_html(body)), text=body,
+                category=category)

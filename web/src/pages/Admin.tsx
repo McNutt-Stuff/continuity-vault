@@ -656,6 +656,8 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
         )}
       </Card>
 
+      <CommsHistory userId={id} />
+
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
@@ -947,6 +949,85 @@ function Mini({ label, value }: { label: string; value: ReactNode }) {
       <div style={{ fontSize: 20, fontWeight: 700 }}>{value}</div>
       <div className="faint" style={{ fontSize: 11.5 }}>{label}</div>
     </div>
+  );
+}
+
+const COMM_CAT_LABEL: Record<string, string> = {
+  signin: "Sign-in code", welcome: "Welcome", access: "Account access",
+  broadcast: "Broadcast", support: "Support", email: "Email",
+};
+function commCatLabel(c: string): string {
+  if (c?.startsWith("notification:")) return c.slice(13).replace(/_/g, " ");
+  return COMM_CAT_LABEL[c] || c || "Email";
+}
+
+function CommsHistory({ userId }: { userId: string }) {
+  const [rows, setRows] = useState<any[] | null>(null);
+  const [sel, setSel] = useState<any>(null);
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try { const r = await api.get<{ communications: any[] }>(`/admin/users/${userId}/communications`); if (live) setRows(r.communications || []); }
+      catch { if (live) setRows([]); }
+    })();
+    return () => { live = false; };
+  }, [userId]);
+
+  async function open(id: string) {
+    try { setSel(await api.get<any>(`/admin/communications/${id}`)); } catch { /* ignore */ }
+  }
+  const statusTone = (s: string) => (s === "failed" ? "danger" : s === "logged" ? "warn" : "ok");
+
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <h3 style={{ margin: 0 }}>Communications history</h3>
+        <span className="faint" style={{ fontSize: 11.5 }}>Every email sent to this account, across all nodes.</span>
+      </div>
+      {rows === null ? <div className="muted">Loading…</div>
+        : rows.length === 0 ? <div className="muted">No communications sent to this account yet.</div>
+        : (
+        <table className="table">
+          <thead><tr><th>Sent</th><th>Type</th><th>Subject</th><th>Delivery</th><th>Opened</th></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => void open(r.id)}>
+                <td className="faint" style={{ fontSize: 12, whiteSpace: "nowrap" }} title={r.created_at ? fmtAbsolute(r.created_at) : ""}>{r.created_at ? timeAgo(r.created_at) : "—"}</td>
+                <td style={{ fontSize: 12.5 }}>{commCatLabel(r.category)}</td>
+                <td style={{ fontSize: 12.5, fontWeight: 600 }}>{r.subject || <span className="faint">(no subject)</span>}</td>
+                <td>
+                  <Pill tone={statusTone(r.status)} dot>{r.status === "logged" ? "log only" : r.status}</Pill>
+                  {r.channel && r.channel !== "log" && r.channel !== "error" && <span className="faint" style={{ fontSize: 11, marginLeft: 6 }}>{r.channel}</span>}
+                </td>
+                <td>{r.opened ? <Pill tone="ok" dot>opened{r.open_count > 1 ? ` ·${r.open_count}` : ""}</Pill> : <span className="faint" style={{ fontSize: 12 }}>—</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {sel && (
+        <div className="modal-backdrop" onClick={() => setSel(null)}>
+          <div className="modal-panel" style={{ width: "min(720px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="spread" style={{ marginBottom: 10 }}>
+              <h3 style={{ margin: 0, fontSize: 16 }}>{sel.subject || "(no subject)"}</h3>
+              <button className="btn ghost sm" onClick={() => setSel(null)}>Close</button>
+            </div>
+            <div className="grid grid-3" style={{ gap: 10, marginBottom: 12 }}>
+              <Mini label="To" value={<span style={{ fontSize: 13 }}>{sel.to_email || "—"}</span>} />
+              <Mini label="Type" value={<span style={{ fontSize: 13 }}>{commCatLabel(sel.category)}</span>} />
+              <Mini label="Sent" value={<span style={{ fontSize: 13 }}>{sel.created_at ? fmtAbsolute(sel.created_at) : "—"}</span>} />
+              <Mini label="Delivery" value={<span style={{ fontSize: 13 }}>{sel.status}{sel.provider ? ` · ${sel.provider}` : ""}</span>} />
+              <Mini label="From node" value={<span style={{ fontSize: 13 }}>{sel.node_name || "—"}</span>} />
+              <Mini label="Opened" value={<span style={{ fontSize: 13 }}>{sel.opened ? `${sel.open_count}× · ${sel.opened_at ? fmtAbsolute(sel.opened_at) : ""}` : "Not yet"}</span>} />
+            </div>
+            {sel.error && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12.5, marginBottom: 10 }}>Delivery error: {sel.error}</div>}
+            <div className="faint" style={{ fontSize: 12, marginBottom: 4 }}>Message body</div>
+            <iframe title="communication body" sandbox="" srcDoc={sel.body_html || `<pre>${sel.body_text || ""}</pre>`}
+                    style={{ width: "100%", height: 380, border: "1px solid var(--border)", borderRadius: 8, background: "#fff" }} />
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

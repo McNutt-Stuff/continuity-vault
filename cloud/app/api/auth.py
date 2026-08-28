@@ -133,7 +133,8 @@ def signup(body: SignupRequest, db: Session = Depends(get_db)):
 
     code = authcodes.issue_code(email, "verify")
     delivery = send_email(email, "Verify your Arkive account",
-                          f"Your Arkive verification code is: {code}\nIt expires shortly.")
+                          f"Your Arkive verification code is: {code}\nIt expires shortly.",
+                          category="signin")
     audit.record(db, actor=email, action="auth.signup", tenant_id=tenant.id)
     resp = {"sent": True, "delivery": delivery}
     if settings.environment == "development":
@@ -163,7 +164,8 @@ def email_request(body: EmailCodeRequest, db: Session = Depends(get_db)):
             return {"sent": True, "throttled": True}
         resp["delivery"] = send_email(
             email, "Your Arkive sign-in code",
-            f"Your Arkive sign-in code is: {code}\nIt expires shortly.")
+            f"Your Arkive sign-in code is: {code}\nIt expires shortly.",
+            category="signin")
         if settings.environment == "development":
             resp["dev_code"] = code
     return resp

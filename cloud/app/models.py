@@ -702,6 +702,36 @@ class NotificationLog(Base):
 
 
 
+class Communication(Base):
+    """Every outbound email to a user/address, captured globally at the email
+    service (emailer.send) so the admin sees a full per-account communications
+    history: subject, rendered body, delivery status/provider, which node sent it,
+    and whether the recipient opened it (1x1 tracking pixel). On a federated node
+    the row is written locally and pushed to the control plane by replication; the
+    open pixel always points at the control plane, which owns the open fields."""
+
+    __tablename__ = "communications"
+    id = Column(String, primary_key=True, default=_uuid)  # also the open-tracking token
+    user_id = Column(String, index=True, nullable=True)
+    tenant_id = Column(String, index=True, nullable=True)
+    to_email = Column(String, index=True, default="")
+    # signin | notification:<type> | broadcast | welcome | access | email
+    category = Column(String, index=True, default="email")
+    subject = Column(String, default="")
+    body_html = Column(Text, default="")
+    body_text = Column(Text, default="")
+    channel = Column(String, default="")      # ses | smtp | log | error
+    status = Column(String, index=True, default="sent")  # sent | failed | logged
+    provider = Column(String, default="")
+    error = Column(Text, default="")
+    node_name = Column(String, default="")    # which node sent it
+    opened_at = Column(DateTime, nullable=True)
+    open_count = Column(Integer, default=0)
+    last_opened_ip = Column(String, default="")
+    created_at = Column(DateTime, default=_now, index=True)
+
+
+
 class NodeMetric(Base):
     """Time-series health sample for a node (~1/min), retained 90 days on the
     control plane so the admin can render CPU/memory/disk/network trend lines."""

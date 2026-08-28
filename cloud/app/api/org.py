@@ -85,7 +85,7 @@ def _send_invite(db: Session, u: User, org_name: str) -> dict:
     channel = emailer.send(u.email, subject,
                            html=emailer.render(subject, emailer.text_to_html(body),
                                                cta={"label": "Sign in", "url": settings.rp_origin}),
-                           text=body)
+                           text=body, category="access")
     out = {"sent": channel in ("ses", "smtp", "log"), "channel": channel}
     if settings.environment == "development":
         out["dev_code"] = code

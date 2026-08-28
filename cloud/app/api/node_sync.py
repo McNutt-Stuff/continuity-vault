@@ -32,6 +32,7 @@ from ..models import (
     Appliance,
     ApplianceStorage,
     Collection,
+    Communication,
     ConfigObject,
     ConnectorAccount,
     CustomerStorage,
@@ -217,6 +218,7 @@ class PushPayload(BaseModel):
     network_apps: list[dict] = []
     network_usage: list[dict] = []
     integration_runs: list[dict] = []
+    communications: list[dict] = []
 
 
 _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
@@ -249,7 +251,7 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     _require_fleet(authorization)
     counts = {"receipts": 0, "documents": 0, "connector_accounts": 0,
               "jobs": 0, "agents": 0, "appliances": 0, "insights": 0,
-              "integrations": 0, "network": 0}
+              "integrations": 0, "network": 0, "communications": 0}
     # A node can hold data for a tenant/user that was removed on the control
     # plane; inserting it would violate a FK and abort the whole push. Skip any
     # row whose tenant or owner isn't present here so one orphan can't block sync.
@@ -337,6 +339,24 @@ def push(body: PushPayload, authorization: str = Header(default=""),
             db.add(UserInsights(**kw))
         counts["insights"] += 1
     _ingest_integration_push(db, body, counts, valid_tenants, valid_users)
+    # Communications history from the node's email service. The control plane owns
+    # the open fields (the tracking pixel always hits the CP), so never overwrite
+    # them from a node push — which also preserves a stub created by an early open.
+    for cm in body.communications:
+        if not _known(cm):
+            continue
+        kw = _deser(Communication, cm)
+        existing = db.get(Communication, kw.get("id"))
+        if existing is not None:
+            for k, v in kw.items():
+                if k in ("id", "opened_at", "open_count", "last_opened_ip"):
+                    continue
+                setattr(existing, k, v)
+        else:
+            for f in ("opened_at", "open_count", "last_opened_ip"):
+                kw.pop(f, None)
+            db.add(Communication(**kw))
+        counts["communications"] += 1
     db.commit()
     return {"ok": True, **counts}
 

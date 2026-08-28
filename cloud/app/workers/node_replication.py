@@ -29,6 +29,7 @@ from ..models import (
     Appliance,
     ApplianceStorage,
     Collection,
+    Communication,
     ConfigObject,
     ConnectorAccount,
     CustomerStorage,
@@ -341,6 +342,15 @@ def _push(s) -> int:
             integ_since = None
     integ_high = integ_since
     integ_instances, net_clients, net_apps, net_usage, integ_runs = [], [], [], [], []
+    communications = []
+    comm_cursor = _read_state().get("communications_cursor")
+    comm_since = None
+    if comm_cursor:
+        try:
+            comm_since = datetime.fromisoformat(comm_cursor)
+        except ValueError:
+            comm_since = None
+    comm_high = comm_since
     with SessionLocal() as db:
         rq = db.query(SnapshotReceipt)
         if since is not None:
@@ -396,8 +406,18 @@ def _push(s) -> int:
             rq2 = rq2.filter(IntegrationRun.created_at > integ_since)
         for row in rq2.order_by(IntegrationRun.created_at.asc()).limit(1000).all():
             integ_runs.append(_row(row))
+        # Outbound-email history the node's email service recorded, so the admin's
+        # per-user communications log on the control plane is complete.
+        cq = db.query(Communication)
+        if comm_since is not None:
+            cq = cq.filter(Communication.created_at > comm_since)
+        for row in cq.order_by(Communication.created_at.asc()).limit(2000).all():
+            communications.append(_row(row))
+            if row.created_at and (comm_high is None or row.created_at > comm_high):
+                comm_high = row.created_at
     if not (receipts or documents or accounts or jobs or agents or appliances or insights
-            or integ_instances or net_clients or net_apps or net_usage or integ_runs):
+            or integ_instances or net_clients or net_apps or net_usage or integ_runs
+            or communications):
         return 0
     res = _post("/nodes/sync/push", {
         "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
@@ -405,6 +425,7 @@ def _push(s) -> int:
         "jobs": jobs, "agents": agents, "appliances": appliances, "insights": insights,
         "integration_instances": integ_instances, "network_clients": net_clients,
         "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
+        "communications": communications,
     })
     if res and res.get("ok"):
         if high is not None:
@@ -414,6 +435,10 @@ def _push(s) -> int:
         if integ_high is not None:
             st = _read_state()
             st["integrations_cursor"] = integ_high.isoformat()
+            _write_state(st)
+        if comm_high is not None:
+            st = _read_state()
+            st["communications_cursor"] = comm_high.isoformat()
             _write_state(st)
         logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d "
                     "appliances=%d insights=%d integrations=%d network=%d",

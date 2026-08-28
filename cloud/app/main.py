@@ -15,6 +15,7 @@ from .api import (
     auth,
     billing,
     collections,
+    comms,
     connectors,
     dashboard,
     debug,
@@ -91,6 +92,7 @@ app.include_router(support.public_router, prefix=API)
 app.include_router(support.tickets_router, prefix=API)
 app.include_router(support.admin_router, prefix=API)
 app.include_router(node_sync.router, prefix=API)
+app.include_router(comms.public_router, prefix=API)
 app.include_router(updates.router, prefix=API)
 app.include_router(updates.public_router, prefix=API)
 

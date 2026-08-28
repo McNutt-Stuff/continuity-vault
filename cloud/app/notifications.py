@@ -486,7 +486,8 @@ def _deliver(db, user: User, key: str, built: dict, dedupe_key: str = "") -> boo
                           cta=built.get("cta"), preheader=built.get("preheader", ""),
                           footer_note="You're receiving this because email notifications are on for your "
                                       "Arkive account. Manage them in Settings.")
-    channel = emailer.send(user.email, built["subject"], html=html, text=built.get("text", ""))
+    channel = emailer.send(user.email, built["subject"], html=html, text=built.get("text", ""),
+                           category=f"notification:{key}")
     logger.info("notify %s -> %s via %s (subject=%r)", key, user.email, channel, built["subject"])
     try:
         db.add(NotificationLog(user_id=user.id, tenant_id=user.tenant_id, type=key,

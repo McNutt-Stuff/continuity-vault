@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import distinct, func
+from sqlalchemy import distinct, func, or_
 from sqlalchemy.orm import Session
 
 from cv_crypto.profiles import PROFILE_REGISTRY
@@ -833,6 +833,52 @@ def get_user(uid: str,
     return view
 
 
+def _comm_row(c) -> dict:
+    """Communications-history list row (no body — keeps the list light)."""
+    return {
+        "id": c.id, "category": c.category, "subject": c.subject,
+        "to_email": c.to_email, "channel": c.channel, "status": c.status,
+        "provider": c.provider, "node_name": c.node_name,
+        "opened": c.opened_at is not None, "open_count": int(c.open_count or 0),
+        "opened_at": c.opened_at.isoformat() if c.opened_at else None,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+    }
+
+
+@router.get("/users/{uid}/communications")
+def user_communications(uid: str,
+                        principal: security.Principal = Depends(security.require_platform_admin),
+                        db: Session = Depends(get_db)):
+    """Every email the platform sent this account (any node), newest first."""
+    from ..models import Communication
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "user not found")
+    # Match by linked user id OR by email (covers pre-account / address-only sends).
+    q = db.query(Communication).filter(
+        or_(Communication.user_id == uid,
+            func.lower(Communication.to_email) == (u.email or "").strip().lower()))
+    rows = q.order_by(Communication.created_at.desc()).limit(200).all()
+    return {"communications": [_comm_row(c) for c in rows]}
+
+
+@router.get("/communications/{cid}")
+def communication_detail(cid: str,
+                         principal: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    """Full record for one communication, including the rendered body."""
+    from ..models import Communication
+    c = db.get(Communication, cid)
+    if not c:
+        raise HTTPException(404, "communication not found")
+    out = _comm_row(c)
+    out["body_html"] = c.body_html or ""
+    out["body_text"] = c.body_text or ""
+    out["error"] = c.error or ""
+    out["last_opened_ip"] = c.last_opened_ip or ""
+    return out
+
+
 @router.put("/users/{uid}")
 def update_user(uid: str, body: UserUpdate,
                 principal: security.Principal = Depends(security.require_platform_admin),
@@ -1002,7 +1048,7 @@ def _send_welcome_email(db: Session, u: User, t: Tenant) -> dict:
         html=emailer.render(subject, emailer.text_to_html(body),
                             preheader="Your Arkive account is ready — here's how to sign in.",
                             cta={"label": "Sign in to Arkive", "url": origin}),
-        text=body)
+        text=body, category="welcome")
     out = {"sent": channel in ("ses", "smtp", "log"), "channel": channel}
     if code and get_settings().environment == "development":
         out["dev_code"] = code
@@ -1020,7 +1066,7 @@ def _send_access_email(db: Session, u: User, subject: str, intro: str) -> dict:
     channel = emailer.send(u.email, subject,
                            html=emailer.render(subject, emailer.text_to_html(body),
                                                cta={"label": "Sign in", "url": get_settings().rp_origin}),
-                           text=body)
+                           text=body, category="access")
     out = {"sent": channel in ("ses", "smtp", "log"), "channel": channel}
     if get_settings().environment == "development":
         out["dev_code"] = code

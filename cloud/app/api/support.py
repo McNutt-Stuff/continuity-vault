@@ -423,7 +423,7 @@ def _email_new_ticket(db: Session, t: SupportTicket, first_body: str) -> None:
         cta={"label": "View your ticket", "url": url},
         preheader=f"Ticket {t.ref} received")
     emailer.send(t.requester_email, f"[{t.ref}] {t.subject}", html=body,
-                 text=f"We've opened ticket {t.ref}. View it at {url}")
+                 text=f"We've opened ticket {t.ref}. View it at {url}", category="support")
     # Notify the support inbox.
     staff = emailer.render(
         f"New support ticket — {t.ref}",
@@ -448,7 +448,7 @@ def _email_staff_reply(t: SupportTicket, msg_body: str) -> None:
         cta={"label": "View & reply", "url": url},
         preheader="You have a new reply from Arkive support")
     emailer.send(t.requester_email, f"[{t.ref}] {t.subject}", html=body,
-                 text=f"New reply on {t.ref}: {url}")
+                 text=f"New reply on {t.ref}: {url}", category="support")
 
 
 def _email_status(t: SupportTicket) -> None:
@@ -461,7 +461,7 @@ def _email_status(t: SupportTicket) -> None:
         cta={"label": "View your ticket", "url": url},
         preheader=f"Ticket {t.ref} is {t.status}")
     emailer.send(t.requester_email, f"[{t.ref}] {t.subject} — {t.status}", html=body,
-                 text=f"Ticket {t.ref} is now {t.status}: {url}")
+                 text=f"Ticket {t.ref} is now {t.status}: {url}", category="support")
 
 
 # --------------------------------------------------------------------------- #
