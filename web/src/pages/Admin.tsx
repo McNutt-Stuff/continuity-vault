@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api, getToken } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo, fmtAbsolute } from "../components/ui";
@@ -457,6 +457,45 @@ function Users() {
 // and the management actions (Edit/Reset/Delete/Insights). Extensible: new
 // sections are just more <Card>s. `backLabel` powers the standard "← back" link
 // (Users list, or the parent tenant when drilled in from a tenant).
+function AdminUserNotifs({ user, onSaved }: { user: any; onSaved: () => void }) {
+  const types = user.notification_types || [];
+  const [prefs, setPrefs] = useState<Record<string, boolean>>(user.notification_prefs || {});
+  if (!types.length) return null;
+  async function toggle(key: string) {
+    const prev = prefs;
+    const next = { ...prefs, [key]: !prefs[key] };
+    setPrefs(next);
+    try { await api.put(`/admin/users/${user.id}`, { notification_prefs: { [key]: next[key] } }); onSaved(); }
+    catch (e: any) { void notify({ message: e.message || "Could not save", tone: "danger" }); setPrefs(prev); }
+  }
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <h3 style={{ margin: "0 0 4px" }}>Email notifications</h3>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 4 }}>Control which emails this account receives.</div>
+      <div className="stack" style={{ gap: 0 }}>
+        {types.map((t: any) => (
+          <div key={t.key} className="spread"
+               style={{ padding: "11px 0", borderTop: "1px solid var(--border-soft)", alignItems: "center", gap: 12 }}>
+            <div className="row" style={{ gap: 10, alignItems: "center", minWidth: 0 }}>
+              <Icon name={(t.icon || "mail") as IconName} size={15} />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 13.5 }}>{t.label}</div>
+                <div className="faint" style={{ fontSize: 12 }}>{t.desc}</div>
+              </div>
+            </div>
+            <button onClick={() => toggle(t.key)} aria-pressed={!!prefs[t.key]} title={prefs[t.key] ? "On" : "Off"}
+              style={{ width: 40, height: 22, borderRadius: 999, border: "none", cursor: "pointer", flexShrink: 0,
+                       background: prefs[t.key] ? "var(--brand)" : "var(--border)", position: "relative", transition: "background .15s" }}>
+              <span style={{ position: "absolute", top: 3, left: prefs[t.key] ? 21 : 3, width: 16, height: 16,
+                             borderRadius: "50%", background: "#fff", transition: "left .15s" }} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void; backLabel: string }) {
   const [u, setU] = useState<any>(null);
   const [err, setErr] = useState("");
@@ -545,6 +584,8 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
           <Mini label="Passkeys" value={c.passkeys ?? 0} />
         </div>
       </Card>
+
+      <AdminUserNotifs user={u} onSaved={load} />
 
       <Card style={{ marginBottom: 16 }}>
         <h3 style={{ margin: "0 0 12px" }}>Usage & storage</h3>
@@ -1119,7 +1160,7 @@ function Nodes() {
       })}
       {nodes.length === 0 && <Card><div className="muted">No nodes registered.</div></Card>}
       <Workers />
-      <NodeBlueprints flash={flash} />
+      <ConfigProfiles flash={flash} />
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
@@ -1649,55 +1690,249 @@ function Workers() {
   );
 }
 
-function NodeBlueprints({ flash }: { flash: (m: string) => void }) {
-  const [rows, setRows] = useState<any[]>([]);
+interface CatalogItem { key: string; label: string; type: string; group: string; example: string; unit?: string; description: string; }
+interface NodeRef { id: string; name: string; role: string; }
+interface Profile {
+  id: string; name: string; description: string; data: Record<string, any>;
+  node_ids: string[]; enabled: boolean; nodes: { id: string; name: string }[];
+  key_count: number; updated_at?: string;
+}
+
+function ConfigProfiles({ flash }: { flash: (m: string) => void }) {
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [catalog, setCatalog] = useState<CatalogItem[]>([]);
+  const [nodes, setNodes] = useState<NodeRef[]>([]);
+  const [editing, setEditing] = useState<Profile | "new" | null>(null);
+
   async function load() {
-    try { setRows(await api.get<any[]>("/admin/node-blueprints")); } catch { /* ignore */ }
+    try {
+      const r = await api.get<{ profiles: Profile[]; catalog: CatalogItem[]; nodes: NodeRef[] }>("/admin/config-profiles");
+      setProfiles(r.profiles || []); setCatalog(r.catalog || []); setNodes(r.nodes || []);
+    } catch { /* ignore */ }
   }
   useEffect(() => { void load(); }, []);
 
-  async function edit(bp: any) {
-    const r = await formDialog({
-      title: `Blueprint · ${bp.role}`, confirmLabel: "Save",
-      message: "Pushed to every node with this role on heartbeat. Config and settings are JSON.",
-      fields: [
-        { name: "target_version", label: "Target version", defaultValue: bp.target_version, placeholder: "e.g. 0.4.1 or main" },
-        { name: "config", label: "Config (JSON)", type: "textarea", defaultValue: JSON.stringify(bp.config || {}, null, 2) },
-        { name: "settings", label: "Settings (JSON)", type: "textarea", defaultValue: JSON.stringify(bp.settings || {}, null, 2) },
-      ],
-    });
-    if (!r) return;
-    let config: any, settings: any;
-    try { config = r.config ? JSON.parse(r.config) : {}; settings = r.settings ? JSON.parse(r.settings) : {}; }
-    catch { void notify({ title: "Invalid JSON", message: "Config and settings must be valid JSON.", tone: "warn" }); return; }
-    try {
-      await api.put(`/admin/node-blueprints/${bp.role}`, { target_version: r.target_version, config, settings });
-      flash("Blueprint saved"); await load();
-    } catch { flash("Failed"); }
+  async function remove(p: Profile) {
+    if (!(await confirmDialog({ title: `Delete “${p.name}”?`, message: "Nodes bound to it revert to their default settings on the next heartbeat.", tone: "danger", confirmLabel: "Delete" }))) return;
+    try { await api.del(`/admin/config-profiles/${p.id}`); flash("Profile deleted"); await load(); }
+    catch (e: any) { void notify({ message: e.message, tone: "danger" }); }
+  }
+
+  if (editing) {
+    return (
+      <ProfileEditor profile={editing === "new" ? null : editing} catalog={catalog} nodes={nodes}
+                     onDone={() => { setEditing(null); void load(); }} onCancel={() => setEditing(null)} />
+    );
   }
 
   return (
     <>
       <div className="spread" style={{ margin: "22px 0 12px" }}>
-        <h3 style={{ margin: 0 }}>Role blueprints</h3>
-        <span className="faint" style={{ fontSize: 12 }}>Central config &amp; update target per node role</span>
+        <div>
+          <h3 style={{ margin: 0 }}>Configuration profiles</h3>
+          <span className="faint" style={{ fontSize: 12 }}>Reusable settings bundles you bind to specific nodes</span>
+        </div>
+        <button className="btn sm primary" onClick={() => setEditing("new")}><Icon name="edit" size={14} /> New profile</button>
       </div>
-      <div className="grid grid-3">
-        {rows.map((bp) => (
-          <Card key={bp.role}>
-            <div className="spread" style={{ marginBottom: 8 }}>
-              <div style={{ fontWeight: 700 }}>{bp.role}</div>
-              <Pill tone={bp.target_version ? "info" : "warn"}>{bp.target_version ? `v${bp.target_version}` : "no target"}</Pill>
-            </div>
-            <div className="faint" style={{ fontSize: 11.5, marginBottom: 10 }}>
-              {Object.keys(bp.config || {}).length} config · {Object.keys(bp.settings || {}).length} settings
-              {bp.updated_at ? ` · updated ${timeAgo(bp.updated_at)}` : ""}
-            </div>
-            <button className="btn ghost sm" onClick={() => edit(bp)}>Edit blueprint</button>
-          </Card>
-        ))}
-      </div>
+      {profiles.length === 0 ? (
+        <Card><div className="muted" style={{ padding: "8px 0" }}>No configuration profiles yet — create one to apply settings across nodes.</div></Card>
+      ) : (
+        <div className="grid grid-3">
+          {profiles.map((p) => (
+            <Card key={p.id}>
+              <div className="spread" style={{ marginBottom: 6 }}>
+                <div style={{ fontWeight: 700 }}>{p.name}</div>
+                {!p.enabled && <Pill tone="warn">disabled</Pill>}
+              </div>
+              {p.description && <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>{p.description}</div>}
+              <div className="faint" style={{ fontSize: 11.5, marginBottom: 8 }}>
+                {p.key_count} setting{p.key_count === 1 ? "" : "s"} · {p.nodes.length} node{p.nodes.length === 1 ? "" : "s"}
+                {p.updated_at ? ` · ${timeAgo(p.updated_at)}` : ""}
+              </div>
+              {p.nodes.length > 0 && (
+                <div className="row" style={{ gap: 4, flexWrap: "wrap", marginBottom: 10 }}>
+                  {p.nodes.slice(0, 4).map((n) => <Pill key={n.id} tone="info">{n.name}</Pill>)}
+                  {p.nodes.length > 4 && <span className="faint" style={{ fontSize: 11 }}>+{p.nodes.length - 4}</span>}
+                </div>
+              )}
+              <div className="row" style={{ gap: 6 }}>
+                <button className="btn ghost sm" onClick={() => setEditing(p)}><Icon name="edit" size={13} /> Edit</button>
+                <button className="btn ghost sm" onClick={() => remove(p)} title="Delete"><Icon name="trash" size={13} /></button>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
     </>
+  );
+}
+
+function ProfileEditor({ profile, catalog, nodes, onDone, onCancel }: {
+  profile: Profile | null; catalog: CatalogItem[]; nodes: NodeRef[];
+  onDone: () => void; onCancel: () => void;
+}) {
+  const catIndex = useMemo(() => Object.fromEntries(catalog.map((c) => [c.key, c])), [catalog]);
+  const groups = useMemo(() => {
+    const g: Record<string, CatalogItem[]> = {};
+    catalog.forEach((c) => { (g[c.group] ||= []).push(c); });
+    return g;
+  }, [catalog]);
+
+  const toStr = (v: any) => Array.isArray(v) ? v.join(", ") : (v === null || v === undefined ? "" : String(v));
+
+  const [name, setName] = useState(profile?.name || "");
+  const [desc, setDesc] = useState(profile?.description || "");
+  const [enabled, setEnabled] = useState(profile?.enabled ?? true);
+  const [nodeIds, setNodeIds] = useState<string[]>(profile?.node_ids || []);
+  const [mode, setMode] = useState<"table" | "json">("table");
+  const [rows, setRows] = useState<{ key: string; value: string }[]>(
+    Object.entries(profile?.data || {}).map(([k, v]) => ({ key: k, value: toStr(v) })));
+  const [jsonText, setJsonText] = useState(JSON.stringify(profile?.data || {}, null, 2));
+  const [busy, setBusy] = useState(false);
+
+  function coerce(key: string, value: string): any {
+    const t = catIndex[key]?.type;
+    if (t === "int") { const n = parseInt(value, 10); return isNaN(n) ? value : n; }
+    if (t === "float") { const n = parseFloat(value); return isNaN(n) ? value : n; }
+    if (t === "bool") return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+    if (t === "csv") return value.split(",").map((s) => s.trim()).filter(Boolean);
+    return value;
+  }
+  function rowsToData(): Record<string, any> {
+    const d: Record<string, any> = {};
+    rows.forEach((r) => { const k = r.key.trim(); if (k) d[k] = coerce(k, r.value); });
+    return d;
+  }
+  function switchMode(m: "table" | "json") {
+    if (m === mode) return;
+    if (m === "json") { setJsonText(JSON.stringify(rowsToData(), null, 2)); setMode("json"); return; }
+    try {
+      const d = JSON.parse(jsonText || "{}");
+      setRows(Object.entries(d).map(([k, v]) => ({ key: k, value: toStr(v) })));
+      setMode("table");
+    } catch { void notify({ message: "Fix the JSON before switching to the table view.", tone: "warn" }); }
+  }
+
+  const addRow = (key = "") => setRows((r) => [...r, { key, value: key ? (catIndex[key]?.example || "") : "" }]);
+  const setRow = (i: number, patch: Partial<{ key: string; value: string }>) =>
+    setRows((r) => r.map((row, idx) => (idx === i ? { ...row, ...patch } : row)));
+  const delRow = (i: number) => setRows((r) => r.filter((_, idx) => idx !== i));
+
+  async function save() {
+    if (!name.trim()) { void notify({ message: "Name is required", tone: "danger" }); return; }
+    let data: any;
+    if (mode === "json") { try { data = JSON.parse(jsonText || "{}"); } catch { void notify({ message: "Invalid JSON", tone: "danger" }); return; } }
+    else data = rowsToData();
+    setBusy(true);
+    try {
+      const payload = { name, description: desc, data, node_ids: nodeIds, enabled };
+      if (profile) await api.put(`/admin/config-profiles/${profile.id}`, payload);
+      else await api.post("/admin/config-profiles", payload);
+      onDone();
+    } catch (e: any) { void notify({ message: e.message, tone: "danger" }); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <Card>
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <h3 style={{ margin: 0 }}>{profile ? "Edit profile" : "New configuration profile"}</h3>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn sm ghost" onClick={onCancel}>Cancel</button>
+          <button className="btn sm primary" disabled={busy} onClick={save}>{busy ? "Saving…" : "Save"}</button>
+        </div>
+      </div>
+      <div className="stack" style={{ gap: 12 }}>
+        <div className="row" style={{ gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <label className="stack flex1" style={{ gap: 5, minWidth: 220 }}>
+            <span className="faint" style={{ fontSize: 12 }}>Name</span>
+            <input className="input sm" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. High-frequency backups" />
+          </label>
+          <label className="row" style={{ gap: 8, alignItems: "center", height: 30 }}>
+            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+            <span style={{ fontSize: 13 }}>Enabled</span>
+          </label>
+        </div>
+        <label className="stack" style={{ gap: 5 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Description</span>
+          <input className="input sm" value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="What this profile is for" />
+        </label>
+
+        <div className="stack" style={{ gap: 6 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Applies to nodes</span>
+          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+            {nodes.map((n) => {
+              const on = nodeIds.includes(n.id);
+              return (
+                <button key={n.id} className={`btn sm ${on ? "primary" : "ghost"}`}
+                        onClick={() => setNodeIds((ids) => on ? ids.filter((x) => x !== n.id) : [...ids, n.id])}>
+                  {on && <Icon name="check" size={12} />} {n.name}
+                  <span className="faint" style={{ fontSize: 10 }}> · {n.role}</span>
+                </button>
+              );
+            })}
+            {nodes.length === 0 && <span className="faint" style={{ fontSize: 12 }}>No nodes registered yet.</span>}
+          </div>
+        </div>
+
+        <div className="spread" style={{ alignItems: "center" }}>
+          <span className="faint" style={{ fontSize: 12 }}>Settings</span>
+          <div className="row" style={{ gap: 4 }}>
+            <button className={`btn sm ${mode === "table" ? "primary" : "ghost"}`} onClick={() => switchMode("table")}>Table</button>
+            <button className={`btn sm ${mode === "json" ? "primary" : "ghost"}`} onClick={() => switchMode("json")}>JSON</button>
+          </div>
+        </div>
+
+        {mode === "table" ? (
+          <div className="stack" style={{ gap: 8 }}>
+            <datalist id="cfg-catalog-keys">
+              {catalog.map((c) => <option key={c.key} value={c.key}>{c.group} · {c.label}</option>)}
+            </datalist>
+            {rows.map((row, i) => {
+              const spec = catIndex[row.key.trim()];
+              return (
+                <div key={i} className="stack" style={{ gap: 3 }}>
+                  <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                    <input className="input sm" list="cfg-catalog-keys" style={{ flex: "0 0 260px" }}
+                           value={row.key} placeholder="setting key"
+                           onChange={(e) => {
+                             const k = e.target.value;
+                             const ex = catIndex[k.trim()];
+                             setRow(i, { key: k, value: (ex && !row.value) ? (ex.example || "") : row.value });
+                           }} />
+                    <input className="input sm flex1" value={row.value}
+                           placeholder={spec ? `e.g. ${spec.example}` : "value"}
+                           onChange={(e) => setRow(i, { value: e.target.value })} />
+                    <button className="btn ghost sm" onClick={() => delRow(i)} title="Remove"><Icon name="trash" size={13} /></button>
+                  </div>
+                  {spec && (
+                    <div className="faint" style={{ fontSize: 11, paddingLeft: 2 }}>
+                      {spec.description} <span style={{ opacity: .7 }}>({spec.type}{spec.unit ? `, ${spec.unit}` : ""})</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <button className="btn ghost sm" onClick={() => addRow()}><Icon name="edit" size={13} /> Add setting</button>
+              <select className="input sm" style={{ maxWidth: 280 }} value=""
+                      onChange={(e) => { if (e.target.value) { addRow(e.target.value); e.currentTarget.value = ""; } }}>
+                <option value="">Add from catalog…</option>
+                {Object.entries(groups).map(([g, items]) => (
+                  <optgroup key={g} label={g}>
+                    {items.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+          </div>
+        ) : (
+          <textarea className="input" spellCheck={false}
+                    style={{ fontFamily: "ui-monospace, monospace", fontSize: 13, minHeight: 220 }}
+                    value={jsonText} onChange={(e) => setJsonText(e.target.value)} />
+        )}
+      </div>
+    </Card>
   );
 }
 
@@ -1941,6 +2176,120 @@ function Audit() {
 }
 
 // ---- Debug / diagnostics (key-gated live troubleshooting) ------------------
+function NotifTest({ dbg, flash }: {
+  dbg: (method: string, path: string, body?: unknown) => Promise<any>;
+  flash: (m: string) => void;
+}) {
+  const [meta, setMeta] = useState<any>(null);
+  const [q, setQ] = useState("");
+  const [users, setUsers] = useState<any[]>([]);
+  const [user, setUser] = useState<any>(null);
+  const [type, setType] = useState("daily_summary");
+  const [busy, setBusy] = useState(false);
+  const [repeat, setRepeat] = useState(24);
+  const [footprint, setFootprint] = useState(true);
+
+  async function load() {
+    try {
+      const m = await dbg("GET", "/debug/notifications");
+      setMeta(m);
+      setType(m.types?.[0]?.key || "daily_summary");
+      setRepeat(m.settings?.source_repeat_hours ?? 24);
+      setFootprint((m.settings?.enabled_insights || []).includes("footprint"));
+    } catch { /* debug key not set yet */ }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function search(v: string) {
+    setQ(v);
+    if (v.trim().length < 2) { setUsers([]); return; }
+    try { const r = await dbg("GET", `/debug/notifications/users?q=${encodeURIComponent(v.trim())}`); setUsers(r.users || []); }
+    catch { setUsers([]); }
+  }
+  async function send() {
+    if (!user) { void notify({ message: "Pick a recipient first.", tone: "danger" }); return; }
+    setBusy(true);
+    try {
+      const r = await dbg("POST", "/debug/notifications/test", { type, user_id: user.id });
+      if (r.ok) flash(`Sent “${r.subject}” to ${r.sent_to}`);
+      else void notify({ message: r.message || "Nothing to send", tone: "warn" });
+      await load();
+    } catch (e: any) { void notify({ message: e.message, tone: "danger" }); }
+    finally { setBusy(false); }
+  }
+  async function saveSettings() {
+    try {
+      await dbg("PUT", "/debug/notifications/settings",
+        { source_repeat_hours: Number(repeat) || 24, enabled_insights: footprint ? ["footprint"] : [] });
+      flash("Notification settings saved");
+      await load();
+    } catch (e: any) { void notify({ message: e.message, tone: "danger" }); }
+  }
+
+  if (!meta) return null;
+  return (
+    <Card style={{ marginBottom: 14 }}>
+      <div className="spread" style={{ marginBottom: 10 }}>
+        <h3 style={{ margin: 0, fontSize: 15 }}>Notification testing</h3>
+        <span className="faint" style={{ fontSize: 11.5 }}>Send any notification to a chosen account (bypasses their preference).</span>
+      </div>
+      <div className="row" style={{ gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <label className="stack" style={{ gap: 5, minWidth: 200 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Type</span>
+          <select className="input sm" value={type} onChange={(e) => setType(e.target.value)}>
+            {meta.types.map((t: any) => <option key={t.key} value={t.key}>{t.label}</option>)}
+          </select>
+        </label>
+        <label className="stack flex1" style={{ gap: 5, minWidth: 220, position: "relative" }}>
+          <span className="faint" style={{ fontSize: 12 }}>Recipient</span>
+          <input className="input sm" placeholder="Search by email…" value={user ? user.email : q}
+                 onChange={(e) => { setUser(null); void search(e.target.value); }} />
+          {!user && users.length > 0 && (
+            <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 5, background: "var(--panel)",
+                          border: "1px solid var(--border)", borderRadius: 8, marginTop: 2, maxHeight: 200, overflow: "auto" }}>
+              {users.map((u) => (
+                <div key={u.id} onClick={() => { setUser(u); setUsers([]); }}
+                     style={{ padding: "7px 10px", cursor: "pointer", fontSize: 13, borderBottom: "1px solid var(--border-soft)" }}>
+                  {u.email} <span className="faint">· {u.name || u.role}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </label>
+        <button className="btn primary sm" disabled={busy || !user} onClick={send}>{busy ? "Sending…" : "Send test"}</button>
+      </div>
+
+      <div className="row" style={{ gap: 12, marginTop: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <label className="stack" style={{ gap: 5, width: 200 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Source-problem repeat (hours)</span>
+          <input className="input sm" type="number" value={repeat} onChange={(e) => setRepeat(Number(e.target.value))} />
+        </label>
+        <label className="row" style={{ gap: 8, alignItems: "center", height: 30 }}>
+          <input type="checkbox" checked={footprint} onChange={(e) => setFootprint(e.target.checked)} />
+          <span style={{ fontSize: 13 }}>Include “footprint” insight in daily summary</span>
+        </label>
+        <button className="btn ghost sm" onClick={saveSettings}>Save settings</button>
+      </div>
+
+      {(meta.recent || []).length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 4 }}>Recent notifications</div>
+          <table className="table"><tbody>
+            {meta.recent.slice(0, 8).map((r: any, i: number) => (
+              <tr key={i}>
+                <td style={{ fontSize: 12 }}>{r.type}</td>
+                <td style={{ fontSize: 12 }}>{r.to}</td>
+                <td className="faint" style={{ fontSize: 11.5 }}>{r.subject}</td>
+                <td style={{ textAlign: "right" }}>{r.ok ? <Pill tone="ok">sent</Pill> : <Pill tone="danger">failed</Pill>}</td>
+              </tr>
+            ))}
+          </tbody></table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function DebugAdmin() {
   const [key, setKey] = useState<string | null>(null);
   const [reveal, setReveal] = useState(false);
@@ -2072,6 +2421,8 @@ function DebugAdmin() {
           ) : <div className="muted" style={{ fontSize: 12.5 }}>Time representative queries to find slow paths.</div>}
         </Card>
       </div>
+
+      <NotifTest dbg={dbg} flash={flash} />
 
       <Card style={{ marginBottom: 14 }}>
         <div className="spread" style={{ marginBottom: 8 }}>

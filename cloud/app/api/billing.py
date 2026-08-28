@@ -437,6 +437,47 @@ class PlanUpdate(BaseModel):
     appliance_plan: list[dict] | None = None
 
 
+_OPTION_LABELS = {"cv-cloud": "Arkive Cloud", "appliance": "Secure Appliance",
+                  "customer-cloud": "Your own cloud storage"}
+
+
+def _money(n, currency: str = "USD") -> str:
+    sym = "$" if currency == "USD" else ""
+    return f"{sym}{float(n or 0):,.2f}"
+
+
+def _notify_plan_change(db, user, view: dict, summary: list[str]) -> None:
+    """Email the acting user a confirmation of their plan/billing changes."""
+    if not summary:
+        return
+    from datetime import datetime, timezone
+    from .. import notifications
+    costs = view.get("costs") or {}
+    cur = view.get("currency", "USD")
+    lines = []
+    plan_name = (view.get("license_plan") or {}).get("name", "Plan")
+    if costs.get("protection_monthly"):
+        lines.append({"label": f"{plan_name} protection", "amount": _money(costs["protection_monthly"], cur) + " / mo"})
+    if costs.get("cloud_storage_monthly"):
+        lines.append({"label": "Arkive Cloud storage", "amount": _money(costs["cloud_storage_monthly"], cur) + " / mo"})
+    if costs.get("appliance_monthly"):
+        lines.append({"label": "Secure appliance lease", "amount": _money(costs["appliance_monthly"], cur) + " / mo"})
+    if costs.get("appliance_setup_one_time"):
+        lines.append({"label": "Appliance setup (one-time)", "amount": _money(costs["appliance_setup_one_time"], cur)})
+    change = {
+        "plan_name": plan_name,
+        "effective": datetime.now(timezone.utc).strftime("%B %-d, %Y"),
+        "summary": summary,
+        "line_items": lines,
+        "total_label": "New monthly total",
+        "total": _money(costs.get("total_monthly", 0), cur) + " / mo",
+    }
+    try:
+        notifications.send_notification(db, user, "plan_change", change=change)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @router.put("/plan")
 def update_plan(body: PlanUpdate,
                 principal: security.Principal = Depends(security.get_principal),
@@ -447,36 +488,57 @@ def update_plan(body: PlanUpdate,
     # Shared-tenant personal accounts each manage their own protection destinations
     # (no org role required); org tenants keep the security-admin-gated tenant-wide plan.
     if (tenant.tenant_type or "dedicated") == "shared":
+        summary: list[str] = []
         if body.options is not None:
             prev = set(user.protection_options or [])
             new = {o for o in body.options if o in valid}
             user.protection_options = list(new)
             _apply_cloud_unsubscribe(user, prev, new)
+            for o in sorted(new - prev):
+                summary.append(f"Enabled {_OPTION_LABELS.get(o, o)}")
+            for o in sorted(prev - new):
+                summary.append(f"Disabled {_OPTION_LABELS.get(o, o)}")
         db.commit()
         audit.record(db, actor=principal.user_id, action="billing.plan_updated",
                      tenant_id=tenant.id, resource=user.id,
                      detail={"options": user.protection_options})
-        return plan_view(db, user, tenant)
+        view = plan_view(db, user, tenant)
+        _notify_plan_change(db, user, view, summary)
+        return view
     if not (security.is_org_admin(principal.role) or principal.is_platform_admin):
         raise HTTPException(403, "security-admin role required")
+    summary = []
     if body.options is not None:
         prev = set(tenant.protection_options or [])
         new = {o for o in body.options if o in valid}
         tenant.protection_options = list(new)
         _apply_cloud_unsubscribe(tenant, prev, new)
+        for o in sorted(new - prev):
+            summary.append(f"Enabled {_OPTION_LABELS.get(o, o)}")
+        for o in sorted(prev - new):
+            summary.append(f"Disabled {_OPTION_LABELS.get(o, o)}")
     if body.licensed_tb is not None:
         # Never allow licensing below the tenant's tier minimum.
         p = get_pricing(db)
         min_tb = float(effective_plan(p, tenant.plan).get("min_tb", 0) or 0)
+        prev_tb = round((tenant.licensed_bytes or 0) / TB, 2)
         tenant.licensed_bytes = int(max(body.licensed_tb, min_tb, 0.0) * TB)
+        new_tb = round((tenant.licensed_bytes or 0) / TB, 2)
+        if new_tb != prev_tb:
+            summary.append(f"Set protected storage to {new_tb:g} TB")
     if body.appliance_plan is not None:
         tenant.appliance_plan = [
             {"capacity_tb": s.get("capacity_tb"), "qty": int(s.get("qty") or 0)}
             for s in body.appliance_plan if int(s.get("qty") or 0) > 0
         ]
+        qty = sum(int(s.get("qty") or 0) for s in tenant.appliance_plan)
+        if qty:
+            summary.append(f"Updated appliance plan ({qty} unit{'s' if qty != 1 else ''})")
     db.commit()
     audit.record(db, actor=principal.user_id, action="billing.plan_updated",
                  tenant_id=tenant.id, resource=tenant.id,
                  detail={"options": tenant.protection_options,
                          "licensed_bytes": tenant.licensed_bytes})
-    return plan_view(db, user, tenant)
+    view = plan_view(db, user, tenant)
+    _notify_plan_change(db, user, view, summary)
+    return view

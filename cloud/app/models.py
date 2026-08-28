@@ -95,6 +95,9 @@ class User(Base):
     last_login_at = Column(DateTime, nullable=True)
     # NULL until the account finishes (or an admin re-triggers) the setup wizard.
     setup_completed_at = Column(DateTime, nullable=True)
+    # Per-type email notification preferences {type_key: bool}. Missing key = the
+    # type's default. Managed by the user (account settings) and admins.
+    notification_prefs = Column(JSON, default=dict)
     created_at = Column(DateTime, default=_now)
 
     tenant = relationship("Tenant", back_populates="users")
@@ -195,6 +198,9 @@ class ConnectorAccount(Base):
     last_object_count = Column(Integer, nullable=True)  # items captured in the last sync
     last_error = Column(Text, nullable=True)            # last sync error message (NULL = healthy)
     last_error_at = Column(DateTime, nullable=True)
+    # Consecutive failed syncs (reset to 0 on success). Drives source-problem
+    # escalation (>5 failures within the schedule) and notifications.
+    fail_count = Column(Integer, default=0)
     # Dual-track deep crawl: independent of the forward/delta sync_cursor, a
     # long-running BACKWARD crawl captures full history in resumable chunks while
     # the scheduled "recent" delta track keeps up with new items concurrently.
@@ -677,6 +683,24 @@ class SystemSetting(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+class NotificationLog(Base):
+    """One row per notification email sent, used to (a) rate-limit recurring
+    notifications (daily summary once/day, source-problem repeat once/day) via a
+    dedupe key, and (b) give the admin an audit of what went out."""
+
+    __tablename__ = "notification_log"
+    id = Column(String, primary_key=True, default=_uuid)
+    user_id = Column(String, index=True, nullable=True)
+    tenant_id = Column(String, index=True, nullable=True)
+    type = Column(String, index=True, nullable=False)   # notification type key
+    dedupe_key = Column(String, index=True, default="")  # e.g. "daily:2026-08-28"
+    channel = Column(String, default="email")
+    subject = Column(String, default="")
+    to_email = Column(String, default="")
+    ok = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=_now, index=True)
+
+
 
 class NodeMetric(Base):
     """Time-series health sample for a node (~1/min), retained 90 days on the
@@ -698,16 +722,23 @@ class NodeMetric(Base):
     load1 = Column(Float, default=0)
 
 
-class NodeBlueprint(Base):
-    """Per-role configuration + update target managed by platform admins. Nodes
-    heartbeat to the control plane and receive their role's blueprint so config,
-    settings, and the target software version are centrally controlled."""
+class ConfigProfile(Base):
+    """A named, reusable set of settings (key→value) that platform admins bind to
+    specific nodes. The profiles bound to a node are merged (in name order) to form
+    the node's effective settings, which reconfigure its running behavior — resolved
+    live on the control plane and delivered to remote nodes on heartbeat. The
+    settings catalog (config_catalog.py) drives the editor's autocomplete/examples
+    and validation."""
 
-    __tablename__ = "node_blueprints"
-    role = Column(String, primary_key=True)  # control-plane | customer-tenant | public-web | ...
-    target_version = Column(String, default="")
-    config = Column(JSON, default=dict)      # role-specific config the node applies
-    settings = Column(JSON, default=dict)    # feature flags / general settings
+    __tablename__ = "config_profiles"
+    id = Column(String, primary_key=True, default=_uuid)
+    name = Column(String, nullable=False, unique=True)
+    description = Column(Text, default="")
+    kind = Column(String, default="node-settings")  # extensible for future setting groups
+    data = Column(JSON, default=dict)               # key -> typed value
+    node_ids = Column(JSON, default=list)           # nodes this profile applies to
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 

@@ -201,6 +201,7 @@ def _apply_additive_migrations() -> None:
         # default) on PG 11+, so it's safe at startup; the scheduler backfills the
         # correct value for legacy rows in the background.
         "ALTER TABLE search_documents ADD COLUMN IF NOT EXISTS is_current BOOLEAN DEFAULT true",
+        "ALTER TABLE users ADD COLUMN notification_prefs JSON",
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",
         "ALTER TABLE audit_events ADD COLUMN category VARCHAR DEFAULT 'activity'",
         "ALTER TABLE connector_accounts ADD COLUMN sync_cursor JSON",
@@ -212,6 +213,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE connector_accounts ADD COLUMN backfill_started_at TIMESTAMP",
         "ALTER TABLE connector_accounts ADD COLUMN backfill_completed_at TIMESTAMP",
         "ALTER TABLE connector_accounts ADD COLUMN backfill_count INTEGER DEFAULT 0",
+        "ALTER TABLE connector_accounts ADD COLUMN fail_count INTEGER DEFAULT 0",
         "ALTER TABLE source_configs ADD COLUMN backfill_enabled BOOLEAN DEFAULT false",
         "ALTER TABLE integration_instances ADD COLUMN provision_state VARCHAR DEFAULT 'idle'",
         "ALTER TABLE integration_instances ADD COLUMN provision_message TEXT",

@@ -1,7 +1,7 @@
 """
 Fleet heartbeat client. Runs on customer-tenant and public-web nodes (via a
 systemd timer) to report health + detected cloud environment to the control
-plane and receive this node's role blueprint (target version + config/settings).
+plane and receive this node's settings (from its bound configuration profiles).
 
 Usage:  python -m app.heartbeat            # one heartbeat, exit
         python -m app.heartbeat --loop     # heartbeat forever (interval from CP)
@@ -21,7 +21,7 @@ import urllib.error
 
 from .config import get_settings
 
-BLUEPRINT_PATH = "/etc/arkive/blueprint.json"
+SETTINGS_PATH = "/etc/arkive/node-settings.json"
 
 
 def _telemetry() -> dict:
@@ -100,8 +100,9 @@ def send_heartbeat() -> dict | None:
         print(f"[heartbeat] failed to reach control plane: {e}", file=sys.stderr)
         return None
 
-    bp = data.get("blueprint") or {}
-    _apply_blueprint(bp)
+    # Persist the settings this node was assigned (via its bound configuration
+    # profiles) so the running processes (scheduler, notifications) apply them.
+    _apply_settings(data.get("settings") or {})
     # Public-web nodes mirror the published site content locally so the site is
     # served same-origin and survives control-plane downtime.
     if s.node_role == "public-web":
@@ -183,18 +184,18 @@ def _inline_into_index(webroot: str, body_text: str) -> None:
         print(f"[heartbeat] could not inline site content: {e}", file=sys.stderr)
 
 
-def _apply_blueprint(bp: dict) -> None:
-    """Persist the received blueprint so the node's updater/config can consume
-    it. Applying the target version is handled by the role-aware updater."""
-    if not bp:
-        return
+def _apply_settings(settings: dict) -> None:
+    """Persist the settings this node received so node_config can resolve them for
+    the scheduler / notifications (config profiles reconfigure live behavior)."""
     try:
         import os
         os.makedirs("/etc/arkive", exist_ok=True)
-        with open(BLUEPRINT_PATH, "w") as fh:
-            json.dump(bp, fh, indent=2)
+        tmp = SETTINGS_PATH + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(settings or {}, fh, indent=2)
+        os.replace(tmp, SETTINGS_PATH)
     except Exception as e:
-        print(f"[heartbeat] could not write blueprint: {e}", file=sys.stderr)
+        print(f"[heartbeat] could not write node settings: {e}", file=sys.stderr)
 
 
 def main() -> int:

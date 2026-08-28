@@ -5,8 +5,8 @@ Public marketing-site content API + admin CMS + fleet-node communication.
 - ``GET  /admin/site``         admin: current content for the editor
 - ``PUT  /admin/site``         admin: save content
 - ``POST /nodes/heartbeat``    node: a customer-tenant / public-web node reports
-                               health + cloud info and receives its role blueprint
-                               (config, settings, target version). Shared-secret auth.
+                               health + cloud info and receives the settings from
+                               its bound configuration profiles. Shared-secret auth.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from .. import audit, security
 from ..config import get_settings
 from ..db import get_db
-from ..models import Node, NodeBlueprint, SiteContent
+from ..models import ConfigProfile, Node, SiteContent
 from ..site_defaults import DEFAULT_SITE
 
 public_router = APIRouter(tags=["site"])          # unauthenticated (site + node heartbeat)
@@ -146,20 +146,27 @@ class NodeHeartbeat(BaseModel):
     cloud: dict = {}
 
 
-def _blueprint_for(db: Session, role: str) -> dict:
-    bp = db.get(NodeBlueprint, role)
-    if bp is None:
-        return {"role": role, "target_version": "", "config": {}, "settings": {}}
-    return {"role": bp.role, "target_version": bp.target_version or "",
-            "config": bp.config or {}, "settings": bp.settings or {}}
+def _effective_settings(db: Session, node: Node) -> tuple[dict, list[str]]:
+    """Settings in effect for a node = every enabled configuration profile bound
+    to it, merged in name order (later profiles win). Delivered on heartbeat so the
+    node can reconfigure its running behavior without a redeploy."""
+    merged: dict = {}
+    applied: list[str] = []
+    for p in (db.query(ConfigProfile).filter(ConfigProfile.enabled.is_(True))
+              .order_by(ConfigProfile.name).all()):
+        if node.id in (p.node_ids or []):
+            merged.update(p.data or {})
+            applied.append(p.name)
+    return merged, applied
 
 
 @public_router.post("/nodes/heartbeat")
 def node_heartbeat(body: NodeHeartbeat,
                    authorization: str = Header(default=""),
                    db: Session = Depends(get_db)):
-    """A non-control-plane node reports in and receives its role blueprint. Auth
-    is the shared fleet secret (Bearer) baked into the install command."""
+    """A non-control-plane node reports in and receives the settings from its bound
+    configuration profiles. Auth is the shared fleet secret (Bearer) baked into the
+    install command."""
     token = authorization.replace("Bearer ", "").strip()
     if not token or token != _fleet_secret():
         raise HTTPException(401, "invalid node credentials")
@@ -180,8 +187,13 @@ def node_heartbeat(body: NodeHeartbeat,
     node.status = "active"
     node.last_heartbeat_at = _now()
     db.commit()
-    return {"ok": True, "node_id": node.id, "blueprint": _blueprint_for(db, body.role),
-            "heartbeat_interval_seconds": 60}
+    merged, applied = _effective_settings(db, node)
+    try:
+        interval = max(15, int(merged.get("CV_HEARTBEAT_INTERVAL_SECONDS", 60)))
+    except (TypeError, ValueError):
+        interval = 60
+    return {"ok": True, "node_id": node.id, "settings": merged,
+            "applied_profiles": applied, "heartbeat_interval_seconds": interval}
 
 
 class BackupReport(BaseModel):

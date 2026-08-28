@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, Loading } from "../components/ui";
-import { Icon } from "../components/Icon";
+import { Icon, IconName } from "../components/Icon";
 import { formDialog, notify } from "../components/dialog";
 import { getTheme, applyTheme, Theme } from "../theme";
 
@@ -105,6 +105,8 @@ export default function Settings() {
         </div>
       </Card>
 
+      <NotificationSettings />
+
       <Card style={{ marginBottom: 16 }}>
         <h2 style={{ marginBottom: 4 }}>Your encryption keys</h2>
         <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
@@ -205,5 +207,65 @@ function Row({ label, value }: { label: string; value?: string }) {
       <span className="faint" style={{ fontSize: 12.5 }}>{label}</span>
       <span style={{ fontWeight: 600 }}>{value ?? "—"}</span>
     </div>
+  );
+}
+
+interface NotifType { key: string; label: string; icon: string; desc: string; }
+
+function NotificationSettings() {
+  const [types, setTypes] = useState<NotifType[]>([]);
+  const [prefs, setPrefs] = useState<Record<string, boolean>>({});
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    api.get<{ types: NotifType[]; prefs: Record<string, boolean> }>("/me/notifications")
+      .then((r) => { setTypes(r.types || []); setPrefs(r.prefs || {}); })
+      .catch(() => {}).finally(() => setLoaded(true));
+  }, []);
+
+  async function toggle(key: string) {
+    const prev = prefs;
+    const next = { ...prefs, [key]: !prefs[key] };
+    setPrefs(next);
+    try { await api.put("/me/notifications", { prefs: { [key]: next[key] } }); }
+    catch (e: any) { notify({ message: e.message || "Could not save", tone: "danger" }); setPrefs(prev); }
+  }
+
+  if (!loaded || types.length === 0) return null;
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <h2 style={{ marginBottom: 4 }}>Email notifications</h2>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 6 }}>
+        Choose which emails Arkive sends you. You can change these any time.
+      </div>
+      <div className="stack" style={{ gap: 0 }}>
+        {types.map((t) => (
+          <div key={t.key} className="spread"
+               style={{ padding: "13px 0", borderTop: "1px solid var(--border-soft)", alignItems: "center", gap: 14 }}>
+            <div className="row" style={{ gap: 12, alignItems: "flex-start", minWidth: 0 }}>
+              <div className="result-icon" style={{ width: 34, height: 34, background: "var(--inset)", color: "var(--brand)", flexShrink: 0 }}>
+                <Icon name={t.icon as IconName} size={17} />
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{t.label}</div>
+                <div className="faint" style={{ fontSize: 12.5 }}>{t.desc}</div>
+              </div>
+            </div>
+            <Toggle on={!!prefs[t.key]} onClick={() => toggle(t.key)} />
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+export function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick} aria-pressed={on} title={on ? "On" : "Off"}
+      style={{ width: 42, height: 24, borderRadius: 999, border: "none", cursor: "pointer", flexShrink: 0,
+               background: on ? "var(--brand)" : "var(--border)", position: "relative", transition: "background .15s" }}>
+      <span style={{ position: "absolute", top: 3, left: on ? 21 : 3, width: 18, height: 18, borderRadius: "50%",
+                     background: "#fff", transition: "left .15s", boxShadow: "0 1px 2px rgba(0,0,0,.3)" }} />
+    </button>
   );
 }

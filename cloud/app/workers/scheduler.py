@@ -22,6 +22,7 @@ from ..connectors import get_connector
 from ..db import WorkerSessionLocal as SessionLocal
 from ..models import Collection, ConnectorAccount, PendingAction, SyncJob, Tenant
 from .sync_worker import run_backup
+from .. import node_config
 
 logger = logging.getLogger("cv.scheduler")
 
@@ -46,6 +47,15 @@ def start_scheduler() -> None:
     if _thread is not None:
         return
     tick = max(15, settings.scheduler_tick_seconds)
+
+    def _current_tick() -> int:
+        # Re-read each cycle so a configuration profile can retune the cadence live.
+        try:
+            with SessionLocal() as db:
+                return max(15, node_config.get_int(db, "CV_SCHEDULER_TICK_SECONDS",
+                                                   settings.scheduler_tick_seconds))
+        except Exception:  # noqa: BLE001
+            return tick
 
     def loop() -> None:
         # Small initial delay so startup/migrations settle first.
@@ -80,7 +90,11 @@ def start_scheduler() -> None:
                 _test_customer_storages()
             except Exception:  # noqa: BLE001
                 logger.exception("customer storage health test failed")
-            time.sleep(tick)
+            try:
+                _run_notifications()
+            except Exception:  # noqa: BLE001
+                logger.exception("notification sweep failed")
+            time.sleep(_current_tick())
 
     _thread = threading.Thread(target=loop, name="cv-sync-scheduler", daemon=True)
     _thread.start()
@@ -253,6 +267,86 @@ def _run_daily_insights() -> None:
     generate_all()
 
 
+_last_notif_sweep: datetime | None = None
+
+
+def _run_notifications() -> None:
+    """Send user email notifications for the tenants this node is responsible for
+    (control plane skips node-assigned tenants; a node runs its own). Per-user
+    dedupe keys make daily/source-problem sends idempotent, so this can sweep
+    often (~15 min) without duplicate mail."""
+    global _last_notif_sweep
+    now = _now()
+    if _last_notif_sweep and (now - _last_notif_sweep) < timedelta(minutes=15):
+        return
+    _last_notif_sweep = now
+    from .. import notifications as notif
+    from ..models import User
+    settings = get_settings()
+    is_cp = (settings.node_role or "control-plane") == "control-plane"
+    with SessionLocal() as db:
+        assigned: set[str] = set()
+        if is_cp:
+            assigned = {tid for (tid,) in
+                        db.query(Tenant.id).filter(Tenant.node_id.isnot(None)).all()}
+        users = [u for u in db.query(User).filter(User.status == "active").all()
+                 if u.tenant_id not in assigned]
+        today = now.strftime("%Y-%m-%d")
+        # Only send the daily digest once the configured hour has arrived; the
+        # per-day dedupe key keeps it to one send even as we keep sweeping.
+        daily_hour = node_config.get_int(db, "notif.daily_hour", 0)
+        send_daily = now.hour >= daily_hour
+        for u in users:
+            if send_daily:
+                try:
+                    notif.send_notification(db, u, "daily_summary", dedupe_key=f"daily:{today}")
+                except Exception:  # noqa: BLE001
+                    db.rollback()
+                    logger.exception("daily summary failed for %s", u.id)
+            try:
+                _notify_source_problems(db, notif, u, now)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("source-problem notify failed for %s", u.id)
+        # Weekly org roll-up (Mondays), to org admins of org tenants.
+        if now.weekday() == 0:
+            try:
+                _run_weekly_org(db, notif, assigned, now)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("weekly org summary failed")
+
+
+def _notify_source_problems(db, notif, user, now: datetime) -> None:
+    issues = notif._source_issues(db, user)
+    if not issues:
+        return
+    # Consolidated, repeated at most every N hours (admin-controlled). The dedupe
+    # key is a time bucket, so the same issues re-notify only once per window.
+    repeat_h = notif.source_repeat_hours(db)
+    bucket = int(now.timestamp() // (repeat_h * 3600))
+    notif.send_notification(db, user, "source_problem",
+                            dedupe_key=f"srcprob:{bucket}", issues=issues)
+
+
+def _run_weekly_org(db, notif, assigned: set[str], now: datetime) -> None:
+    from ..models import User
+    week = now.strftime("%Y-W%W")
+    org_tenants = [t for t in db.query(Tenant)
+                   .filter(Tenant.tenant_type != "shared").all()
+                   if t.id not in assigned]
+    for t in org_tenants:
+        admins = (db.query(User)
+                  .filter(User.tenant_id == t.id, User.status == "active",
+                          User.role.in_(["owner", "security-admin"])).all())
+        for u in admins:
+            try:
+                notif.send_notification(db, u, "weekly_org", dedupe_key=f"weekly:{week}")
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("weekly org summary failed for %s", u.id)
+
+
 def _effective_interval(c: Collection, default_minutes: int, caps=None) -> int:
     """Resolve a mapping's cadence: NULL → the global default; value as-is otherwise.
     A mapping that wants a slower cadence (e.g. a full-refetch source) sets its own
@@ -405,6 +499,9 @@ def run_due() -> int:
                     settings.node_name or settings.domain)
         _scope_logged = True
     with SessionLocal() as db:
+        # A configuration profile can retune the default cadence live.
+        default_minutes = max(1, node_config.get_int(
+            db, "CV_SYNC_INTERVAL_MINUTES", settings.sync_interval_minutes))
         assigned: set[str] = set()
         if skip_assigned:
             assigned = {tid for (tid,) in

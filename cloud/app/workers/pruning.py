@@ -40,8 +40,11 @@ def prune_all(db) -> dict:
     advisory lock ensures only one prune runs at a time (skips if already running)."""
     from ..models import (ApplianceCommand, BackupRun, IntegrationRun, NetworkUsage,
                           NodeMetric, PendingAction, SyncJob)
+    from .. import node_config
     now = datetime.utcnow()
     counts: dict = {}
+    # A configuration profile can retune telemetry retention live.
+    r_node_metrics = node_config.get_int(db, "CV_METRICS_RETENTION_DAYS", R_NODE_METRICS)
 
     is_pg = db.bind is not None and db.bind.dialect.name == "postgresql"
     if is_pg:
@@ -99,7 +102,7 @@ def prune_all(db) -> dict:
             synchronize_session=False))
 
     _do("node_metrics_deleted", lambda: db.query(NodeMetric).filter(
-        NodeMetric.ts < now - timedelta(days=R_NODE_METRICS)).delete(
+        NodeMetric.ts < now - timedelta(days=r_node_metrics)).delete(
             synchronize_session=False))
 
     if is_pg:

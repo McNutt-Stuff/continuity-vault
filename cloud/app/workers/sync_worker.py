@@ -31,7 +31,7 @@ from cv_crypto.envelope import EnvelopeKeyHierarchy, encrypt_object
 from cv_crypto.provider import hexdigest
 from cv_crypto.signing import HybridSigner
 
-from .. import audit, credstore, fleet, keybroker
+from .. import audit, credstore, fleet, keybroker, node_config
 from ..connectors import get_connector
 from ..connectors import oauth
 from ..models import (
@@ -78,6 +78,7 @@ def _record_sync_success(db: Session, account: Optional[ConnectorAccount], count
     account.last_object_count = int(count)
     account.last_error = None
     account.last_error_at = None
+    account.fail_count = 0
     if account.auth_status == "needs-reauth":
         account.auth_status = "linked"
     db.commit()
@@ -123,6 +124,7 @@ def _record_sync_error(db: Session, account: Optional[ConnectorAccount],
         needs_auth = False
     account.last_error = msg
     account.last_error_at = datetime.now(timezone.utc)
+    account.fail_count = int(account.fail_count or 0) + 1
     if needs_auth:
         account.auth_status = "needs-reauth"
     try:
@@ -517,7 +519,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     hierarchy = EnvelopeKeyHierarchy(root_key)
     snapshot_id = str(uuid.uuid4())
     snapshot_key = hierarchy.snapshot_key(vault.id, collection.id, snapshot_id)
-    chunk_size = get_settings().content_chunk_bytes
+    chunk_size = node_config.get_int(db, "CV_CONTENT_CHUNK_BYTES", get_settings().content_chunk_bytes)
 
     storage_units: list = []  # envelopes to persist (single, or chunks + index)
     index_rows: List[SearchDocument] = []

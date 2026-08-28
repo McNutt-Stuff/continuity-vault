@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from cv_crypto.profiles import PROFILE_REGISTRY
 from cv_crypto.provider import get_provider
 
-from .. import audit, authcodes, credstore, platform_config, security, services
+from .. import audit, authcodes, config_catalog, credstore, node_config, notifications, platform_config, security, services
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
@@ -31,10 +31,10 @@ from ..models import (
     BackupRun,
     Collection,
     ConfigObject,
+    ConfigProfile,
     ConnectorAccount,
     DesktopAgent,
     Node,
-    NodeBlueprint,
     PricingConfig,
     SearchDocument,
     ServiceObject,
@@ -663,6 +663,8 @@ def _user_view(u: User) -> dict:
             "email_verified": bool(u.email_verified),
             "tenant_id": u.tenant_id,
             "feature_flags": u.feature_flags or {},
+            "notification_prefs": notifications.normalized_prefs(u),
+            "notification_types": notifications.NOTIFICATION_TYPES,
             "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
             "setup_completed_at": u.setup_completed_at.isoformat() if u.setup_completed_at else None,
             "created_at": u.created_at.isoformat() if u.created_at else None}
@@ -726,6 +728,7 @@ class UserUpdate(BaseModel):
     role: str | None = None
     status: str | None = None
     is_platform_admin: bool | None = None
+    notification_prefs: dict | None = None
 
 
 @router.get("/users/{uid}")
@@ -855,6 +858,13 @@ def update_user(uid: str, body: UserUpdate,
         u.status = body.status
     if body.is_platform_admin is not None:
         u.is_platform_admin = body.is_platform_admin
+    if body.notification_prefs is not None:
+        prefs = dict(u.notification_prefs or {})
+        valid = {t["key"] for t in notifications.NOTIFICATION_TYPES}
+        for k, v in body.notification_prefs.items():
+            if k in valid:
+                prefs[k] = bool(v)
+        u.notification_prefs = prefs
     db.commit()
     audit.record(db, actor=principal.user_id, action="admin.user_updated",
                  tenant_id=u.tenant_id, category="admin", detail={"email": u.email})
@@ -1601,59 +1611,115 @@ def node_tenants(nid: str, db: Session = Depends(get_db)):
 
 
 # --------------------------------------------------------------------------- #
-# Node blueprints — the role-specific config/version pushed to fleet nodes.    #
+# Configuration profiles — reusable named settings bound to specific nodes.    #
 # --------------------------------------------------------------------------- #
 
-NODE_ROLES = ["control-plane", "customer-tenant", "public-web"]
+def _profile_view(db: Session, p: ConfigProfile) -> dict:
+    ids = p.node_ids or []
+    names = ({n.id: n.name for n in db.query(Node).filter(Node.id.in_(ids)).all()}
+             if ids else {})
+    return {"id": p.id, "name": p.name, "description": p.description or "",
+            "kind": p.kind, "data": p.data or {}, "node_ids": ids,
+            "enabled": bool(p.enabled),
+            "nodes": [{"id": nid, "name": names.get(nid, nid)} for nid in ids],
+            "key_count": len(p.data or {}),
+            "updated_at": p.updated_at.isoformat() if p.updated_at else None}
 
 
-def _blueprint_view(bp: NodeBlueprint) -> dict:
-    return {"role": bp.role, "target_version": bp.target_version or "",
-            "config": bp.config or {}, "settings": bp.settings or {},
-            "updated_at": bp.updated_at.isoformat() if bp.updated_at else None}
+@router.get("/config-catalog")
+def config_catalog_list(_p: security.Principal = Depends(security.require_platform_admin)):
+    """The known settings a profile can carry (autocomplete + examples + help)."""
+    return {"catalog": config_catalog.catalog()}
 
 
-@router.get("/node-blueprints")
-def list_blueprints(db: Session = Depends(get_db)):
-    existing = {b.role: b for b in db.query(NodeBlueprint).all()}
-    out = []
-    for role in NODE_ROLES:
-        bp = existing.get(role)
-        if bp is None:
-            out.append({"role": role, "target_version": "", "config": {},
-                        "settings": {}, "updated_at": None})
-        else:
-            out.append(_blueprint_view(bp))
-    return out
+@router.get("/config-profiles")
+def list_config_profiles(_p: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    profiles = db.query(ConfigProfile).order_by(ConfigProfile.name).all()
+    nodes = [{"id": n.id, "name": n.name, "role": n.role}
+             for n in db.query(Node).order_by(Node.role, Node.name).all()]
+    return {"profiles": [_profile_view(db, p) for p in profiles],
+            "catalog": config_catalog.catalog(), "nodes": nodes}
 
 
-class BlueprintUpdate(BaseModel):
-    target_version: str | None = None
-    config: dict | None = None
-    settings: dict | None = None
+class ProfileIn(BaseModel):
+    name: str
+    description: str = ""
+    data: dict = {}
+    node_ids: list[str] = []
+    enabled: bool = True
 
 
-@router.put("/node-blueprints/{role}")
-def update_blueprint(role: str, body: BlueprintUpdate,
-                     principal: security.Principal = Depends(security.require_platform_admin),
-                     db: Session = Depends(get_db)):
-    if role not in NODE_ROLES:
-        raise HTTPException(400, "unknown role")
-    bp = db.get(NodeBlueprint, role)
-    if bp is None:
-        bp = NodeBlueprint(role=role)
-        db.add(bp)
-    if body.target_version is not None:
-        bp.target_version = body.target_version.strip()
-    if body.config is not None:
-        bp.config = body.config
-    if body.settings is not None:
-        bp.settings = body.settings
+def _clean_profile(db: Session, body: ProfileIn) -> tuple[dict, list[str]]:
+    coerced, errors = config_catalog.validate_data(body.data or {})
+    if errors:
+        raise HTTPException(400, "invalid values: " + "; ".join(errors))
+    valid_nodes = {n.id for n in db.query(Node.id).all()} if body.node_ids else set()
+    node_ids = [nid for nid in (body.node_ids or []) if nid in valid_nodes]
+    return coerced, node_ids
+
+
+@router.post("/config-profiles")
+def create_config_profile(body: ProfileIn,
+                          principal: security.Principal = Depends(security.require_platform_admin),
+                          db: Session = Depends(get_db)):
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    if db.query(ConfigProfile).filter(ConfigProfile.name == name).first():
+        raise HTTPException(400, "a profile with that name already exists")
+    data, node_ids = _clean_profile(db, body)
+    p = ConfigProfile(name=name, description=body.description or "", data=data,
+                      node_ids=node_ids, enabled=body.enabled)
+    db.add(p)
     db.commit()
-    db.refresh(bp)
-    audit.record(db, actor=principal.user_id, action="admin.blueprint_updated",
-                 category="admin", detail={"role": role})
-    return _blueprint_view(bp)
+    db.refresh(p)
+    node_config.invalidate()
+    audit.record(db, actor=principal.user_id, action="admin.config_profile_created",
+                 category="admin", detail={"name": name})
+    return _profile_view(db, p)
+
+
+@router.put("/config-profiles/{pid}")
+def update_config_profile(pid: str, body: ProfileIn,
+                          principal: security.Principal = Depends(security.require_platform_admin),
+                          db: Session = Depends(get_db)):
+    p = db.get(ConfigProfile, pid)
+    if p is None:
+        raise HTTPException(404, "not found")
+    name = (body.name or "").strip()
+    if name and name != p.name:
+        if db.query(ConfigProfile).filter(ConfigProfile.name == name,
+                                          ConfigProfile.id != p.id).first():
+            raise HTTPException(400, "a profile with that name already exists")
+        p.name = name
+    data, node_ids = _clean_profile(db, body)
+    p.description = body.description or ""
+    p.data = data
+    p.node_ids = node_ids
+    p.enabled = body.enabled
+    db.commit()
+    db.refresh(p)
+    node_config.invalidate()
+    audit.record(db, actor=principal.user_id, action="admin.config_profile_updated",
+                 category="admin", detail={"name": p.name})
+    return _profile_view(db, p)
+
+
+@router.delete("/config-profiles/{pid}")
+def delete_config_profile(pid: str,
+                          principal: security.Principal = Depends(security.require_platform_admin),
+                          db: Session = Depends(get_db)):
+    p = db.get(ConfigProfile, pid)
+    if p is None:
+        raise HTTPException(404, "not found")
+    nm = p.name
+    db.delete(p)
+    db.commit()
+    node_config.invalidate()
+    audit.record(db, actor=principal.user_id, action="admin.config_profile_deleted",
+                 category="admin", detail={"name": nm})
+    return {"ok": True}
 
 
 # =========================================================================== #

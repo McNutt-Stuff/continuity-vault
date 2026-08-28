@@ -430,3 +430,83 @@ def _node_call(node, path: str) -> dict:
     r = httpx.get(f"{base}{path}", headers={"Authorization": f"Bearer {secret}"}, timeout=15.0)
     r.raise_for_status()
     return r.json()
+
+
+# --------------------------------------------------------------------------- #
+# Notification testing (admin) — send any notification type to a chosen user   #
+# --------------------------------------------------------------------------- #
+
+@router.get("/notifications", dependencies=[Depends(require_debug_key)])
+def notif_overview(db: Session = Depends(get_db)):
+    from .. import notifications as notif
+    from ..models import NotificationLog
+    recent = (db.query(NotificationLog)
+              .order_by(NotificationLog.created_at.desc()).limit(20).all())
+    return {
+        "types": notif.NOTIFICATION_TYPES,
+        "settings": {
+            "source_repeat_hours": notif.source_repeat_hours(db),
+            "enabled_insights": notif.enabled_insights(db),
+        },
+        "recent": [{"type": r.type, "to": r.to_email, "subject": r.subject,
+                    "ok": bool(r.ok),
+                    "at": r.created_at.isoformat() if r.created_at else None} for r in recent],
+    }
+
+
+@router.get("/notifications/users", dependencies=[Depends(require_debug_key)])
+def notif_users(q: str = "", db: Session = Depends(get_db)):
+    """Search accounts to pick a test recipient."""
+    from ..models import User
+    query = db.query(User)
+    if q.strip():
+        like = f"%{q.strip().lower()}%"
+        query = query.filter(func.lower(User.email).like(like))
+    rows = query.order_by(User.created_at.desc()).limit(25).all()
+    return {"users": [{"id": u.id, "email": u.email, "name": u.full_name,
+                       "tenant_id": u.tenant_id, "role": u.role} for u in rows]}
+
+
+class NotifTest(BaseModel):
+    type: str
+    user_id: str
+
+
+@router.post("/notifications/test", dependencies=[Depends(require_debug_key)])
+def notif_test(body: NotifTest, db: Session = Depends(get_db)):
+    from .. import notifications as notif
+    from ..models import User
+    user = db.get(User, body.user_id)
+    if user is None:
+        raise HTTPException(404, "user not found")
+    if body.type not in {t["key"] for t in notif.NOTIFICATION_TYPES}:
+        raise HTTPException(400, "unknown notification type")
+    result = notif.send_test(db, user, body.type)
+    logger.warning("debug: test notification %s -> %s (%s)", body.type, user.email,
+                   result.get("ok"))
+    return result
+
+
+class NotifSettings(BaseModel):
+    source_repeat_hours: int | None = None
+    enabled_insights: list[str] | None = None
+
+
+@router.put("/notifications/settings", dependencies=[Depends(require_debug_key)])
+def notif_settings(body: NotifSettings, db: Session = Depends(get_db)):
+    def _set(key: str, value: str):
+        row = db.get(SystemSetting, key)
+        if row is None:
+            db.add(SystemSetting(key=key, value=value))
+        else:
+            row.value = value
+    if body.source_repeat_hours is not None:
+        _set("notif.source_repeat_hours", str(max(1, int(body.source_repeat_hours))))
+    if body.enabled_insights is not None:
+        _set("notif.enabled_insights", ",".join(x.strip() for x in body.enabled_insights if x.strip()))
+    db.commit()
+    from .. import notifications as notif
+    return {"ok": True, "settings": {
+        "source_repeat_hours": notif.source_repeat_hours(db),
+        "enabled_insights": notif.enabled_insights(db),
+    }}
