@@ -3691,7 +3691,7 @@ function SectionManager({ sections, reload }: { sections: AdminSectionRow[]; rel
   }
   async function del(s: AdminSectionRow) {
     if (s.count > 0) { notify({ message: `Move or delete the ${s.count} page(s) in “${s.name}” first.`, tone: "danger" }); return; }
-    if (!(await confirmDialog({ title: `Delete section “${s.name}”?`, tone: "danger", confirmLabel: "Delete" }))) return;
+    if (!(await confirmDialog({ title: `Delete section “${s.name}”?`, message: "The empty section will be removed from the docs navigation.", tone: "danger", confirmLabel: "Delete" }))) return;
     try { await api.del(`/admin/support/sections/${s.id}`); reload(); }
     catch (e: any) { notify({ message: e.message, tone: "danger" }); }
   }
