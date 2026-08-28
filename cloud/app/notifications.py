@@ -15,6 +15,7 @@ these from the node that manages a tenant sends via that node's mail service.
 from __future__ import annotations
 
 import html as _html
+import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func
@@ -22,6 +23,8 @@ from sqlalchemy import func
 from . import emailer
 from .models import (Collection, ConnectorAccount, NotificationLog, SearchDocument,
                      SnapshotReceipt, SystemSetting, Tenant, User, Vault)
+
+logger = logging.getLogger("cv.notify")
 
 # --------------------------------------------------------------------------- #
 # Type catalog (extensible)                                                   #
@@ -477,12 +480,14 @@ def _already_sent(db, user_id: str, dedupe_key: str) -> bool:
 def _deliver(db, user: User, key: str, built: dict, dedupe_key: str = "") -> bool:
     """Render + send + log one notification. Returns True if it was sent."""
     if not user.email:
+        logger.warning("notify %s skipped: user %s has no email", key, user.id)
         return False
     html = emailer.render(built["title"], built["body_html"],
                           cta=built.get("cta"), preheader=built.get("preheader", ""),
                           footer_note="You're receiving this because email notifications are on for your "
                                       "Arkive account. Manage them in Settings.")
     channel = emailer.send(user.email, built["subject"], html=html, text=built.get("text", ""))
+    logger.info("notify %s -> %s via %s (subject=%r)", key, user.email, channel, built["subject"])
     try:
         db.add(NotificationLog(user_id=user.id, tenant_id=user.tenant_id, type=key,
                                dedupe_key=dedupe_key, subject=built["subject"],
@@ -498,13 +503,17 @@ def send_notification(db, user: User, key: str, *, dedupe_key: str = "",
     """Build + send a notification if the user has the type enabled (unless
     ``force``). Returns True if an email was sent."""
     if key not in _TYPE_KEYS:
+        logger.warning("notify skipped: unknown type %r", key)
         return False
     if not force and not is_enabled(user, key):
+        logger.info("notify %s skipped: disabled in prefs for %s", key, user.email or user.id)
         return False
     if not force and _already_sent(db, user.id, dedupe_key):
+        logger.info("notify %s skipped: already sent (dedupe=%s) to %s", key, dedupe_key, user.email or user.id)
         return False
     built = _build(db, user, key, ctx)
     if built is None:
+        logger.info("notify %s skipped: nothing to send for %s", key, user.email or user.id)
         return False
     return _deliver(db, user, key, built, dedupe_key)
 

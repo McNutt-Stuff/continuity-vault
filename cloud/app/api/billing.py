@@ -9,6 +9,7 @@ license, and their desired appliances.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,6 +23,8 @@ from ..models import PricingConfig, SearchDocument, Tenant, User, Vault
 from .dashboard import _OBJECT_BUCKETS, _bucket_for
 
 router = APIRouter(prefix="/billing", tags=["billing"])
+
+logger = logging.getLogger("cv.billing")
 
 TB = 1024 ** 4  # 1 TB (binary) — matches the byte sizes shown in the UI
 
@@ -475,7 +478,7 @@ def _notify_plan_change(db, user, view: dict, summary: list[str]) -> None:
     try:
         notifications.send_notification(db, user, "plan_change", change=change)
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("plan-change notification failed for %s", getattr(user, "email", user.id))
 
 
 @router.put("/plan")
