@@ -196,6 +196,11 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE service_objects ADD COLUMN capabilities JSON",
         "ALTER TABLE search_documents ADD COLUMN content_hash VARCHAR",
         "ALTER TABLE search_documents ADD COLUMN version INTEGER DEFAULT 1",
+        # One current row per (tenant, source_type, object_id) so reads filter to
+        # it instead of de-duplicating the whole index. Metadata-only (constant
+        # default) on PG 11+, so it's safe at startup; the scheduler backfills the
+        # correct value for legacy rows in the background.
+        "ALTER TABLE search_documents ADD COLUMN IF NOT EXISTS is_current BOOLEAN DEFAULT true",
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",
         "ALTER TABLE audit_events ADD COLUMN category VARCHAR DEFAULT 'activity'",
         "ALTER TABLE connector_accounts ADD COLUMN sync_cursor JSON",
