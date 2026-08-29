@@ -733,24 +733,23 @@ class UserUpdate(BaseModel):
     notification_prefs: dict | None = None
 
 
-def _user_data_rollup(db: Session, tenant_id: str) -> tuple[dict, int, list, list]:
+def _user_data_rollup(db: Session, collection_ids: list) -> tuple[dict, int, list, list]:
     """Storage-by-channel, recovery-point count, sources and recent activity for a
-    tenant — scoped by ``tenant_id`` (NOT vault ownership) so the platform admin
-    always sees an account's data wherever it's mapped. Best-effort: a slow/failing
-    scan degrades to empties so the detail page never 500s. Works for CP-hosted AND
-    federated data (receipts/documents/collections all carry tenant_id on the CP)."""
+    specific set of collections (a USER's own sources) — scoped by collection_id so
+    the admin sees per-user sources/activity regardless of vault mapping. Best-effort:
+    a slow/failing scan degrades to empties so the detail page never 500s."""
     storage = {"cloud_bytes": 0, "appliance_bytes": 0, "customer_bytes": 0}
     recovery_points = 0
     sources: list = []
     activity: list = []
-    if not tenant_id:
+    if not collection_ids:
         return storage, recovery_points, sources, activity
     try:
         for dest, byts, cnt in (db.query(
                 SnapshotReceipt.destination,
                 func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0),
                 func.count(SnapshotReceipt.id))
-                .filter(SnapshotReceipt.tenant_id == tenant_id)
+                .filter(SnapshotReceipt.collection_id.in_(collection_ids))
                 .group_by(SnapshotReceipt.destination).all()):
             b = int(byts or 0)
             d = dest or ""
@@ -761,7 +760,7 @@ def _user_data_rollup(db: Session, tenant_id: str) -> tuple[dict, int, list, lis
             else:
                 storage["appliance_bytes"] += b
             recovery_points += int(cnt or 0)
-        colls = db.query(Collection).filter(Collection.tenant_id == tenant_id).all()
+        colls = db.query(Collection).filter(Collection.id.in_(collection_ids)).all()
         for c in colls:
             acct = (db.get(ConnectorAccount, c.connector_account_id)
                     if c.connector_account_id else None)
@@ -777,7 +776,7 @@ def _user_data_rollup(db: Session, tenant_id: str) -> tuple[dict, int, list, lis
                     SnapshotReceipt.collection_id, SnapshotReceipt.destination,
                     SnapshotReceipt.object_count, SnapshotReceipt.total_bytes,
                     SnapshotReceipt.recoverable, SnapshotReceipt.created_at)
-                   .filter(SnapshotReceipt.tenant_id == tenant_id)
+                   .filter(SnapshotReceipt.collection_id.in_(collection_ids))
                    .order_by(SnapshotReceipt.created_at.desc()).limit(15).all()):
             c = colls_by_id.get(rc.collection_id)
             activity.append({
@@ -792,6 +791,64 @@ def _user_data_rollup(db: Session, tenant_id: str) -> tuple[dict, int, list, lis
     except Exception:  # noqa: BLE001
         db.rollback()
     return storage, recovery_points, sources, activity
+
+
+def _user_collection_ids(db: Session, uid: str, tenant_id: str, owned_vault_ids: list) -> list:
+    """The collections attributed to a USER: sources whose connector account they
+    own, plus collections in vaults they own (agent/manual sources). Mirrors how the
+    customer Sources page scopes (ConnectorAccount.owner_user_id)."""
+    acct_ids = [a for (a,) in
+                db.query(ConnectorAccount.id).filter(
+                    ConnectorAccount.owner_user_id == uid).all()]
+    conds = []
+    if acct_ids:
+        conds.append(Collection.connector_account_id.in_(acct_ids))
+    if owned_vault_ids:
+        conds.append(Collection.vault_id.in_(owned_vault_ids))
+    if not conds:
+        return []
+    return [c for (c,) in
+            db.query(Collection.id).filter(Collection.tenant_id == tenant_id,
+                                           or_(*conds)).all()]
+
+
+def _user_sources(db: Session, uid: str, tenant_id: str) -> list:
+    """The user's connected sources + usage — the SAME tables/logic that drive the
+    customer's Sources page (connectors.list_accounts): the user's ConnectorAccounts
+    with type, label/username, object count, protected bytes and status."""
+    accounts = db.query(ConnectorAccount).filter(
+        ConnectorAccount.tenant_id == tenant_id,
+        ConnectorAccount.owner_user_id == uid).all()
+    if not accounts:
+        return []
+    coll_to_acct = {cid: aid for cid, aid in db.query(
+        Collection.id, Collection.connector_account_id).filter(
+        Collection.tenant_id == tenant_id).all()}
+    bytes_by_acct: dict = {}
+    if coll_to_acct:
+        seen: set = set()
+        for cid, oid, sz in (db.query(
+                SearchDocument.collection_id, SearchDocument.object_id,
+                SearchDocument.size_bytes)
+                .filter(SearchDocument.tenant_id == tenant_id,
+                        SearchDocument.collection_id.in_(list(coll_to_acct.keys())))
+                .order_by(SearchDocument.created_at.desc()).all()):
+            aid = coll_to_acct.get(cid)
+            if not aid or (aid, oid) in seen:
+                continue
+            seen.add((aid, oid))
+            bytes_by_acct[aid] = bytes_by_acct.get(aid, 0) + int(sz or 0)
+    out = [{
+        "id": a.id, "name": a.account_label or a.connector_type,
+        "source_type": a.connector_type, "account_username": a.account_username,
+        "object_count": int(a.last_object_count or 0),
+        "protected_bytes": bytes_by_acct.get(a.id, 0),
+        "last_backup_at": a.last_sync_at.isoformat() if a.last_sync_at else None,
+        "active": bool(a.active), "has_error": bool(a.last_error),
+        "needs_reauth": a.auth_status == "needs-reauth",
+    } for a in accounts]
+    out.sort(key=lambda s: (s["protected_bytes"], s["object_count"]), reverse=True)
+    return out
 
 
 @router.get("/users/{uid}")
@@ -821,10 +878,15 @@ def get_user(uid: str,
         view["billing"] = None
 
     vaults = db.query(Vault).filter(Vault.owner_user_id == uid).all()
-    # Admin function: show the account's sources/activity/storage scoped by TENANT
-    # (the data is keyed by tenant_id in the DB) — vault ownership is irrelevant, so
-    # the admin can always see a user's data wherever it's mapped.
-    storage, recovery_points, sources, activity = _user_data_rollup(db, u.tenant_id)
+    owned_vault_ids = [v.id for v in vaults]
+    # Per-user sources/activity: the collections this user owns (their connected
+    # sources + collections in vaults they own). This is an admin function so it
+    # reads straight from the DB regardless of how/where the data is mapped.
+    coll_ids = _user_collection_ids(db, uid, u.tenant_id, owned_vault_ids)
+    storage, recovery_points, _rollup_sources, activity = _user_data_rollup(db, coll_ids)
+    # Sources come from the SAME tables that drive the customer's Sources page
+    # (their ConnectorAccounts + protected bytes) — usage/type/metadata only.
+    sources = _user_sources(db, uid, u.tenant_id)
 
     from ..models import Passkey
     try:
@@ -835,7 +897,7 @@ def get_user(uid: str,
     view["vaults"] = [{"id": v.id, "name": v.name,
                        "key_ownership_model": v.key_ownership_model} for v in vaults]
     view["storage"] = storage
-    view["activity_scope"] = "user" if ttype == "shared" else "account"
+    view["activity_scope"] = "user"
     view["counts"] = {
         "objects": int(total), "recovery_points": recovery_points,
         "sources": len(sources), "vaults": len(vaults), "passkeys": int(passkeys),

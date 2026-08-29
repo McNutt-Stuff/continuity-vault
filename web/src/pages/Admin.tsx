@@ -612,13 +612,13 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
       <Card style={{ marginBottom: 16 }}>
         <div className="spread" style={{ margin: "0 0 12px" }}>
           <h3 style={{ margin: 0 }}>Sources</h3>
-          {u.activity_scope === "account" && <span className="faint" style={{ fontSize: 11.5 }}>account-wide</span>}
+          <span className="faint" style={{ fontSize: 11.5 }}>{(u.sources || []).length} connected</span>
         </div>
         {(u.sources || []).length === 0 ? (
-          <div className="muted">No sources mapped for this account yet.</div>
+          <div className="muted">No sources connected by this user yet.</div>
         ) : (
           <table className="table">
-            <thead><tr><th>Source</th><th>Type</th><th style={{ textAlign: "right" }}>Objects</th><th>Last backup</th></tr></thead>
+            <thead><tr><th>Source</th><th>Type</th><th style={{ textAlign: "right" }}>Objects</th><th style={{ textAlign: "right" }}>Protected</th><th>Last backup</th><th>Status</th></tr></thead>
             <tbody>
               {u.sources.map((src: any) => (
                 <tr key={src.id}>
@@ -627,12 +627,22 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
                       {brandForSource(src.source_type)
                         ? <BrandIcon name={brandForSource(src.source_type)!} size={16} />
                         : <Icon name="database" size={15} />}
-                      <span style={{ fontWeight: 600 }}>{src.name}</span>
+                      <div>
+                        <div style={{ fontWeight: 600 }}>{src.name}</div>
+                        {src.account_username && <div className="faint" style={{ fontSize: 11 }}>{src.account_username}</div>}
+                      </div>
                     </div>
                   </td>
                   <td className="faint" style={{ fontSize: 12 }}>{src.source_type}</td>
                   <td style={{ textAlign: "right" }}>{(src.object_count || 0).toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{bytes(src.protected_bytes || 0)}</td>
                   <td className="faint" style={{ fontSize: 12 }}>{src.last_backup_at ? timeAgo(src.last_backup_at) : "never"}</td>
+                  <td>
+                    {src.needs_reauth ? <Pill tone="warn" dot>reconnect</Pill>
+                      : !src.active ? <Pill tone="warn">deactivated</Pill>
+                      : src.has_error ? <Pill tone="danger" dot>issue</Pill>
+                      : <Pill tone="ok" dot>healthy</Pill>}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -641,10 +651,7 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
       </Card>
 
       <Card style={{ marginBottom: 16 }}>
-        <div className="spread" style={{ margin: "0 0 12px" }}>
-          <h3 style={{ margin: 0 }}>Recent activity</h3>
-          {u.activity_scope === "account" && <span className="faint" style={{ fontSize: 11.5 }}>account-wide</span>}
-        </div>
+        <h3 style={{ margin: "0 0 12px" }}>Recent activity</h3>
         {(u.activity || []).length === 0 ? (
           <div className="muted">No backup activity yet.</div>
         ) : (
