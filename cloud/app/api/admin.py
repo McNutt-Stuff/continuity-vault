@@ -320,6 +320,7 @@ def fleet_view(db: Session = Depends(get_db)):
                                  and a.software_version != prod),
         "version_updated_at": a.version_updated_at.isoformat() if a.version_updated_at else None,
         "last_heartbeat_at": a.last_heartbeat_at.isoformat() if a.last_heartbeat_at else None,
+        "config_profile_id": a.config_profile_id,
     } for a in rows]
 
 
@@ -760,6 +761,15 @@ def get_user(uid: str,
 
     vaults = db.query(Vault).filter(Vault.owner_user_id == uid).all()
     vault_ids = [v.id for v in vaults]
+    # Sources/activity live on the vaults the user OWNS; for a shared/personal
+    # account (the user IS the account) or when nothing is owned yet, fall back to
+    # the tenant's vaults so the tables reflect what the account is protecting.
+    if vault_ids and ttype != "shared":
+        scope_vault_ids = vault_ids
+    else:
+        scope_vault_ids = [
+            v for (v,) in db.query(Vault.id).filter(Vault.tenant_id == u.tenant_id).all()
+        ] or vault_ids
 
     storage = {"cloud_bytes": 0, "appliance_bytes": 0, "customer_bytes": 0}
     recovery_points = 0
@@ -768,12 +778,12 @@ def get_user(uid: str,
     # The heavy rollups are best-effort: a slow/failing scan degrades to the core
     # profile rather than 500-ing the whole detail page.
     try:
-        if vault_ids:
+        if scope_vault_ids:
             for dest, byts, cnt in (db.query(
                     SnapshotReceipt.destination,
                     func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0),
                     func.count(SnapshotReceipt.id))
-                    .filter(SnapshotReceipt.vault_id.in_(vault_ids))
+                    .filter(SnapshotReceipt.vault_id.in_(scope_vault_ids))
                     .group_by(SnapshotReceipt.destination).all()):
                 b = int(byts or 0)
                 d = dest or ""
@@ -784,7 +794,7 @@ def get_user(uid: str,
                 else:
                     storage["appliance_bytes"] += b
                 recovery_points += int(cnt or 0)
-            colls = db.query(Collection).filter(Collection.vault_id.in_(vault_ids)).all()
+            colls = db.query(Collection).filter(Collection.vault_id.in_(scope_vault_ids)).all()
             for c in colls:
                 acct = (db.get(ConnectorAccount, c.connector_account_id)
                         if c.connector_account_id else None)
@@ -801,7 +811,7 @@ def get_user(uid: str,
                         SnapshotReceipt.collection_id, SnapshotReceipt.destination,
                         SnapshotReceipt.object_count, SnapshotReceipt.total_bytes,
                         SnapshotReceipt.recoverable, SnapshotReceipt.created_at)
-                       .filter(SnapshotReceipt.vault_id.in_(vault_ids))
+                       .filter(SnapshotReceipt.vault_id.in_(scope_vault_ids))
                        .order_by(SnapshotReceipt.created_at.desc()).limit(15).all()):
                 c = colls_by_id.get(rc.collection_id)
                 activity.append({
@@ -1667,13 +1677,10 @@ def node_config_detail(nid: str,
     n = db.get(Node, nid)
     if not n:
         raise HTTPException(404, "node not found")
-    bound = [p for p in db.query(ConfigProfile).order_by(ConfigProfile.name).all()
-             if nid in (p.node_ids or [])]
-    # Layers the control plane resolves (= what it delivers to the node).
-    profile_vals: dict = {}
-    for p in bound:
-        if p.enabled:
-            profile_vals.update(p.data or {})
+    # The single assigned node-kind profile (legacy node_ids still resolved by
+    # node_config for older bindings, but the UI manages one profile per node).
+    prof = db.get(ConfigProfile, n.config_profile_id) if n.config_profile_id else None
+    profile_vals: dict = dict(prof.data or {}) if (prof and prof.enabled) else {}
     overrides = dict(n.config_overrides or {})
     local = _node_local_defaults(n)
 
@@ -1699,10 +1706,10 @@ def node_config_detail(nid: str,
         })
 
     out = {
-        "profiles": [{"id": p.id, "name": p.name, "description": p.description or "",
-                      "enabled": bool(p.enabled), "key_count": len(p.data or {}),
-                      "updated_at": p.updated_at.isoformat() if p.updated_at else None}
-                     for p in bound],
+        "config_profile": _profile_view(db, prof) if prof else None,
+        "available_profiles": [_profile_view(db, x) for x in
+                               db.query(ConfigProfile).order_by(ConfigProfile.name).all()
+                               if _profile_target(x.kind) == "node"],
         "overrides": overrides,
         "settings": settings,
         "catalog": config_catalog.catalog(),
@@ -1782,15 +1789,23 @@ def set_node_overrides(nid: str, body: NodeOverrides,
 # Configuration profiles — reusable named settings bound to specific nodes.    #
 # --------------------------------------------------------------------------- #
 
+def _profile_target(kind: str) -> str:
+    """Normalize a profile's target type. Legacy 'node-settings' → 'node'."""
+    return "appliance" if (kind or "") == "appliance" else "node"
+
+
 def _profile_view(db: Session, p: ConfigProfile) -> dict:
-    ids = p.node_ids or []
-    names = ({n.id: n.name for n in db.query(Node).filter(Node.id.in_(ids)).all()}
-             if ids else {})
+    target = _profile_target(p.kind)
+    if target == "appliance":
+        assigned = db.query(func.count(Appliance.id)).filter(
+            Appliance.config_profile_id == p.id).scalar() or 0
+    else:
+        assigned = db.query(func.count(Node.id)).filter(
+            Node.config_profile_id == p.id).scalar() or 0
     return {"id": p.id, "name": p.name, "description": p.description or "",
-            "kind": p.kind, "data": p.data or {}, "node_ids": ids,
-            "enabled": bool(p.enabled),
-            "nodes": [{"id": nid, "name": names.get(nid, nid)} for nid in ids],
-            "key_count": len(p.data or {}),
+            "kind": p.kind, "target": target, "data": p.data or {},
+            "enabled": bool(p.enabled), "key_count": len(p.data or {}),
+            "assigned_count": int(assigned),
             "updated_at": p.updated_at.isoformat() if p.updated_at else None}
 
 
@@ -1839,18 +1854,16 @@ def list_config_profiles(_p: security.Principal = Depends(security.require_platf
 class ProfileIn(BaseModel):
     name: str
     description: str = ""
+    kind: str = "node"          # node | appliance
     data: dict = {}
-    node_ids: list[str] = []
     enabled: bool = True
 
 
-def _clean_profile(db: Session, body: ProfileIn) -> tuple[dict, list[str]]:
+def _clean_profile(db: Session, body: ProfileIn) -> dict:
     coerced, errors = config_catalog.validate_data(body.data or {})
     if errors:
         raise HTTPException(400, "invalid values: " + "; ".join(errors))
-    valid_nodes = {n.id for n in db.query(Node.id).all()} if body.node_ids else set()
-    node_ids = [nid for nid in (body.node_ids or []) if nid in valid_nodes]
-    return coerced, node_ids
+    return coerced
 
 
 @router.post("/config-profiles")
@@ -1862,14 +1875,14 @@ def create_config_profile(body: ProfileIn,
         raise HTTPException(400, "name is required")
     if db.query(ConfigProfile).filter(ConfigProfile.name == name).first():
         raise HTTPException(400, "a profile with that name already exists")
-    data, node_ids = _clean_profile(db, body)
+    data = _clean_profile(db, body)
     p = ConfigProfile(name=name, description=body.description or "", data=data,
-                      node_ids=node_ids, enabled=body.enabled)
+                      kind=_profile_target(body.kind), enabled=body.enabled)
     db.add(p)
     db.commit()
     db.refresh(p)
     _config_changed()
-    _log_profile_change(db, "created", p.name, node_ids, data, p.enabled)
+    _log_profile_change(db, "created", p.name, [], data, p.enabled)
     audit.record(db, actor=principal.user_id, action="admin.config_profile_created",
                  category="admin", detail={"name": name})
     return _profile_view(db, p)
@@ -1888,15 +1901,15 @@ def update_config_profile(pid: str, body: ProfileIn,
                                           ConfigProfile.id != p.id).first():
             raise HTTPException(400, "a profile with that name already exists")
         p.name = name
-    data, node_ids = _clean_profile(db, body)
+    data = _clean_profile(db, body)
     p.description = body.description or ""
+    p.kind = _profile_target(body.kind)
     p.data = data
-    p.node_ids = node_ids
     p.enabled = body.enabled
     db.commit()
     db.refresh(p)
     _config_changed()
-    _log_profile_change(db, "updated", p.name, node_ids, data, p.enabled)
+    _log_profile_change(db, "updated", p.name, [], data, p.enabled)
     audit.record(db, actor=principal.user_id, action="admin.config_profile_updated",
                  category="admin", detail={"name": p.name})
     return _profile_view(db, p)
@@ -1910,15 +1923,93 @@ def delete_config_profile(pid: str,
     if p is None:
         raise HTTPException(404, "not found")
     nm = p.name
-    node_ids = list(p.node_ids or [])
     data = dict(p.data or {})
+    target = _profile_target(p.kind)
+    # Un-assign it from anything it's bound to so nothing keeps a dangling ref.
+    if target == "appliance":
+        for a in db.query(Appliance).filter(Appliance.config_profile_id == p.id).all():
+            a.config_profile_id = None
+    else:
+        for n in db.query(Node).filter(Node.config_profile_id == p.id).all():
+            n.config_profile_id = None
     db.delete(p)
     db.commit()
     _config_changed()
-    _log_profile_change(db, "deleted", nm, node_ids, data, False)
+    _log_profile_change(db, "deleted", nm, [], data, False)
     audit.record(db, actor=principal.user_id, action="admin.config_profile_deleted",
                  category="admin", detail={"name": nm})
     return {"ok": True}
+
+
+class ProfileAssign(BaseModel):
+    profile_id: str | None = None  # None clears the assignment
+
+
+@router.put("/nodes/{nid}/config-profile")
+def assign_node_profile(nid: str, body: ProfileAssign,
+                        principal: security.Principal = Depends(security.require_platform_admin),
+                        db: Session = Depends(get_db)):
+    """Assign (or clear) the single configuration profile for a node. Only a
+    node-kind profile may be assigned."""
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    if body.profile_id:
+        p = db.get(ConfigProfile, body.profile_id)
+        if p is None:
+            raise HTTPException(404, "profile not found")
+        if _profile_target(p.kind) != "node":
+            raise HTTPException(400, "that profile is for appliances, not nodes")
+        n.config_profile_id = p.id
+    else:
+        n.config_profile_id = None
+    db.commit()
+    _config_changed()
+    audit.record(db, actor=principal.user_id, action="admin.node_profile_assigned",
+                 category="admin", detail={"node": n.name, "profile_id": n.config_profile_id})
+    return node_config_detail(nid, principal, db)
+
+
+@router.put("/appliances/{aid}/config-profile")
+def assign_appliance_profile(aid: str, body: ProfileAssign,
+                             principal: security.Principal = Depends(security.require_platform_admin),
+                             db: Session = Depends(get_db)):
+    """Assign (or clear) the single configuration profile for an appliance. Only an
+    appliance-kind profile may be assigned."""
+    a = db.get(Appliance, aid)
+    if not a:
+        raise HTTPException(404, "appliance not found")
+    if body.profile_id:
+        p = db.get(ConfigProfile, body.profile_id)
+        if p is None:
+            raise HTTPException(404, "profile not found")
+        if _profile_target(p.kind) != "appliance":
+            raise HTTPException(400, "that profile is for nodes, not appliances")
+        a.config_profile_id = p.id
+    else:
+        a.config_profile_id = None
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.appliance_profile_assigned",
+                 category="admin", detail={"appliance": a.name, "profile_id": a.config_profile_id})
+    prof = db.get(ConfigProfile, a.config_profile_id) if a.config_profile_id else None
+    return {"ok": True, "config_profile": _profile_view(db, prof) if prof else None,
+            "available": [_profile_view(db, x) for x in
+                          db.query(ConfigProfile).order_by(ConfigProfile.name).all()
+                          if _profile_target(x.kind) == "appliance"]}
+
+
+@router.get("/appliances/{aid}/config-profile")
+def appliance_profile_detail(aid: str,
+                             _p: security.Principal = Depends(security.require_platform_admin),
+                             db: Session = Depends(get_db)):
+    a = db.get(Appliance, aid)
+    if not a:
+        raise HTTPException(404, "appliance not found")
+    prof = db.get(ConfigProfile, a.config_profile_id) if a.config_profile_id else None
+    return {"config_profile": _profile_view(db, prof) if prof else None,
+            "available": [_profile_view(db, x) for x in
+                          db.query(ConfigProfile).order_by(ConfigProfile.name).all()
+                          if _profile_target(x.kind) == "appliance"]}
 
 
 # =========================================================================== #

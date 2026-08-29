@@ -115,12 +115,13 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "users", label: "Users", icon: "user", group: "Customers" },
   { key: "reports", label: "Reports", icon: "activity", group: "Customers" },
   { key: "customer-analytics", label: "Customer Analytics", icon: "insights", group: "Customers" },
-  { key: "config-objects", label: "Configuration objects", icon: "key", group: "Integrations" },
-  { key: "sources", label: "Sources", icon: "link", group: "Integrations" },
-  { key: "integrations", label: "Integrations", icon: "puzzle", group: "Integrations" },
-  { key: "service-objects", label: "Service objects", icon: "mail", group: "Integrations" },
-  { key: "pricing", label: "Pricing", icon: "database", group: "Integrations" },
-  { key: "website", label: "Website", icon: "grid", group: "Integrations" },
+  { key: "config-objects", label: "Configuration objects", icon: "key", group: "Configurations" },
+  { key: "config-profiles", label: "Configuration profiles", icon: "puzzle", group: "Configurations" },
+  { key: "sources", label: "Sources", icon: "link", group: "Configurations" },
+  { key: "integrations", label: "Integrations", icon: "puzzle", group: "Configurations" },
+  { key: "service-objects", label: "Service objects", icon: "mail", group: "Configurations" },
+  { key: "pricing", label: "Pricing", icon: "database", group: "Configurations" },
+  { key: "website", label: "Website", icon: "grid", group: "Configurations" },
   { key: "nodes", label: "Nodes", icon: "server", group: "Infrastructure" },
   { key: "storage-usage", label: "Arkive Cloud", icon: "database", group: "Infrastructure" },
   { key: "backups", label: "Backups", icon: "shield", group: "Infrastructure" },
@@ -147,6 +148,7 @@ export default function Admin() {
       {s === "storage-usage" && <StorageUsageAdmin />}
       {s === "backups" && <BackupsAdmin />}
       {s === "config-objects" && <ConfigObjectsAdmin />}
+      {s === "config-profiles" && <ConfigProfiles />}
       {s === "sources" && <SourcesAdmin />}
       {s === "integrations" && <IntegrationsAdmin />}
       {s === "service-objects" && <><ServiceObjectsAdmin /><EmailAdmin /></>}
@@ -1254,7 +1256,6 @@ function Nodes() {
       })}
       {nodes.length === 0 && <Card><div className="muted">No nodes registered.</div></Card>}
       <Workers />
-      <ConfigProfiles flash={flash} />
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
@@ -1328,17 +1329,53 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
       setOv(o);
     } catch { /* ignore */ }
   }
-  async function saveOverrides() {
+  async function saveOverridesMap(map: Record<string, string>) {
     const payload: Record<string, unknown> = {};
-    Object.entries(ov).forEach(([k, v]) => { if (String(v).trim() !== "") payload[k] = v; });
+    Object.entries(map).forEach(([k, v]) => { if (String(v).trim() !== "") payload[k] = v; });
     try {
       const c = await api.put<any>(`/admin/nodes/${id}/config-overrides`, { overrides: payload });
       setConfig(c);
       const o: Record<string, string> = {};
       Object.entries(c.overrides || {}).forEach(([k, v]) => { o[k] = String(v); });
       setOv(o);
-      flash("Overrides saved");
+      flash("Override saved");
     } catch (e) { flash((e as { message?: string }).message || "Save failed"); }
+  }
+  async function assignProfile(pid: string | null) {
+    try {
+      const c = await api.put<any>(`/admin/nodes/${id}/config-profile`, { profile_id: pid });
+      setConfig(c);
+      const o: Record<string, string> = {};
+      Object.entries(c.overrides || {}).forEach(([k, v]) => { o[k] = String(v); });
+      setOv(o);
+      flash(pid ? "Profile assigned" : "Profile unassigned");
+    } catch (e) { flash((e as { message?: string }).message || "Assignment failed"); }
+  }
+  async function openOverride(s: any) {
+    const choices = s.choices || (s.key === "service.email" ? "email-service" : s.key === "service.storage" ? "storage-service" : null);
+    const svc = choices ? (config.services?.[choices] || []) : null;
+    let field: any;
+    if (svc) {
+      field = { name: "v", label: s.label || s.key, defaultValue: ov[s.key] ?? "",
+        options: [{ label: "— inherit (use profile / local) —", value: "" },
+          ...svc.map((x: any) => ({ label: `${x.name}${x.configured ? "" : " (incomplete)"}`, value: x.id }))] };
+    } else if (s.type === "bool") {
+      field = { name: "v", label: s.label || s.key, defaultValue: ov[s.key] ?? "",
+        options: [{ label: "— inherit —", value: "" }, { label: "true", value: "true" }, { label: "false", value: "false" }] };
+    } else {
+      field = { name: "v", label: s.label || s.key, defaultValue: ov[s.key] ?? "",
+        placeholder: s.local_default != null ? `default: ${s.local_default}` : "value" };
+    }
+    const r = await formDialog({
+      title: `Override · ${s.label || s.key}`,
+      message: "Force a value on this node — takes precedence over the config profile. Leave blank to clear the override.",
+      fields: [field], confirmLabel: "Save override",
+    });
+    if (!r) return;
+    const val = String(r.v ?? "").trim();
+    const next = { ...ov };
+    if (val === "") delete next[s.key]; else next[s.key] = val;
+    await saveOverridesMap(next);
   }
   async function loadLogs() { try { setLogs((await api.get<any>(`/admin/nodes/${id}/logs?source=${logSource}&lines=250`)).lines || []); } catch { /* ignore */ } }
 
@@ -1657,23 +1694,38 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
         <>
           <Card style={{ marginBottom: 14 }}>
             <div className="spread" style={{ marginBottom: 8 }}>
-              <h3 style={{ margin: 0, fontSize: 15 }}>Assigned configuration profiles</h3>
-              <span className="faint" style={{ fontSize: 12 }}>{config?.profiles?.length || 0} bound</span>
+              <h3 style={{ margin: 0, fontSize: 15 }}>Assigned configuration profile</h3>
+              <span className="faint" style={{ fontSize: 12 }}>One profile per node</span>
             </div>
-            {!config ? <div className="muted">Loading…</div>
-              : config.profiles.length === 0 ? <div className="muted">No configuration profiles are bound to this node — it uses built-in defaults. Bind one under Nodes → Configuration profiles.</div>
-              : (
-              <div className="stack" style={{ gap: 10 }}>
-                {config.profiles.map((p: any) => (
-                  <div key={p.id} className="spread" style={{ border: "1px solid var(--border)", borderRadius: 10, padding: "10px 12px" }}>
+            {!config ? <div className="muted">Loading…</div> : (
+              <>
+                {config.config_profile ? (
+                  <div className="spread" style={{ border: "1px solid var(--border)", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
                     <div>
-                      <div style={{ fontWeight: 700 }}>{p.name} <span className="faint" style={{ fontWeight: 400, fontSize: 11.5 }}>· {p.key_count} setting{p.key_count === 1 ? "" : "s"}</span></div>
-                      {p.description && <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>{p.description}</div>}
+                      <div style={{ fontWeight: 700 }}>{config.config_profile.name} <span className="faint" style={{ fontWeight: 400, fontSize: 11.5 }}>· {config.config_profile.key_count} setting{config.config_profile.key_count === 1 ? "" : "s"}</span></div>
+                      {config.config_profile.description && <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>{config.config_profile.description}</div>}
                     </div>
-                    <Pill tone={p.enabled ? "ok" : "warn"} dot>{p.enabled ? "enabled" : "disabled"}</Pill>
+                    <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                      <Pill tone={config.config_profile.enabled ? "ok" : "warn"} dot>{config.config_profile.enabled ? "enabled" : "disabled"}</Pill>
+                      <button className="btn ghost sm" onClick={() => assignProfile(null)}>Unassign</button>
+                    </div>
                   </div>
-                ))}
-              </div>
+                ) : (
+                  <div className="muted" style={{ marginBottom: 12 }}>No configuration profile assigned — this node uses built-in defaults (plus any overrides below).</div>
+                )}
+                <label className="row" style={{ gap: 8, alignItems: "center" }}>
+                  <span className="faint" style={{ fontSize: 12 }}>Assign profile</span>
+                  <select className="input sm" style={{ maxWidth: 320 }} value={config.config_profile?.id || ""} onChange={(e) => assignProfile(e.target.value || null)}>
+                    <option value="">— none —</option>
+                    {(config.available_profiles || []).map((p: any) => (
+                      <option key={p.id} value={p.id}>{p.name}{p.enabled ? "" : " (disabled)"}</option>
+                    ))}
+                  </select>
+                </label>
+                {(config.available_profiles || []).length === 0 && (
+                  <div className="faint" style={{ fontSize: 11.5, marginTop: 6 }}>No node-type profiles exist yet — create one under Configurations → Configuration profiles.</div>
+                )}
+              </>
             )}
           </Card>
 
@@ -1683,16 +1735,15 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
               <div className="row" style={{ gap: 6 }}>
                 {config?.applied_source === "unreachable" && <Pill tone="warn" dot>node unreachable</Pill>}
                 {config?.applied_source === "node" && <Pill tone="info" dot>live from node</Pill>}
-                <button className="btn primary sm" onClick={saveOverrides}>Save overrides</button>
               </div>
             </div>
             <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
-              Precedence: <b>override</b> → <b>config profile</b> → <b>local default</b>. Set an override to force a value on this node; clear it to fall back.
+              Precedence: <b>override</b> → <b>config profile</b> → <b>local default</b>.
             </div>
             {!config ? <div className="muted">Loading…</div>
               : (
               <table className="table">
-                <thead><tr><th>Setting</th><th>Effective value</th><th>Source</th><th style={{ minWidth: 180 }}>Override</th></tr></thead>
+                <thead><tr><th>Setting</th><th>Effective value</th><th>Source</th><th style={{ textAlign: "right" }}>Override</th></tr></thead>
                 <tbody>
                   {config.settings.map((s: any) => {
                     const choices = s.choices || (s.key === "service.email" ? "email-service" : s.key === "service.storage" ? "storage-service" : null);
@@ -1716,22 +1767,10 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
                             : s.source === "profile" ? <Pill tone="ok" dot>Config profile</Pill>
                             : <span className="faint" style={{ fontSize: 12 }}>Local default</span>}
                         </td>
-                        <td>
-                          {services ? (
-                            <select className="input sm" value={ov[s.key] ?? ""} onChange={(e) => setOv({ ...ov, [s.key]: e.target.value })}>
-                              <option value="">— inherit —</option>
-                              {services.map((x: any) => <option key={x.id} value={x.id}>{x.name}{x.configured ? "" : " (incomplete)"}</option>)}
-                            </select>
-                          ) : s.type === "bool" ? (
-                            <select className="input sm" value={ov[s.key] ?? ""} onChange={(e) => setOv({ ...ov, [s.key]: e.target.value })}>
-                              <option value="">— inherit —</option>
-                              <option value="true">true</option>
-                              <option value="false">false</option>
-                            </select>
-                          ) : (
-                            <input className="input sm" value={ov[s.key] ?? ""} placeholder="inherit"
-                                   onChange={(e) => setOv({ ...ov, [s.key]: e.target.value })} />
-                          )}
+                        <td style={{ textAlign: "right" }}>
+                          <button className="btn ghost sm" onClick={() => openOverride(s)}>
+                            {s.source === "override" ? "Edit override" : "Override"}
+                          </button>
                         </td>
                       </tr>
                     );
@@ -1896,12 +1935,14 @@ interface CatalogItem { key: string; label: string; type: string; group: string;
 interface NodeRef { id: string; name: string; role: string; }
 interface Profile {
   id: string; name: string; description: string; data: Record<string, any>;
-  node_ids: string[]; enabled: boolean; nodes: { id: string; name: string }[];
-  key_count: number; updated_at?: string;
+  kind: string; target: "node" | "appliance"; enabled: boolean;
+  key_count: number; assigned_count: number; updated_at?: string;
 }
 
-function ConfigProfiles({ flash }: { flash: (m: string) => void }) {
+function ConfigProfiles({ flash: extFlash }: { flash?: (m: string) => void } = {}) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [toast, setToast] = useState("");
+  const flash = (m: string) => { if (extFlash) extFlash(m); else { setToast(m); setTimeout(() => setToast(""), 3000); } };
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [nodes, setNodes] = useState<NodeRef[]>([]);
   const [editing, setEditing] = useState<Profile | "new" | null>(null);
@@ -1915,14 +1956,14 @@ function ConfigProfiles({ flash }: { flash: (m: string) => void }) {
   useEffect(() => { void load(); }, []);
 
   async function remove(p: Profile) {
-    if (!(await confirmDialog({ title: `Delete “${p.name}”?`, message: "Nodes bound to it revert to their default settings on the next heartbeat.", tone: "danger", confirmLabel: "Delete" }))) return;
+    if (!(await confirmDialog({ title: `Delete “${p.name}”?`, message: `${p.target === "appliance" ? "Appliances" : "Nodes"} assigned to it revert to default settings.`, tone: "danger", confirmLabel: "Delete" }))) return;
     try { await api.del(`/admin/config-profiles/${p.id}`); flash("Profile deleted"); await load(); }
     catch (e: any) { void notify({ message: e.message, tone: "danger" }); }
   }
 
   if (editing) {
     return (
-      <ProfileEditor profile={editing === "new" ? null : editing} catalog={catalog} nodes={nodes}
+      <ProfileEditor profile={editing === "new" ? null : editing} catalog={catalog}
                      onDone={() => { setEditing(null); void load(); }} onCancel={() => setEditing(null)} />
     );
   }
@@ -1932,31 +1973,28 @@ function ConfigProfiles({ flash }: { flash: (m: string) => void }) {
       <div className="spread" style={{ margin: "22px 0 12px" }}>
         <div>
           <h3 style={{ margin: 0 }}>Configuration profiles</h3>
-          <span className="faint" style={{ fontSize: 12 }}>Reusable settings bundles you bind to specific nodes</span>
+          <span className="faint" style={{ fontSize: 12 }}>Reusable settings bundles you assign to a node or an appliance (from its own section)</span>
         </div>
         <button className="btn sm primary" onClick={() => setEditing("new")}><Icon name="edit" size={14} /> New profile</button>
       </div>
       {profiles.length === 0 ? (
-        <Card><div className="muted" style={{ padding: "8px 0" }}>No configuration profiles yet — create one to apply settings across nodes.</div></Card>
+        <Card><div className="muted" style={{ padding: "8px 0" }}>No configuration profiles yet — create one, then assign it to a node or appliance from its section.</div></Card>
       ) : (
         <div className="grid grid-3">
           {profiles.map((p) => (
             <Card key={p.id}>
               <div className="spread" style={{ marginBottom: 6 }}>
                 <div style={{ fontWeight: 700 }}>{p.name}</div>
-                {!p.enabled && <Pill tone="warn">disabled</Pill>}
+                <div className="row" style={{ gap: 4 }}>
+                  <Pill tone={p.target === "appliance" ? "warn" : "info"}>{p.target === "appliance" ? "Appliance" : "Node"}</Pill>
+                  {!p.enabled && <Pill tone="warn">disabled</Pill>}
+                </div>
               </div>
               {p.description && <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>{p.description}</div>}
-              <div className="faint" style={{ fontSize: 11.5, marginBottom: 8 }}>
-                {p.key_count} setting{p.key_count === 1 ? "" : "s"} · {p.nodes.length} node{p.nodes.length === 1 ? "" : "s"}
+              <div className="faint" style={{ fontSize: 11.5, marginBottom: 10 }}>
+                {p.key_count} setting{p.key_count === 1 ? "" : "s"} · assigned to {p.assigned_count} {p.target === "appliance" ? "appliance" : "node"}{p.assigned_count === 1 ? "" : "s"}
                 {p.updated_at ? ` · ${timeAgo(p.updated_at)}` : ""}
               </div>
-              {p.nodes.length > 0 && (
-                <div className="row" style={{ gap: 4, flexWrap: "wrap", marginBottom: 10 }}>
-                  {p.nodes.slice(0, 4).map((n) => <Pill key={n.id} tone="info">{n.name}</Pill>)}
-                  {p.nodes.length > 4 && <span className="faint" style={{ fontSize: 11 }}>+{p.nodes.length - 4}</span>}
-                </div>
-              )}
               <div className="row" style={{ gap: 6 }}>
                 <button className="btn ghost sm" onClick={() => setEditing(p)}><Icon name="edit" size={13} /> Edit</button>
                 <button className="btn ghost sm" onClick={() => remove(p)} title="Delete"><Icon name="trash" size={13} /></button>
@@ -1965,12 +2003,13 @@ function ConfigProfiles({ flash }: { flash: (m: string) => void }) {
           ))}
         </div>
       )}
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
 }
 
-function ProfileEditor({ profile, catalog, nodes, onDone, onCancel }: {
-  profile: Profile | null; catalog: CatalogItem[]; nodes: NodeRef[];
+function ProfileEditor({ profile, catalog, onDone, onCancel }: {
+  profile: Profile | null; catalog: CatalogItem[];
   onDone: () => void; onCancel: () => void;
 }) {
   const catIndex = useMemo(() => Object.fromEntries(catalog.map((c) => [c.key, c])), [catalog]);
@@ -1987,7 +2026,7 @@ function ProfileEditor({ profile, catalog, nodes, onDone, onCancel }: {
   const [name, setName] = useState(profile?.name || "");
   const [desc, setDesc] = useState(profile?.description || "");
   const [enabled, setEnabled] = useState(profile?.enabled ?? true);
-  const [nodeIds, setNodeIds] = useState<string[]>(profile?.node_ids || []);
+  const [kind, setKind] = useState<"node" | "appliance">(profile?.target || "node");
   const [mode, setMode] = useState<"table" | "json">("table");
   const [rows, setRows] = useState<{ key: string; value: string }[]>(
     Object.entries(profile?.data || {}).map(([k, v]) => ({ key: k, value: toStr(v) })));
@@ -2029,7 +2068,7 @@ function ProfileEditor({ profile, catalog, nodes, onDone, onCancel }: {
     else data = rowsToData();
     setBusy(true);
     try {
-      const payload = { name, description: desc, data, node_ids: nodeIds, enabled };
+      const payload = { name, description: desc, kind, data, enabled };
       if (profile) await api.put(`/admin/config-profiles/${profile.id}`, payload);
       else await api.post("/admin/config-profiles", payload);
       onDone();
@@ -2061,23 +2100,14 @@ function ProfileEditor({ profile, catalog, nodes, onDone, onCancel }: {
           <span className="faint" style={{ fontSize: 12 }}>Description</span>
           <input className="input sm" value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="What this profile is for" />
         </label>
-
-        <div className="stack" style={{ gap: 6 }}>
-          <span className="faint" style={{ fontSize: 12 }}>Applies to nodes</span>
-          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-            {nodes.map((n) => {
-              const on = nodeIds.includes(n.id);
-              return (
-                <button key={n.id} className={`btn sm ${on ? "primary" : "ghost"}`}
-                        onClick={() => setNodeIds((ids) => on ? ids.filter((x) => x !== n.id) : [...ids, n.id])}>
-                  {on && <Icon name="check" size={12} />} {n.name}
-                  <span className="faint" style={{ fontSize: 10 }}> · {n.role}</span>
-                </button>
-              );
-            })}
-            {nodes.length === 0 && <span className="faint" style={{ fontSize: 12 }}>No nodes registered yet.</span>}
-          </div>
-        </div>
+        <label className="stack" style={{ gap: 5, maxWidth: 260 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Profile type</span>
+          <select className="input sm" value={kind} disabled={!!profile} onChange={(e) => setKind(e.target.value as "node" | "appliance")}>
+            <option value="node">Node</option>
+            <option value="appliance">Appliance</option>
+          </select>
+          <span className="faint" style={{ fontSize: 11 }}>{profile ? "Type can't be changed after creation." : "Which kind of device this profile can be assigned to."}</span>
+        </label>
 
         <div className="spread" style={{ alignItems: "center" }}>
           <span className="faint" style={{ fontSize: 12 }}>Settings</span>
@@ -2305,10 +2335,19 @@ function CmsField({ label, value, onChange, area }: { label: string; value: stri
 function Fleet() {
   const [rows, setRows] = useState<any[]>([]);
   const [prod, setProd] = useState<string>("");
+  const [profiles, setProfiles] = useState<any[]>([]);
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 2800); }
+  async function loadFleet() { try { setRows(await api.get<any[]>("/admin/fleet")); } catch { /* ignore */ } }
   useEffect(() => {
-    api.get<any[]>("/admin/fleet").then(setRows).catch(() => {});
+    void loadFleet();
     api.get<{ appliance?: string }>("/admin/versions").then((v) => setProd(v.appliance || "")).catch(() => {});
+    api.get<{ profiles: any[] }>("/admin/config-profiles").then((r) => setProfiles((r.profiles || []).filter((p) => p.target === "appliance"))).catch(() => {});
   }, []);
+  async function assign(a: any, pid: string) {
+    try { await api.put(`/admin/appliances/${a.id}/config-profile`, { profile_id: pid || null }); flash(pid ? "Profile assigned" : "Profile unassigned"); await loadFleet(); }
+    catch (e) { flash((e as { message?: string }).message || "Assignment failed"); }
+  }
   return (
     <>
       <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
@@ -2317,7 +2356,7 @@ function Fleet() {
       </div>
       <Card>
         <table className="table">
-          <thead><tr><th>Serial</th><th>Model</th><th>State</th><th>Attestation</th><th>Version</th><th>Last updated</th><th>Heartbeat</th></tr></thead>
+          <thead><tr><th>Serial</th><th>Model</th><th>State</th><th>Attestation</th><th>Version</th><th>Configuration profile</th><th>Heartbeat</th></tr></thead>
           <tbody>
             {rows.map((a) => (
               <tr key={a.id}>
@@ -2325,14 +2364,23 @@ function Fleet() {
                 <td><Pill tone="info">{a.state}</Pill></td>
                 <td>{a.attestation_ok ? <Pill tone="ok">ok</Pill> : <Pill tone="danger">failed</Pill>}</td>
                 <td><VersionPill version={a.software_version} updateAvailable={a.update_available} /></td>
-                <td className="faint" title={a.version_updated_at ? fmtAbsolute(a.version_updated_at) : ""}>{a.version_updated_at ? timeAgo(a.version_updated_at) : "—"}</td>
+                <td>
+                  <select className="input sm" style={{ maxWidth: 220 }} value={a.config_profile_id || ""} onChange={(e) => assign(a, e.target.value)}>
+                    <option value="">— none —</option>
+                    {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}{p.enabled ? "" : " (disabled)"}</option>)}
+                  </select>
+                </td>
                 <td className="faint">{timeAgo(a.last_heartbeat_at)}</td>
               </tr>
             ))}
           </tbody>
         </table>
         {rows.length === 0 && <div className="muted">No appliances in fleet.</div>}
+        {profiles.length === 0 && rows.length > 0 && (
+          <div className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>No appliance-type configuration profiles exist yet — create one under Configurations → Configuration profiles.</div>
+        )}
       </Card>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
 }

@@ -155,16 +155,21 @@ class NodeHeartbeat(BaseModel):
 
 
 def _effective_settings(db: Session, node: Node) -> tuple[dict, list[str]]:
-    """Settings in effect for a node = every enabled configuration profile bound
-    to it, merged in name order (later profiles win). Delivered on heartbeat so the
-    node can reconfigure its running behavior without a redeploy."""
+    """Settings in effect for a node = its single assigned configuration profile
+    (kind='node'), or the legacy node_ids-bound profiles. Delivered on heartbeat so
+    the node can reconfigure its running behavior without a redeploy."""
     merged: dict = {}
     applied: list[str] = []
-    for p in (db.query(ConfigProfile).filter(ConfigProfile.enabled.is_(True))
-              .order_by(ConfigProfile.name).all()):
-        if node.id in (p.node_ids or []):
-            merged.update(p.data or {})
-            applied.append(p.name)
+    prof = db.get(ConfigProfile, node.config_profile_id) if node.config_profile_id else None
+    if prof is not None and prof.enabled:
+        merged.update(prof.data or {})
+        applied.append(prof.name)
+    elif prof is None:
+        for p in (db.query(ConfigProfile).filter(ConfigProfile.enabled.is_(True))
+                  .order_by(ConfigProfile.name).all()):
+            if node.id in (p.node_ids or []):
+                merged.update(p.data or {})
+                applied.append(p.name)
     return merged, applied
 
 

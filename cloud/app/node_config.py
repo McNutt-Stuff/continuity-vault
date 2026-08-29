@@ -58,11 +58,19 @@ def _self_layers(db) -> tuple[dict, dict]:
         from .models import ConfigProfile, Node
         node = db.query(Node).filter(Node.is_self.is_(True)).first()
         if node is not None:
-            for p in (db.query(ConfigProfile)
-                      .filter(ConfigProfile.enabled.is_(True))
-                      .order_by(ConfigProfile.name).all()):
-                if node.id in (p.node_ids or []):
-                    profiles.update(p.data or {})
+            # One assigned profile (kind='node') is authoritative; fall back to the
+            # legacy node_ids membership for profiles bound the old way.
+            prof = None
+            if node.config_profile_id:
+                prof = db.get(ConfigProfile, node.config_profile_id)
+            if prof is not None and prof.enabled:
+                profiles.update(prof.data or {})
+            elif prof is None:
+                for p in (db.query(ConfigProfile)
+                          .filter(ConfigProfile.enabled.is_(True))
+                          .order_by(ConfigProfile.name).all()):
+                    if node.id in (p.node_ids or []):
+                        profiles.update(p.data or {})
             if node.config_overrides:
                 overrides.update(node.config_overrides)
     except Exception:  # noqa: BLE001 — table missing / DB not ready

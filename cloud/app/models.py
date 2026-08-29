@@ -259,6 +259,8 @@ class Appliance(Base):
     # Storage service objects this appliance replicates its sealed data to for
     # off-site resiliency (multiple, distinct destinations).
     backup_service_ids = Column(JSON, default=list)
+    # The single configuration profile (kind='appliance') assigned to this appliance.
+    config_profile_id = Column(String, nullable=True)
     created_at = Column(DateTime, default=_now)
 
 
@@ -643,6 +645,8 @@ class Node(Base):
     # Per-node setting overrides — HIGHEST precedence (override > config profile >
     # local/env default). Delivered to remote nodes on heartbeat.
     config_overrides = Column(JSON, default=dict)
+    # The single configuration profile (kind='node') assigned to this node.
+    config_profile_id = Column(String, nullable=True)
     # Storage service objects this node backs its own core state up to. A list so
     # a node can replicate its infrastructure backup to MULTIPLE destinations for
     # resiliency (use different services, not the same one twice).
