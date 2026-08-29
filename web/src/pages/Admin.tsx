@@ -1695,9 +1695,10 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
                 <thead><tr><th>Setting</th><th>Effective value</th><th>Source</th><th style={{ minWidth: 180 }}>Override</th></tr></thead>
                 <tbody>
                   {config.settings.map((s: any) => {
-                    const services = s.choices ? (config.services?.[s.choices] || []) : null;
+                    const choices = s.choices || (s.key === "service.email" ? "email-service" : s.key === "service.storage" ? "storage-service" : null);
+                    const services = choices ? (config.services?.[choices] || []) : null;
                     const svcName = (id: string) => (services || []).find((x: any) => x.id === id)?.name || id;
-                    const shownVal = s.choices && s.value ? svcName(String(s.value)) : (s.value == null || s.value === "" ? "—" : String(s.value));
+                    const shownVal = choices && s.value ? svcName(String(s.value)) : (s.value == null || s.value === "" ? "—" : String(s.value));
                     const appliedVal = config.applied ? config.applied[s.key] : undefined;
                     const drift = config.applied != null && s.source !== "local" && String(appliedVal ?? "") !== String(s.value ?? "");
                     return (
@@ -2093,6 +2094,12 @@ function ProfileEditor({ profile, catalog, nodes, onDone, onCancel }: {
             </datalist>
             {rows.map((row, i) => {
               const spec = catIndex[row.key.trim()];
+              // Service-assignment keys always render a service picker, even if the
+              // catalog metadata hasn't loaded yet.
+              const key = row.key.trim();
+              const choices = spec?.choices
+                || (key === "service.email" ? "email-service"
+                    : key === "service.storage" ? "storage-service" : null);
               return (
                 <div key={i} className="stack" style={{ gap: 3 }}>
                   <div className="row" style={{ gap: 8, alignItems: "center" }}>
@@ -2103,10 +2110,10 @@ function ProfileEditor({ profile, catalog, nodes, onDone, onCancel }: {
                              const ex = catIndex[k.trim()];
                              setRow(i, { key: k, value: (ex && !row.value) ? (ex.example || "") : row.value });
                            }} />
-                    {spec?.choices ? (
+                    {choices ? (
                       <select className="input sm flex1" value={row.value} onChange={(e) => setRow(i, { value: e.target.value })}>
-                        <option value="">— none —</option>
-                        {services.filter((x) => x.category === (spec.choices === "email-service" ? "email" : "storage")).map((x) => (
+                        <option value="">— none (use default) —</option>
+                        {services.filter((x) => x.category === (choices === "email-service" ? "email" : "storage")).map((x) => (
                           <option key={x.id} value={x.id}>{x.name}{x.configured ? "" : " (incomplete)"}</option>
                         ))}
                       </select>
