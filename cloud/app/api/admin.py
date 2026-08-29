@@ -9,6 +9,7 @@ an operator read customer plaintext (spec 3.1: no standing plaintext access).
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 import shutil
@@ -1656,6 +1657,52 @@ def node_tenants(nid: str, db: Session = Depends(get_db)):
     return {"node": n.name, "total_bytes": total, "tenants": rows}
 
 
+@router.get("/nodes/{nid}/config")
+def node_config_detail(nid: str,
+                       _p: security.Principal = Depends(security.require_platform_admin),
+                       db: Session = Depends(get_db)):
+    """Configuration profiles bound to this node + the resulting effective settings.
+    For a reachable customer-tenant node we also fetch what it has actually applied
+    (from its node-settings.json) so config drift is visible."""
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    bound = [p for p in db.query(ConfigProfile).order_by(ConfigProfile.name).all()
+             if nid in (p.node_ids or [])]
+    merged: dict = {}
+    for p in bound:
+        if p.enabled:
+            merged.update(p.data or {})
+    idx = config_catalog.catalog_index()
+    settings = []
+    for k in sorted(merged):
+        spec = idx.get(k, {})
+        settings.append({"key": k, "value": merged[k], "label": spec.get("label"),
+                         "unit": spec.get("unit"), "group": spec.get("group"),
+                         "description": spec.get("description")})
+    out = {
+        "profiles": [{"id": p.id, "name": p.name, "description": p.description or "",
+                      "enabled": bool(p.enabled), "key_count": len(p.data or {}),
+                      "data": p.data or {},
+                      "updated_at": p.updated_at.isoformat() if p.updated_at else None}
+                     for p in bound],
+        "settings": settings,
+        "applied": None,      # what the node currently has in effect
+        "applied_source": None,
+    }
+    if n.is_self:
+        out["applied"] = node_config.effective(db)
+        out["applied_source"] = "profiles"
+    elif _remote_capable(n):
+        try:
+            res = _node_call(n, "/nodes/sync/config")
+            out["applied"] = (res or {}).get("settings")
+            out["applied_source"] = "node"
+        except Exception:  # noqa: BLE001
+            out["applied_source"] = "unreachable"
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Configuration profiles — reusable named settings bound to specific nodes.    #
 # --------------------------------------------------------------------------- #
@@ -1670,6 +1717,17 @@ def _profile_view(db: Session, p: ConfigProfile) -> dict:
             "nodes": [{"id": nid, "name": names.get(nid, nid)} for nid in ids],
             "key_count": len(p.data or {}),
             "updated_at": p.updated_at.isoformat() if p.updated_at else None}
+
+
+def _log_profile_change(db: Session, action: str, name: str, node_ids: list[str],
+                        data: dict, enabled: bool) -> None:
+    """Verbose log of a profile roll-out: which nodes it targets + the settings."""
+    names = ([n.name for n in db.query(Node).filter(Node.id.in_(node_ids)).all()]
+             if node_ids else [])
+    logging.getLogger("cv.nodeconfig").info(
+        "config profile %s: '%s' (%s, %d keys) → nodes %s; settings=%s",
+        action, name, "enabled" if enabled else "disabled",
+        len(data or {}), names or "(none)", data or {})
 
 
 @router.get("/config-catalog")
@@ -1721,6 +1779,7 @@ def create_config_profile(body: ProfileIn,
     db.commit()
     db.refresh(p)
     node_config.invalidate()
+    _log_profile_change(db, "created", p.name, node_ids, data, p.enabled)
     audit.record(db, actor=principal.user_id, action="admin.config_profile_created",
                  category="admin", detail={"name": name})
     return _profile_view(db, p)
@@ -1747,6 +1806,7 @@ def update_config_profile(pid: str, body: ProfileIn,
     db.commit()
     db.refresh(p)
     node_config.invalidate()
+    _log_profile_change(db, "updated", p.name, node_ids, data, p.enabled)
     audit.record(db, actor=principal.user_id, action="admin.config_profile_updated",
                  category="admin", detail={"name": p.name})
     return _profile_view(db, p)
@@ -1760,9 +1820,12 @@ def delete_config_profile(pid: str,
     if p is None:
         raise HTTPException(404, "not found")
     nm = p.name
+    node_ids = list(p.node_ids or [])
+    data = dict(p.data or {})
     db.delete(p)
     db.commit()
     node_config.invalidate()
+    _log_profile_change(db, "deleted", nm, node_ids, data, False)
     audit.record(db, actor=principal.user_id, action="admin.config_profile_deleted",
                  category="admin", detail={"name": nm})
     return {"ok": True}
@@ -1996,6 +2059,22 @@ _SERVICE_KINDS: dict = {
         "setting_defaults": {"region": "us-east-1"},
         "required": ["from_email"],
     },
+    "email-sendgrid": {
+        "label": "SendGrid email",
+        "category": "email",
+        "credential_keys": ["api_key"],
+        "settings": ["from_email", "from_name", "reply_to"],
+        "required": ["from_email"],
+    },
+    "email-smtp": {
+        "label": "SMTP email",
+        "category": "email",
+        "credential_keys": ["smtp_password"],
+        "settings": ["smtp_host", "smtp_port", "smtp_user", "smtp_starttls",
+                     "from_email", "from_name", "reply_to"],
+        "setting_defaults": {"smtp_port": "587", "smtp_starttls": "true"},
+        "required": ["smtp_host", "from_email"],
+    },
 }
 
 
@@ -2199,34 +2278,23 @@ def test_service_object(sid: str, body: "ServiceTest | None" = None,
     cfg = _service_merged(db, svc)
     if svc.kind.startswith("storage-"):
         return _test_storage_service(db, principal, svc, cfg)
-    if svc.kind == "email-ses":
+    if svc.kind.startswith("email-"):
         from .. import emailer
         to = ((body.to if body else None) or "").strip()
         if not to:
             return {"ok": False, "error": "enter a recipient email address"}
-        from_email = (cfg.get("from_email") or "").strip()
-        if not from_email:
+        if not (cfg.get("from_email") or "").strip():
             return {"ok": False, "error": "set a From email on this service object"}
-        # Test THIS service object's own config (not the node-resolved sender).
-        send_cfg = {
-            "region": cfg.get("region") or get_settings().s3_region,
-            "from_email": from_email,
-            "from_name": cfg.get("from_name") or "Arkive",
-            "reply_to": cfg.get("reply_to") or "",
-            "aws_access_key_id": (cfg.get("aws_access_key_id") or "").strip(),
-            "aws_secret": (cfg.get("aws_secret_access_key") or "").strip(),
-        }
         html = emailer.render(
             "Test email from Arkive",
             emailer.text_to_html(f"This confirms the '{svc.name}' email service object is "
                                  "configured correctly and can deliver mail."),
             preheader="Arkive email service test")
-        try:
-            emailer._send_ses(send_cfg, to, "Test email from Arkive", html,
-                              "Arkive email service test — this service object is configured correctly.")
-            result = {"ok": True, "error": None}
-        except Exception as exc:  # surface the SES error to the admin
-            result = {"ok": False, "error": str(exc)}
+        # Route by the service's own kind (SES / SendGrid / SMTP / …) using THIS
+        # service object's config, not the node-resolved sender.
+        result = emailer.send_via_service(
+            svc.kind, cfg, to, "Test email from Arkive", html,
+            "Arkive email service test — this service object is configured correctly.")
         audit.record(db, actor=principal.user_id, action="admin.service_object_test",
                      category="admin", detail={"name": svc.name, "to": to,
                                                "ok": result["ok"], "error": result["error"]})

@@ -976,7 +976,13 @@ function CommsHistory({ userId }: { userId: string }) {
   async function open(id: string) {
     try { setSel(await api.get<any>(`/admin/communications/${id}`)); } catch { /* ignore */ }
   }
-  const statusTone = (s: string) => (s === "failed" ? "danger" : s === "logged" ? "warn" : "ok");
+  // Delivery: whether it actually left the platform. "Logged" = no live email
+  // provider was configured on the sending server, so it was recorded but not sent.
+  const delivery = (r: any): { label: string; tone: "ok" | "warn" | "danger"; hint: string } => {
+    if (r.status === "failed") return { label: "Failed", tone: "danger", hint: r.error || "Delivery failed" };
+    if (r.status === "logged") return { label: "Not sent (log only)", tone: "warn", hint: "No email provider was configured on the sending server — recorded but not emailed." };
+    return { label: "Delivered", tone: "ok", hint: r.channel ? `Sent via ${r.channel}` : "Sent" };
+  };
 
   return (
     <Card style={{ marginBottom: 16 }}>
@@ -990,18 +996,25 @@ function CommsHistory({ userId }: { userId: string }) {
         <table className="table">
           <thead><tr><th>Sent</th><th>Type</th><th>Subject</th><th>Delivery</th><th>Opened</th></tr></thead>
           <tbody>
-            {rows.map((r) => (
+            {rows.map((r) => {
+              const d = delivery(r);
+              return (
               <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => void open(r.id)}>
                 <td className="faint" style={{ fontSize: 12, whiteSpace: "nowrap" }} title={r.created_at ? fmtAbsolute(r.created_at) : ""}>{r.created_at ? timeAgo(r.created_at) : "—"}</td>
                 <td style={{ fontSize: 12.5 }}>{commCatLabel(r.category)}</td>
                 <td style={{ fontSize: 12.5, fontWeight: 600 }}>{r.subject || <span className="faint">(no subject)</span>}</td>
-                <td>
-                  <Pill tone={statusTone(r.status)} dot>{r.status === "logged" ? "log only" : r.status}</Pill>
+                <td title={d.hint}>
+                  <Pill tone={d.tone} dot>{d.label}</Pill>
                   {r.channel && r.channel !== "log" && r.channel !== "error" && <span className="faint" style={{ fontSize: 11, marginLeft: 6 }}>{r.channel}</span>}
                 </td>
-                <td>{r.opened ? <Pill tone="ok" dot>opened{r.open_count > 1 ? ` ·${r.open_count}` : ""}</Pill> : <span className="faint" style={{ fontSize: 12 }}>—</span>}</td>
+                <td>
+                  {r.opened
+                    ? <Pill tone="ok" dot>Opened{r.open_count > 1 ? ` ·${r.open_count}` : ""}</Pill>
+                    : <span className="faint" style={{ fontSize: 12 }}>Unopened</span>}
+                </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       )}
@@ -1016,9 +1029,9 @@ function CommsHistory({ userId }: { userId: string }) {
               <Mini label="To" value={<span style={{ fontSize: 13 }}>{sel.to_email || "—"}</span>} />
               <Mini label="Type" value={<span style={{ fontSize: 13 }}>{commCatLabel(sel.category)}</span>} />
               <Mini label="Sent" value={<span style={{ fontSize: 13 }}>{sel.created_at ? fmtAbsolute(sel.created_at) : "—"}</span>} />
-              <Mini label="Delivery" value={<span style={{ fontSize: 13 }}>{sel.status}{sel.provider ? ` · ${sel.provider}` : ""}</span>} />
+              <Mini label="Delivery" value={<span style={{ fontSize: 13 }}>{delivery(sel).label}{sel.provider && sel.status === "sent" ? ` · ${sel.provider}` : ""}</span>} />
               <Mini label="From node" value={<span style={{ fontSize: 13 }}>{sel.node_name || "—"}</span>} />
-              <Mini label="Opened" value={<span style={{ fontSize: 13 }}>{sel.opened ? `${sel.open_count}× · ${sel.opened_at ? fmtAbsolute(sel.opened_at) : ""}` : "Not yet"}</span>} />
+              <Mini label="Opened" value={<span style={{ fontSize: 13 }}>{sel.opened ? `Opened ${sel.open_count}× · ${sel.opened_at ? fmtAbsolute(sel.opened_at) : ""}` : "Unopened"}</span>} />
             </div>
             {sel.error && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12.5, marginBottom: 10 }}>Delivery error: {sel.error}</div>}
             <div className="faint" style={{ fontSize: 12, marginBottom: 4 }}>Message body</div>
@@ -1255,10 +1268,11 @@ function uptimeShort(s?: number | null): string {
   return `up ${m}m`;
 }
 
-type NodeTab = "health" | "processes" | "keys" | "logs" | "tenants";
+type NodeTab = "health" | "processes" | "keys" | "logs" | "tenants" | "config";
 const NODE_TABS: { key: NodeTab; label: string; icon: IconName }[] = [
   { key: "health", label: "System health", icon: "activity" },
   { key: "processes", label: "Processes & services", icon: "grid" },
+  { key: "config", label: "Configuration", icon: "puzzle" },
   { key: "keys", label: "Keys & certificates", icon: "lock" },
   { key: "logs", label: "Logs", icon: "note" },
   { key: "tenants", label: "Tenant usage", icon: "user" },
@@ -1279,6 +1293,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
   const [history, setHistory] = useState<any[]>([]);
   const [keys, setKeys] = useState<any>(null);
   const [tenants, setTenants] = useState<any>(null);
+  const [config, setConfig] = useState<any>(null);
   const [logs, setLogs] = useState<any[]>([]);
   const [logSource, setLogSource] = useState("app");
   const [logPaused, setLogPaused] = useState(false);
@@ -1303,6 +1318,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
   async function loadHistory(w: string) { try { setHistory((await api.get<any>(`/admin/nodes/${id}/history?window=${w}`)).series || []); } catch { /* ignore */ } }
   async function loadKeys() { try { setKeys(await api.get<any>(`/admin/nodes/${id}/keys`)); } catch { /* ignore */ } }
   async function loadTenants() { try { setTenants(await api.get<any>(`/admin/nodes/${id}/tenants`)); } catch { /* ignore */ } }
+  async function loadConfig() { try { setConfig(await api.get<any>(`/admin/nodes/${id}/config`)); } catch { /* ignore */ } }
   async function loadLogs() { try { setLogs((await api.get<any>(`/admin/nodes/${id}/logs?source=${logSource}&lines=250`)).lines || []); } catch { /* ignore */ } }
 
   useEffect(() => { void loadNode(); void loadLive(); void loadKeys(); void loadTenants();
@@ -1317,6 +1333,9 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
     const iv = setInterval(() => { if (!logPaused) void loadLogs(); }, 5000); return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, logSource, logPaused, id]);
+  useEffect(() => { if (tab === "config") void loadConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, id]);
 
   async function ctl(action: string, unit: string, confirmMsg?: string) {
     if (confirmMsg && !await confirmDialog({ title: "Confirm", message: confirmMsg, tone: "danger", confirmLabel: action })) return;
@@ -1620,6 +1639,76 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
             </tbody>
           </table>
         </Card>
+      )}
+      {tab === "config" && (
+        <>
+          <Card style={{ marginBottom: 14 }}>
+            <div className="spread" style={{ marginBottom: 8 }}>
+              <h3 style={{ margin: 0, fontSize: 15 }}>Assigned configuration profiles</h3>
+              <span className="faint" style={{ fontSize: 12 }}>{config?.profiles?.length || 0} bound</span>
+            </div>
+            {!config ? <div className="muted">Loading…</div>
+              : config.profiles.length === 0 ? <div className="muted">No configuration profiles are bound to this node — it uses built-in defaults. Bind one under Nodes → Configuration profiles.</div>
+              : (
+              <div className="stack" style={{ gap: 10 }}>
+                {config.profiles.map((p: any) => (
+                  <div key={p.id} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: "10px 12px" }}>
+                    <div className="spread">
+                      <div style={{ fontWeight: 700 }}>{p.name} <span className="faint" style={{ fontWeight: 400, fontSize: 11.5 }}>· {p.key_count} setting{p.key_count === 1 ? "" : "s"}</span></div>
+                      <Pill tone={p.enabled ? "ok" : "warn"} dot>{p.enabled ? "enabled" : "disabled"}</Pill>
+                    </div>
+                    {p.description && <div className="faint" style={{ fontSize: 12, margin: "2px 0 6px" }}>{p.description}</div>}
+                    <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                      {Object.entries(p.data || {}).map(([k, v]) => (
+                        <span key={k} style={{ fontSize: 11, padding: "2px 7px", borderRadius: 6, background: "var(--inset)", fontFamily: "monospace" }}>{k}={String(v)}</span>
+                      ))}
+                      {Object.keys(p.data || {}).length === 0 && <span className="faint" style={{ fontSize: 12 }}>No settings</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card>
+            <div className="spread" style={{ marginBottom: 8 }}>
+              <h3 style={{ margin: 0, fontSize: 15 }}>Effective settings</h3>
+              {config?.applied_source === "unreachable" && <Pill tone="warn" dot>node unreachable</Pill>}
+              {config?.applied_source === "node" && <Pill tone="info" dot>live from node</Pill>}
+              {config?.applied_source === "profiles" && <Pill tone="ok" dot>this node</Pill>}
+            </div>
+            <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
+              The merged result of the enabled profiles above — what this node's scheduler, notifications and telemetry actually use.
+            </div>
+            {!config ? <div className="muted">Loading…</div>
+              : config.settings.length === 0 ? <div className="muted">No settings in effect — the node runs on built-in defaults.</div>
+              : (
+              <table className="table">
+                <thead><tr><th>Setting</th><th>Value</th><th>Applied on node</th></tr></thead>
+                <tbody>
+                  {config.settings.map((s: any) => {
+                    const appliedVal = config.applied ? config.applied[s.key] : undefined;
+                    const drift = config.applied != null && String(appliedVal) !== String(s.value);
+                    return (
+                      <tr key={s.key}>
+                        <td>
+                          <div style={{ fontWeight: 600, fontSize: 12.5 }}>{s.label || s.key}</div>
+                          <div className="faint" style={{ fontSize: 11 }}>{s.key}{s.group ? ` · ${s.group}` : ""}</div>
+                        </td>
+                        <td style={{ fontWeight: 600 }}>{String(s.value)}{s.unit ? <span className="faint" style={{ fontSize: 11, marginLeft: 4 }}>{s.unit}</span> : null}</td>
+                        <td>
+                          {config.applied == null ? <span className="faint">—</span>
+                            : drift ? <Pill tone="warn" dot>differs: {String(appliedVal ?? "unset")}</Pill>
+                            : <Pill tone="ok" dot>in sync</Pill>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </Card>
+        </>
       )}
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>

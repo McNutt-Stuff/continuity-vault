@@ -520,6 +520,15 @@ def node_debug(authorization: str = Header(default=""), db: Session = Depends(ge
     return _brief_stats(db)
 
 
+@router.get("/config")
+def node_config_state(authorization: str = Header(default=""), db: Session = Depends(get_db)):
+    """The settings this node currently has in effect (config profiles applied via
+    its last heartbeat), so the control plane can show applied-vs-assigned drift."""
+    _require_fleet(authorization)
+    from .. import node_config
+    return {"settings": node_config.effective(db)}
+
+
 class ControlReq(BaseModel):
     action: str
     unit: str = ""

@@ -14,10 +14,13 @@ the helpers that build bodies, so notification content can't inject markup.
 from __future__ import annotations
 
 import html as _html
+import json
 import logging
 import smtplib
 import ssl
 import time
+import urllib.error
+import urllib.request
 import uuid
 from email.message import EmailMessage
 from typing import Iterable, Optional
@@ -27,6 +30,20 @@ from .config import get_settings
 
 settings = get_settings()
 log = logging.getLogger("arkive.email")
+
+# Map an email ServiceObject kind → the transport its sender uses. Adding a new
+# provider = register a kind here + a sender in _SENDERS (+ a kind in admin's
+# _SERVICE_KINDS). Unknown kinds fall back to the suffix after "email-".
+_EMAIL_KIND_PROVIDER = {
+    "email-ses": "ses",
+    "email-sendgrid": "sendgrid",
+    "email-smtp": "smtp",
+}
+
+
+def _provider_for_kind(kind: str) -> str:
+    kind = kind or ""
+    return _EMAIL_KIND_PROVIDER.get(kind) or kind.split("email-", 1)[-1] or "ses"
 
 _ACCENT = "#4f7cff"
 _DARK = "#0b1120"
@@ -92,24 +109,53 @@ def _config() -> dict:
             cfg["aws_secret"] = ov["aws_secret_access_key"].strip()
     except Exception:
         pass
-    # The email service object selected on the running node wins over all of the
-    # above, so mail routing scales per-node (kind "email-ses").
+    # The email service object assigned to the running node is AUTHORITATIVE: any
+    # node that sends email uses its assigned service, and the service KIND selects
+    # the transport (email-ses → ses, email-sendgrid → sendgrid, email-smtp → smtp).
     try:
         from .services import self_email_service
         svc = self_email_service()
-        if svc and svc.get("kind") == "email-ses":
+        kind = str((svc or {}).get("kind") or "")
+        if svc and kind.startswith("email-"):
             ov = svc.get("config") or {}
-            for k in ("provider", "from_email", "from_name", "reply_to", "region"):
-                if ov.get(k):
-                    cfg[k] = ov[k]
+            cfg["provider"] = ov.get("provider") or _provider_for_kind(kind)
+            cfg["service_kind"] = kind
+            cfg["service_name"] = svc.get("name") or ""
+            # Pass every non-empty config value through so each sender reads its own
+            # keys (api_key, smtp_host/user/password, aws creds, from_email, …).
+            for k, v in ov.items():
+                if v not in (None, ""):
+                    cfg[k] = v
+            # SES stores its secret under the historical cfg key name.
             if ov.get("aws_access_key_id") and ov.get("aws_secret_access_key"):
-                cfg["aws_access_key_id"] = ov["aws_access_key_id"].strip()
-                cfg["aws_secret"] = ov["aws_secret_access_key"].strip()
+                cfg["aws_access_key_id"] = str(ov["aws_access_key_id"]).strip()
+                cfg["aws_secret"] = str(ov["aws_secret_access_key"]).strip()
             cfg["enabled"] = True
     except Exception:
         pass
+    # Surface a common misconfiguration (an assigned provider missing its creds) so
+    # it doesn't silently fall into log/error mode.
+    if cfg.get("enabled"):
+        miss = _missing_creds(cfg)
+        if miss:
+            log.warning("email service '%s' (%s): %s", cfg.get("service_name") or "default",
+                        cfg.get("provider"), miss)
     _cfg_cache, _cfg_at = cfg, time.time()
     return cfg
+
+
+def _missing_creds(cfg: dict) -> str:
+    """Human-readable reason the configured provider can't send, or '' if it can."""
+    p = cfg.get("provider")
+    if p in ("ses", "sendgrid", "smtp") and not cfg.get("from_email"):
+        return "no From email configured"
+    if p == "ses" and not (cfg.get("aws_access_key_id") and cfg.get("aws_secret")):
+        return "SES selected but AWS credentials are missing"
+    if p == "sendgrid" and not cfg.get("api_key"):
+        return "SendGrid selected but api_key is missing"
+    if p == "smtp" and not (cfg.get("smtp_host") or settings.smtp_host):
+        return "SMTP selected but smtp_host is missing"
+    return ""
 
 
 def invalidate_config_cache() -> None:
@@ -214,20 +260,86 @@ def _send_ses(cfg: dict, to: str, subject: str, html: str, text: str) -> None:
 
 
 def _send_smtp(cfg: dict, to: str, subject: str, html: str, text: str) -> None:
+    # Prefer the service object's own SMTP config (email-smtp), fall back to env.
+    host = cfg.get("smtp_host") or settings.smtp_host
+    if not host:
+        raise RuntimeError("SMTP host not configured")
+    port = int(cfg.get("smtp_port") or settings.smtp_port or 587)
+    user = cfg.get("smtp_user") or settings.smtp_user
+    password = cfg.get("smtp_password") or settings.smtp_password or ""
+    starttls = cfg.get("smtp_starttls", settings.smtp_starttls)
+    if isinstance(starttls, str):
+        starttls = starttls.strip().lower() in ("1", "true", "yes", "on")
     msg = EmailMessage()
-    msg["From"] = f'{cfg["from_name"]} <{cfg["from_email"]}>' if cfg["from_name"] else cfg["from_email"]
+    msg["From"] = f'{cfg["from_name"]} <{cfg["from_email"]}>' if cfg.get("from_name") else cfg["from_email"]
     msg["To"] = to
     msg["Subject"] = subject
     if cfg.get("reply_to"):
         msg["Reply-To"] = cfg["reply_to"]
     msg.set_content(text)
     msg.add_alternative(html, subtype="html")
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as server:
-        if settings.smtp_starttls:
+    with smtplib.SMTP(host, port, timeout=15) as server:
+        if starttls:
             server.starttls(context=ssl.create_default_context())
-        if settings.smtp_user:
-            server.login(settings.smtp_user, settings.smtp_password or "")
+        if user:
+            server.login(user, password)
         server.send_message(msg)
+
+
+def _send_sendgrid(cfg: dict, to: str, subject: str, html: str, text: str) -> None:
+    api_key = (cfg.get("api_key") or "").strip()
+    if not api_key:
+        raise RuntimeError("SendGrid api_key not configured")
+    if not cfg.get("from_email"):
+        raise RuntimeError("SendGrid from_email not configured")
+    sender = ({"email": cfg["from_email"], "name": cfg["from_name"]}
+              if cfg.get("from_name") else {"email": cfg["from_email"]})
+    payload: dict = {
+        "personalizations": [{"to": [{"email": to}]}],
+        "from": sender,
+        "subject": subject,
+        "content": [{"type": "text/plain", "value": text or " "},
+                    {"type": "text/html", "value": html}],
+    }
+    if cfg.get("reply_to"):
+        payload["reply_to"] = {"email": cfg["reply_to"]}
+    req = urllib.request.Request(
+        "https://api.sendgrid.com/v3/mail/send", data=json.dumps(payload).encode(),
+        method="POST",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            if r.status >= 300:
+                raise RuntimeError(f"SendGrid HTTP {r.status}")
+    except urllib.error.HTTPError as e:  # surface SendGrid's error body
+        body = e.read().decode("utf-8", "ignore")[:300]
+        raise RuntimeError(f"SendGrid HTTP {e.code}: {body}") from e
+
+
+# Provider → sender. Register a new email provider here (and a kind in
+# _EMAIL_KIND_PROVIDER + admin _SERVICE_KINDS) to support it fleet-wide.
+_SENDERS = {"ses": _send_ses, "smtp": _send_smtp, "sendgrid": _send_sendgrid}
+
+
+def send_via_service(kind: str, config: dict, to: str, subject: str, html: str,
+                     text: str = "") -> dict:
+    """Send through a SPECIFIC email service object's own config (the admin 'send
+    test' button), independent of the node-resolved sender. Returns {ok, error}."""
+    cfg = dict(config or {})
+    cfg["provider"] = cfg.get("provider") or _provider_for_kind(str(kind or ""))
+    cfg.setdefault("from_name", cfg.get("from_name") or "Arkive")
+    if not cfg.get("region"):
+        cfg["region"] = settings.s3_region
+    if cfg.get("aws_secret_access_key") and not cfg.get("aws_secret"):
+        cfg["aws_secret"] = str(cfg["aws_secret_access_key"]).strip()
+    sender = _SENDERS.get(cfg["provider"])
+    if not sender:
+        return {"ok": False, "error": f"no sender for provider '{cfg['provider']}'"}
+    try:
+        sender(cfg, to, subject, html, text or "Arkive email service test")
+        return {"ok": True, "error": None}
+    except Exception as exc:  # noqa: BLE001 — surface to the admin
+        return {"ok": False, "error": str(exc)}
 
 
 def send_verbose(to: str, subject: str, *, html: str, text: str = "",
@@ -248,12 +360,10 @@ def send_verbose(to: str, subject: str, *, html: str, text: str = "",
         html = comms.inject_pixel(html, cid)
     except Exception:  # noqa: BLE001
         pass
-    if provider in ("ses", "smtp") and not (provider == "smtp" and not settings.smtp_host):
+    sender = _SENDERS.get(provider)
+    if sender:
         try:
-            if provider == "ses":
-                _send_ses(cfg, to, subject, html, text)
-            else:
-                _send_smtp(cfg, to, subject, html, text)
+            sender(cfg, to, subject, html, text)
             channel = provider
         except Exception as exc:  # never raise into request paths
             log.error("email send failed (%s -> %s): %s", provider, to, exc)
@@ -262,6 +372,8 @@ def send_verbose(to: str, subject: str, *, html: str, text: str = "",
         # Log mode (no live provider): emit the subject plus each body line as its
         # own short, tagged record so sign-in codes are always readable/greppable
         # in the service logs (journalctl -u cv-cloud), regardless of line length.
+        if provider != "log":
+            log.warning("no sender for email provider '%s' — logging instead", provider)
         log.warning("EMAIL (provider=log) -> %s | %s", to, subject)
         for line in text.splitlines():
             line = line.strip()

@@ -444,6 +444,17 @@ _OPTION_LABELS = {"cv-cloud": "Arkive Cloud", "appliance": "Secure Appliance",
                   "customer-cloud": "Your own cloud storage"}
 
 
+def _ap_sig(plan) -> tuple:
+    """Stable signature of an appliance plan (capacity, qty pairs) for diffing."""
+    return tuple(sorted((float(s.get("capacity_tb") or 0), int(s.get("qty") or 0))
+                        for s in (plan or []) if int(s.get("qty") or 0) > 0))
+
+
+def _plan_sig(options, licensed_bytes, appliance_plan) -> tuple:
+    """Everything that affects the plan/price — so ANY change reliably notifies."""
+    return (tuple(sorted(options or [])), int(licensed_bytes or 0), _ap_sig(appliance_plan))
+
+
 def _money(n, currency: str = "USD") -> str:
     sym = "$" if currency == "USD" else ""
     return f"{sym}{float(n or 0):,.2f}"
@@ -510,6 +521,9 @@ def update_plan(body: PlanUpdate,
         return view
     if not (security.is_org_admin(principal.role) or principal.is_platform_admin):
         raise HTTPException(403, "security-admin role required")
+    # Snapshot the whole plan up-front so we reliably notify on ANY change —
+    # including appliance removals / capacity changes the old per-field checks missed.
+    before_sig = _plan_sig(tenant.protection_options, tenant.licensed_bytes, tenant.appliance_plan)
     summary = []
     if body.options is not None:
         prev = set(tenant.protection_options or [])
@@ -530,18 +544,26 @@ def update_plan(body: PlanUpdate,
         if new_tb != prev_tb:
             summary.append(f"Set protected storage to {new_tb:g} TB")
     if body.appliance_plan is not None:
+        prev_qty = sum(q for _, q in _ap_sig(tenant.appliance_plan))
         tenant.appliance_plan = [
             {"capacity_tb": s.get("capacity_tb"), "qty": int(s.get("qty") or 0)}
             for s in body.appliance_plan if int(s.get("qty") or 0) > 0
         ]
-        qty = sum(int(s.get("qty") or 0) for s in tenant.appliance_plan)
-        if qty:
-            summary.append(f"Updated appliance plan ({qty} unit{'s' if qty != 1 else ''})")
+        new_qty = sum(q for _, q in _ap_sig(tenant.appliance_plan))
+        if new_qty == 0 and prev_qty > 0:
+            summary.append("Removed all secure appliances")
+        elif new_qty != prev_qty:
+            summary.append(f"Updated appliance plan to {new_qty} unit{'s' if new_qty != 1 else ''}")
     db.commit()
     audit.record(db, actor=principal.user_id, action="billing.plan_updated",
                  tenant_id=tenant.id, resource=tenant.id,
                  detail={"options": tenant.protection_options,
                          "licensed_bytes": tenant.licensed_bytes})
     view = plan_view(db, user, tenant)
+    # Any plan/price change with no granular line (e.g. an appliance capacity swap
+    # at the same count) still gets a confirmation — so notifications are reliable.
+    after_sig = _plan_sig(tenant.protection_options, tenant.licensed_bytes, tenant.appliance_plan)
+    if not summary and before_sig != after_sig:
+        summary.append("Updated your protection plan")
     _notify_plan_change(db, user, view, summary)
     return view

@@ -110,6 +110,24 @@ def _ic(name: str) -> str:
     return _ICON.get(name, "•")
 
 
+# Source types with a brand icon synced into the portal (web/public/source-icons).
+# Keep in sync with scripts/sync_source_icons.py SOURCE_ICONS.
+_BRAND_ICON_TYPES = {
+    "gmail", "onepassword", "outlook", "onedrive", "dropbox", "icloud",
+    "google_drive", "slack", "notion", "github", "reddit", "facebook",
+    "instagram", "linkedin", "evernote", "google_calendar", "google_contacts",
+    "google_photos", "imessage", "ubiquiti", "aws", "azure", "gcp",
+}
+
+
+def _source_icon_url(source_type: str) -> str:
+    """Absolute URL to the source's brand icon on the portal — the SAME asset the
+    UI renders. Empty when there's no synced brand icon for the type."""
+    if source_type in _BRAND_ICON_TYPES:
+        return f"{_portal_url()}/source-icons/{source_type}.svg"
+    return ""
+
+
 def _esc(s) -> str:
     return _html.escape(str(s if s is not None else ""))
 
@@ -141,12 +159,22 @@ def _stat_grid(items: list[dict]) -> str:
 
 
 def _rows(items: list[dict]) -> str:
-    """A simple list: [{icon,name,detail}]."""
+    """A simple list: [{icon,name,detail}] — an item may carry `icon_url` (brand
+    logo <img>, same asset as the UI) which takes precedence over the emoji."""
     if not items:
         return ""
+
+    def _cell(i: dict) -> str:
+        url = i.get("icon_url")
+        if url:
+            return (f'<img src="{_esc(url)}" width="18" height="18" alt="" '
+                    f'style="display:inline-block;width:18px;height:18px;'
+                    f'border-radius:4px;vertical-align:middle;" />')
+        return _ic(i.get("icon", "object"))
+
     body = "".join(
         f'<tr>'
-        f'<td width="26" style="padding:9px 0;border-bottom:1px solid #eef1f7;font-size:16px;">{_ic(i.get("icon","object"))}</td>'
+        f'<td width="26" style="padding:9px 0;border-bottom:1px solid #eef1f7;font-size:16px;">{_cell(i)}</td>'
         f'<td style="padding:9px 0;border-bottom:1px solid #eef1f7;font-size:14px;color:#1a2234;">{_esc(i["name"])}</td>'
         f'<td style="padding:9px 0;border-bottom:1px solid #eef1f7;font-size:13px;color:#8a94a7;text-align:right;">{_esc(i.get("detail",""))}</td>'
         f'</tr>'
@@ -228,6 +256,7 @@ def _source_issues(db, user: User) -> list[dict]:
               .filter(ConnectorAccount.id.in_(acct_ids),
                       ConnectorAccount.last_error.isnot(None)).all()):
         out.append({"id": a.id, "name": a.account_label or a.connector_type,
+                    "source_type": a.connector_type,
                     "error": (a.last_error or "").splitlines()[0][:160],
                     "at": a.last_error_at, "fails": int(a.fail_count or 0),
                     "reauth": a.auth_status == "needs-reauth"})
@@ -285,7 +314,8 @@ def build_daily_summary(db, user: User, *, force: bool = False) -> dict | None:
     ]))
     if by_source:
         parts.append(_section("By source", "source"))
-        parts.append(_rows([{"icon": "source", "name": _source_name(st), "detail": _fmt_bytes(b)}
+        parts.append(_rows([{"icon": "source", "icon_url": _source_icon_url(st),
+                             "name": _source_name(st), "detail": _fmt_bytes(b)}
                             for st, b in sorted(by_source.items(), key=lambda x: -x[1])]))
     if by_dest:
         parts.append(_section("Where it was stored", "cloud"))
@@ -373,7 +403,8 @@ def build_weekly_org(db, tenant: Tenant) -> dict | None:
                             for o, b in sorted(by_user.items(), key=lambda x: -x[1])]))
     if by_source:
         parts.append(_section("By source", "source"))
-        parts.append(_rows([{"icon": "source", "name": _source_name(st), "detail": _fmt_bytes(b)}
+        parts.append(_rows([{"icon": "source", "icon_url": _source_icon_url(st),
+                             "name": _source_name(st), "detail": _fmt_bytes(b)}
                             for st, b in sorted(by_source.items(), key=lambda x: -x[1])]))
     if by_dest:
         parts.append(_section("By destination", "cloud"))
@@ -402,7 +433,7 @@ def build_source_problem(db, user: User, issues: list[dict] | None = None) -> di
     else:
         parts.append(f'<p style="margin:0 0 12px;"><b>{n} of your sources</b> need attention. '
                      f'Re-connect them to resume protection — your existing history is safe.</p>')
-    parts.append(_rows([{"icon": "alert",
+    parts.append(_rows([{"icon": "alert", "icon_url": _source_icon_url(i.get("source_type", "")),
                          "name": (f'{i["name"]} · repeatedly failing' if i.get("fails", 0) > 5 else i["name"]),
                          "detail": i["error"]} for i in issues]))
     persistent = [i for i in issues if i.get("fails", 0) > 5]

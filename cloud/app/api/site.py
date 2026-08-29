@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
+import logging
 import secrets
 import tarfile
 import time
@@ -29,6 +31,12 @@ from ..config import get_settings
 from ..db import get_db
 from ..models import ConfigProfile, Node, SiteContent
 from ..site_defaults import DEFAULT_SITE
+
+logger = logging.getLogger("cv.nodeconfig")
+
+# Per-node signature of the last delivered config, so we log a node's effective
+# configuration only when it actually changes (heartbeats are frequent).
+_last_applied_sig: dict[str, str] = {}
 
 public_router = APIRouter(tags=["site"])          # unauthenticated (site + node heartbeat)
 admin_router = APIRouter(prefix="/admin", tags=["site-admin"],
@@ -188,6 +196,21 @@ def node_heartbeat(body: NodeHeartbeat,
     node.last_heartbeat_at = _now()
     db.commit()
     merged, applied = _effective_settings(db, node)
+    # Log (once per change) which configuration profiles a node is now running and
+    # the effective settings we're delivering, so profile roll-outs are auditable.
+    try:
+        sig = json.dumps({"p": applied, "s": merged}, sort_keys=True, default=str)
+        if _last_applied_sig.get(node.id) != sig:
+            _last_applied_sig[node.id] = sig
+            if applied:
+                logger.info("config: node %s (%s) now running profiles %s → %s",
+                            node.name, node.role, applied,
+                            {k: merged[k] for k in sorted(merged)})
+            else:
+                logger.info("config: node %s (%s) has no configuration profiles (default settings)",
+                            node.name, node.role)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         interval = max(15, int(merged.get("CV_HEARTBEAT_INTERVAL_SECONDS", 60)))
     except (TypeError, ValueError):

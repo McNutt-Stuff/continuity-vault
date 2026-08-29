@@ -16,8 +16,11 @@ Results are cached briefly; ``invalidate()`` clears the cache after an edit.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
+
+logger = logging.getLogger("cv.nodeconfig")
 
 # Where the heartbeat client writes the settings delivered to a remote node.
 SETTINGS_PATH = "/etc/arkive/node-settings.json"
@@ -25,6 +28,7 @@ SETTINGS_PATH = "/etc/arkive/node-settings.json"
 _cache: dict = {}
 _at: float = 0.0
 _TTL = 15.0
+_last_sig: str | None = None
 
 
 def _from_file() -> dict:
@@ -53,12 +57,25 @@ def _from_profiles(db) -> dict:
 
 def effective(db) -> dict:
     """All settings in effect on this node (live profiles win over the delivered file)."""
-    global _cache, _at
+    global _cache, _at, _last_sig
     if _cache and time.time() - _at < _TTL:
         return _cache
     merged = _from_file()
     merged.update(_from_profiles(db))
     _cache, _at = merged, time.time()
+    # Log once whenever the effective configuration actually changes, so the
+    # running process (scheduler / notifications) shows when it adopts new settings.
+    try:
+        sig = json.dumps(merged, sort_keys=True, default=str)
+        if sig != _last_sig:
+            _last_sig = sig
+            if merged:
+                logger.info("effective node settings updated: %s",
+                            {k: merged[k] for k in sorted(merged)})
+            else:
+                logger.info("effective node settings: none (using built-in defaults)")
+    except Exception:  # noqa: BLE001
+        pass
     return merged
 
 

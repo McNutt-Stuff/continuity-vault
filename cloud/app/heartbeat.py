@@ -186,16 +186,34 @@ def _inline_into_index(webroot: str, body_text: str) -> None:
 
 def _apply_settings(settings: dict) -> None:
     """Persist the settings this node received so node_config can resolve them for
-    the scheduler / notifications (config profiles reconfigure live behavior)."""
+    the scheduler / notifications (config profiles reconfigure live behavior).
+    Logs a verbose diff whenever the applied configuration actually changes."""
+    settings = settings or {}
     try:
         import os
+        # Diff against what we already have so a profile roll-out is visible in logs.
+        current: dict = {}
+        try:
+            with open(SETTINGS_PATH) as fh:
+                current = json.load(fh) or {}
+        except (FileNotFoundError, ValueError):
+            current = {}
+        if current != settings:
+            added = {k: settings[k] for k in settings if k not in current}
+            removed = [k for k in current if k not in settings]
+            changed = {k: f"{current[k]} → {settings[k]}"
+                       for k in settings if k in current and current[k] != settings[k]}
+            print(f"[heartbeat] applying config profile settings ({len(settings)} keys): "
+                  f"added={added or '{}'} changed={changed or '{}'} removed={removed or '[]'}",
+                  file=sys.stderr)
         os.makedirs("/etc/arkive", exist_ok=True)
         tmp = SETTINGS_PATH + ".tmp"
         with open(tmp, "w") as fh:
-            json.dump(settings or {}, fh, indent=2)
+            json.dump(settings, fh, indent=2)
         os.replace(tmp, SETTINGS_PATH)
     except Exception as e:
         print(f"[heartbeat] could not write node settings: {e}", file=sys.stderr)
+
 
 
 def main() -> int:
