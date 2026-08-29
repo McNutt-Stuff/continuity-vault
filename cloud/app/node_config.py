@@ -2,15 +2,19 @@
 Effective node settings resolver.
 
 Configuration profiles let admins reconfigure a running node's behavior without a
-redeploy. This resolves the settings in effect on THIS node:
+redeploy. Settings resolve in a strict precedence:
 
-  * on the control plane (and any node whose DB holds the profiles) the profiles
-    bound to the self node are merged live; and
-  * a remote node applies the settings it received on its last heartbeat (written
-    to ``node-settings.json`` by the heartbeat client).
+    1. Override   — a per-node admin override (highest; Node.config_overrides)
+    2. Profile    — an enabled configuration profile bound to the node
+    3. Local      — the node's built-in / environment default (each consumer's fallback)
 
-Consumers read a typed value with ``get_int``/``get_bool``/``get_list``/``get``.
-Results are cached briefly; ``invalidate()`` clears the cache after an edit.
+On the control plane the profiles + overrides for the self node are read live from
+the DB; a remote node applies the layers it received on its last heartbeat (written
+to ``node-settings.json`` by the heartbeat client as {"profiles": …, "overrides": …}).
+
+Consumers read a typed value with ``get_int``/``get_bool``/``get_list``/``get`` (the
+default they pass IS the "local" layer). ``effective_detailed`` exposes per-key
+provenance for the admin UI. Results are cached briefly; ``invalidate()`` clears it.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from pathlib import Path
 
 logger = logging.getLogger("cv.nodeconfig")
 
-# Where the heartbeat client writes the settings delivered to a remote node.
+# Where the heartbeat client writes the layers delivered to a remote node.
 SETTINGS_PATH = "/etc/arkive/node-settings.json"
 
 _cache: dict = {}
@@ -32,36 +36,47 @@ _last_sig: str | None = None
 
 
 def _from_file() -> dict:
+    """Delivered layers for a remote node → {"profiles": {...}, "overrides": {...}}.
+    Accepts the legacy flat format (a bare dict = profile settings)."""
     try:
-        return json.loads(Path(SETTINGS_PATH).read_text()) or {}
+        raw = json.loads(Path(SETTINGS_PATH).read_text())
     except Exception:  # noqa: BLE001 — absent/unreadable on the control plane
-        return {}
+        return {"profiles": {}, "overrides": {}}
+    if isinstance(raw, dict) and ("profiles" in raw or "overrides" in raw):
+        return {"profiles": dict(raw.get("profiles") or {}),
+                "overrides": dict(raw.get("overrides") or {})}
+    return {"profiles": dict(raw) if isinstance(raw, dict) else {}, "overrides": {}}
 
 
-def _from_profiles(db) -> dict:
-    out: dict = {}
+def _self_layers(db) -> tuple[dict, dict]:
+    """(profiles, overrides) for THIS node — DB on the control plane, else the
+    delivered file. One self-node lookup drives both."""
+    file = _from_file()
+    profiles = dict(file.get("profiles") or {})
+    overrides = dict(file.get("overrides") or {})
     try:
         from .models import ConfigProfile, Node
         node = db.query(Node).filter(Node.is_self.is_(True)).first()
-        if node is None:
-            return out
-        for p in (db.query(ConfigProfile)
-                  .filter(ConfigProfile.enabled.is_(True))
-                  .order_by(ConfigProfile.name).all()):
-            if node.id in (p.node_ids or []):
-                out.update(p.data or {})
+        if node is not None:
+            for p in (db.query(ConfigProfile)
+                      .filter(ConfigProfile.enabled.is_(True))
+                      .order_by(ConfigProfile.name).all()):
+                if node.id in (p.node_ids or []):
+                    profiles.update(p.data or {})
+            if node.config_overrides:
+                overrides.update(node.config_overrides)
     except Exception:  # noqa: BLE001 — table missing / DB not ready
         pass
-    return out
+    return profiles, overrides
 
 
 def effective(db) -> dict:
-    """All settings in effect on this node (live profiles win over the delivered file)."""
+    """All settings in effect on this node (override wins over profile)."""
     global _cache, _at, _last_sig
     if _cache and time.time() - _at < _TTL:
         return _cache
-    merged = _from_file()
-    merged.update(_from_profiles(db))
+    profiles, overrides = _self_layers(db)
+    merged = {**profiles, **overrides}
     _cache, _at = merged, time.time()
     # Log once whenever the effective configuration actually changes, so the
     # running process (scheduler / notifications) shows when it adopts new settings.
@@ -77,6 +92,18 @@ def effective(db) -> dict:
     except Exception:  # noqa: BLE001
         pass
     return merged
+
+
+def effective_detailed(db) -> dict:
+    """{key: {"value", "source"}} where source is 'override' | 'profile' — for the
+    admin config view (keys not listed fall back to the local/env default)."""
+    profiles, overrides = _self_layers(db)
+    out: dict = {}
+    for k, v in profiles.items():
+        out[k] = {"value": v, "source": "profile"}
+    for k, v in overrides.items():
+        out[k] = {"value": v, "source": "override"}
+    return out
 
 
 def invalidate() -> None:

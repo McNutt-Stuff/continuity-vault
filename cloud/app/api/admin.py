@@ -1661,32 +1661,52 @@ def node_tenants(nid: str, db: Session = Depends(get_db)):
 def node_config_detail(nid: str,
                        _p: security.Principal = Depends(security.require_platform_admin),
                        db: Session = Depends(get_db)):
-    """Configuration profiles bound to this node + the resulting effective settings.
-    For a reachable customer-tenant node we also fetch what it has actually applied
-    (from its node-settings.json) so config drift is visible."""
+    """Configuration profiles bound to this node + the effective settings with
+    per-key provenance (override > profile > local default) and the per-node
+    overrides. For a reachable node we also fetch what it has actually applied."""
     n = db.get(Node, nid)
     if not n:
         raise HTTPException(404, "node not found")
     bound = [p for p in db.query(ConfigProfile).order_by(ConfigProfile.name).all()
              if nid in (p.node_ids or [])]
-    merged: dict = {}
+    # Layers the control plane resolves (= what it delivers to the node).
+    profile_vals: dict = {}
     for p in bound:
         if p.enabled:
-            merged.update(p.data or {})
+            profile_vals.update(p.data or {})
+    overrides = dict(n.config_overrides or {})
+    local = _node_local_defaults(n)
+
     idx = config_catalog.catalog_index()
+    keys = list(idx.keys()) + [k for k in {**profile_vals, **overrides}
+                               if k not in idx]
     settings = []
-    for k in sorted(merged):
+    for k in keys:
         spec = idx.get(k, {})
-        settings.append({"key": k, "value": merged[k], "label": spec.get("label"),
-                         "unit": spec.get("unit"), "group": spec.get("group"),
-                         "description": spec.get("description")})
+        if k in overrides:
+            value, source = overrides[k], "override"
+        elif k in profile_vals:
+            value, source = profile_vals[k], "profile"
+        else:
+            value, source = local.get(k), "local"
+        settings.append({
+            "key": k, "value": value, "source": source,
+            "label": spec.get("label"), "unit": spec.get("unit"),
+            "type": spec.get("type"), "group": spec.get("group"),
+            "description": spec.get("description"), "choices": spec.get("choices"),
+            "override_value": overrides.get(k), "profile_value": profile_vals.get(k),
+            "local_default": local.get(k),
+        })
+
     out = {
         "profiles": [{"id": p.id, "name": p.name, "description": p.description or "",
                       "enabled": bool(p.enabled), "key_count": len(p.data or {}),
-                      "data": p.data or {},
                       "updated_at": p.updated_at.isoformat() if p.updated_at else None}
                      for p in bound],
+        "overrides": overrides,
         "settings": settings,
+        "catalog": config_catalog.catalog(),
+        "services": _config_service_options(db),
         "applied": None,      # what the node currently has in effect
         "applied_source": None,
     }
@@ -1701,6 +1721,61 @@ def node_config_detail(nid: str,
         except Exception:  # noqa: BLE001
             out["applied_source"] = "unreachable"
     return out
+
+
+def _node_local_defaults(n: Node) -> dict:
+    """The node's built-in / env baseline for cataloged keys (the 'local' layer).
+    service.* falls back to the node's legacy service assignment."""
+    s = get_settings()
+    return {
+        "CV_SYNC_INTERVAL_MINUTES": s.sync_interval_minutes,
+        "CV_SCHEDULER_TICK_SECONDS": s.scheduler_tick_seconds,
+        "CV_HEARTBEAT_INTERVAL_SECONDS": getattr(s, "heartbeat_interval_seconds", 60),
+        "CV_METRICS_RETENTION_DAYS": 90,
+        "CV_CONTENT_CHUNK_BYTES": s.content_chunk_bytes,
+        "notif.source_repeat_hours": 24,
+        "notif.enabled_insights": "footprint",
+        "notif.daily_hour": 0,
+        "service.storage": n.storage_service_id or "",
+        "service.email": n.email_service_id or "",
+    }
+
+
+def _config_service_options(db: Session) -> dict:
+    """Service objects grouped for the config service.* pickers."""
+    out = {"storage-service": [], "email-service": []}
+    for s in db.query(ServiceObject).order_by(ServiceObject.name.asc()).all():
+        v = _service_view(db, s)
+        bucket = "storage-service" if s.kind.startswith("storage-") else "email-service"
+        out[bucket].append({"id": s.id, "name": s.name, "kind": s.kind,
+                            "enabled": bool(s.enabled), "configured": v["configured"]})
+    return out
+
+
+class NodeOverrides(BaseModel):
+    overrides: dict = {}
+
+
+@router.put("/nodes/{nid}/config-overrides")
+def set_node_overrides(nid: str, body: NodeOverrides,
+                       principal: security.Principal = Depends(security.require_platform_admin),
+                       db: Session = Depends(get_db)):
+    """Set the per-node setting overrides (highest precedence). Empty values clear
+    a key (falls back to the config profile, then the local default)."""
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    coerced, errors = config_catalog.validate_data(body.overrides or {})
+    if errors:
+        raise HTTPException(400, "invalid values: " + "; ".join(errors))
+    # Drop empty values so clearing a field reverts to the profile/local layer.
+    n.config_overrides = {k: v for k, v in coerced.items() if v not in (None, "", [])}
+    db.commit()
+    _config_changed()
+    audit.record(db, actor=principal.user_id, action="admin.node_overrides_updated",
+                 category="admin", detail={"node": n.name,
+                                           "keys": sorted(n.config_overrides.keys())})
+    return node_config_detail(nid, principal, db)
 
 
 # --------------------------------------------------------------------------- #
@@ -1728,6 +1803,21 @@ def _log_profile_change(db: Session, action: str, name: str, node_ids: list[str]
         "config profile %s: '%s' (%s, %d keys) → nodes %s; settings=%s",
         action, name, "enabled" if enabled else "disabled",
         len(data or {}), names or "(none)", data or {})
+
+
+def _config_changed() -> None:
+    """A config profile / node override changed — drop every cache that resolves
+    node settings and service assignments so the new values apply promptly."""
+    node_config.invalidate()
+    try:
+        services.invalidate()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from .. import emailer
+        emailer.invalidate_config_cache()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.get("/config-catalog")
@@ -1778,7 +1868,7 @@ def create_config_profile(body: ProfileIn,
     db.add(p)
     db.commit()
     db.refresh(p)
-    node_config.invalidate()
+    _config_changed()
     _log_profile_change(db, "created", p.name, node_ids, data, p.enabled)
     audit.record(db, actor=principal.user_id, action="admin.config_profile_created",
                  category="admin", detail={"name": name})
@@ -1805,7 +1895,7 @@ def update_config_profile(pid: str, body: ProfileIn,
     p.enabled = body.enabled
     db.commit()
     db.refresh(p)
-    node_config.invalidate()
+    _config_changed()
     _log_profile_change(db, "updated", p.name, node_ids, data, p.enabled)
     audit.record(db, actor=principal.user_id, action="admin.config_profile_updated",
                  category="admin", detail={"name": p.name})
@@ -1824,7 +1914,7 @@ def delete_config_profile(pid: str,
     data = dict(p.data or {})
     db.delete(p)
     db.commit()
-    node_config.invalidate()
+    _config_changed()
     _log_profile_change(db, "deleted", nm, node_ids, data, False)
     audit.record(db, actor=principal.user_id, action="admin.config_profile_deleted",
                  category="admin", detail={"name": nm})

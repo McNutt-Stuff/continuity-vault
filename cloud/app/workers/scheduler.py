@@ -271,10 +271,13 @@ _last_notif_sweep: datetime | None = None
 
 
 def _run_notifications() -> None:
-    """Send user email notifications for the tenants this node is responsible for
-    (control plane skips node-assigned tenants; a node runs its own). Per-user
-    dedupe keys make daily/source-problem sends idempotent, so this can sweep
-    often (~15 min) without duplicate mail."""
+    """Send user email notifications for the tenants THIS node is responsible for,
+    using this node's own assigned email service — a customer node emails its own
+    tenants' daily/source-problem digests; the control plane emails the tenants it
+    still handles (not assigned to a node). Neither routes mail through the other.
+    Higher-level mail (password reset, welcome, plan change) is sent directly by the
+    control-plane request handlers. Per-user dedupe keys make sends idempotent, so
+    this can sweep often (~15 min) without duplicate mail."""
     global _last_notif_sweep
     now = _now()
     if _last_notif_sweep and (now - _last_notif_sweep) < timedelta(minutes=15):
@@ -285,6 +288,8 @@ def _run_notifications() -> None:
     settings = get_settings()
     is_cp = (settings.node_role or "control-plane") == "control-plane"
     with SessionLocal() as db:
+        # The control plane skips tenants assigned to a node (that node emails them);
+        # a customer node's local DB only holds its own tenants, so it runs them all.
         assigned: set[str] = set()
         if is_cp:
             assigned = {tid for (tid,) in

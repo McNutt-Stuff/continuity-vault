@@ -640,6 +640,9 @@ class Node(Base):
     # node's selections drive where cloud objects are stored and how mail sends.
     storage_service_id = Column(String, nullable=True)  # ServiceObject (storage-*)
     email_service_id = Column(String, nullable=True)    # ServiceObject (email-*)
+    # Per-node setting overrides — HIGHEST precedence (override > config profile >
+    # local/env default). Delivered to remote nodes on heartbeat.
+    config_overrides = Column(JSON, default=dict)
     # Storage service objects this node backs its own core state up to. A list so
     # a node can replicate its infrastructure backup to MULTIPLE destinations for
     # resiliency (use different services, not the same one twice).

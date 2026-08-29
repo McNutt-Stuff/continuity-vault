@@ -44,28 +44,37 @@ def _self_services() -> dict:
     try:
         from .db import SessionLocal
         from .models import ConfigObject, Node, ServiceObject
-        from . import credstore
+        from . import credstore, node_config
         with SessionLocal() as db:
             node = db.query(Node).filter(Node.is_self.is_(True)).first()
-            if node is not None:
-                slots = (("storage", node.storage_service_id),
-                         ("email", node.email_service_id))
-                for slot, sid in slots:
-                    if not sid:
-                        continue
-                    svc = db.get(ServiceObject, sid)
-                    if svc is None or not svc.enabled:
-                        continue
-                    values: dict = {}
-                    if svc.config_object_id:
-                        obj = db.get(ConfigObject, svc.config_object_id)
-                        if obj and obj.encrypted_values:
-                            try:
-                                values = credstore.decrypt("platform", obj.encrypted_values)
-                            except Exception:
-                                values = {}
-                    out[slot] = {"kind": svc.kind, "name": svc.name,
-                                 "config": {**values, **(svc.settings or {})}}
+            # The assigned service is chosen via configuration (profile/override key
+            # service.storage / service.email) so it works across the whole fleet;
+            # the Node column is the legacy fallback.
+            eff = {}
+            try:
+                eff = node_config.effective(db)
+            except Exception:
+                eff = {}
+            ids = {
+                "storage": eff.get("service.storage") or (node.storage_service_id if node else None),
+                "email": eff.get("service.email") or (node.email_service_id if node else None),
+            }
+            for slot, sid in ids.items():
+                if not sid:
+                    continue
+                svc = db.get(ServiceObject, sid)
+                if svc is None or not svc.enabled:
+                    continue
+                values: dict = {}
+                if svc.config_object_id:
+                    obj = db.get(ConfigObject, svc.config_object_id)
+                    if obj and obj.encrypted_values:
+                        try:
+                            values = credstore.decrypt("platform", obj.encrypted_values)
+                        except Exception:
+                            values = {}
+                out[slot] = {"kind": svc.kind, "name": svc.name,
+                             "config": {**values, **(svc.settings or {})}}
     except Exception:
         pass  # DB not ready / migration pending — fall back to env
     _cache, _at = out, time.time()

@@ -43,6 +43,14 @@ CONFIG_CATALOG: list[dict] = [
     {"key": "CV_CONTENT_CHUNK_BYTES", "label": "Content chunk size",
      "type": "int", "group": "Storage", "example": "8388608", "unit": "bytes",
      "description": "Chunk size used to split large content into encrypted units at rest."},
+
+    # --- Assigned services (per-node backend selection) -------------------- #
+    {"key": "service.storage", "label": "Arkive Cloud storage service",
+     "type": "string", "group": "Services", "choices": "storage-service",
+     "description": "Which storage ServiceObject this node uses for Arkive Cloud object storage."},
+    {"key": "service.email", "label": "Email service",
+     "type": "string", "group": "Services", "choices": "email-service",
+     "description": "Which email ServiceObject this node uses to send mail (SES / SendGrid / SMTP)."},
 ]
 
 _INDEX = {c["key"]: c for c in CONFIG_CATALOG}

@@ -100,9 +100,9 @@ def send_heartbeat() -> dict | None:
         print(f"[heartbeat] failed to reach control plane: {e}", file=sys.stderr)
         return None
 
-    # Persist the settings this node was assigned (via its bound configuration
-    # profiles) so the running processes (scheduler, notifications) apply them.
-    _apply_settings(data.get("settings") or {})
+    # Persist the config layers this node was assigned (bound profiles + per-node
+    # overrides) so the running processes (scheduler, notifications) apply them.
+    _apply_settings(data.get("config") or data.get("settings") or {})
     # Public-web nodes mirror the published site content locally so the site is
     # served same-origin and survives control-plane downtime.
     if s.node_role == "public-web":
@@ -184,32 +184,44 @@ def _inline_into_index(webroot: str, body_text: str) -> None:
         print(f"[heartbeat] could not inline site content: {e}", file=sys.stderr)
 
 
-def _apply_settings(settings: dict) -> None:
-    """Persist the settings this node received so node_config can resolve them for
-    the scheduler / notifications (config profiles reconfigure live behavior).
-    Logs a verbose diff whenever the applied configuration actually changes."""
-    settings = settings or {}
+def _apply_settings(payload: dict) -> None:
+    """Persist the config layers this node received so node_config can resolve them
+    for the scheduler / notifications. ``payload`` is the structured
+    {"profiles": …, "overrides": …} (or a legacy flat dict). Logs a verbose diff of
+    the effective settings whenever they change."""
+    payload = payload or {}
+    # Structured (profiles + overrides) or legacy flat = profile settings only.
+    if "profiles" in payload or "overrides" in payload:
+        structured = {"profiles": dict(payload.get("profiles") or {}),
+                      "overrides": dict(payload.get("overrides") or {})}
+    else:
+        structured = {"profiles": dict(payload), "overrides": {}}
+    effective = {**structured["profiles"], **structured["overrides"]}
     try:
         import os
-        # Diff against what we already have so a profile roll-out is visible in logs.
-        current: dict = {}
+        # Diff the EFFECTIVE settings against what we already have (logs the change).
+        prev_eff: dict = {}
         try:
             with open(SETTINGS_PATH) as fh:
-                current = json.load(fh) or {}
+                prev = json.load(fh) or {}
+            if isinstance(prev, dict) and ("profiles" in prev or "overrides" in prev):
+                prev_eff = {**(prev.get("profiles") or {}), **(prev.get("overrides") or {})}
+            elif isinstance(prev, dict):
+                prev_eff = prev
         except (FileNotFoundError, ValueError):
-            current = {}
-        if current != settings:
-            added = {k: settings[k] for k in settings if k not in current}
-            removed = [k for k in current if k not in settings]
-            changed = {k: f"{current[k]} → {settings[k]}"
-                       for k in settings if k in current and current[k] != settings[k]}
-            print(f"[heartbeat] applying config profile settings ({len(settings)} keys): "
-                  f"added={added or '{}'} changed={changed or '{}'} removed={removed or '[]'}",
-                  file=sys.stderr)
+            prev_eff = {}
+        if prev_eff != effective:
+            added = {k: effective[k] for k in effective if k not in prev_eff}
+            removed = [k for k in prev_eff if k not in effective]
+            changed = {k: f"{prev_eff[k]} → {effective[k]}"
+                       for k in effective if k in prev_eff and prev_eff[k] != effective[k]}
+            print(f"[heartbeat] applying node config ({len(effective)} effective keys, "
+                  f"{len(structured['overrides'])} override(s)): added={added or '{}'} "
+                  f"changed={changed or '{}'} removed={removed or '[]'}", file=sys.stderr)
         os.makedirs("/etc/arkive", exist_ok=True)
         tmp = SETTINGS_PATH + ".tmp"
         with open(tmp, "w") as fh:
-            json.dump(settings, fh, indent=2)
+            json.dump(structured, fh, indent=2)
         os.replace(tmp, SETTINGS_PATH)
     except Exception as e:
         print(f"[heartbeat] could not write node settings: {e}", file=sys.stderr)

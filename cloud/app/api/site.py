@@ -196,26 +196,29 @@ def node_heartbeat(body: NodeHeartbeat,
     node.last_heartbeat_at = _now()
     db.commit()
     merged, applied = _effective_settings(db, node)
+    overrides = dict(node.config_overrides or {})
+    effective = {**merged, **overrides}  # override wins over profile
     # Log (once per change) which configuration profiles a node is now running and
     # the effective settings we're delivering, so profile roll-outs are auditable.
     try:
-        sig = json.dumps({"p": applied, "s": merged}, sort_keys=True, default=str)
+        sig = json.dumps({"p": applied, "s": effective}, sort_keys=True, default=str)
         if _last_applied_sig.get(node.id) != sig:
             _last_applied_sig[node.id] = sig
-            if applied:
-                logger.info("config: node %s (%s) now running profiles %s → %s",
-                            node.name, node.role, applied,
-                            {k: merged[k] for k in sorted(merged)})
+            if applied or overrides:
+                logger.info("config: node %s (%s) running profiles %s + %d override(s) → %s",
+                            node.name, node.role, applied, len(overrides),
+                            {k: effective[k] for k in sorted(effective)})
             else:
                 logger.info("config: node %s (%s) has no configuration profiles (default settings)",
                             node.name, node.role)
     except Exception:  # noqa: BLE001
         pass
     try:
-        interval = max(15, int(merged.get("CV_HEARTBEAT_INTERVAL_SECONDS", 60)))
+        interval = max(15, int(effective.get("CV_HEARTBEAT_INTERVAL_SECONDS", 60)))
     except (TypeError, ValueError):
         interval = 60
-    return {"ok": True, "node_id": node.id, "settings": merged,
+    return {"ok": True, "node_id": node.id, "settings": effective,
+            "config": {"profiles": merged, "overrides": overrides},
             "applied_profiles": applied, "heartbeat_interval_seconds": interval}
 
 
