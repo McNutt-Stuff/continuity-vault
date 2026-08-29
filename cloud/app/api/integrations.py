@@ -29,6 +29,7 @@ from ..models import (
     NetworkApp,
     NetworkClient,
     NetworkUsage,
+    SearchDocument,
     Tenant,
     User,
 )
@@ -830,6 +831,91 @@ def admin_update(itype: str, body: AdminIntegrationUpdate,
     return {"ok": True, "integration_type": itype, "enabled": cfg.enabled}
 
 
+def _source_display(source_type: str) -> str:
+    try:
+        from ..connectors import get_connector
+        c = get_connector(source_type)
+        if c and getattr(c, "display_name", None):
+            return c.display_name
+    except Exception:  # noqa: BLE001
+        pass
+    return (source_type or "Source").replace("_", " ").title()
+
+
+def _source_analytics(db: Session, tenant_id: str | None) -> dict:
+    """Data-source usage across customers (or one tenant): which connectors are
+    adopted, by how many accounts/users/tenants, how much they protect, and their
+    health. Combines ConnectorAccount adoption with protected bytes/objects from the
+    current search index (is_current)."""
+    aq = db.query(ConnectorAccount)
+    if tenant_id:
+        aq = aq.filter(ConnectorAccount.tenant_id == tenant_id)
+    accounts = aq.all()
+    by_type: dict[str, dict] = {}
+    health = {"healthy": 0, "reauth": 0, "error": 0, "deactivated": 0}
+    users_with_sources: set = set()
+
+    def _entry(st: str) -> dict:
+        return by_type.setdefault(st, {
+            "source_type": st, "accounts": 0, "users": set(), "tenants": set(),
+            "objects": 0, "protected_bytes": 0, "healthy": 0, "issues": 0, "active": 0})
+
+    for a in accounts:
+        e = _entry(a.connector_type or "unknown")
+        e["accounts"] += 1
+        if a.owner_user_id:
+            e["users"].add(a.owner_user_id)
+            users_with_sources.add(a.owner_user_id)
+        e["tenants"].add(a.tenant_id)
+        e["objects"] += int(a.last_object_count or 0)
+        if not a.active:
+            health["deactivated"] += 1
+        elif a.auth_status == "needs-reauth":
+            health["reauth"] += 1
+            e["issues"] += 1
+        elif a.last_error:
+            health["error"] += 1
+            e["issues"] += 1
+        else:
+            health["healthy"] += 1
+            e["healthy"] += 1
+        if a.active:
+            e["active"] += 1
+
+    # Protected data per source type from the CURRENT search index (deduped rows).
+    try:
+        sq = db.query(SearchDocument.source_type,
+                      func.coalesce(func.sum(SearchDocument.size_bytes), 0),
+                      func.count(SearchDocument.id)).filter(SearchDocument.is_current.is_(True))
+        if tenant_id:
+            sq = sq.filter(SearchDocument.tenant_id == tenant_id)
+        for st, byts, cnt in sq.group_by(SearchDocument.source_type).all():
+            e = _entry(st or "unknown")
+            e["protected_bytes"] = int(byts or 0)
+            e["objects"] = int(cnt or 0)  # is_current count = current object count
+    except Exception:  # noqa: BLE001 — is_current may not be backfilled yet
+        pass
+
+    sources = sorted(
+        ({"source_type": e["source_type"], "display_name": _source_display(e["source_type"]),
+          "accounts": e["accounts"], "users": len(e["users"]), "tenants": len(e["tenants"]),
+          "objects": e["objects"], "protected_bytes": e["protected_bytes"],
+          "healthy": e["healthy"], "issues": e["issues"], "active": e["active"]}
+         for e in by_type.values()),
+        key=lambda x: (-x["protected_bytes"], -x["accounts"], -x["objects"]))
+    return {
+        "sources": sources,
+        "health": health,
+        "totals": {
+            "connected": len(accounts),
+            "source_types": len([s for s in sources if s["accounts"]]),
+            "users_with_sources": len(users_with_sources),
+            "protected_bytes": sum(s["protected_bytes"] for s in sources),
+            "objects": sum(s["objects"] for s in sources),
+        },
+    }
+
+
 @admin_router.get("/analytics")
 def admin_analytics(scope: str = "platform", tenant_id: str | None = None,
                     principal: security.Principal = Depends(security.require_platform_admin),
@@ -890,4 +976,6 @@ def admin_analytics(scope: str = "platform", tenant_id: str | None = None,
         "recommended_sources": recommended,
         "device_types": [{"type": k, "count": v}
                          for k, v in sorted(device_types.items(), key=lambda kv: -kv[1])],
+        # Adopted data sources (connected connectors) usage + health.
+        "data_sources": _source_analytics(db, tenant_id if scope == "tenant" else None),
     }

@@ -8,6 +8,7 @@ import { DestIcon } from "../components/DestIcon";
 import { FilterBar } from "../components/FilterBar";
 import { promptDialog, formDialog, confirmDialog, notify } from "../components/dialog";
 import { Ring, Sparkline, AreaChart } from "../components/charts";
+import { humanizeAction } from "../components/format";
 import { VersionPill, ProductionVersion } from "../components/VersionBadge";
 import { JobKindBadge } from "../components/JobKindBadge";
 import { RichTextEditor } from "../components/RichTextEditor";
@@ -498,6 +499,13 @@ function AdminUserNotifs({ user, onSaved }: { user: any; onSaved: () => void }) 
   );
 }
 
+const ACT_ICON: Record<string, IconName> = {
+  security: "shield", credential: "key", admin: "grid", system: "server", activity: "activity",
+};
+const ACT_SEV: Record<string, "ok" | "info" | "warn" | "danger"> = {
+  info: "info", notice: "info", warning: "warn", critical: "danger",
+};
+
 function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void; backLabel: string }) {
   const [u, setU] = useState<any>(null);
   const [err, setErr] = useState("");
@@ -618,7 +626,7 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
           <div className="muted">No sources connected by this user yet.</div>
         ) : (
           <table className="table">
-            <thead><tr><th>Source</th><th>Type</th><th style={{ textAlign: "right" }}>Objects</th><th style={{ textAlign: "right" }}>Protected</th><th>Last backup</th><th>Status</th></tr></thead>
+            <thead><tr><th>Source</th><th>Type</th><th style={{ textAlign: "right" }}>Objects</th><th style={{ textAlign: "right" }}>Protected</th><th>Last sync</th><th>Status</th></tr></thead>
             <tbody>
               {u.sources.map((src: any) => (
                 <tr key={src.id}>
@@ -653,18 +661,16 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
       <Card style={{ marginBottom: 16 }}>
         <h3 style={{ margin: "0 0 12px" }}>Recent activity</h3>
         {(u.activity || []).length === 0 ? (
-          <div className="muted">No backup activity yet.</div>
+          <div className="muted">No recorded activity for this user yet.</div>
         ) : (
           <div className="stack" style={{ gap: 8 }}>
             {u.activity.map((e: any, i: number) => (
               <div key={i} className="row" style={{ gap: 8, fontSize: 12.5, alignItems: "center", flexWrap: "wrap" }}>
-                {brandForSource(e.source_type)
-                  ? <BrandIcon name={brandForSource(e.source_type)!} size={15} />
-                  : <Icon name="database" size={14} />}
-                <span style={{ fontWeight: 600 }}>{e.source}</span>
-                <span className="faint row" style={{ gap: 5 }}><DestIcon dest={e.destination} size={12} /> {e.object_count} objects · {bytes(e.total_bytes || 0)}</span>
-                <Pill tone={e.recoverable ? "ok" : "warn"} dot>{e.recoverable ? "recoverable" : "sealing"}</Pill>
-                <span className="faint" style={{ marginLeft: "auto" }}>{e.at ? timeAgo(e.at) : ""}</span>
+                <Icon name={ACT_ICON[e.category] || "activity"} size={14} />
+                <span style={{ fontWeight: 600 }}>{humanizeAction(e.action)}</span>
+                {e.resource && <span className="faint" style={{ fontSize: 11 }}>{e.resource}</span>}
+                {e.severity && e.severity !== "info" && <Pill tone={ACT_SEV[e.severity] || "info"} dot>{e.severity}</Pill>}
+                <span className="faint" style={{ marginLeft: "auto" }} title={e.at ? fmtAbsolute(e.at) : ""}>{e.at ? timeAgo(e.at) : ""}</span>
               </div>
             ))}
           </div>
@@ -4072,6 +4078,8 @@ function CustomerAnalytics() {
 
   const t = data?.totals || {};
   const maxApp = Math.max(1, ...((data?.top_apps || []).map((a: any) => a.total_bytes)));
+  const ds = data?.data_sources || {};
+  const dsMax = Math.max(1, ...((ds.sources || []).map((s: any) => s.protected_bytes || 0)));
 
   return (
     <>
@@ -4165,6 +4173,77 @@ function CustomerAnalytics() {
           </tbody>
         </table>
       </Card>
+
+      <div className="spread" style={{ margin: "22px 0 10px" }}>
+        <h3 style={{ margin: 0 }}>Data source usage</h3>
+        <span className="faint" style={{ fontSize: 12 }}>Which connected data sources customers actually use</span>
+      </div>
+      <div className="insights-stats" style={{ marginBottom: 16 }}>
+        <AdminStat icon="link" label="Connected sources" value={String(ds.totals?.connected || 0)} tint="#4f7cff" />
+        <AdminStat icon="grid" label="Source types" value={String(ds.totals?.source_types || 0)} tint="#c56cf0" />
+        <AdminStat icon="user" label="Users with sources" value={String(ds.totals?.users_with_sources || 0)} tint="#2dbe60" />
+        <AdminStat icon="database" label="Data protected" value={bytes(ds.totals?.protected_bytes || 0)} tint="#f5a623" />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16 }}>
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Source adoption</h3>
+          <table className="table">
+            <thead><tr><th>Source</th><th style={{ textAlign: "right" }}>Accounts</th><th style={{ textAlign: "right" }}>Users</th><th style={{ textAlign: "right" }}>Objects</th><th style={{ textAlign: "right" }}>Protected</th><th>Health</th></tr></thead>
+            <tbody>
+              {(ds.sources || []).map((s: any) => (
+                <tr key={s.source_type}>
+                  <td>
+                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                      {brandForSource(s.source_type) ? <BrandIcon name={brandForSource(s.source_type)!} size={16} /> : <Icon name="database" size={15} />}
+                      <span style={{ fontWeight: 600 }}>{s.display_name}</span>
+                    </div>
+                  </td>
+                  <td style={{ textAlign: "right" }}>{s.accounts}</td>
+                  <td style={{ textAlign: "right" }}>{s.users}</td>
+                  <td style={{ textAlign: "right" }}>{(s.objects || 0).toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{bytes(s.protected_bytes || 0)}</td>
+                  <td>
+                    {s.issues > 0 ? <Pill tone="warn" dot>{s.issues} issue{s.issues === 1 ? "" : "s"}</Pill>
+                      : s.accounts > 0 ? <Pill tone="ok" dot>healthy</Pill>
+                      : <span className="faint" style={{ fontSize: 12 }}>—</span>}
+                  </td>
+                </tr>
+              ))}
+              {(ds.sources || []).length === 0 && <tr><td colSpan={6} className="muted">{loading ? "Loading…" : "No connected sources yet."}</td></tr>}
+            </tbody>
+          </table>
+        </Card>
+
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Top sources by data</h3>
+          <div className="stack" style={{ gap: 10 }}>
+            {(ds.sources || []).slice(0, 8).map((s: any) => (
+              <div key={s.source_type}>
+                <div className="spread" style={{ fontSize: 12, marginBottom: 3 }}>
+                  <span className="row" style={{ gap: 6, alignItems: "center" }}>
+                    {brandForSource(s.source_type) ? <BrandIcon name={brandForSource(s.source_type)!} size={13} /> : <Icon name="database" size={12} />}
+                    {s.display_name}
+                  </span>
+                  <span className="faint">{bytes(s.protected_bytes || 0)}</span>
+                </div>
+                <div style={{ height: 6, background: "var(--inset)", borderRadius: 3 }}>
+                  <div style={{ height: "100%", width: `${((s.protected_bytes || 0) / dsMax) * 100}%`, background: "linear-gradient(90deg,#4f7cff,#35d0a5)", borderRadius: 3 }} />
+                </div>
+              </div>
+            ))}
+            {(ds.sources || []).length === 0 && <div className="muted">No source data yet.</div>}
+          </div>
+          <div style={{ borderTop: "1px solid var(--border-soft)", margin: "14px 0 10px" }} />
+          <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>Source health</div>
+          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+            <Pill tone="ok" dot>{ds.health?.healthy || 0} healthy</Pill>
+            {(ds.health?.reauth || 0) > 0 && <Pill tone="warn" dot>{ds.health.reauth} reconnect</Pill>}
+            {(ds.health?.error || 0) > 0 && <Pill tone="danger" dot>{ds.health.error} error</Pill>}
+            {(ds.health?.deactivated || 0) > 0 && <Pill tone="warn">{ds.health.deactivated} off</Pill>}
+          </div>
+        </Card>
+      </div>
     </>
   );
 }

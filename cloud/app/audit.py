@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -9,6 +10,11 @@ from sqlalchemy.orm import Session
 from cv_crypto.provider import hexdigest
 
 from .models import AuditEvent
+
+# Per-request marker (a shared mutable dict, so it survives the sync threadpool):
+# record() flips it True, and the universal activity middleware skips a generic
+# entry when a rich audit entry was already written for this request.
+_request_audited: ContextVar[Optional[dict]] = ContextVar("cv_request_audited", default=None)
 
 
 # Action → (category, severity) classification. Anything not listed defaults to
@@ -84,6 +90,9 @@ def record(db: Session, actor: str, action: str, tenant_id: Optional[str] = None
     )
     db.add(event)
     db.commit()
+    flag = _request_audited.get()
+    if flag is not None:
+        flag["audited"] = True
     return event
 
 

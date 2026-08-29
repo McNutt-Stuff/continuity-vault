@@ -851,6 +851,25 @@ def _user_sources(db: Session, uid: str, tenant_id: str) -> list:
     return out
 
 
+def _user_recent_activity(db: Session, uid: str, email: str, limit: int = 25) -> list:
+    """Recent things the USER did — their audit-ledger entries (logins, settings/
+    source/config edits, etc.). Auth actions record actor=email, everything else
+    actor=user_id, so match both."""
+    actors = [a for a in (uid, (email or "").strip().lower()) if a]
+    if not actors:
+        return []
+    rows = (db.query(AuditEvent.action, AuditEvent.category, AuditEvent.severity,
+                     AuditEvent.resource, AuditEvent.detail, AuditEvent.created_at)
+            .filter(AuditEvent.actor.in_(actors))
+            .order_by(AuditEvent.created_at.desc()).limit(limit).all())
+    return [{
+        "action": r.action, "category": r.category or "activity",
+        "severity": r.severity or "info", "resource": r.resource or "",
+        "detail": r.detail or {},
+        "at": r.created_at.isoformat() if r.created_at else None,
+    } for r in rows]
+
+
 @router.get("/users/{uid}")
 def get_user(uid: str,
              principal: security.Principal = Depends(security.require_platform_admin),
@@ -883,10 +902,12 @@ def get_user(uid: str,
     # sources + collections in vaults they own). This is an admin function so it
     # reads straight from the DB regardless of how/where the data is mapped.
     coll_ids = _user_collection_ids(db, uid, u.tenant_id, owned_vault_ids)
-    storage, recovery_points, _rollup_sources, activity = _user_data_rollup(db, coll_ids)
+    storage, recovery_points, _rollup_sources, _rollup_activity = _user_data_rollup(db, coll_ids)
     # Sources come from the SAME tables that drive the customer's Sources page
     # (their ConnectorAccounts + protected bytes) — usage/type/metadata only.
     sources = _user_sources(db, uid, u.tenant_id)
+    # Recent activity = what the USER did (audit ledger), not backup receipts.
+    activity = _user_recent_activity(db, uid, u.email)
 
     from ..models import Passkey
     try:

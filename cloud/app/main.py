@@ -59,6 +59,11 @@ app.add_middleware(
 from .api import node_proxy  # noqa: E402
 app.middleware("http")(node_proxy.middleware)
 
+# Universal activity logger: record every authenticated state-changing request to
+# the audit ledger so the admin has a complete per-user activity trail.
+from . import activity_logger  # noqa: E402
+app.middleware("http")(activity_logger.middleware)
+
 API = "/api"
 app.include_router(auth.router, prefix=API)
 app.include_router(tenant.router, prefix=API)
