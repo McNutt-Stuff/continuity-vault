@@ -610,7 +610,10 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
       </Card>
 
       <Card style={{ marginBottom: 16 }}>
-        <h3 style={{ margin: "0 0 12px" }}>Sources</h3>
+        <div className="spread" style={{ margin: "0 0 12px" }}>
+          <h3 style={{ margin: 0 }}>Sources</h3>
+          {u.activity_scope === "account" && <span className="faint" style={{ fontSize: 11.5 }}>account-wide</span>}
+        </div>
         {(u.sources || []).length === 0 ? (
           <div className="muted">No sources mapped for this account yet.</div>
         ) : (
@@ -638,7 +641,10 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
       </Card>
 
       <Card style={{ marginBottom: 16 }}>
-        <h3 style={{ margin: "0 0 12px" }}>Recent activity</h3>
+        <div className="spread" style={{ margin: "0 0 12px" }}>
+          <h3 style={{ margin: 0 }}>Recent activity</h3>
+          {u.activity_scope === "account" && <span className="faint" style={{ fontSize: 11.5 }}>account-wide</span>}
+        </div>
         {(u.activity || []).length === 0 ? (
           <div className="muted">No backup activity yet.</div>
         ) : (

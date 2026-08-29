@@ -733,6 +733,66 @@ class UserUpdate(BaseModel):
     notification_prefs: dict | None = None
 
 
+def _user_data_rollup(db: Session, vault_ids: list) -> tuple[dict, int, list, list]:
+    """Storage-by-channel, recovery-point count, sources and recent activity for a
+    set of vaults. Best-effort — a slow/failing scan degrades to empties so the
+    detail page never 500s. Works for CP-hosted AND federated (pushed) data since
+    receipts/documents/collections all live on the control plane by vault_id."""
+    storage = {"cloud_bytes": 0, "appliance_bytes": 0, "customer_bytes": 0}
+    recovery_points = 0
+    sources: list = []
+    activity: list = []
+    if not vault_ids:
+        return storage, recovery_points, sources, activity
+    try:
+        for dest, byts, cnt in (db.query(
+                SnapshotReceipt.destination,
+                func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0),
+                func.count(SnapshotReceipt.id))
+                .filter(SnapshotReceipt.vault_id.in_(vault_ids))
+                .group_by(SnapshotReceipt.destination).all()):
+            b = int(byts or 0)
+            d = dest or ""
+            if d == "customer-s3" or d.startswith("byos:"):
+                storage["customer_bytes"] += b
+            elif d == "cv-cloud":
+                storage["cloud_bytes"] += b
+            else:
+                storage["appliance_bytes"] += b
+            recovery_points += int(cnt or 0)
+        colls = db.query(Collection).filter(Collection.vault_id.in_(vault_ids)).all()
+        for c in colls:
+            acct = (db.get(ConnectorAccount, c.connector_account_id)
+                    if c.connector_account_id else None)
+            sources.append({
+                "id": c.id, "name": (acct.account_label if acct else c.name),
+                "source_type": c.source_type,
+                "last_backup_at": c.last_backup_at.isoformat() if c.last_backup_at else None,
+                "object_count": int(c.last_object_count or 0),
+            })
+        sources.sort(key=lambda s: s["object_count"], reverse=True)
+        colls_by_id = {c.id: c for c in colls}
+        for rc in (db.query(
+                    SnapshotReceipt.collection_id, SnapshotReceipt.destination,
+                    SnapshotReceipt.object_count, SnapshotReceipt.total_bytes,
+                    SnapshotReceipt.recoverable, SnapshotReceipt.created_at)
+                   .filter(SnapshotReceipt.vault_id.in_(vault_ids))
+                   .order_by(SnapshotReceipt.created_at.desc()).limit(15).all()):
+            c = colls_by_id.get(rc.collection_id)
+            activity.append({
+                "source": (c.name if c else rc.collection_id),
+                "source_type": (c.source_type if c else ""),
+                "destination": rc.destination,
+                "object_count": int(rc.object_count or 0),
+                "total_bytes": int(rc.total_bytes or 0),
+                "recoverable": bool(rc.recoverable),
+                "at": rc.created_at.isoformat() if rc.created_at else None,
+            })
+    except Exception:  # noqa: BLE001
+        db.rollback()
+    return storage, recovery_points, sources, activity
+
+
 @router.get("/users/{uid}")
 def get_user(uid: str,
              principal: security.Principal = Depends(security.require_platform_admin),
@@ -761,70 +821,20 @@ def get_user(uid: str,
 
     vaults = db.query(Vault).filter(Vault.owner_user_id == uid).all()
     vault_ids = [v.id for v in vaults]
-    # Sources/activity live on the vaults the user OWNS; for a shared/personal
-    # account (the user IS the account) or when nothing is owned yet, fall back to
-    # the tenant's vaults so the tables reflect what the account is protecting.
-    if vault_ids and ttype != "shared":
-        scope_vault_ids = vault_ids
-    else:
-        scope_vault_ids = [
-            v for (v,) in db.query(Vault.id).filter(Vault.tenant_id == u.tenant_id).all()
-        ] or vault_ids
-
-    storage = {"cloud_bytes": 0, "appliance_bytes": 0, "customer_bytes": 0}
-    recovery_points = 0
-    activity: list = []
-    sources: list = []
-    # The heavy rollups are best-effort: a slow/failing scan degrades to the core
-    # profile rather than 500-ing the whole detail page.
-    try:
-        if scope_vault_ids:
-            for dest, byts, cnt in (db.query(
-                    SnapshotReceipt.destination,
-                    func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0),
-                    func.count(SnapshotReceipt.id))
-                    .filter(SnapshotReceipt.vault_id.in_(scope_vault_ids))
-                    .group_by(SnapshotReceipt.destination).all()):
-                b = int(byts or 0)
-                d = dest or ""
-                if d == "customer-s3" or d.startswith("byos:"):
-                    storage["customer_bytes"] += b
-                elif d == "cv-cloud":
-                    storage["cloud_bytes"] += b
-                else:
-                    storage["appliance_bytes"] += b
-                recovery_points += int(cnt or 0)
-            colls = db.query(Collection).filter(Collection.vault_id.in_(scope_vault_ids)).all()
-            for c in colls:
-                acct = (db.get(ConnectorAccount, c.connector_account_id)
-                        if c.connector_account_id else None)
-                sources.append({
-                    "id": c.id, "name": (acct.account_label if acct else c.name),
-                    "source_type": c.source_type,
-                    "last_backup_at": c.last_backup_at.isoformat() if c.last_backup_at else None,
-                    "object_count": int(c.last_object_count or 0),
-                })
-            sources.sort(key=lambda s: s["object_count"], reverse=True)
-            colls_by_id = {c.id: c for c in colls}
-            # Select only the columns we need (skip the big receipt JSON blob).
-            for rc in (db.query(
-                        SnapshotReceipt.collection_id, SnapshotReceipt.destination,
-                        SnapshotReceipt.object_count, SnapshotReceipt.total_bytes,
-                        SnapshotReceipt.recoverable, SnapshotReceipt.created_at)
-                       .filter(SnapshotReceipt.vault_id.in_(scope_vault_ids))
-                       .order_by(SnapshotReceipt.created_at.desc()).limit(15).all()):
-                c = colls_by_id.get(rc.collection_id)
-                activity.append({
-                    "source": (c.name if c else rc.collection_id),
-                    "source_type": (c.source_type if c else ""),
-                    "destination": rc.destination,
-                    "object_count": int(rc.object_count or 0),
-                    "total_bytes": int(rc.total_bytes or 0),
-                    "recoverable": bool(rc.recoverable),
-                    "at": rc.created_at.isoformat() if rc.created_at else None,
-                })
-    except Exception:  # noqa: BLE001
-        db.rollback()
+    tenant_vault_ids = [v for (v,) in
+                        db.query(Vault.id).filter(Vault.tenant_id == u.tenant_id).all()]
+    # Prefer the user's own vaults; shared/personal accounts (user == account) use
+    # the tenant's vaults directly.
+    scope = vault_ids if (vault_ids and ttype != "shared") else (tenant_vault_ids or vault_ids)
+    used_owned = bool(vault_ids) and scope == vault_ids
+    storage, recovery_points, sources, activity = _user_data_rollup(db, scope)
+    # ADMIN ALWAYS SHOWS THE ACCOUNT'S DATA regardless of where it lives: if the
+    # per-user scope is empty (org member whose data sits on the tenant vault, a
+    # federated tenant, etc.) but the tenant has protected data, broaden to every
+    # tenant vault so the Sources / Recent activity tables still populate.
+    if not sources and recovery_points == 0 and tenant_vault_ids and set(scope) != set(tenant_vault_ids):
+        storage, recovery_points, sources, activity = _user_data_rollup(db, tenant_vault_ids)
+        used_owned = False
 
     from ..models import Passkey
     try:
@@ -835,6 +845,7 @@ def get_user(uid: str,
     view["vaults"] = [{"id": v.id, "name": v.name,
                        "key_ownership_model": v.key_ownership_model} for v in vaults]
     view["storage"] = storage
+    view["activity_scope"] = "user" if used_owned else "account"
     view["counts"] = {
         "objects": int(total), "recovery_points": recovery_points,
         "sources": len(sources), "vaults": len(vaults), "passkeys": int(passkeys),
