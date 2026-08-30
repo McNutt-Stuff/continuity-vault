@@ -3,7 +3,7 @@ import { api, Me } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
-import { formDialog, notify } from "../components/dialog";
+import { formDialog, confirmDialog, notify } from "../components/dialog";
 import { getTheme, applyTheme, Theme } from "../theme";
 
 interface Tenant { name: string; plan: string; key_ownership_model: string; vaults: any[]; }
@@ -13,9 +13,10 @@ interface KeyInfo {
   strength_bits: number; pq_hybrid: boolean; ownership_model: string | null; root_key_hash: string | null;
 }
 
-type SettingsTab = "personal" | "look" | "notifications" | "features" | "security" | "data";
+type SettingsTab = "personal" | "billing" | "look" | "notifications" | "features" | "security" | "data";
 const SETTINGS_TABS: { key: SettingsTab; label: string; icon: IconName }[] = [
   { key: "personal", label: "Personal information", icon: "user" },
+  { key: "billing", label: "Billing", icon: "credit-card" },
   { key: "look", label: "Look & feel", icon: "sun" },
   { key: "notifications", label: "Notification preferences", icon: "mail" },
   { key: "features", label: "Account features", icon: "grid" },
@@ -95,6 +96,8 @@ export default function Settings() {
 
       <div className="settings-content">
         {tab === "personal" && <PersonalInfo me={me} tenant={tenant} refresh={refresh} />}
+
+        {tab === "billing" && <BillingSettings />}
 
         {tab === "look" && (
           <Card>
@@ -279,7 +282,117 @@ function PersonalInfo({ me, tenant, refresh }: { me: Me | null; tenant: Tenant |
       <Row label="Plan" value={tenant?.plan} />
       <Row label="Your role" value={me?.role} />
       <Row label="Key ownership" value={tenant?.key_ownership_model} />
+
+      <div className="divider" />
+      <AddressBook />
     </Card>
+  );
+}
+
+interface Address {
+  id: string; kind: string; label: string; name: string; line1: string; line2: string;
+  city: string; region: string; postal_code: string; country: string; phone: string; is_default: boolean;
+}
+const ADDRESS_KINDS: { key: string; label: string }[] = [
+  { key: "billing", label: "Billing" },
+  { key: "shipping", label: "Shipping" },
+  { key: "alternate", label: "Alternate" },
+];
+const BLANK_ADDRESS: Omit<Address, "id"> = {
+  kind: "shipping", label: "", name: "", line1: "", line2: "", city: "", region: "",
+  postal_code: "", country: "US", phone: "", is_default: false,
+};
+
+function AddressBook() {
+  const [addrs, setAddrs] = useState<Address[]>([]);
+  const [editing, setEditing] = useState<Address | (Omit<Address, "id"> & { id?: string }) | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    try { setAddrs((await api.get<{ addresses: Address[] }>("/auth/me/addresses")).addresses); }
+    catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function save() {
+    if (!editing) return;
+    setBusy(true);
+    try {
+      if (editing.id) await api.put(`/auth/me/addresses/${editing.id}`, editing);
+      else await api.post("/auth/me/addresses", editing);
+      setEditing(null);
+      await load();
+    } catch (e: any) { notify({ message: e.message || "Could not save address", tone: "danger" }); }
+    finally { setBusy(false); }
+  }
+  async function remove(a: Address) {
+    if (!(await confirmDialog({ title: "Remove address?", message: `Delete this ${a.kind} address?`, tone: "danger", confirmLabel: "Delete" }))) return;
+    try { await api.del(`/auth/me/addresses/${a.id}`); await load(); }
+    catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
+
+  return (
+    <div>
+      <div className="spread" style={{ marginBottom: 10 }}>
+        <div>
+          <h3 style={{ margin: 0 }}>Addresses</h3>
+          <div className="muted" style={{ fontSize: 12.5 }}>Billing, shipping and alternate addresses for orders and invoices.</div>
+        </div>
+        <button className="btn sm" onClick={() => setEditing({ ...BLANK_ADDRESS })}>
+          <Icon name="edit" size={14} /> Add address
+        </button>
+      </div>
+      {addrs.length === 0 && !editing && (
+        <div className="muted" style={{ fontSize: 12.5 }}>No addresses saved yet.</div>
+      )}
+      {addrs.map((a) => (
+        <div key={a.id} className="result-row">
+          <div className="result-icon" style={{ background: "var(--inset)" }}><Icon name="note" size={16} /></div>
+          <div className="flex1">
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <span style={{ fontWeight: 600, textTransform: "capitalize" }}>{a.kind}</span>
+              {a.label && <span className="faint" style={{ fontSize: 12 }}>· {a.label}</span>}
+              {a.is_default && <Pill tone="ok">Default</Pill>}
+            </div>
+            <div className="faint" style={{ fontSize: 12 }}>
+              {[a.name, a.line1, a.line2, [a.city, a.region, a.postal_code].filter(Boolean).join(", "), a.country]
+                .filter(Boolean).join(" · ")}
+            </div>
+          </div>
+          <button className="btn ghost sm" onClick={() => setEditing({ ...a })}><Icon name="edit" size={14} /></button>
+          <button className="btn ghost sm" onClick={() => void remove(a)}><Icon name="trash" size={14} /></button>
+        </div>
+      ))}
+      {editing && (
+        <div className="card" style={{ marginTop: 12, background: "var(--inset)" }}>
+          <div className="grid grid-2" style={{ gap: 10 }}>
+            <label className="stack" style={{ gap: 5 }}>
+              <span className="faint" style={{ fontSize: 12 }}>Type</span>
+              <select className="input" value={editing.kind} onChange={(e) => setEditing({ ...editing, kind: e.target.value })}>
+                {ADDRESS_KINDS.map((k) => <option key={k.key} value={k.key}>{k.label}</option>)}
+              </select>
+            </label>
+            <SettingsField label="Label (optional)" value={editing.label} onChange={(v) => setEditing({ ...editing, label: v })} placeholder="Home, Office…" />
+            <SettingsField label="Full name" value={editing.name} onChange={(v) => setEditing({ ...editing, name: v })} placeholder="Recipient name" />
+            <SettingsField label="Phone" value={editing.phone} onChange={(v) => setEditing({ ...editing, phone: v })} placeholder="+1 555 123 4567" />
+            <SettingsField label="Address line 1" value={editing.line1} onChange={(v) => setEditing({ ...editing, line1: v })} placeholder="Street address" />
+            <SettingsField label="Address line 2" value={editing.line2} onChange={(v) => setEditing({ ...editing, line2: v })} placeholder="Apt, suite (optional)" />
+            <SettingsField label="City" value={editing.city} onChange={(v) => setEditing({ ...editing, city: v })} placeholder="City" />
+            <SettingsField label="State / region" value={editing.region} onChange={(v) => setEditing({ ...editing, region: v })} placeholder="State" />
+            <SettingsField label="Postal code" value={editing.postal_code} onChange={(v) => setEditing({ ...editing, postal_code: v })} placeholder="ZIP" />
+            <SettingsField label="Country" value={editing.country} onChange={(v) => setEditing({ ...editing, country: v })} placeholder="US" />
+          </div>
+          <label className="row" style={{ gap: 8, marginTop: 12, alignItems: "center", cursor: "pointer" }}>
+            <input type="checkbox" checked={editing.is_default} onChange={(e) => setEditing({ ...editing, is_default: e.target.checked })} />
+            <span style={{ fontSize: 13 }}>Set as default {editing.kind} address</span>
+          </label>
+          <div className="row" style={{ gap: 8, marginTop: 12 }}>
+            <button className="btn primary sm" disabled={busy} onClick={save}>{busy ? "Saving…" : "Save address"}</button>
+            <button className="btn ghost sm" onClick={() => setEditing(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -291,6 +404,151 @@ function SettingsField({ label, value, onChange, placeholder }: {
       <span className="faint" style={{ fontSize: 12 }}>{label}</span>
       <input className="input" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
     </label>
+  );
+}
+
+interface PaymentMethodView {
+  id: string; processor: string; type: string; brand: string; last4: string;
+  exp_month: number; exp_year: number; holder_name: string; is_default: boolean;
+}
+interface PaymentConfig {
+  configured: boolean; processor: string | null; name?: string; currency?: string;
+  publishable_key?: string; client_id?: string; environment?: string;
+}
+const BRAND_LABEL: Record<string, string> = {
+  visa: "Visa", mastercard: "Mastercard", amex: "American Express",
+  discover: "Discover", diners: "Diners Club", jcb: "JCB", card: "Card",
+};
+
+function BillingSettings() {
+  const [cfg, setCfg] = useState<PaymentConfig | null>(null);
+  const [methods, setMethods] = useState<PaymentMethodView[]>([]);
+  const [addrs, setAddrs] = useState<Address[]>([]);
+  const [adding, setAdding] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [form, setForm] = useState({ number: "", exp: "", cvc: "", holder_name: "", billing_address_id: "" });
+
+  async function load() {
+    const [c, m, a] = await Promise.all([
+      api.get<PaymentConfig>("/billing/payment-config").catch(() => null),
+      api.get<{ payment_methods: PaymentMethodView[] }>("/billing/payment-methods").catch(() => ({ payment_methods: [] })),
+      api.get<{ addresses: Address[] }>("/auth/me/addresses").catch(() => ({ addresses: [] })),
+    ]);
+    setCfg(c); setMethods(m.payment_methods); setAddrs(a.addresses);
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function addCard() {
+    setErr("");
+    const [mm, yy] = form.exp.split("/").map((s) => s.trim());
+    const exp_month = parseInt(mm || "", 10);
+    let exp_year = parseInt(yy || "", 10);
+    if (exp_year && exp_year < 100) exp_year += 2000;
+    if (!exp_month || !exp_year) { setErr("Enter the expiry as MM/YY."); return; }
+    setBusy(true);
+    try {
+      await api.post("/billing/payment-methods", {
+        number: form.number, exp_month, exp_year, cvc: form.cvc,
+        holder_name: form.holder_name, billing_address_id: form.billing_address_id || null,
+        make_default: methods.length === 0,
+      });
+      setForm({ number: "", exp: "", cvc: "", holder_name: "", billing_address_id: "" });
+      setAdding(false);
+      await load();
+    } catch (e: any) { setErr(e.message || "Could not add card"); }
+    finally { setBusy(false); }
+  }
+  async function makeDefault(id: string) {
+    try { await api.put(`/billing/payment-methods/${id}/default`, {}); await load(); }
+    catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
+  async function removeCard(pm: PaymentMethodView) {
+    if (!(await confirmDialog({ title: "Remove card?", message: `Delete the ${BRAND_LABEL[pm.brand] || "card"} ending ${pm.last4}?`, tone: "danger", confirmLabel: "Delete" }))) return;
+    try { await api.del(`/billing/payment-methods/${pm.id}`); await load(); }
+    catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
+
+  const billingAddrs = addrs.filter((a) => a.kind === "billing");
+
+  return (
+    <Card>
+      <div className="spread" style={{ marginBottom: 10 }}>
+        <div>
+          <h2 style={{ margin: 0 }}>Billing</h2>
+          <div className="muted" style={{ fontSize: 12.5 }}>
+            {cfg?.configured
+              ? `Payments are processed securely by ${cfg.name || (cfg.processor === "paypal" ? "PayPal" : "Stripe")}. Card numbers are never stored by Arkive.`
+              : "Manage the cards used for your Arkive subscription and appliance orders."}
+          </div>
+        </div>
+        {cfg?.processor && <Pill tone="info">{cfg.processor === "paypal" ? "PayPal" : "Stripe"}</Pill>}
+      </div>
+
+      {!cfg?.configured && (
+        <div className="muted" style={{ fontSize: 12.5, padding: "10px 0" }}>
+          <Icon name="info" size={13} /> Online payments aren’t enabled yet. An administrator assigns a payment
+          processor to this node in <b>Configuration → Services</b>. You can still save a card below in test mode.
+        </div>
+      )}
+
+      {methods.length === 0 && !adding && (
+        <div className="muted" style={{ fontSize: 12.5, padding: "8px 0" }}>No payment methods on file.</div>
+      )}
+      {methods.map((pm) => (
+        <div key={pm.id} className="result-row">
+          <div className="result-icon" style={{ background: "var(--inset)" }}><Icon name="credit-card" size={16} /></div>
+          <div className="flex1">
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <span style={{ fontWeight: 600 }}>{BRAND_LABEL[pm.brand] || "Card"} •••• {pm.last4}</span>
+              {pm.is_default && <Pill tone="ok">Default</Pill>}
+            </div>
+            <div className="faint" style={{ fontSize: 12 }}>
+              Expires {String(pm.exp_month).padStart(2, "0")}/{pm.exp_year}{pm.holder_name ? ` · ${pm.holder_name}` : ""}
+            </div>
+          </div>
+          {!pm.is_default && <button className="btn ghost sm" onClick={() => void makeDefault(pm.id)}>Make default</button>}
+          <button className="btn ghost sm" onClick={() => void removeCard(pm)}><Icon name="trash" size={14} /></button>
+        </div>
+      ))}
+
+      {!adding ? (
+        <div style={{ marginTop: 12 }}>
+          <button className="btn sm" onClick={() => setAdding(true)}><Icon name="credit-card" size={14} /> Add payment method</button>
+        </div>
+      ) : (
+        <div className="card" style={{ marginTop: 12, background: "var(--inset)" }}>
+          <h3 style={{ marginTop: 0, marginBottom: 10 }}>Add a card</h3>
+          <div className="grid grid-2" style={{ gap: 10 }}>
+            <label className="stack" style={{ gap: 5, gridColumn: "1 / -1" }}>
+              <span className="faint" style={{ fontSize: 12 }}>Card number</span>
+              <input className="input" inputMode="numeric" autoComplete="cc-number" placeholder="1234 1234 1234 1234"
+                     value={form.number} onChange={(e) => setForm({ ...form, number: e.target.value })} />
+            </label>
+            <SettingsField label="Expiry (MM/YY)" value={form.exp} onChange={(v) => setForm({ ...form, exp: v })} placeholder="MM/YY" />
+            <SettingsField label="CVC" value={form.cvc} onChange={(v) => setForm({ ...form, cvc: v })} placeholder="123" />
+            <SettingsField label="Cardholder name" value={form.holder_name} onChange={(v) => setForm({ ...form, holder_name: v })} placeholder="Name on card" />
+            <label className="stack" style={{ gap: 5 }}>
+              <span className="faint" style={{ fontSize: 12 }}>Billing address</span>
+              <select className="input" value={form.billing_address_id} onChange={(e) => setForm({ ...form, billing_address_id: e.target.value })}>
+                <option value="">— none —</option>
+                {billingAddrs.map((a) => (
+                  <option key={a.id} value={a.id}>{[a.label || a.name, a.line1, a.city].filter(Boolean).join(", ")}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {err && <div style={{ color: "var(--danger, #ff5d5d)", fontSize: 12.5, marginTop: 10 }}><Icon name="alert" size={13} /> {err}</div>}
+          <div className="row" style={{ gap: 8, marginTop: 12 }}>
+            <button className="btn primary sm" disabled={busy} onClick={addCard}>{busy ? "Saving…" : "Save card"}</button>
+            <button className="btn ghost sm" onClick={() => { setAdding(false); setErr(""); }}>Cancel</button>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
+            <Icon name="lock" size={11} /> Card details are sent over TLS to your payment processor and tokenized — Arkive stores only the brand, last four digits and expiry.
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

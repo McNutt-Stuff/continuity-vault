@@ -1970,10 +1970,15 @@ def _node_local_defaults(n: Node) -> dict:
 
 def _config_service_options(db: Session) -> dict:
     """Service objects grouped for the config service.* pickers."""
-    out = {"storage-service": [], "email-service": []}
+    out = {"storage-service": [], "email-service": [], "payment-service": []}
     for s in db.query(ServiceObject).order_by(ServiceObject.name.asc()).all():
         v = _service_view(db, s)
-        bucket = "storage-service" if s.kind.startswith("storage-") else "email-service"
+        if s.kind.startswith("storage-"):
+            bucket = "storage-service"
+        elif s.kind.startswith("payment-"):
+            bucket = "payment-service"
+        else:
+            bucket = "email-service"
         out[bucket].append({"id": s.id, "name": s.name, "kind": s.kind,
                             "enabled": bool(s.enabled), "configured": v["configured"]})
     return out
@@ -2475,6 +2480,22 @@ _SERVICE_KINDS: dict = {
                      "from_email", "from_name", "reply_to"],
         "setting_defaults": {"smtp_port": "587", "smtp_starttls": "true"},
         "required": ["smtp_host", "from_email"],
+    },
+    "payment-stripe": {
+        "label": "Stripe payments",
+        "category": "payment",
+        "credential_keys": ["secret_key", "webhook_secret"],
+        "settings": ["publishable_key", "currency", "statement_descriptor"],
+        "setting_defaults": {"currency": "usd"},
+        "required": ["publishable_key"],
+    },
+    "payment-paypal": {
+        "label": "PayPal payments",
+        "category": "payment",
+        "credential_keys": ["client_secret"],
+        "settings": ["client_id", "environment", "currency"],
+        "setting_defaults": {"environment": "live", "currency": "USD"},
+        "required": ["client_id"],
     },
 }
 

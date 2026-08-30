@@ -57,6 +57,9 @@ CONFIG_CATALOG: list[dict] = [
     {"key": "service.email", "label": "Email service",
      "type": "string", "group": "Services", "choices": "email-service",
      "description": "Which email ServiceObject this node uses to send mail (SES / SendGrid / SMTP)."},
+    {"key": "service.payment", "label": "Payment processor",
+     "type": "string", "group": "Services", "choices": "payment-service",
+     "description": "Which payment ServiceObject this node uses to process billing (Stripe / PayPal)."},
 ]
 
 _INDEX = {c["key"]: c for c in CONFIG_CATALOG}

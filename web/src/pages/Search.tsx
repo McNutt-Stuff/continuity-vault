@@ -109,6 +109,7 @@ interface SearchResp {
     category: Record<string, number>;
     label: Record<string, number>;
     attributes: Record<string, Record<string, number>>;
+    attribute_contacts?: Record<string, Record<string, string>>;
   };
   source_display: Record<string, string>;
 }
@@ -206,14 +207,16 @@ function FilterCheck({ state }: { state: "on" | "partial" | "off" }) {
 
 // A styled combobox for the attribute value: free-form typing plus a suggestion
 // list (facet values) rendered in the same menu style as the other filters.
-function AttrValue({ label, value, suggestions, onChange }: {
-  label: string; value: string; suggestions: [string, number][]; onChange: (v: string) => void;
+function AttrValue({ label, value, suggestions, contacts, onChange }: {
+  label: string; value: string; suggestions: [string, number][];
+  contacts?: Record<string, string>; onChange: (v: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState(value);
   useEffect(() => { setText(value); }, [value]);
   const q = text.trim().toLowerCase();
-  const filtered = suggestions.filter(([v]) => !q || v.toLowerCase().includes(q)).slice(0, 12);
+  const filtered = suggestions.filter(([v]) =>
+    !q || v.toLowerCase().includes(q) || (contacts?.[v] || "").toLowerCase().includes(q)).slice(0, 12);
   return (
     <div className="filter-select" style={{ position: "relative" }}>
       <span style={{ textTransform: "capitalize" }}>{label}</span>
@@ -230,7 +233,11 @@ function AttrValue({ label, value, suggestions, onChange }: {
           <div className="fs-menu" style={{ minWidth: 200 }}>
             {filtered.map(([v, n]) => (
               <div key={v} className="fs-opt" onClick={() => { setText(v); onChange(v); setOpen(false); }}>
-                <span className="fs-opt-label">{v}</span>
+                <span className="fs-opt-label">
+                  {contacts?.[v]
+                    ? <><span style={{ fontWeight: 600 }}>{contacts[v]}</span> <span className="faint" style={{ fontSize: 11 }}>{v}</span></>
+                    : v}
+                </span>
                 <span className="fs-opt-count">{n}</span>
               </div>
             ))}
@@ -1049,6 +1056,7 @@ export default function Search() {
                   label={attrKey}
                   value={attrValue}
                   suggestions={Object.entries(attrVals || {})}
+                  contacts={data.facets.attribute_contacts?.[attrKey]}
                   onChange={(v) => setAttr(v ? `${attrKey}:${v}` : null)}
                 />
               )}

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from .. import audit, security
 from ..db import get_db
-from ..models import PricingConfig, SearchDocument, Tenant, User, Vault
+from ..models import PaymentMethod, PricingConfig, SearchDocument, Tenant, User, Vault
 from .dashboard import _OBJECT_BUCKETS, _bucket_for
 
 router = APIRouter(prefix="/billing", tags=["billing"])
@@ -567,3 +567,130 @@ def update_plan(body: PlanUpdate,
         summary.append("Updated your protection plan")
     _notify_plan_change(db, user, view, summary)
     return view
+
+
+# --------------------------------------------------------------------------- #
+# Payment methods — processed through the tenant's assigned payment processor   #
+# (Stripe / PayPal ServiceObject). Only PCI-safe fields are stored.             #
+# --------------------------------------------------------------------------- #
+
+def _pm_view(pm: PaymentMethod) -> dict:
+    return {
+        "id": pm.id, "processor": pm.processor, "type": pm.type,
+        "brand": pm.brand, "last4": pm.last4,
+        "exp_month": pm.exp_month, "exp_year": pm.exp_year,
+        "holder_name": pm.holder_name, "is_default": bool(pm.is_default),
+        "billing_address_id": pm.billing_address_id,
+        "created_at": pm.created_at.isoformat() if pm.created_at else None,
+    }
+
+
+@router.get("/payment-config")
+def payment_config(principal: security.Principal = Depends(security.get_principal),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    """Which processor serves this tenant + the public key the UI needs. Never
+    returns any secret."""
+    from .. import services
+    svc = services.tenant_payment_service(db, tenant.id)
+    if not svc:
+        return {"configured": False, "processor": None}
+    kind = svc.get("kind", "")
+    cfg = svc.get("config", {}) or {}
+    processor = kind.replace("payment-", "") or None
+    out = {"configured": True, "processor": processor, "name": svc.get("name"),
+           "currency": (cfg.get("currency") or "USD").upper()}
+    if processor == "stripe":
+        out["publishable_key"] = cfg.get("publishable_key") or ""
+    elif processor == "paypal":
+        out["client_id"] = cfg.get("client_id") or ""
+        out["environment"] = cfg.get("environment") or "live"
+    return out
+
+
+@router.get("/payment-methods")
+def list_payment_methods(principal: security.Principal = Depends(security.get_principal),
+                         tenant: Tenant = Depends(security.get_tenant),
+                         db: Session = Depends(get_db)):
+    rows = (db.query(PaymentMethod)
+            .filter(PaymentMethod.tenant_id == tenant.id)
+            .order_by(PaymentMethod.is_default.desc(), PaymentMethod.created_at.desc()).all())
+    return {"payment_methods": [_pm_view(p) for p in rows]}
+
+
+class AddCard(BaseModel):
+    number: str
+    exp_month: int
+    exp_year: int
+    cvc: str
+    holder_name: str | None = None
+    billing_address_id: str | None = None
+    make_default: bool = True
+
+
+@router.post("/payment-methods")
+def add_payment_method(body: AddCard,
+                       principal: security.Principal = Depends(security.require_passkey),
+                       tenant: Tenant = Depends(security.get_tenant),
+                       db: Session = Depends(get_db)):
+    """Vault a card with the tenant's assigned processor and store only the
+    PCI-safe fields + processor references (never the PAN / CVC)."""
+    from .. import payments, services
+    svc = services.tenant_payment_service(db, tenant.id)
+    try:
+        res = payments.add_card(svc, body.model_dump())
+    except payments.PaymentError as exc:
+        raise HTTPException(400, str(exc))
+    make_default = body.make_default or (
+        db.query(PaymentMethod).filter(PaymentMethod.tenant_id == tenant.id).count() == 0)
+    if make_default:
+        (db.query(PaymentMethod)
+         .filter(PaymentMethod.tenant_id == tenant.id)
+         .update({PaymentMethod.is_default: False}))
+    pm = PaymentMethod(tenant_id=tenant.id, user_id=principal.user_id,
+                       billing_address_id=body.billing_address_id or None,
+                       is_default=make_default, **res)
+    db.add(pm)
+    db.commit()
+    db.refresh(pm)
+    audit.record(db, actor=principal.user_id, action="billing.payment_method_added",
+                 tenant_id=tenant.id, resource=pm.id,
+                 detail={"processor": pm.processor, "brand": pm.brand, "last4": pm.last4})
+    return _pm_view(pm)
+
+
+@router.put("/payment-methods/{pid}/default")
+def set_default_payment_method(pid: str,
+                               principal: security.Principal = Depends(security.get_principal),
+                               tenant: Tenant = Depends(security.get_tenant),
+                               db: Session = Depends(get_db)):
+    pm = db.get(PaymentMethod, pid)
+    if not pm or pm.tenant_id != tenant.id:
+        raise HTTPException(404, "payment method not found")
+    (db.query(PaymentMethod).filter(PaymentMethod.tenant_id == tenant.id)
+     .update({PaymentMethod.is_default: False}))
+    pm.is_default = True
+    db.commit()
+    return _pm_view(pm)
+
+
+@router.delete("/payment-methods/{pid}")
+def delete_payment_method(pid: str,
+                          principal: security.Principal = Depends(security.get_principal),
+                          tenant: Tenant = Depends(security.get_tenant),
+                          db: Session = Depends(get_db)):
+    pm = db.get(PaymentMethod, pid)
+    if not pm or pm.tenant_id != tenant.id:
+        raise HTTPException(404, "payment method not found")
+    was_default = pm.is_default
+    db.delete(pm)
+    db.commit()
+    if was_default:
+        nxt = (db.query(PaymentMethod).filter(PaymentMethod.tenant_id == tenant.id)
+               .order_by(PaymentMethod.created_at.desc()).first())
+        if nxt:
+            nxt.is_default = True
+            db.commit()
+    audit.record(db, actor=principal.user_id, action="billing.payment_method_removed",
+                 tenant_id=tenant.id, resource=pid)
+    return {"ok": True}

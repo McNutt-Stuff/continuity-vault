@@ -39,7 +39,7 @@ def _self_services() -> dict:
     global _cache, _at
     if _cache and time.time() - _at < _TTL:
         return _cache
-    out: dict = {"storage": None, "email": None}
+    out: dict = {"storage": None, "email": None, "payment": None}
     try:
         from .db import SessionLocal
         from .models import ConfigObject, Node, ServiceObject
@@ -47,8 +47,8 @@ def _self_services() -> dict:
         with SessionLocal() as db:
             node = db.query(Node).filter(Node.is_self.is_(True)).first()
             # The assigned service is chosen via configuration (profile/override key
-            # service.storage / service.email) so it works across the whole fleet;
-            # the Node column is the legacy fallback.
+            # service.storage / service.email / service.payment) so it works across
+            # the whole fleet; the Node column is the legacy fallback.
             eff = {}
             try:
                 eff = node_config.effective(db)
@@ -57,6 +57,7 @@ def _self_services() -> dict:
             ids = {
                 "storage": eff.get("service.storage") or (node.storage_service_id if node else None),
                 "email": eff.get("service.email") or (node.email_service_id if node else None),
+                "payment": eff.get("service.payment"),
             }
             for slot, sid in ids.items():
                 if not sid:
@@ -88,6 +89,54 @@ def self_storage_service() -> Optional[dict]:
 def self_email_service() -> Optional[dict]:
     """{"kind","name","config"} for the running node's email service, or None."""
     return _self_services().get("email")
+
+
+def self_payment_service() -> Optional[dict]:
+    """{"kind","name","config"} for the running node's payment processor, or None."""
+    return _self_services().get("payment")
+
+
+def _node_effective(db, node) -> dict:
+    """Effective config (override > profile) for an arbitrary node — used to
+    resolve a tenant's assigned processor from the control plane."""
+    from .models import ConfigProfile
+    merged: dict = {}
+    if node.config_profile_id:
+        prof = db.get(ConfigProfile, node.config_profile_id)
+        if prof is not None and prof.enabled:
+            merged.update(prof.data or {})
+    if node.config_overrides:
+        merged.update(node.config_overrides)
+    return merged
+
+
+def tenant_payment_service(db, tenant_id: str) -> Optional[dict]:
+    """{"kind","name","config"} for the payment processor assigned to the node a
+    tenant is served by (via that node's configuration profile / override key
+    ``service.payment``). Falls back to the running node's processor when the
+    tenant has no dedicated node. Returns None when nothing is configured."""
+    from .models import ConfigObject, Node, ServiceObject, Tenant
+    from . import credstore
+    t = db.get(Tenant, tenant_id)
+    node = db.get(Node, t.node_id) if (t and t.node_id) else None
+    if node is None:
+        return self_payment_service()
+    sid = _node_effective(db, node).get("service.payment")
+    if not sid:
+        return self_payment_service()
+    svc = db.get(ServiceObject, sid)
+    if svc is None or not svc.enabled:
+        return None
+    values: dict = {}
+    if svc.config_object_id:
+        obj = db.get(ConfigObject, svc.config_object_id)
+        if obj and obj.encrypted_values:
+            try:
+                values = credstore.decrypt("platform", obj.encrypted_values)
+            except Exception:
+                values = {}
+    return {"kind": svc.kind, "name": svc.name,
+            "config": {**values, **(svc.settings or {})}}
 
 
 def invalidate() -> None:

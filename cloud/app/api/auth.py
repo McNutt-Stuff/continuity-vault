@@ -26,7 +26,7 @@ from .. import features as _features
 from ..config import get_settings
 from ..db import get_db
 from ..emailer import send_email
-from ..models import Passkey, Tenant, User
+from ..models import Passkey, Tenant, User, UserAddress
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
@@ -562,6 +562,100 @@ def update_profile(body: ProfileUpdate,
     db.commit()
     return {"ok": True, "display_name": user.display_name, "first_name": user.first_name or "",
             "last_name": user.last_name or "", "phone": user.phone or ""}
+
+
+_ADDRESS_KINDS = ("billing", "shipping", "alternate")
+
+
+def _address_view(a: UserAddress) -> dict:
+    return {"id": a.id, "kind": a.kind, "label": a.label, "name": a.name,
+            "line1": a.line1, "line2": a.line2, "city": a.city, "region": a.region,
+            "postal_code": a.postal_code, "country": a.country, "phone": a.phone,
+            "is_default": bool(a.is_default)}
+
+
+class AddressBody(BaseModel):
+    kind: str = "shipping"
+    label: str | None = None
+    name: str | None = None
+    line1: str | None = None
+    line2: str | None = None
+    city: str | None = None
+    region: str | None = None
+    postal_code: str | None = None
+    country: str | None = None
+    phone: str | None = None
+    is_default: bool = False
+
+
+@router.get("/me/addresses")
+def list_addresses(principal: security.Principal = Depends(security.get_principal),
+                   db: Session = Depends(get_db)):
+    rows = (db.query(UserAddress)
+            .filter(UserAddress.user_id == principal.user_id)
+            .order_by(UserAddress.kind.asc(), UserAddress.is_default.desc(),
+                      UserAddress.created_at.asc()).all())
+    return {"addresses": [_address_view(a) for a in rows]}
+
+
+def _apply_address(a: UserAddress, body: AddressBody) -> None:
+    if body.kind in _ADDRESS_KINDS:
+        a.kind = body.kind
+    for f in ("label", "name", "line1", "line2", "city", "region",
+              "postal_code", "country", "phone"):
+        v = getattr(body, f)
+        if v is not None:
+            setattr(a, f, v.strip())
+    if not a.country:
+        a.country = "US"
+
+
+@router.post("/me/addresses")
+def add_address(body: AddressBody,
+                principal: security.Principal = Depends(security.get_principal),
+                tenant: Tenant = Depends(security.get_tenant),
+                db: Session = Depends(get_db)):
+    a = UserAddress(tenant_id=tenant.id, user_id=principal.user_id)
+    _apply_address(a, body)
+    if body.is_default:
+        (db.query(UserAddress)
+         .filter(UserAddress.user_id == principal.user_id, UserAddress.kind == a.kind)
+         .update({UserAddress.is_default: False}))
+        a.is_default = True
+    db.add(a)
+    db.commit()
+    db.refresh(a)
+    return _address_view(a)
+
+
+@router.put("/me/addresses/{aid}")
+def update_address(aid: str, body: AddressBody,
+                   principal: security.Principal = Depends(security.get_principal),
+                   db: Session = Depends(get_db)):
+    a = db.get(UserAddress, aid)
+    if not a or a.user_id != principal.user_id:
+        raise HTTPException(404, "address not found")
+    _apply_address(a, body)
+    if body.is_default:
+        (db.query(UserAddress)
+         .filter(UserAddress.user_id == principal.user_id, UserAddress.kind == a.kind,
+                 UserAddress.id != a.id)
+         .update({UserAddress.is_default: False}))
+        a.is_default = True
+    db.commit()
+    return _address_view(a)
+
+
+@router.delete("/me/addresses/{aid}")
+def delete_address(aid: str,
+                   principal: security.Principal = Depends(security.get_principal),
+                   db: Session = Depends(get_db)):
+    a = db.get(UserAddress, aid)
+    if not a or a.user_id != principal.user_id:
+        raise HTTPException(404, "address not found")
+    db.delete(a)
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/complete-setup")

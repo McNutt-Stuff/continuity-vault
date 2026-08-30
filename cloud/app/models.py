@@ -1000,6 +1000,54 @@ class ServiceObject(Base):
         return caps or list(STORAGE_CAPABILITIES)
 
 
+class UserAddress(Base):
+    """A saved postal address for a user — billing, shipping, or an alternate.
+    Referenced by payment methods (billing address) and appliance/order shipping."""
+
+    __tablename__ = "user_addresses"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), index=True)
+    user_id = Column(String, ForeignKey("users.id"), index=True)
+    kind = Column(String, default="shipping")   # billing | shipping | alternate
+    label = Column(String, default="")           # optional nickname ("Home", "Office")
+    name = Column(String, default="")            # recipient / cardholder name
+    line1 = Column(String, default="")
+    line2 = Column(String, default="")
+    city = Column(String, default="")
+    region = Column(String, default="")          # state / province
+    postal_code = Column(String, default="")
+    country = Column(String, default="US")
+    phone = Column(String, default="")
+    is_default = Column(Boolean, default=False)  # default for its kind
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class PaymentMethod(Base):
+    """A stored payment instrument. Only PCI-safe fields live here (brand, last4,
+    expiry) plus the processor's opaque references (customer + payment-method
+    token) minted by the assigned payment ServiceObject (Stripe / PayPal). The
+    full card number / CVC is never stored."""
+
+    __tablename__ = "payment_methods"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), index=True)
+    user_id = Column(String, ForeignKey("users.id"), index=True)
+    processor = Column(String, default="")           # stripe | paypal | test
+    type = Column(String, default="card")            # card | paypal
+    brand = Column(String, default="")               # visa | mastercard | amex …
+    last4 = Column(String, default="")
+    exp_month = Column(Integer, default=0)
+    exp_year = Column(Integer, default=0)
+    holder_name = Column(String, default="")
+    processor_customer = Column(String, default="")  # e.g. Stripe customer id
+    processor_token = Column(String, default="")     # e.g. Stripe payment_method id
+    billing_address_id = Column(String, nullable=True)
+    is_default = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
 class CustomerStorage(Base):
     """A customer's own cloud bucket/container used as a backup destination
     (bring-your-own-storage), the third protection tier alongside Arkive Cloud

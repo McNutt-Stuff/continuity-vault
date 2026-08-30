@@ -523,6 +523,40 @@ def _search_fast(db: Session, tenant: Tenant, allowed: list[str], *, q: str,
     }
 
 
+def _enrich_attribute_facets(db: Session, tenant_id: str, user_id: str, resp: dict) -> None:
+    """Resolve the raw identifiers in from/to/cc/bcc/phone attribute facets to
+    saved contact names, so the attribute-value dropdown can show a contact hint
+    beside each phone/email. Attaches ``facets.attribute_contacts`` = {key: {raw:
+    name}}."""
+    user = db.get(User, user_id)
+    if not user or not getattr(user, "contact_linking_enabled", False):
+        return
+    from .. import contacts
+    attrs = (resp.get("facets") or {}).get("attributes") or {}
+    id_keys = {"from", "to", "cc", "bcc", "phone"}
+    idents: list[tuple[str, str]] = []
+    per_key: dict[str, list[tuple[str, str]]] = {}
+    for key, vals in attrs.items():
+        if key not in id_keys:
+            continue
+        for raw in vals.keys():
+            c = contacts.classify(str(raw))
+            if c:
+                idents.append(c)
+                per_key.setdefault(key, []).append((raw, c[1]))
+    if not idents:
+        return
+    resolved = contacts.resolve(db, tenant_id, user_id, idents)
+    out: dict[str, dict] = {}
+    for key, pairs in per_key.items():
+        m = {raw: resolved[norm]["name"] for (raw, norm) in pairs
+             if resolved.get(norm) and resolved[norm].get("name")}
+        if m:
+            out[key] = m
+    if out:
+        resp.setdefault("facets", {})["attribute_contacts"] = out
+
+
 def _enrich_contacts(db: Session, tenant_id: str, user_id: str, resp: dict) -> None:
     """When the user opted into contact linking, resolve phone/email identifiers
     in message/email/attachment results to a saved contact name (built by the node
@@ -596,6 +630,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
             cat_set=cat_set, coll_set=coll_set, date_from=date_from, date_to=date_to,
             date_field=date_field, sort=sort, direction=direction, limit=limit)
         _enrich_contacts(db, tenant.id, principal.user_id, resp)
+        _enrich_attribute_facets(db, tenant.id, principal.user_id, resp)
         return resp
     # PERF: the free-text query is pushed to the DB (server-side filter) and the
     # heavy `search_blob` column is NEVER transferred — we select only the fields
@@ -916,6 +951,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         "source_display": source_display,
     }
     _enrich_contacts(db, tenant.id, principal.user_id, resp)
+    _enrich_attribute_facets(db, tenant.id, principal.user_id, resp)
     return resp
 
 

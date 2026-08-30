@@ -1410,7 +1410,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
     } catch (e) { flash((e as { message?: string }).message || "Assignment failed"); }
   }
   async function openOverride(s: any) {
-    const choices = s.choices || (s.key === "service.email" ? "email-service" : s.key === "service.storage" ? "storage-service" : null);
+    const choices = s.choices || (s.key === "service.email" ? "email-service" : s.key === "service.storage" ? "storage-service" : s.key === "service.payment" ? "payment-service" : null);
     let field: any;
     if (choices === "timezone") {
       field = { name: "v", label: s.label || s.key, defaultValue: ov[s.key] ?? "",
@@ -1808,7 +1808,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
                 <thead><tr><th>Setting</th><th>Effective value</th><th>Source</th><th style={{ textAlign: "right" }}>Override</th></tr></thead>
                 <tbody>
                   {config.settings.map((s: any) => {
-                    const choices = s.choices || (s.key === "service.email" ? "email-service" : s.key === "service.storage" ? "storage-service" : null);
+                    const choices = s.choices || (s.key === "service.email" ? "email-service" : s.key === "service.storage" ? "storage-service" : s.key === "service.payment" ? "payment-service" : null);
                     const services = choices ? (config.services?.[choices] || []) : null;
                     const svcName = (id: string) => (services || []).find((x: any) => x.id === id)?.name || id;
                     const shownVal = choices && s.value ? svcName(String(s.value)) : (s.value == null || s.value === "" ? "—" : String(s.value));
@@ -2191,7 +2191,8 @@ function ProfileEditor({ profile, catalog, onDone, onCancel }: {
               const key = row.key.trim();
               const choices = spec?.choices
                 || (key === "service.email" ? "email-service"
-                    : key === "service.storage" ? "storage-service" : null);
+                    : key === "service.storage" ? "storage-service"
+                    : key === "service.payment" ? "payment-service" : null);
               return (
                 <div key={i} className="stack" style={{ gap: 3 }}>
                   <div className="row" style={{ gap: 8, alignItems: "center" }}>
