@@ -141,6 +141,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "users", label: "Users", icon: "user", group: "Customers" },
   { key: "reports", label: "Reports", icon: "activity", group: "Customers" },
   { key: "customer-analytics", label: "Customer Analytics", icon: "insights", group: "Customers" },
+  { key: "billing", label: "Billing", icon: "credit-card", group: "Customers" },
   { key: "config-objects", label: "Configuration objects", icon: "key", group: "Configurations" },
   { key: "config-profiles", label: "Configuration profiles", icon: "puzzle", group: "Configurations" },
   { key: "sources", label: "Sources", icon: "link", group: "Configurations" },
@@ -170,6 +171,7 @@ export default function Admin() {
       {s === "users" && <Users />}
       {s === "reports" && <Reports />}
       {s === "customer-analytics" && <CustomerAnalytics />}
+      {s === "billing" && <BillingAdmin />}
       {s === "nodes" && <Nodes />}
       {s === "storage-usage" && <StorageUsageAdmin />}
       {s === "backups" && <BackupsAdmin />}
@@ -2211,7 +2213,7 @@ function ProfileEditor({ profile, catalog, onDone, onCancel }: {
                     ) : choices ? (
                       <select className="input sm flex1" value={row.value} onChange={(e) => setRow(i, { value: e.target.value })}>
                         <option value="">— none (use default) —</option>
-                        {services.filter((x) => x.category === (choices === "email-service" ? "email" : "storage")).map((x) => (
+                        {services.filter((x) => x.category === (choices === "email-service" ? "email" : choices === "payment-service" ? "payment" : "storage")).map((x) => (
                           <option key={x.id} value={x.id}>{x.name}{x.configured ? "" : " (incomplete)"}</option>
                         ))}
                       </select>
@@ -3981,6 +3983,157 @@ async function showStorageTestResult(o: ServiceObj, checks: TestCheck[], ok: boo
     message: lines.join("\n"),
     tone: ok ? "ok" : "danger",
   });
+}
+
+interface AdminBillingProfile {
+  id: string; tenant_id: string; tenant_name: string; processor: string;
+  plan_id: string; plan_name: string; amount_cents: number; currency: string;
+  interval: string; status: string; active: boolean;
+  processor_customer: string; processor_subscription: string;
+  current_period_end: string | null; last_charge_at: string | null; last_status: string;
+  payment_method: { brand: string; last4: string; exp_month: number; exp_year: number } | null;
+  charges_total: number; charges_succeeded: number; charges_failed: number;
+}
+interface AdminBillingCharge {
+  id: string; amount_cents: number; currency: string; status: string; attempt: number;
+  kind: string; processor_charge_id: string; error: string; created_at: string | null;
+}
+interface AdminBillingDetail extends AdminBillingProfile { charges: AdminBillingCharge[] }
+
+function fmtCents(cents: number, cur = "USD"): string {
+  const sym = cur === "USD" ? "$" : "";
+  return `${sym}${(cents / 100).toFixed(2)}${cur === "USD" ? "" : " " + cur}`;
+}
+const BILLING_STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "info"> = {
+  active: "ok", paused: "warn", inactive: "info", past_due: "danger", canceled: "danger",
+  succeeded: "ok", failed: "danger", pending: "warn",
+};
+
+function BillingAdmin() {
+  const [profiles, setProfiles] = useState<AdminBillingProfile[]>([]);
+  const [detail, setDetail] = useState<AdminBillingDetail | null>(null);
+  const [busy, setBusy] = useState("");
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3200); }
+
+  async function load() {
+    try { setProfiles((await api.get<{ profiles: AdminBillingProfile[] }>("/admin/billing/profiles")).profiles); }
+    catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function openDetail(id: string) {
+    try { setDetail(await api.get<AdminBillingDetail>(`/admin/billing/profiles/${id}`)); }
+    catch (e: any) { flash(e.message || "Could not load profile"); }
+  }
+  async function toggle(p: AdminBillingProfile, enable: boolean) {
+    setBusy(p.id);
+    try {
+      await api.post(`/admin/billing/profiles/${p.id}/${enable ? "enable" : "disable"}`, {});
+      flash(enable ? "Recurring billing enabled" : "Recurring billing paused");
+      await load();
+      if (detail?.id === p.id) await openDetail(p.id);
+    } catch (e: any) { flash(e.message || "Action failed"); }
+    finally { setBusy(""); }
+  }
+  async function chargeNow(p: AdminBillingProfile) {
+    if (!await confirmDialog({ title: "Charge now?", message: `Capture ${fmtCents(p.amount_cents, p.currency)} from ${p.tenant_name}'s card via ${p.processor || "the processor"}?`, confirmLabel: "Charge" })) return;
+    setBusy(p.id);
+    try {
+      const c = await api.post<AdminBillingCharge>(`/admin/billing/profiles/${p.id}/charge`, {});
+      flash(c.status === "succeeded" ? `Charged ${fmtCents(c.amount_cents, c.currency)}` : `Charge ${c.status}: ${c.error || ""}`);
+      await load();
+      if (detail?.id === p.id) await openDetail(p.id);
+    } catch (e: any) { flash(e.message || "Charge failed"); }
+    finally { setBusy(""); }
+  }
+
+  return (
+    <>
+      <Card style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ marginBottom: 10 }}>
+          <div>
+            <h3 style={{ margin: 0 }}>Billing profiles</h3>
+            <div className="muted" style={{ fontSize: 12.5 }}>Every tenant's recurring subscription. Enable to start charging their card at the plan price through the assigned processor; disable to pause.</div>
+          </div>
+          <button className="btn ghost sm" onClick={load}><Icon name="repeat" size={13} /> Refresh</button>
+        </div>
+        <table className="table">
+          <thead><tr><th>Tenant</th><th>Plan</th><th>Amount</th><th>Method</th><th>Status</th><th>Charges</th><th>Last</th><th></th></tr></thead>
+          <tbody>
+            {profiles.map((p) => (
+              <tr key={p.id}>
+                <td style={{ fontWeight: 600 }}>{p.tenant_name}</td>
+                <td>{p.plan_name || p.plan_id || "—"}</td>
+                <td>{fmtCents(p.amount_cents, p.currency)}<span className="faint" style={{ fontSize: 11 }}>/{p.interval}</span></td>
+                <td className="faint" style={{ fontSize: 12 }}>{p.payment_method ? `${p.payment_method.brand} ••${p.payment_method.last4}` : <span className="warn">no card</span>}</td>
+                <td><Pill tone={BILLING_STATUS_TONE[p.status] || "info"} dot>{p.active ? p.status : (p.status === "inactive" ? "inactive" : "paused")}</Pill></td>
+                <td className="faint" style={{ fontSize: 12 }}>{p.charges_succeeded}✓ {p.charges_failed ? `${p.charges_failed}✗` : ""}</td>
+                <td className="faint" style={{ fontSize: 11.5 }}>{p.last_charge_at ? `${p.last_status} · ${timeAgo(p.last_charge_at)}` : "—"}</td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  {p.active
+                    ? <button className="btn ghost sm" disabled={busy === p.id} onClick={() => toggle(p, false)}>Disable</button>
+                    : <button className="btn primary sm" disabled={busy === p.id} onClick={() => toggle(p, true)}>Enable</button>}
+                  {" "}<button className="btn ghost sm" disabled={busy === p.id || !p.payment_method} onClick={() => chargeNow(p)}>Charge</button>
+                  {" "}<button className="btn ghost sm" onClick={() => openDetail(p.id)}>View</button>
+                </td>
+              </tr>
+            ))}
+            {profiles.length === 0 && <tr><td colSpan={8} className="muted">No billing profiles yet. They're created when a customer saves a card.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+
+      {detail && (
+        <div className="modal-backdrop" onClick={() => setDetail(null)}>
+          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <div>
+                <h3 style={{ margin: 0 }}>{detail.tenant_name} · billing</h3>
+                <div className="faint" style={{ fontSize: 12 }}>
+                  {fmtCents(detail.amount_cents, detail.currency)}/{detail.interval} · {detail.processor || "unassigned"}
+                  {detail.processor_subscription ? ` · ${detail.processor_subscription}` : ""}
+                </div>
+              </div>
+              <button className="btn ghost sm" onClick={() => setDetail(null)}><Icon name="logout" size={14} /></button>
+            </div>
+            <div className="modal-body">
+              <div className="row" style={{ gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                <Pill tone={BILLING_STATUS_TONE[detail.status] || "info"} dot>{detail.status}</Pill>
+                {detail.payment_method && <Pill tone="info">{detail.payment_method.brand} ••{detail.payment_method.last4} · {String(detail.payment_method.exp_month).padStart(2, "0")}/{detail.payment_method.exp_year}</Pill>}
+                {detail.current_period_end && <span className="faint" style={{ fontSize: 12 }}>Renews {fmtAbsolute(detail.current_period_end)}</span>}
+              </div>
+              <div className="faint" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 6px" }}>Payments</div>
+              <table className="table">
+                <thead><tr><th>When</th><th>Amount</th><th>Kind</th><th>Attempt</th><th>Status</th><th>Detail</th></tr></thead>
+                <tbody>
+                  {detail.charges.map((c) => (
+                    <tr key={c.id}>
+                      <td className="faint" style={{ fontSize: 12 }}>{c.created_at ? fmtAbsolute(c.created_at) : "—"}</td>
+                      <td>{fmtCents(c.amount_cents, c.currency)}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>{c.kind}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>#{c.attempt}</td>
+                      <td><Pill tone={BILLING_STATUS_TONE[c.status] || "info"} dot>{c.status}</Pill></td>
+                      <td className="faint" style={{ fontSize: 11.5 }}>{c.error || c.processor_charge_id || "—"}</td>
+                    </tr>
+                  ))}
+                  {detail.charges.length === 0 && <tr><td colSpan={6} className="muted">No charges yet.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            <div className="modal-foot">
+              {detail.active
+                ? <button className="btn ghost sm" onClick={() => toggle(detail, false)}>Pause charges</button>
+                : <button className="btn primary sm" onClick={() => toggle(detail, true)}>Enable charges</button>}
+              <button className="btn sm" disabled={!detail.payment_method} onClick={() => chargeNow(detail)}>Charge now</button>
+              <button className="btn ghost sm" onClick={() => setDetail(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
 }
 
 function ServiceObjectsAdmin() {

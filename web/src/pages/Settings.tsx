@@ -415,6 +415,17 @@ interface PaymentConfig {
   configured: boolean; processor: string | null; name?: string; currency?: string;
   publishable_key?: string; client_id?: string; environment?: string;
 }
+interface SubscriptionResp {
+  profile: {
+    amount_cents: number; currency: string; interval: string; status: string; active: boolean;
+    plan_name: string; current_period_end: string | null;
+  } | null;
+  quote?: { amount_cents: number; currency: string; plan_id: string; plan_name: string };
+}
+function fmtCents(cents: number, cur = "USD"): string {
+  const sym = cur === "USD" ? "$" : "";
+  return `${sym}${(cents / 100).toFixed(2)}${cur === "USD" ? "" : " " + cur}`;
+}
 const BRAND_LABEL: Record<string, string> = {
   visa: "Visa", mastercard: "Mastercard", amex: "American Express",
   discover: "Discover", diners: "Diners Club", jcb: "JCB", card: "Card",
@@ -424,18 +435,20 @@ function BillingSettings() {
   const [cfg, setCfg] = useState<PaymentConfig | null>(null);
   const [methods, setMethods] = useState<PaymentMethodView[]>([]);
   const [addrs, setAddrs] = useState<Address[]>([]);
+  const [sub, setSub] = useState<SubscriptionResp | null>(null);
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [form, setForm] = useState({ number: "", exp: "", cvc: "", holder_name: "", billing_address_id: "" });
 
   async function load() {
-    const [c, m, a] = await Promise.all([
+    const [c, m, a, s] = await Promise.all([
       api.get<PaymentConfig>("/billing/payment-config").catch(() => null),
       api.get<{ payment_methods: PaymentMethodView[] }>("/billing/payment-methods").catch(() => ({ payment_methods: [] })),
       api.get<{ addresses: Address[] }>("/auth/me/addresses").catch(() => ({ addresses: [] })),
+      api.get<SubscriptionResp>("/billing/subscription").catch(() => null),
     ]);
-    setCfg(c); setMethods(m.payment_methods); setAddrs(a.addresses);
+    setCfg(c); setMethods(m.payment_methods); setAddrs(a.addresses); setSub(s);
   }
   useEffect(() => { void load(); }, []);
 
@@ -484,6 +497,29 @@ function BillingSettings() {
         </div>
         {cfg?.processor && <Pill tone="info">{cfg.processor === "paypal" ? "PayPal" : "Stripe"}</Pill>}
       </div>
+
+      {(sub?.profile || sub?.quote) && (() => {
+        const amount = sub.profile?.amount_cents ?? sub.quote?.amount_cents ?? 0;
+        const cur = sub.profile?.currency ?? sub.quote?.currency ?? "USD";
+        const planName = sub.profile?.plan_name || sub.quote?.plan_name || "Plan";
+        const interval = sub.profile?.interval || "month";
+        return (
+          <div className="result-row" style={{ background: "var(--inset)", borderRadius: 10, marginBottom: 6 }}>
+            <div className="result-icon" style={{ background: "var(--inset)" }}><Icon name="repeat" size={16} /></div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>{fmtCents(amount, cur)} <span className="faint" style={{ fontWeight: 400, fontSize: 12 }}>/ {interval}</span> · {planName}</div>
+              <div className="faint" style={{ fontSize: 12 }}>
+                {sub.profile
+                  ? (sub.profile.active
+                    ? `Recurring billing active${sub.profile.current_period_end ? ` — renews ${new Date(sub.profile.current_period_end + (/[zZ]|[+-]\d\d:?\d\d$/.test(sub.profile.current_period_end) ? "" : "Z")).toLocaleDateString()}` : ""}`
+                    : "Card on file — recurring billing will begin once activated")
+                  : "Your plan's recurring amount. Add a card to set up billing."}
+              </div>
+            </div>
+            {sub.profile && <Pill tone={sub.profile.active ? "ok" : "warn"}>{sub.profile.active ? "Active" : "Inactive"}</Pill>}
+          </div>
+        );
+      })()}
 
       {methods.length === 0 && !adding && (
         <div className="muted" style={{ fontSize: 12.5, padding: "8px 0" }}>No payment methods on file.</div>

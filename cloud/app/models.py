@@ -1048,6 +1048,50 @@ class PaymentMethod(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+class BillingProfile(Base):
+    """A tenant's recurring billing subscription at the payment processor. Created
+    when a customer adds a card; charging is toggled by an admin (``active``),
+    which creates/pauses the processor subscription for the plan amount."""
+
+    __tablename__ = "billing_profiles"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), index=True)
+    processor = Column(String, default="")                 # stripe | paypal | test
+    processor_customer = Column(String, default="")        # customer id at the processor
+    processor_subscription = Column(String, default="")    # subscription id (when active)
+    payment_method_id = Column(String, nullable=True)      # our PaymentMethod.id used to charge
+    plan_id = Column(String, default="")
+    plan_name = Column(String, default="")
+    amount_cents = Column(Integer, default=0)              # recurring amount
+    currency = Column(String, default="USD")
+    interval = Column(String, default="month")             # month | year
+    status = Column(String, default="inactive")            # inactive|active|paused|past_due|canceled
+    active = Column(Boolean, default=False)                # admin switch: are recurring charges on?
+    current_period_end = Column(DateTime, nullable=True)
+    last_charge_at = Column(DateTime, nullable=True)
+    last_status = Column(String, default="")               # last charge outcome
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class BillingCharge(Base):
+    """One charge attempt against a billing profile — the payment history the
+    admin billing view lists (succeeded / failed / pending + attempt count)."""
+
+    __tablename__ = "billing_charges"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), index=True)
+    profile_id = Column(String, ForeignKey("billing_profiles.id"), index=True)
+    amount_cents = Column(Integer, default=0)
+    currency = Column(String, default="USD")
+    status = Column(String, default="pending")             # succeeded | failed | pending
+    attempt = Column(Integer, default=1)
+    kind = Column(String, default="recurring")             # recurring | manual | setup
+    processor_charge_id = Column(String, default="")
+    error = Column(String, default="")
+    created_at = Column(DateTime, default=_now)
+
+
 class CustomerStorage(Base):
     """A customer's own cloud bucket/container used as a backup destination
     (bring-your-own-storage), the third protection tier alongside Arkive Cloud

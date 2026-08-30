@@ -19,7 +19,10 @@ from sqlalchemy.orm import Session
 
 from .. import audit, security
 from ..db import get_db
-from ..models import PaymentMethod, PricingConfig, SearchDocument, Tenant, User, Vault
+from ..models import (
+    BillingCharge, BillingProfile, PaymentMethod, PricingConfig,
+    SearchDocument, Tenant, User, Vault,
+)
 from .dashboard import _OBJECT_BUCKETS, _bucket_for
 
 router = APIRouter(prefix="/billing", tags=["billing"])
@@ -653,6 +656,7 @@ def add_payment_method(body: AddCard,
     db.add(pm)
     db.commit()
     db.refresh(pm)
+    _ensure_billing_profile(db, tenant, db.get(User, principal.user_id), pm)
     audit.record(db, actor=principal.user_id, action="billing.payment_method_added",
                  tenant_id=tenant.id, resource=pm.id,
                  detail={"processor": pm.processor, "brand": pm.brand, "last4": pm.last4})
@@ -694,3 +698,236 @@ def delete_payment_method(pid: str,
     audit.record(db, actor=principal.user_id, action="billing.payment_method_removed",
                  tenant_id=tenant.id, resource=pid)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Recurring billing profiles — the tenant's subscription at the processor.      #
+# The customer's card creates the profile (inactive); an admin turns charging   #
+# on/off. The amount is the plan's computed monthly total.                      #
+# --------------------------------------------------------------------------- #
+
+def _plan_amount_cents(db: Session, user: User, tenant: Tenant) -> tuple[int, str, str, str]:
+    """(amount_cents, currency, plan_id, plan_name) from the tenant's computed
+    monthly plan cost."""
+    view = plan_view(db, user, tenant)
+    total = float((view.get("costs") or {}).get("total_monthly") or 0.0)
+    plan = view.get("license_plan") or {}
+    cur = (view.get("currency") or "USD")
+    return int(round(total * 100)), cur, plan.get("id", tenant.plan or ""), plan.get("name", "")
+
+
+def _ensure_billing_profile(db: Session, tenant: Tenant, user: User,
+                            pm: PaymentMethod) -> BillingProfile:
+    """Create-or-update the tenant's billing profile from a saved card. Never
+    flips charging on — that's an admin action. Keeps the processor customer +
+    default method + current plan amount in sync."""
+    amount, cur, plan_id, plan_name = _plan_amount_cents(db, user, tenant)
+    prof = db.query(BillingProfile).filter(BillingProfile.tenant_id == tenant.id).first()
+    if prof is None:
+        prof = BillingProfile(tenant_id=tenant.id, status="inactive", active=False)
+        db.add(prof)
+    prof.processor = pm.processor or prof.processor
+    if pm.processor_customer:
+        prof.processor_customer = pm.processor_customer
+    if pm.is_default or not prof.payment_method_id:
+        prof.payment_method_id = pm.id
+    prof.amount_cents = amount
+    prof.currency = cur
+    prof.plan_id = plan_id
+    prof.plan_name = plan_name
+    db.commit()
+    db.refresh(prof)
+    return prof
+
+
+def _profile_view(db: Session, prof: BillingProfile) -> dict:
+    pm = db.get(PaymentMethod, prof.payment_method_id) if prof.payment_method_id else None
+    return {
+        "id": prof.id, "tenant_id": prof.tenant_id, "processor": prof.processor,
+        "plan_id": prof.plan_id, "plan_name": prof.plan_name,
+        "amount_cents": prof.amount_cents, "currency": prof.currency,
+        "interval": prof.interval, "status": prof.status, "active": bool(prof.active),
+        "processor_customer": prof.processor_customer,
+        "processor_subscription": prof.processor_subscription,
+        "current_period_end": prof.current_period_end.isoformat() if prof.current_period_end else None,
+        "last_charge_at": prof.last_charge_at.isoformat() if prof.last_charge_at else None,
+        "last_status": prof.last_status,
+        "payment_method": _pm_view(pm) if pm else None,
+        "updated_at": prof.updated_at.isoformat() if prof.updated_at else None,
+    }
+
+
+@router.get("/subscription")
+def get_subscription(principal: security.Principal = Depends(security.get_principal),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    """The tenant's recurring billing status for the customer's Billing tab."""
+    prof = db.query(BillingProfile).filter(BillingProfile.tenant_id == tenant.id).first()
+    if not prof:
+        amount, cur, plan_id, plan_name = _plan_amount_cents(
+            db, db.get(User, principal.user_id), tenant)
+        return {"profile": None, "quote": {"amount_cents": amount, "currency": cur,
+                                           "plan_id": plan_id, "plan_name": plan_name}}
+    return {"profile": _profile_view(db, prof)}
+
+
+# --------------------------------------------------------------------------- #
+# Admin billing — view every tenant's billing profile, toggle recurring        #
+# charges, run a charge now, and inspect the charge history.                    #
+# --------------------------------------------------------------------------- #
+
+admin_router = APIRouter(prefix="/admin/billing", tags=["admin-billing"])
+
+
+def _charge_view(c: BillingCharge) -> dict:
+    return {"id": c.id, "amount_cents": c.amount_cents, "currency": c.currency,
+            "status": c.status, "attempt": c.attempt, "kind": c.kind,
+            "processor_charge_id": c.processor_charge_id, "error": c.error,
+            "created_at": c.created_at.isoformat() if c.created_at else None}
+
+
+@admin_router.get("/profiles", dependencies=[Depends(security.require_platform_admin)])
+def admin_list_profiles(db: Session = Depends(get_db)):
+    """Every tenant's billing profile with its status + recent-charge rollup."""
+    profs = db.query(BillingProfile).order_by(BillingProfile.updated_at.desc()).all()
+    tenants = {t.id: t for t in db.query(Tenant).all()}
+    out = []
+    for p in profs:
+        charges = (db.query(BillingCharge)
+                   .filter(BillingCharge.profile_id == p.id).all())
+        succeeded = sum(1 for c in charges if c.status == "succeeded")
+        failed = sum(1 for c in charges if c.status == "failed")
+        v = _profile_view(db, p)
+        t = tenants.get(p.tenant_id)
+        v["tenant_name"] = t.name if t else "(unknown)"
+        v["charges_total"] = len(charges)
+        v["charges_succeeded"] = succeeded
+        v["charges_failed"] = failed
+        out.append(v)
+    return {"profiles": out}
+
+
+@admin_router.get("/profiles/{pid}", dependencies=[Depends(security.require_platform_admin)])
+def admin_profile_detail(pid: str, db: Session = Depends(get_db)):
+    prof = db.get(BillingProfile, pid)
+    if not prof:
+        raise HTTPException(404, "billing profile not found")
+    t = db.get(Tenant, prof.tenant_id)
+    charges = (db.query(BillingCharge).filter(BillingCharge.profile_id == pid)
+               .order_by(BillingCharge.created_at.desc()).limit(100).all())
+    v = _profile_view(db, prof)
+    v["tenant_name"] = t.name if t else "(unknown)"
+    v["charges"] = [_charge_view(c) for c in charges]
+    return v
+
+
+def _sync_amount(db: Session, prof: BillingProfile) -> None:
+    """Refresh the profile's amount from the tenant's current plan (owner user)."""
+    t = db.get(Tenant, prof.tenant_id)
+    owner = (db.query(User).filter(User.tenant_id == prof.tenant_id)
+             .order_by(User.created_at.asc()).first())
+    if t and owner:
+        amount, cur, plan_id, plan_name = _plan_amount_cents(db, owner, t)
+        prof.amount_cents, prof.currency = amount, cur
+        prof.plan_id, prof.plan_name = plan_id, plan_name
+
+
+@admin_router.post("/profiles/{pid}/enable", dependencies=[Depends(security.require_platform_admin)])
+def admin_enable_profile(pid: str,
+                         principal: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    """Turn recurring charges on: create (or resume) the processor subscription
+    for the plan amount using the tenant's default card."""
+    from .. import payments, services
+    prof = db.get(BillingProfile, pid)
+    if not prof:
+        raise HTTPException(404, "billing profile not found")
+    pm = db.get(PaymentMethod, prof.payment_method_id) if prof.payment_method_id else None
+    if not pm:
+        raise HTTPException(400, "no payment method on file for this tenant")
+    svc = services.tenant_payment_service(db, prof.tenant_id)
+    _sync_amount(db, prof)
+    if prof.amount_cents <= 0:
+        raise HTTPException(400, "plan amount is zero — nothing to bill")
+    try:
+        if prof.processor_subscription:
+            res = payments.set_subscription_paused(svc, prof.processor_subscription, False)
+            prof.status = res.get("status", "active")
+        else:
+            res = payments.start_subscription(
+                svc, customer=prof.processor_customer, token=pm.processor_token,
+                amount_cents=prof.amount_cents, currency=prof.currency,
+                interval=prof.interval, plan_name=prof.plan_name or "Arkive protection")
+            prof.processor_subscription = res.get("subscription_id", "")
+            prof.status = res.get("status", "active")
+            cpe = res.get("current_period_end")
+            if cpe:
+                prof.current_period_end = datetime.fromisoformat(cpe).replace(tzinfo=None)
+    except payments.PaymentError as exc:
+        raise HTTPException(400, str(exc))
+    prof.active = True
+    if not prof.processor:
+        prof.processor = payments._processor_name(svc)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.billing_enabled",
+                 tenant_id=prof.tenant_id, resource=prof.id,
+                 detail={"amount_cents": prof.amount_cents, "sub": prof.processor_subscription})
+    return _profile_view(db, prof)
+
+
+@admin_router.post("/profiles/{pid}/disable", dependencies=[Depends(security.require_platform_admin)])
+def admin_disable_profile(pid: str,
+                          principal: security.Principal = Depends(security.require_platform_admin),
+                          db: Session = Depends(get_db)):
+    """Pause recurring charges (keeps the subscription so it can be resumed)."""
+    from .. import payments, services
+    prof = db.get(BillingProfile, pid)
+    if not prof:
+        raise HTTPException(404, "billing profile not found")
+    svc = services.tenant_payment_service(db, prof.tenant_id)
+    if prof.processor_subscription:
+        try:
+            payments.set_subscription_paused(svc, prof.processor_subscription, True)
+        except payments.PaymentError as exc:
+            raise HTTPException(400, str(exc))
+    prof.active = False
+    prof.status = "paused"
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.billing_disabled",
+                 tenant_id=prof.tenant_id, resource=prof.id)
+    return _profile_view(db, prof)
+
+
+@admin_router.post("/profiles/{pid}/charge", dependencies=[Depends(security.require_platform_admin)])
+def admin_charge_now(pid: str,
+                     principal: security.Principal = Depends(security.require_platform_admin),
+                     db: Session = Depends(get_db)):
+    """Capture a one-off charge for the plan amount against the tenant's card."""
+    from .. import payments, services
+    prof = db.get(BillingProfile, pid)
+    if not prof:
+        raise HTTPException(404, "billing profile not found")
+    pm = db.get(PaymentMethod, prof.payment_method_id) if prof.payment_method_id else None
+    if not pm:
+        raise HTTPException(400, "no payment method on file for this tenant")
+    svc = services.tenant_payment_service(db, prof.tenant_id)
+    _sync_amount(db, prof)
+    attempt = (db.query(func.count(BillingCharge.id))
+               .filter(BillingCharge.profile_id == prof.id).scalar() or 0) + 1
+    res = payments.charge_once(
+        svc, customer=prof.processor_customer, token=pm.processor_token,
+        amount_cents=prof.amount_cents, currency=prof.currency,
+        description=f"{prof.plan_name or 'Arkive'} — manual charge")
+    charge = BillingCharge(
+        tenant_id=prof.tenant_id, profile_id=prof.id, amount_cents=prof.amount_cents,
+        currency=prof.currency, status=res["status"], attempt=attempt, kind="manual",
+        processor_charge_id=res.get("charge_id", ""), error=res.get("error", ""))
+    db.add(charge)
+    prof.last_charge_at = datetime.utcnow()
+    prof.last_status = res["status"]
+    db.commit()
+    db.refresh(charge)
+    audit.record(db, actor=principal.user_id, action="admin.billing_charged",
+                 tenant_id=prof.tenant_id, resource=prof.id,
+                 detail={"amount_cents": prof.amount_cents, "status": res["status"]})
+    return _charge_view(charge)
