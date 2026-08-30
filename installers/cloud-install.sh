@@ -159,6 +159,11 @@ sync_code() {
   chmod +x "$INSTALL_DIR"/installers/*.sh "$INSTALL_DIR"/updater/*.sh 2>/dev/null || true
 }
 
+set_node_hostname() {
+  # System hostname = the node's configured name (CV_HOSTNAME override wins).
+  set_system_hostname "${CV_HOSTNAME:-${CV_NODE_NAME:-$CV_DOMAIN}}"
+}
+
 setup_node_control() {
   # Let the service account control its managed units + read the journal so the
   # admin node console can restart/stop services and stream logs (scoped, no pw).
@@ -440,6 +445,7 @@ fi
 step_always "Validating application"       validate_app
 step_always "Writing configuration"        write_env
 step_always "Recording node marker"        write_node_marker
+step_always "Setting system hostname"      set_node_hostname
 step_always "Enabling node control"        setup_node_control
 step_always "Starting control-plane service" install_service
 step_always "Installing infrastructure backup timer" install_backup

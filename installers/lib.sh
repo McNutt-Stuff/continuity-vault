@@ -49,6 +49,36 @@ _slug() {
   echo "$1" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-'
 }
 
+# Set the system hostname (idempotent, best-effort — never aborts the install).
+# Sanitizes the requested name to a valid hostname, applies it via hostnamectl
+# (falling back to /etc/hostname + hostname), and keeps the /etc/hosts 127.0.1.1
+# line in sync so local resolution still works.
+set_system_hostname() {
+  local desired short current
+  desired="$(printf '%s' "${1:-}" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -e 's/[^a-z0-9.-]\{1,\}/-/g' -e 's/^[-.]\{1,\}//' -e 's/[-.]\{1,\}$//')"
+  [[ -z "$desired" ]] && return 0
+  short="${desired%%.*}"
+  current="$(hostnamectl --static 2>/dev/null || cat /etc/hostname 2>/dev/null || hostname 2>/dev/null || echo '')"
+  current="$(printf '%s' "$current" | tr -d '[:space:]')"
+  [[ "$current" == "$desired" ]] && return 0
+  if command -v hostnamectl >/dev/null 2>&1; then
+    hostnamectl set-hostname "$desired" 2>/dev/null || true
+  else
+    printf '%s\n' "$desired" > /etc/hostname 2>/dev/null || true
+    hostname "$desired" 2>/dev/null || true
+  fi
+  if [[ -f /etc/hosts ]]; then
+    if grep -q '^127\.0\.1\.1' /etc/hosts 2>/dev/null; then
+      sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t${desired} ${short}/" /etc/hosts 2>/dev/null || true
+    else
+      printf '127.0.1.1\t%s %s\n' "$desired" "$short" >> /etc/hosts 2>/dev/null || true
+    fi
+  fi
+  echo "system hostname set to ${desired}"
+}
+
 _on_error() {
   # Safety net for failures outside a managed step.
   printf "\n  %s✗ Unexpected error near line %s%s\n" "$RED" "${1:-?}" "$RESET"
