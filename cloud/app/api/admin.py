@@ -2484,18 +2484,17 @@ _SERVICE_KINDS: dict = {
     "payment-stripe": {
         "label": "Stripe payments",
         "category": "payment",
-        "credential_keys": ["secret_key", "webhook_secret"],
-        "settings": ["publishable_key", "currency", "statement_descriptor"],
-        "setting_defaults": {"currency": "usd"},
-        "required": ["publishable_key"],
+        "credential_keys": ["secret_key"],
+        "settings": ["publishable_key"],
+        "required": ["secret_key", "publishable_key"],
     },
     "payment-paypal": {
         "label": "PayPal payments",
         "category": "payment",
         "credential_keys": ["client_secret"],
-        "settings": ["client_id", "environment", "currency"],
-        "setting_defaults": {"environment": "live", "currency": "USD"},
-        "required": ["client_id"],
+        "settings": ["client_id", "environment"],
+        "setting_defaults": {"environment": "live"},
+        "required": ["client_id", "client_secret"],
     },
 }
 
