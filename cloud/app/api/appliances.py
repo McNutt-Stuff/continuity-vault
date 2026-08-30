@@ -873,6 +873,13 @@ def register_heartbeat(body: RegisterHeartbeatRequest,
         a = db.get(Appliance, pa.paired_appliance_id)
         if a is not None:
             token = _mint_appliance_token(db, a)
+            # This poll IS the agent checking in live, so count it as a heartbeat:
+            # the appliance reflects "online" the moment it adopts, instead of
+            # sitting Offline in ONLINE_STAGING until its first management heartbeat.
+            a.last_heartbeat_at = _now()
+            if body.telemetry:
+                a.telemetry = body.telemetry
+            db.commit()
             return {"paired": True, "activation": {
                 "appliance_id": a.id, "agent_token": token, "tenant_id": a.tenant_id,
                 "cloud_public_bundle": fleet.cloud_public_bundle(),

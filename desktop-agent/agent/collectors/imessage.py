@@ -351,6 +351,12 @@ def collect(config: Optional[dict] = None,
                     "meta": {"kind": kind, "mime": a["mime_type"], "filename": fname,
                              "message_guid": guid, "chat_id": chat_id,
                              "chat_name": chat_name, "service": service,
+                             # Inherit the parent message's participants so contact
+                             # linking resolves who sent/received the attachment.
+                             "from": sender.get("name") or sender.get("handle"),
+                             "to": ", ".join(r.get("name") or r.get("handle")
+                                             for r in recipients)[:200],
+                             "direction": "sent" if is_from_me else "received",
                              "modified": when},
                     "labels": [chat_name or "Messages", "Attachment"],
                     "size_bytes": len(raw),

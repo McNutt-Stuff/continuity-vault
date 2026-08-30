@@ -14,6 +14,7 @@ interface Recovered {
   expires_in_seconds: number; viewed: boolean;
   version?: number | null; version_created_at?: string | null;
   object_modified_at?: string | null;
+  contact_links?: { raw: string; name: string; source_type: string; type: string }[];
 }
 interface RetrieveResp {
   status: string; message: string; recovered_id?: string; title?: string;
@@ -114,7 +115,7 @@ interface SearchResp {
 
 interface ThreadMsg {
   object_id: string; message_guid?: string; title: string; preview: string; text?: string;
-  from?: string; direction?: string; service?: string; date: string | null;
+  from?: string; from_name?: string; contact_source_type?: string; direction?: string; service?: string; date: string | null;
   has_attachments: boolean;
   attachments: { object_id: string; filename: string; kind: string; mime?: string }[];
 }
@@ -584,12 +585,13 @@ export default function Search() {
           doc_type: res.doc_type || r.doc_type, source_type: r.source_type,
           mime: res.mime || "application/octet-stream", size_bytes: res.size_bytes || 0,
           location: loc.label, expires_in_seconds: 1800, viewed: false,
+          contact_links: r.contact_links,
         });
       } else if (res.async && res.command_id) {
         // Appliance-stored: the appliance must unseal, retrieve and re-seal. Show a
         // live progress modal and poll until the item is decrypted and staged.
         setRetrieving({ commandId: res.command_id, title: r.title, location: loc.label, stage: "requested" });
-        void pollRetrieveStatus(res.command_id, { title: r.title, location: loc.label, objectId: r.object_id });
+        void pollRetrieveStatus(res.command_id, { title: r.title, location: loc.label, objectId: r.object_id, contactLinks: r.contact_links });
       } else if (res.status === "client-encrypted" && res.content_b64) {
         downloadB64(res.content_b64, safeName(res.filename || r.title, r.doc_type));
         setMsg(res.message);
@@ -607,7 +609,7 @@ export default function Search() {
   // Poll an appliance recovery command until it re-seals and the cloud stages the
   // decrypted item, then open it. Superseded/cancelled when pollRef changes.
   async function pollRetrieveStatus(commandId: string,
-                                    ctx: { title: string; location: string; objectId: string }) {
+                                    ctx: { title: string; location: string; objectId: string; contactLinks?: { raw: string; name: string; source_type: string; type: string }[] }) {
     const token = ++pollRef.current;
     const deadline = Date.now() + 3 * 60 * 1000;
     while (pollRef.current === token && Date.now() < deadline) {
@@ -629,6 +631,7 @@ export default function Search() {
           doc_type: rec.doc_type, source_type: rec.source_type,
           mime: rec.mime, size_bytes: rec.size_bytes,
           location: ctx.location, expires_in_seconds: 1800, viewed: false,
+          contact_links: ctx.contactLinks,
         });
         return;
       }
@@ -1239,6 +1242,17 @@ export default function Search() {
                   {viewing.item.mime} · {bytes(viewing.item.size_bytes)} · from {viewing.item.location}
                   {viewing.item.object_modified_at ? ` · dated ${fmtAbsolute(viewing.item.object_modified_at)}` : ""}
                 </div>
+                {viewing.item.contact_links && viewing.item.contact_links.length > 0 && (
+                  <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    {dedupeLinks(viewing.item.contact_links).map((c, i) => (
+                      <span key={i} className="contact-link" title={`Linked to your contacts from ${SOURCE_META[c.source_type]?.label || c.source_type} · ${c.raw}`}>
+                        <Icon name="link" size={10} />
+                        <Icon name="user" size={11} />
+                        <span style={{ fontWeight: 600 }}>{c.name}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
               <button className="btn ghost sm" onClick={closeViewer}><Icon name="logout" size={14} /></button>
             </div>
@@ -1438,7 +1452,13 @@ export default function Search() {
                           color: sent ? "#fff" : "var(--text)",
                           borderRadius: 14, padding: "8px 12px" }}>
                       <div style={{ fontSize: 11, marginBottom: 2, opacity: 0.7 }}>
-                        {sent ? "Me" : (m.from || "Unknown")} · {m.date ? fmtAbsolute(m.date) : ""}
+                        {sent ? "Me" : (m.from_name || m.from || "Unknown")}
+                        {!sent && m.from_name && (
+                          <span title={`Linked to your contacts from ${SOURCE_META[m.contact_source_type || ""]?.label || m.contact_source_type || "another source"} · ${m.from || ""}`} style={{ marginLeft: 4, display: "inline-flex", verticalAlign: "middle" }}>
+                            <Icon name="link" size={10} />
+                          </span>
+                        )}
+                        {" · "}{m.date ? fmtAbsolute(m.date) : ""}
                       </div>
                       <div style={{ fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
                         {isPlaceholder || !body ? <span style={{ opacity: 0.6 }}>(no text)</span> : body}

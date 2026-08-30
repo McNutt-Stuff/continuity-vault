@@ -261,8 +261,36 @@ def thread(chat_id: str, source_type: str = "imessage",
     for m in messages:
         m["attachments"] = atts_by_msg.get(m["message_guid"], [])
     messages.sort(key=lambda m: m["date"] or "")
+    _enrich_thread_contacts(db, tenant.id, principal.user_id, messages)
     return {"chat_id": chat_id, "chat_name": chat_name, "count": len(messages),
             "messages": messages}
+
+
+def _enrich_thread_contacts(db: Session, tenant_id: str, user_id: str,
+                            messages: list) -> None:
+    """Resolve each message's ``from`` identifier (a bare phone/email) to a saved
+    contact name so a reassembled conversation shows people, not raw handles."""
+    user = db.get(User, user_id)
+    if not user or not getattr(user, "contact_linking_enabled", False):
+        return
+    from .. import contacts
+    per_msg: list = []
+    idents: list[tuple[str, str]] = []
+    for m in messages:
+        c = contacts.classify(str(m.get("from") or ""))
+        per_msg.append(c)
+        if c:
+            idents.append(c)
+    if not idents:
+        return
+    resolved = contacts.resolve(db, tenant_id, user_id, idents)
+    for m, c in zip(messages, per_msg):
+        if not c:
+            continue
+        hit = resolved.get(c[1])
+        if hit and hit.get("name"):
+            m["from_name"] = hit["name"]
+            m["contact_source_type"] = hit.get("source_type", "")
 
 
 # High-cardinality facets (labels, meta attributes) are sampled from the newest
@@ -497,8 +525,11 @@ def _search_fast(db: Session, tenant: Tenant, allowed: list[str], *, q: str,
 
 def _enrich_contacts(db: Session, tenant_id: str, user_id: str, resp: dict) -> None:
     """When the user opted into contact linking, resolve phone/email identifiers
-    in message results to a saved contact name (built by the node scheduler) and
-    attach ``contact_links`` so the UI can show the name + which source it's from."""
+    in message/email/attachment results to a saved contact name (built by the node
+    scheduler) and attach ``contact_links`` so the UI can show the name + which
+    source it's from. Any result whose metadata carries a from/to/cc/bcc/phone
+    identifier is enriched — messages, emails, and the attachments that inherit
+    their parent message's participants."""
     results = resp.get("results") or []
     if not results:
         return
@@ -509,9 +540,6 @@ def _enrich_contacts(db: Session, tenant_id: str, user_id: str, resp: dict) -> N
     per_result: list[list] = []
     idents: list[tuple[str, str]] = []
     for r in results:
-        if r.get("category") != "message":
-            per_result.append([])
-            continue
         found = contacts.message_identifiers(r.get("meta") or {})
         per_result.append(found)
         idents.extend((t, norm) for (t, norm, _raw) in found)
