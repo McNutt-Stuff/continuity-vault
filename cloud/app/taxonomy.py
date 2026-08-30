@@ -116,6 +116,47 @@ def category_for_kind(kind: str) -> str:
     return KIND_TO_CATEGORY.get((kind or "").lower(), Category.FILE.value)
 
 
+# --------------------------------------------------------------------------- #
+# Attribute consolidation — unify provider-specific metadata keys that mean the #
+# same thing so the unified-search facets/filters are consistent across every   #
+# source (e.g. an email "sender" and a chat "from" both filter as "from").      #
+# Extensible: add a source key to the appropriate canonical set below and every #
+# source that emits it is normalized automatically.                             #
+# --------------------------------------------------------------------------- #
+
+ATTRIBUTE_ALIASES: Dict[str, set] = {
+    "from": {"from", "sender", "author", "from_email", "sender_email",
+             "from_address", "posted_by", "user"},
+    "to": {"to", "recipient", "recipients", "to_email", "to_address", "sent_to"},
+    "cc": {"cc", "carbon_copy"},
+    "bcc": {"bcc"},
+    "subject": {"subject", "title_subject", "topic"},
+    "folder": {"folder", "mailbox", "label_folder", "parent_folder"},
+    "chat": {"chat", "chat_name", "conversation", "group", "group_name", "thread_name"},
+    "service": {"service", "channel", "platform"},
+    "direction": {"direction"},
+    "phone": {"phone", "phone_number", "number", "handle", "msisdn"},
+    "account": {"account", "mailbox_account"},
+}
+# Reverse map (source key → canonical key). Built once at import.
+_ALIAS_TO_CANON: Dict[str, str] = {
+    alias: canon for canon, aliases in ATTRIBUTE_ALIASES.items() for alias in aliases
+}
+
+
+def canonical_attr(key: str) -> str:
+    """Canonical attribute key for a provider metadata key (lower-cased; unknown
+    keys pass through unchanged so ad-hoc attributes still work)."""
+    k = str(key or "").strip().lower()
+    return _ALIAS_TO_CANON.get(k, k)
+
+
+def attr_source_keys(canonical: str) -> set:
+    """All provider metadata keys that map to a canonical attribute key."""
+    c = str(canonical or "").strip().lower()
+    return ATTRIBUTE_ALIASES.get(c, {c})
+
+
 def sensitivity_for(category: str) -> str:
     try:
         return CATEGORY_META[Category(category)]["sensitivity"].value

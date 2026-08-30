@@ -31,10 +31,11 @@ from ..models import (
     SearchDocument,
     SnapshotReceipt,
     Tenant,
+    User,
     Vault,
 )
 from ..storage import build_destination
-from ..taxonomy import category_for_kind, describe, sensitivity_for
+from ..taxonomy import canonical_attr, category_for_kind, describe, sensitivity_for
 
 router = APIRouter(prefix="/search", tags=["search"])
 logger = logging.getLogger("cv.search")
@@ -363,11 +364,12 @@ def _search_fast(db: Session, tenant: Tenant, allowed: list[str], *, q: str,
         for k, v in (meta or {}).items():
             if k == "client_encrypted" or v in (None, "", [], {}):
                 continue
+            ck = canonical_attr(k)
             for val in (v if isinstance(v, (list, tuple)) else [v]):
                 sval = str(val)
                 if sval and len(sval) <= 60:
-                    meta_facets.setdefault(k, {})
-                    meta_facets[k][sval] = meta_facets[k].get(sval, 0) + 1
+                    meta_facets.setdefault(ck, {})
+                    meta_facets[ck][sval] = meta_facets[ck].get(sval, 0) + 1
     meta_facets = {k: dict(sorted(vals.items(), key=lambda kv: kv[1], reverse=True)[:8])
                    for k, vals in meta_facets.items() if len(vals) > 1}
 
@@ -493,6 +495,40 @@ def _search_fast(db: Session, tenant: Tenant, allowed: list[str], *, q: str,
     }
 
 
+def _enrich_contacts(db: Session, tenant_id: str, user_id: str, resp: dict) -> None:
+    """When the user opted into contact linking, resolve phone/email identifiers
+    in message results to a saved contact name (built by the node scheduler) and
+    attach ``contact_links`` so the UI can show the name + which source it's from."""
+    results = resp.get("results") or []
+    if not results:
+        return
+    user = db.get(User, user_id)
+    if not user or not getattr(user, "contact_linking_enabled", False):
+        return
+    from .. import contacts
+    per_result: list[list] = []
+    idents: list[tuple[str, str]] = []
+    for r in results:
+        if r.get("category") != "message":
+            per_result.append([])
+            continue
+        found = contacts.message_identifiers(r.get("meta") or {})
+        per_result.append(found)
+        idents.extend((t, norm) for (t, norm, _raw) in found)
+    if not idents:
+        return
+    resolved = contacts.resolve(db, tenant_id, user_id, idents)
+    for r, found in zip(results, per_result):
+        links = []
+        for (t, norm, raw) in found:
+            hit = resolved.get(norm)
+            if hit and hit.get("name"):
+                links.append({"raw": raw, "name": hit["name"],
+                              "source_type": hit.get("source_type", ""), "type": t})
+        if links:
+            r["contact_links"] = links
+
+
 @router.get("")
 def search(q: str = "", source_type: str | None = None, doc_type: str | None = None,
            category: list[str] | None = Query(None), label: list[str] | None = Query(None),
@@ -508,6 +544,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     attr_key, attr_val = "", ""
     if attr and ":" in attr:
         attr_key, attr_val = attr.split(":", 1)
+        attr_key = canonical_attr(attr_key)
     # Type (category), label and source (per-account collection) filters are all
     # multi-select: an empty set means "no filter" (everything).
     cat_set = set(category or [])
@@ -526,10 +563,12 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     # instead of hauling the whole index into Python. Those two filters need the
     # JSON columns, so they fall through to the (correct) in-Python path below.
     if allowed and not label_set and not attr_key:
-        return _search_fast(
+        resp = _search_fast(
             db, tenant, allowed, q=q, source_type=source_type, doc_type=doc_type,
             cat_set=cat_set, coll_set=coll_set, date_from=date_from, date_to=date_to,
             date_field=date_field, sort=sort, direction=direction, limit=limit)
+        _enrich_contacts(db, tenant.id, principal.user_id, resp)
+        return resp
     # PERF: the free-text query is pushed to the DB (server-side filter) and the
     # heavy `search_blob` column is NEVER transferred — we select only the fields
     # the dedup, facets and result rows need. This keeps search responsive on
@@ -633,10 +672,17 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     def _attr_match(r: SearchDocument) -> bool:
         if not attr_key:
             return True
-        v = (r.meta or {}).get(attr_key)
-        if isinstance(v, (list, tuple)):
-            return attr_val in [str(x) for x in v]
-        return str(v) == attr_val
+        want = attr_val.strip().lower()
+        # Match across every provider key that maps to the canonical attribute,
+        # case-insensitively, allowing a typed substring (free-form filtering).
+        for k, v in (r.meta or {}).items():
+            if canonical_attr(k) != attr_key:
+                continue
+            for val in (v if isinstance(v, (list, tuple)) else [v]):
+                s = str(val).lower()
+                if s and (s == want or (want and want in s)):
+                    return True
+        return False
 
     def _matches(r: SearchDocument, skip: str = "") -> bool:
         if skip != "source":
@@ -726,13 +772,14 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         for k, v in (r.meta or {}).items():
             if k == "client_encrypted" or v in (None, "", [], {}):
                 continue
+            ck = canonical_attr(k)
             values = v if isinstance(v, (list, tuple)) else [v]
             for val in values:
                 sval = str(val)
                 if not sval or len(sval) > 60:
                     continue
-                meta_facets.setdefault(k, {})
-                meta_facets[k][sval] = meta_facets[k].get(sval, 0) + 1
+                meta_facets.setdefault(ck, {})
+                meta_facets[ck][sval] = meta_facets[ck].get(sval, 0) + 1
     # Keep only keys with more than one distinct value (useful as filters), and
     # cap values per key.
     meta_facets = {
@@ -831,7 +878,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         "version_count": len(versions_by_oid.get((r.source_type, r.object_id), [])),
     } for r in rows]
 
-    return {
+    resp = {
         "count": len(results),
         "total_indexed": len(unique),
         "results": results,
@@ -840,6 +887,9 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
                    "attributes": meta_facets, "source_accounts": source_accounts},
         "source_display": source_display,
     }
+    _enrich_contacts(db, tenant.id, principal.user_id, resp)
+    return resp
+
 
 
 class RetrieveRequest(BaseModel):

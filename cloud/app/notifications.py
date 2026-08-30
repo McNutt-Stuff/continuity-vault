@@ -554,10 +554,15 @@ def _deliver(db, user: User, key: str, built: dict, dedupe_key: str = "") -> boo
     if not recipients:
         logger.warning("notify %s skipped: user %s has no email", key, user.id)
         return False
+    footer = ("You're receiving this because email notifications are on for your "
+              "Arkive account. Manage them in Settings.")
+    extras = normalized_emails(user)
+    if extras:
+        footer += (" A copy is also sent to your additional notification "
+                   f"address{'es' if len(extras) > 1 else ''}: {', '.join(extras)}.")
     html = emailer.render(built["title"], built["body_html"],
                           cta=built.get("cta"), preheader=built.get("preheader", ""),
-                          footer_note="You're receiving this because email notifications are on for your "
-                                      "Arkive account. Manage them in Settings.")
+                          footer_note=footer)
     sent_any = False
     for to_email in recipients:
         channel = emailer.send(to_email, built["subject"], html=html, text=built.get("text", ""),

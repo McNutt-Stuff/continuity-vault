@@ -63,6 +63,7 @@ DEFAULT_AGENT_CONFIG = {
     "schedule_minutes": 360,
     "appliance_endpoint": None,  # set to push directly to an appliance ingest gateway
     "verbose_logging": False,  # advanced: DEBUG-level agent logging
+    "show_tray_icon": True,  # show the macOS menu-bar icon (applies on agent restart)
 }
 
 
@@ -174,6 +175,7 @@ class AgentConfigUpdate(BaseModel):
     enabled_collectors: list[str] | None = None
     appliance_endpoint: str | None = None
     verbose_logging: bool | None = None
+    show_tray_icon: bool | None = None
 
 
 @fleet_router.put("/{agent_id}/config")

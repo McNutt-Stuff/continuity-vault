@@ -14,6 +14,22 @@ import { Ring, Sparkline, AreaChart } from "../components/charts";
 import { humanizeAction } from "../components/format";
 import { VersionPill, ProductionVersion } from "../components/VersionBadge";
 import { JobKindBadge } from "../components/JobKindBadge";
+
+// IANA timezone names for the config editors. Uses the browser's built-in list
+// (Intl.supportedValuesOf) with a small fallback for older engines.
+let _TZ_CACHE: string[] | null = null;
+function tzList(): string[] {
+  if (_TZ_CACHE) return _TZ_CACHE;
+  try {
+    const f = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf;
+    if (typeof f === "function") { _TZ_CACHE = f("timeZone"); return _TZ_CACHE; }
+  } catch { /* ignore */ }
+  _TZ_CACHE = ["UTC", "America/New_York", "America/Chicago", "America/Denver",
+    "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu", "America/Sao_Paulo",
+    "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Moscow", "Africa/Johannesburg",
+    "Asia/Dubai", "Asia/Kolkata", "Asia/Shanghai", "Asia/Tokyo", "Australia/Sydney"];
+  return _TZ_CACHE;
+}
 import { RichTextEditor } from "../components/RichTextEditor";
 import { toEditorHtml } from "../md";
 
@@ -1051,17 +1067,31 @@ function CommsHistory({ userId }: { userId: string }) {
       {sel && (
         <div className="modal-backdrop" onClick={() => setSel(null)}>
           <div className="modal-panel" style={{ width: "min(720px, 100%)" }} onClick={(e) => e.stopPropagation()}>
-            <div className="spread" style={{ marginBottom: 10 }}>
-              <h3 style={{ margin: 0, fontSize: 16 }}>{sel.subject || "(no subject)"}</h3>
+            <div className="spread" style={{ marginBottom: 12 }}>
+              <div style={{ minWidth: 0 }}>
+                <h3 style={{ margin: 0, fontSize: 16 }}>{sel.subject || "(no subject)"}</h3>
+                <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>{commCatLabel(sel.category)} · to {sel.to_email || "—"}</div>
+              </div>
               <button className="btn ghost sm" onClick={() => setSel(null)}>Close</button>
             </div>
-            <div className="grid grid-3" style={{ gap: 10, marginBottom: 12 }}>
-              <Mini label="To" value={<span style={{ fontSize: 13 }}>{sel.to_email || "—"}</span>} />
-              <Mini label="Type" value={<span style={{ fontSize: 13 }}>{commCatLabel(sel.category)}</span>} />
-              <Mini label="Sent" value={<span style={{ fontSize: 13 }}>{sel.created_at ? fmtAbsolute(sel.created_at) : "—"}</span>} />
-              <Mini label="Delivery" value={<span style={{ fontSize: 13 }}>{delivery(sel).label}{sel.provider && sel.status === "sent" ? ` · ${sel.provider}` : ""}</span>} />
-              <Mini label="From node" value={<span style={{ fontSize: 13 }}>{sel.node_name || "—"}</span>} />
-              <Mini label="Opened" value={<span style={{ fontSize: 13 }}>{sel.opened ? `Opened ${sel.open_count}× · ${sel.opened_at ? fmtAbsolute(sel.opened_at) : ""}` : "Unopened"}</span>} />
+            <div style={{ marginBottom: 12 }}>
+              <Row2 label="To" value={sel.to_email || "—"} />
+              <Row2 label="Delivery" value={
+                <span className="row" style={{ gap: 8, alignItems: "center", justifyContent: "flex-end" }}>
+                  <Pill tone={delivery(sel).tone} dot>{delivery(sel).label}</Pill>
+                  {sel.provider && sel.status === "sent" && <span className="faint" style={{ fontSize: 11.5 }}>via {sel.provider}</span>}
+                </span>
+              } />
+              <Row2 label="Opened" value={
+                sel.opened
+                  ? <span className="row" style={{ gap: 8, alignItems: "center", justifyContent: "flex-end" }}>
+                      <Pill tone="ok" dot>Opened{sel.open_count > 1 ? ` ·${sel.open_count}` : ""}</Pill>
+                      <span className="faint" style={{ fontSize: 11.5 }}>{sel.opened_at ? fmtAbsolute(sel.opened_at) : ""}</span>
+                    </span>
+                  : <span className="faint">Unopened</span>
+              } />
+              <Row2 label="Sent" value={sel.created_at ? fmtAbsolute(sel.created_at) : "—"} />
+              <Row2 label="From node" value={sel.node_name || "Control plane"} />
             </div>
             {sel.error && <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12.5, marginBottom: 10 }}>Delivery error: {sel.error}</div>}
             <div className="faint" style={{ fontSize: 12, marginBottom: 4 }}>Message body</div>
@@ -1381,9 +1411,13 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
   }
   async function openOverride(s: any) {
     const choices = s.choices || (s.key === "service.email" ? "email-service" : s.key === "service.storage" ? "storage-service" : null);
-    const svc = choices ? (config.services?.[choices] || []) : null;
     let field: any;
-    if (svc) {
+    if (choices === "timezone") {
+      field = { name: "v", label: s.label || s.key, defaultValue: ov[s.key] ?? "",
+        options: [{ label: "— inherit (use profile / UTC) —", value: "" },
+          ...tzList().map((z) => ({ label: z, value: z }))] };
+    } else if (choices) {
+      const svc = config.services?.[choices] || [];
       field = { name: "v", label: s.label || s.key, defaultValue: ov[s.key] ?? "",
         options: [{ label: "— inherit (use profile / local) —", value: "" },
           ...svc.map((x: any) => ({ label: `${x.name}${x.configured ? "" : " (incomplete)"}`, value: x.id }))] };
@@ -2168,7 +2202,12 @@ function ProfileEditor({ profile, catalog, onDone, onCancel }: {
                              const ex = catIndex[k.trim()];
                              setRow(i, { key: k, value: (ex && !row.value) ? (ex.example || "") : row.value });
                            }} />
-                    {choices ? (
+                    {choices === "timezone" ? (
+                      <select className="input sm flex1" value={row.value} onChange={(e) => setRow(i, { value: e.target.value })}>
+                        <option value="">— none (use UTC) —</option>
+                        {tzList().map((z) => <option key={z} value={z}>{z}</option>)}
+                      </select>
+                    ) : choices ? (
                       <select className="input sm flex1" value={row.value} onChange={(e) => setRow(i, { value: e.target.value })}>
                         <option value="">— none (use default) —</option>
                         {services.filter((x) => x.category === (choices === "email-service" ? "email" : "storage")).map((x) => (

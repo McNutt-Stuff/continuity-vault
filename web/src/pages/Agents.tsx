@@ -237,6 +237,7 @@ function AgentDetail({ a, onCommand, reload }:
   const online = isOnline(a);
   const [kv, setKv] = useState<{ title: string; rows: [string, string][] } | null>(null);
   const [verbose, setVerbose] = useState<boolean>(!!a.config?.verbose_logging);
+  const [showTray, setShowTray] = useState<boolean>(a.config?.show_tray_icon !== false);
   const [dest, setDest] = useState<string>(() => {
     const arr = a.config?.destinations || ["cv-cloud"];
     if (arr.includes("appliance")) return arr.includes("cv-cloud") ? "both" : "appliance";
@@ -460,6 +461,21 @@ function AgentDetail({ a, onCommand, reload }:
             onClick={() => { const next = !verbose; setVerbose(next); void setConfig({ verbose_logging: next }); }}
           >
             {verbose ? "On" : "Off"}
+          </button>
+        </div>
+        <div className="collector-row" style={{ marginTop: 10 }}>
+          <div className="row" style={{ gap: 10 }}>
+            <Icon name="server" size={16} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Show menu bar icon</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>Run the agent quietly in the background. Applies on the agent's next heartbeat (it restarts to apply).</div>
+            </div>
+          </div>
+          <button
+            className={`btn sm ${showTray ? "primary" : ""}`}
+            onClick={() => { const next = !showTray; setShowTray(next); void setConfig({ show_tray_icon: next }); }}
+          >
+            {showTray ? "Shown" : "Hidden"}
           </button>
         </div>
       </Card>

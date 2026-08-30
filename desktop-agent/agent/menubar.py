@@ -41,11 +41,27 @@ def run() -> None:
     cfg = Config()
     agent = Agent(cfg)
 
+    # The menu-bar icon is opt-out via the cloud-driven agent config (Agents →
+    # Configuration); a local ``no_tray`` marker wins for offline control. When
+    # hidden — or when rumps isn't available — the agent runs fully headless. The
+    # heartbeat restarts the process (launchd KeepAlive) if the preference flips.
     try:
         import rumps
+        agent._tray_available = True
     except Exception:
-        agent.run()  # headless fallback
+        agent._tray_available = False
+        agent._tray_mode = False
+        agent.run()  # headless fallback (no menu-bar support)
         return
+
+    show_tray = bool((agent.reg or {}).get("config", {}).get("show_tray_icon", True))
+    if (cfg.data_dir / "no_tray").exists():
+        show_tray = False
+    if not show_tray:
+        agent._tray_mode = False
+        agent.run()  # headless — no menu-bar icon
+        return
+    agent._tray_mode = True
 
     class App(rumps.App):
         def __init__(self):

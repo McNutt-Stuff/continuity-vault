@@ -70,3 +70,26 @@ def set_notification_emails(body: EmailsIn,
     user.notification_emails = notifications.sanitize_emails(body.emails)
     db.commit()
     return {"ok": True, "emails": notifications.normalized_emails(user)}
+
+
+class ContactLinkingIn(BaseModel):
+    enabled: bool
+
+
+@router.get("/contact-linking")
+def get_contact_linking(principal: security.Principal = Depends(security.get_principal),
+                        db: Session = Depends(get_db)):
+    user = db.get(User, principal.user_id)
+    return {"enabled": bool(user.contact_linking_enabled)}
+
+
+@router.put("/contact-linking")
+def set_contact_linking(body: ContactLinkingIn,
+                        principal: security.Principal = Depends(security.get_principal),
+                        db: Session = Depends(get_db)):
+    """Opt in/out of contact linking — resolving phone numbers / emails in
+    messages to a saved contact's name (built by a background node job)."""
+    user = db.get(User, principal.user_id)
+    user.contact_linking_enabled = bool(body.enabled)
+    db.commit()
+    return {"ok": True, "enabled": bool(user.contact_linking_enabled)}

@@ -14,6 +14,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from sqlalchemy import text
 
@@ -62,6 +63,10 @@ def start_scheduler() -> None:
         time.sleep(min(tick, 30))
         while True:
             try:
+                _apply_node_timezone()
+            except Exception:  # noqa: BLE001
+                logger.exception("timezone apply failed")
+            try:
                 run_due()
             except Exception:  # noqa: BLE001 - never let the thread die
                 logger.exception("scheduled backup cycle failed")
@@ -94,6 +99,10 @@ def start_scheduler() -> None:
                 _run_notifications()
             except Exception:  # noqa: BLE001
                 logger.exception("notification sweep failed")
+            try:
+                _run_contact_directory()
+            except Exception:  # noqa: BLE001
+                logger.exception("contact directory build failed")
             time.sleep(_current_tick())
 
     _thread = threading.Thread(target=loop, name="cv-sync-scheduler", daemon=True)
@@ -106,6 +115,41 @@ def start_scheduler() -> None:
 
 
 _last_storage_test: datetime | None = None
+
+
+def _apply_node_timezone() -> None:
+    """Apply the node's configured CV_TIMEZONE to (a) this process — so Python
+    local-time + log timestamps reflect it — and (b) best-effort the host system
+    timezone so journalctl / OS logs match. The system change needs sudo rights on
+    ``timedatectl`` (granted by the installer's sudoers); it is a no-op otherwise."""
+    with SessionLocal() as db:
+        name = node_config.apply_process_timezone(db)
+    if not name:
+        return
+    global _applied_system_tz
+    if name == _applied_system_tz:
+        return
+    try:
+        current = ""
+        try:
+            current = Path("/etc/timezone").read_text().strip()
+        except Exception:  # noqa: BLE001
+            current = ""
+        if current != name:
+            import subprocess
+            r = subprocess.run(["sudo", "-n", "timedatectl", "set-timezone", name],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                logger.info("system timezone set to %s", name)
+            else:
+                logger.debug("system timezone not changed (%s): %s",
+                             r.returncode, (r.stderr or "").strip())
+        _applied_system_tz = name
+    except Exception:  # noqa: BLE001 — never let a tz change break the loop
+        _applied_system_tz = name
+
+
+_applied_system_tz: str | None = None
 
 
 def _test_customer_storages() -> None:
@@ -268,6 +312,37 @@ def _run_daily_insights() -> None:
 
 
 _last_notif_sweep: datetime | None = None
+_last_contact_build: datetime | None = None
+
+
+def _run_contact_directory() -> None:
+    """Rebuild the contact directory (phone/email → name) for users who opted in,
+    for the tenants THIS node is responsible for. Rate-limited to a few hours —
+    it's derived from the contact index which changes slowly."""
+    global _last_contact_build
+    now = datetime.utcnow()
+    if _last_contact_build and (now - _last_contact_build) < timedelta(hours=6):
+        return
+    _last_contact_build = now
+    from .. import contacts
+    from ..models import User
+    settings = get_settings()
+    is_cp = (settings.node_role or "control-plane") == "control-plane"
+    with SessionLocal() as db:
+        assigned: set[str] = set()
+        if is_cp:
+            assigned = {tid for (tid,) in
+                        db.query(Tenant.id).filter(Tenant.node_id.isnot(None)).all()}
+        users = [u for u in db.query(User).filter(
+                    User.status == "active",
+                    User.contact_linking_enabled.is_(True)).all()
+                 if u.tenant_id not in assigned]
+        for u in users:
+            try:
+                contacts.build_directory(db, u)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("contact directory build failed for %s", u.id)
 
 
 def _run_notifications() -> None:
@@ -296,11 +371,12 @@ def _run_notifications() -> None:
                         db.query(Tenant.id).filter(Tenant.node_id.isnot(None)).all()}
         users = [u for u in db.query(User).filter(User.status == "active").all()
                  if u.tenant_id not in assigned]
-        today = now.strftime("%Y-%m-%d")
-        # Only send the daily digest once the configured hour has arrived; the
-        # per-day dedupe key keeps it to one send even as we keep sweeping.
+        # The daily digest fires at notif.daily_hour in the NODE's timezone, once
+        # per LOCAL day (dedupe key = local date).
+        local = node_config.local_now(db)
+        today = local.strftime("%Y-%m-%d")
         daily_hour = node_config.get_int(db, "notif.daily_hour", 0)
-        send_daily = now.hour >= daily_hour
+        send_daily = local.hour >= daily_hour
         for u in users:
             if send_daily:
                 try:
@@ -313,8 +389,8 @@ def _run_notifications() -> None:
             except Exception:  # noqa: BLE001
                 db.rollback()
                 logger.exception("source-problem notify failed for %s", u.id)
-        # Weekly org roll-up (Mondays), to org admins of org tenants.
-        if now.weekday() == 0:
+        # Weekly org roll-up (Mondays in the node's timezone), to org admins.
+        if local.weekday() == 0:
             try:
                 _run_weekly_org(db, notif, assigned, now)
             except Exception:  # noqa: BLE001

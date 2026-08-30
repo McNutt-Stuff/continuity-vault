@@ -98,6 +98,7 @@ ensure_control_perms() {
       echo "${user} ALL=(root) NOPASSWD: /usr/bin/systemctl ${act} ${unit}" >> "$f"
     done
   done
+  echo "${user} ALL=(root) NOPASSWD: /usr/bin/timedatectl set-timezone *" >> "$f"
   chmod 440 "$f" 2>/dev/null || true
   # Journal-group membership only takes effect on a fresh process start, so
   # restart the app when we just added it.

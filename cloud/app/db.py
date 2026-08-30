@@ -206,6 +206,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE search_documents ADD COLUMN IF NOT EXISTS is_current BOOLEAN DEFAULT true",
         "ALTER TABLE users ADD COLUMN notification_prefs JSON",
         "ALTER TABLE users ADD COLUMN notification_emails JSON",
+        "ALTER TABLE users ADD COLUMN contact_linking_enabled BOOLEAN DEFAULT false",
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",
         "ALTER TABLE audit_events ADD COLUMN category VARCHAR DEFAULT 'activity'",
         "ALTER TABLE connector_accounts ADD COLUMN sync_cursor JSON",

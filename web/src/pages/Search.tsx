@@ -95,6 +95,7 @@ interface Result {
   locations?: { destination: string; label: string; recoverable: boolean; provider?: string }[];
   versions?: { version: number; snapshot_id: string; size_bytes: number; created_at: string | null; is_current: boolean }[];
   version_count?: number;
+  contact_links?: { raw: string; name: string; source_type: string; type: string }[];
 }
 interface SearchResp {
   count: number;
@@ -118,6 +119,17 @@ interface ThreadMsg {
   attachments: { object_id: string; filename: string; kind: string; mime?: string }[];
 }
 interface ThreadResp { chat_id: string; chat_name: string; count: number; messages: ThreadMsg[]; }
+
+// Collapse repeated contact links (a contact may appear as both from + to) by name.
+function dedupeLinks(links: { raw: string; name: string; source_type: string; type: string }[]) {
+  const seen = new Set<string>();
+  const out: typeof links = [];
+  for (const l of links) {
+    const k = l.name.trim().toLowerCase();
+    if (k && !seen.has(k)) { seen.add(k); out.push(l); }
+  }
+  return out;
+}
 
 const CATEGORY_META: Record<string, { icon: IconName; label: string; color: string }> = {
   credential: { icon: "key", label: "Credentials", color: "#f5a623" },
@@ -980,14 +992,19 @@ export default function Search() {
                   </select>
                 </label>
               )}
-              {attrKey && attrVals && (
+              {attrKey && (
                 <label className="filter-select">
                   <span style={{ textTransform: "capitalize" }}>{attrKey}</span>
-                  <select value={attrValue}
-                    onChange={(e) => setAttr(e.target.value ? `${attrKey}:${e.target.value}` : null)}>
-                    <option value="">Any</option>
-                    {Object.entries(attrVals).map(([v, n]) => <option key={v} value={v}>{v} ({n})</option>)}
-                  </select>
+                  <input
+                    list={`attr-vals-${attrKey}`}
+                    key={attrKey}
+                    placeholder="Any value — type to filter…"
+                    defaultValue={attrValue}
+                    onChange={(e) => { const v = e.target.value.trim(); setAttr(v ? `${attrKey}:${v}` : null); }}
+                  />
+                  <datalist id={`attr-vals-${attrKey}`}>
+                    {Object.entries(attrVals || {}).map(([v, n]) => <option key={v} value={v}>{`${v} (${n})`}</option>)}
+                  </datalist>
                 </label>
               )}
               {hasFilters && (
@@ -1089,6 +1106,17 @@ export default function Search() {
                 <div className="faint" style={{ fontSize: 12.5 }}>
                   {r.preview || <span className="faint">no indexed metadata for this object</span>}
                 </div>
+                {r.contact_links && r.contact_links.length > 0 && (
+                  <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    {dedupeLinks(r.contact_links).map((c, i) => (
+                      <span key={i} className="contact-link" title={`Linked to your contacts from ${SOURCE_META[c.source_type]?.label || c.source_type} · ${c.raw}`}>
+                        <Icon name="link" size={10} />
+                        <Icon name="user" size={11} />
+                        <span style={{ fontWeight: 600 }}>{c.name}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
                 {r.labels && r.labels.length > 0 && (
                   <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
                     {r.labels.slice(0, 4).map((l) => (

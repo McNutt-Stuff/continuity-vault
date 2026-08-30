@@ -101,6 +101,9 @@ class User(Base):
     # Additional addresses that also receive this account's email notifications
     # (never used for login; may duplicate another account's login email).
     notification_emails = Column(JSON, default=list)
+    # Opt-in: build a contact directory so messages that only carry a phone/email
+    # can show the linked contact name (see ContactLink).
+    contact_linking_enabled = Column(Boolean, default=False)
     created_at = Column(DateTime, default=_now)
 
     tenant = relationship("Tenant", back_populates="users")
@@ -470,6 +473,25 @@ class SearchDocument(Base):
     # prior rows when a new version is indexed, so reads filter to the current row
     # instead of de-duplicating the whole index. Backfilled for legacy rows.
     is_current = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=_now)
+
+
+class ContactLink(Base):
+    """Derived contact directory: links a NORMALIZED identifier (phone number or
+    email address) to a contact display name gathered from the user's contact
+    sources, so messages that only carry a raw number/address can display the
+    person's name. Rebuilt periodically by a node scheduler; opt-in per user."""
+
+    __tablename__ = "contact_links"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, index=True, nullable=False)
+    owner_user_id = Column(String, index=True, nullable=True)
+    identifier_type = Column(String, index=True)   # phone | email
+    identifier = Column(String, index=True)        # normalized match key
+    display_name = Column(String, default="")
+    source_type = Column(String, default="")       # google_contacts | icloud | ...
+    source_object_id = Column(String, default="")
+    updated_at = Column(DateTime, default=_now, index=True)
     created_at = Column(DateTime, default=_now)
 
 

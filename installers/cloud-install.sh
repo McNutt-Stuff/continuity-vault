@@ -169,6 +169,9 @@ setup_node_control() {
       echo "${CV_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl ${a} ${u}" >> "$f"
     done
   done
+  # Allow setting the host timezone so a CV_TIMEZONE config profile reflects in
+  # journalctl / OS logs (the app calls `sudo -n timedatectl set-timezone <tz>`).
+  echo "${CV_USER} ALL=(root) NOPASSWD: /usr/bin/timedatectl set-timezone *" >> "$f"
   chmod 440 "$f"
   usermod -aG systemd-journal "${CV_USER}" 2>/dev/null || true
 }

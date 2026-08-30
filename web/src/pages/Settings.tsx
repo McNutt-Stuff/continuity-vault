@@ -107,6 +107,8 @@ export default function Settings() {
 
       <NotificationSettings />
 
+      <ContactLinkingSettings />
+
       <Card style={{ marginBottom: 16 }}>
         <h2 style={{ marginBottom: 4 }}>Your encryption keys</h2>
         <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
@@ -316,6 +318,36 @@ function NotificationSettings() {
         {emails.length >= maxEmails && (
           <div className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>You've reached the maximum of {maxEmails} additional emails.</div>
         )}
+      </div>
+    </Card>
+  );
+}
+
+function ContactLinkingSettings() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    api.get<{ enabled: boolean }>("/me/contact-linking").then((r) => setEnabled(!!r.enabled)).catch(() => setEnabled(false));
+  }, []);
+  async function toggle() {
+    const next = !enabled;
+    setEnabled(next);
+    try { await api.put("/me/contact-linking", { enabled: next }); }
+    catch (e: any) { notify({ message: e.message || "Could not save", tone: "danger" }); setEnabled(!next); }
+  }
+  if (enabled === null) return null;
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div className="spread" style={{ alignItems: "flex-start", gap: 16 }}>
+        <div style={{ minWidth: 0 }}>
+          <h2 style={{ marginBottom: 4 }}>Contact linking</h2>
+          <div className="muted" style={{ fontSize: 12.5 }}>
+            Match phone numbers and email addresses in your messages to the people in your contacts, so a text
+            from a number shows the contact's name. Numbers are normalized (<span className="mono">+12015771404</span>,
+            <span className="mono"> 2015771404</span> and <span className="mono">201-577-1404</span> all match). Built privately in
+            the background from your own contact sources and shown as linked from your contacts.
+          </div>
+        </div>
+        <Toggle on={enabled} onClick={toggle} />
       </div>
     </Card>
   );

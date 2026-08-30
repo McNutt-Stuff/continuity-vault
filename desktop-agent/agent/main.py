@@ -283,6 +283,8 @@ class Agent:
         self.reg["config"] = data.get("config", self.reg.get("config", {}))
         # Cloud-driven advanced setting: verbose (DEBUG) logging.
         agent_log.set_verbose(bool(self.reg.get("config", {}).get("verbose_logging")))
+        # Menu-bar icon show/hide preference — restart to apply if it changed.
+        self._apply_tray_preference()
         # Per-node routing: once the tenant is pinned to a customer node the cloud
         # hands us that node's API base; from then on ALL signaling, commands and
         # ingest go there instead of the control plane.
@@ -314,6 +316,29 @@ class Agent:
         # interactive folder browsing isn't throttled to one folder per cycle.
         self._fast_poll = handled > 0 or bool(data.get("pending_more"))
         return data
+
+    def _apply_tray_preference(self) -> None:
+        """When the cloud config toggles the menu-bar icon, sync the local marker
+        and restart (launchd KeepAlive relaunches) so the change takes effect.
+        Only one restart occurs: the new process reads the marker and matches."""
+        mode = getattr(self, "_tray_mode", None)
+        if mode is None:
+            return
+        desired = bool(self.reg.get("config", {}).get("show_tray_icon", True))
+        if desired == mode:
+            return
+        if desired and not getattr(self, "_tray_available", False):
+            return  # can't show a tray without rumps — never loop-restart
+        marker = self.cfg.data_dir / "no_tray"
+        try:
+            if desired:
+                marker.unlink(missing_ok=True)
+            else:
+                marker.write_text("1")
+        except Exception:
+            pass
+        self.log.info("menu-bar icon preference changed (show=%s) — restarting to apply", desired)
+        os._exit(0)
 
     def _maybe_self_update(self, latest: Optional[str]) -> None:
         if not latest or latest == self.cfg.version:

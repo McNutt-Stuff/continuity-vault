@@ -129,6 +129,17 @@ def startup() -> None:
 
         seed()
 
+    # Apply this node's configured timezone to the process so API log timestamps
+    # and server-side time formatting reflect CV_TIMEZONE (the scheduler keeps it
+    # in sync as the config changes).
+    try:
+        from . import node_config
+        from .db import SessionLocal
+        with SessionLocal() as db:
+            node_config.apply_process_timezone(db)
+    except Exception:  # noqa: BLE001
+        pass
+
     # Clear jobs left "running" by a previous process — their worker threads died
     # with the old process, so they can never complete on their own.
     try:

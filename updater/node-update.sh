@@ -27,6 +27,7 @@ ensure_control_perms() {
       echo "${user} ALL=(root) NOPASSWD: /usr/bin/systemctl ${act} ${unit}" >> "$f"
     done
   done
+  echo "${user} ALL=(root) NOPASSWD: /usr/bin/timedatectl set-timezone *" >> "$f"
   chmod 440 "$f" 2>/dev/null || true
   if ! id -nG "$user" 2>/dev/null | grep -qw systemd-journal; then
     usermod -aG systemd-journal "$user" 2>/dev/null || true

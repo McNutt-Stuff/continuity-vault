@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger("cv.nodeconfig")
@@ -154,3 +156,63 @@ def get_list(db, key: str, default=None) -> list:
     if isinstance(v, list):
         return v
     return [x.strip() for x in str(v).split(",") if x.strip()]
+
+
+# --------------------------------------------------------------------------- #
+# Timezone (CV_TIMEZONE) — governs the daily-summary send time, log timestamps  #
+# and server-side time formatting for this node.                               #
+# --------------------------------------------------------------------------- #
+
+_applied_tz: str | None = None
+
+
+def timezone_name(db) -> str:
+    """The configured IANA timezone name for this node ("" if unset → UTC)."""
+    return str(get(db, "CV_TIMEZONE", "") or "").strip()
+
+
+def tzinfo(db):
+    """A tzinfo for this node's configured timezone, falling back to UTC."""
+    name = timezone_name(db)
+    if name:
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(name)
+        except Exception:  # noqa: BLE001 — unknown zone → UTC
+            logger.warning("invalid CV_TIMEZONE %r — using UTC", name)
+    return timezone.utc
+
+
+def local_now(db) -> datetime:
+    """Current time as an aware datetime in this node's configured timezone."""
+    return datetime.now(tzinfo(db))
+
+
+def to_local(db, dt: datetime) -> datetime:
+    """Convert a datetime (naive values are treated as UTC — matching the DB's
+    tz-naive UTC columns) into this node's configured timezone."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(tzinfo(db))
+
+
+def apply_process_timezone(db) -> str:
+    """Set the process TZ so Python's local-time functions and log timestamps
+    reflect the node's configured timezone. Idempotent; only calls tzset when the
+    zone changes. DB writes stay UTC (they use explicit tz-aware UTC helpers)."""
+    global _applied_tz
+    name = timezone_name(db)
+    if name == (_applied_tz or ""):
+        return name
+    try:
+        if name:
+            os.environ["TZ"] = name
+        else:
+            os.environ.pop("TZ", None)
+        if hasattr(time, "tzset"):
+            time.tzset()
+        _applied_tz = name
+        logger.info("process timezone set to %s", name or "system default (UTC)")
+    except Exception:  # noqa: BLE001
+        logger.warning("could not apply process timezone %r", name)
+    return name

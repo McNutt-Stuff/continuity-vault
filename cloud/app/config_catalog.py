@@ -20,6 +20,12 @@ CONFIG_CATALOG: list[dict] = [
      "type": "int", "group": "Scheduling", "example": "30", "unit": "seconds",
      "description": "How often the scheduler wakes to check for due work (minimum 15)."},
 
+    # --- Locale ------------------------------------------------------------ #
+    {"key": "CV_TIMEZONE", "label": "Node timezone",
+     "type": "string", "group": "Locale", "choices": "timezone", "example": "America/New_York",
+     "description": "IANA timezone for this node. Governs the daily-summary send time, "
+                    "server log timestamps and other server-side time formatting."},
+
     # --- Notifications ----------------------------------------------------- #
     {"key": "notif.source_repeat_hours", "label": "Source-problem repeat window",
      "type": "int", "group": "Notifications", "example": "24", "unit": "hours",
@@ -27,9 +33,9 @@ CONFIG_CATALOG: list[dict] = [
     {"key": "notif.enabled_insights", "label": "Daily-summary insights",
      "type": "csv", "group": "Notifications", "example": "footprint",
      "description": "Comma-separated insight cards to include in the daily summary email."},
-    {"key": "notif.daily_hour", "label": "Daily summary hour",
+    {"key": "notif.daily_hour", "label": "Daily summary send time",
      "type": "int", "group": "Notifications", "example": "8", "unit": "hour (0–23)",
-     "description": "Preferred local hour to send the daily summary."},
+     "description": "Hour of day to send the daily summary, in the node's timezone (CV_TIMEZONE)."},
 
     # --- Telemetry --------------------------------------------------------- #
     {"key": "CV_HEARTBEAT_INTERVAL_SECONDS", "label": "Heartbeat interval",
@@ -96,4 +102,12 @@ def validate_data(data: dict) -> tuple[dict, list[str]]:
         except (ValueError, TypeError):
             errors.append(f"{k}: expected {spec['type']}")
             coerced[k] = v
+        # Timezone values must be a valid IANA name so the scheduler never gets a
+        # bad zone (which would silently fall back to UTC).
+        if k == "CV_TIMEZONE" and coerced.get(k):
+            try:
+                from zoneinfo import ZoneInfo
+                ZoneInfo(str(coerced[k]))
+            except Exception:  # noqa: BLE001
+                errors.append(f"{k}: unknown timezone {coerced[k]!r}")
     return coerced, errors
