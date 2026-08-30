@@ -418,7 +418,7 @@ interface PaymentConfig {
 interface SubscriptionResp {
   profile: {
     amount_cents: number; currency: string; interval: string; status: string; active: boolean;
-    plan_name: string; current_period_end: string | null;
+    plan_name: string; current_period_end: string | null; next_charge_at: string | null;
   } | null;
   quote?: { amount_cents: number; currency: string; plan_id: string; plan_name: string };
 }
@@ -454,8 +454,8 @@ interface PlanChangePreview {
   current_plan: { id: string; name: string };
   target_plan: { id: string; name: string; price_per_tb_month: number; min_tb: number };
   current_monthly: number; target_monthly: number; currency: string;
-  is_upgrade: boolean; is_downgrade: boolean; requires_new_tenant: boolean;
-  affected_members: number; grace_days: number; warnings: string[];
+  is_upgrade: boolean; is_downgrade: boolean; is_inplace?: boolean; requires_new_tenant: boolean;
+  affected_members: number; grace_days: number; cooldown_days?: number; blocked?: boolean; warnings: string[];
 }
 function money(n: number, cur = "USD"): string {
   return `${cur === "USD" ? "$" : ""}${(n || 0).toFixed(2)}${cur === "USD" ? "" : " " + cur}`;
@@ -486,9 +486,15 @@ function PlanChangeCard() {
     if (!prev) return;
     setBusy(true); setErr("");
     try {
-      await api.post("/billing/plan-change", { plan: target, tenant_name: tenantName || null });
-      await notify({ title: "Plan changed", message: "You'll be signed out to finish switching — sign back in to continue.", tone: "ok" });
-      logout();
+      const r = await api.post<any>("/billing/plan-change", { plan: target, tenant_name: tenantName || null });
+      if (r?.requires_relogin) {
+        await notify({ title: "Plan changed", message: "You'll be signed out to finish switching — sign back in to continue.", tone: "ok" });
+        logout();
+        return;
+      }
+      const extra = r?.prorated_cents ? ` A prorated ${money(r.prorated_cents / 100)} was charged for the rest of this period.` : "";
+      await notify({ title: "Plan changed", message: `You're now on ${prev.target_plan.name}.${extra}`, tone: "ok" });
+      setTarget(""); setPrev(null); setBusy(false);
     } catch (e: any) { setErr(e.message || "Could not change plan"); setBusy(false); }
   }
 
@@ -532,7 +538,7 @@ function PlanChangeCard() {
           ))}
           {err && <div style={{ color: "var(--danger, #ff5d5d)", fontSize: 12.5, marginTop: 10 }}><Icon name="alert" size={13} /> {err}</div>}
           <div className="row" style={{ gap: 8, marginTop: 12 }}>
-            <button className="btn primary sm" disabled={busy || (prev.requires_new_tenant && !tenantName.trim())} onClick={apply}>
+            <button className="btn primary sm" disabled={busy || prev.blocked || (prev.requires_new_tenant && !tenantName.trim())} onClick={apply}>
               {busy ? "Applying…" : `Switch to ${prev.target_plan.name}`}
             </button>
             <button className="btn ghost sm" onClick={() => { setTarget(""); setPrev(null); }}>Cancel</button>
@@ -669,7 +675,7 @@ function BillingSettings() {
               <div className="faint" style={{ fontSize: 12 }}>
                 {sub.profile
                   ? (sub.profile.active
-                    ? `Recurring billing active${sub.profile.current_period_end ? ` — renews ${new Date(sub.profile.current_period_end + (/[zZ]|[+-]\d\d:?\d\d$/.test(sub.profile.current_period_end) ? "" : "Z")).toLocaleDateString()}` : ""}`
+                    ? `Billed monthly${sub.profile.next_charge_at ? ` — next charge ${new Date(sub.profile.next_charge_at + (/[zZ]|[+-]\d\d:?\d\d$/.test(sub.profile.next_charge_at) ? "" : "Z")).toLocaleDateString()}` : ""}`
                     : "Card on file — recurring billing will begin once activated")
                   : "Your plan's recurring amount. Add a card to set up billing."}
               </div>

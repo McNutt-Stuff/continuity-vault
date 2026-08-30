@@ -4020,9 +4020,16 @@ interface AdminBillingProfile {
   plan_id: string; plan_name: string; amount_cents: number; currency: string;
   interval: string; status: string; active: boolean;
   processor_customer: string; processor_subscription: string;
+  activated_at: string | null; next_charge_at: string | null;
   current_period_end: string | null; last_charge_at: string | null; last_status: string;
+  dunning_attempts?: number;
   payment_method: { brand: string; last4: string; exp_month: number; exp_year: number } | null;
-  charges_total: number; charges_succeeded: number; charges_failed: number;
+  charges_total: number; charges_succeeded: number; charges_failed: number; collected_cents?: number;
+}
+interface AdminBillingSummary {
+  currency: string; mrr_cents: number; arr_cents: number; fy_revenue_cents: number; fy_label: string;
+  month_revenue_cents: number; all_time_cents: number; active_subscriptions: number;
+  arpu_cents: number; fy_per_user_cents: number; charges_succeeded: number; charges_failed: number;
 }
 interface AdminBillingCharge {
   id: string; amount_cents: number; currency: string; status: string; attempt: number;
@@ -4039,8 +4046,19 @@ const BILLING_STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "info"> = {
   succeeded: "ok", failed: "danger", pending: "warn",
 };
 
+function RevCard({ label, value, sub, accent }: { label: string; value: string; sub: string; accent: string }) {
+  return (
+    <div className="card" style={{ padding: 14, borderLeft: `3px solid ${accent}` }}>
+      <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 700, marginTop: 4 }}>{value}</div>
+      <div className="faint" style={{ fontSize: 11.5, marginTop: 2 }}>{sub}</div>
+    </div>
+  );
+}
+
 function BillingAdmin() {
   const [profiles, setProfiles] = useState<AdminBillingProfile[]>([]);
+  const [summary, setSummary] = useState<AdminBillingSummary | null>(null);
   const [detail, setDetail] = useState<AdminBillingDetail | null>(null);
   const [busy, setBusy] = useState("");
   const [toast, setToast] = useState("");
@@ -4048,6 +4066,8 @@ function BillingAdmin() {
 
   async function load() {
     try { setProfiles((await api.get<{ profiles: AdminBillingProfile[] }>("/admin/billing/profiles")).profiles); }
+    catch { /* ignore */ }
+    try { setSummary(await api.get<AdminBillingSummary>("/admin/billing/summary")); }
     catch { /* ignore */ }
   }
   useEffect(() => { void load(); }, []);
@@ -4080,25 +4100,36 @@ function BillingAdmin() {
 
   return (
     <>
+      {summary && (
+        <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
+          <RevCard label="ARR" value={fmtCents(summary.arr_cents, summary.currency)} sub="Annual recurring revenue" accent="#4f7cff" />
+          <RevCard label="MRR" value={fmtCents(summary.mrr_cents, summary.currency)} sub={`${summary.active_subscriptions} active sub(s)`} accent="#35d0a5" />
+          <RevCard label={`${summary.fy_label} revenue`} value={fmtCents(summary.fy_revenue_cents, summary.currency)} sub="Collected this fiscal year" accent="#f5a623" />
+          <RevCard label="This month" value={fmtCents(summary.month_revenue_cents, summary.currency)} sub="Collected month-to-date" accent="#c56cf0" />
+          <RevCard label="Revenue / user" value={fmtCents(summary.fy_per_user_cents, summary.currency)} sub={`FY · ARPU ${fmtCents(summary.arpu_cents, summary.currency)}/mo`} accent="#2dbe60" />
+          <RevCard label="All-time" value={fmtCents(summary.all_time_cents, summary.currency)} sub={`${summary.charges_succeeded}✓ / ${summary.charges_failed}✗ charges`} accent="#ea4335" />
+        </div>
+      )}
       <Card style={{ marginBottom: 16 }}>
         <div className="spread" style={{ marginBottom: 10 }}>
           <div>
             <h3 style={{ margin: 0 }}>Billing profiles</h3>
-            <div className="muted" style={{ fontSize: 12.5 }}>Every tenant's recurring subscription. Enable to start charging their card at the plan price through the assigned processor; disable to pause.</div>
+            <div className="muted" style={{ fontSize: 12.5 }}>Every tenant's recurring subscription. Enable to start charging their card at the plan price on the monthly anniversary; disable to pause.</div>
           </div>
           <button className="btn ghost sm" onClick={load}><Icon name="repeat" size={13} /> Refresh</button>
         </div>
         <table className="table">
-          <thead><tr><th>Tenant</th><th>Plan</th><th>Amount</th><th>Method</th><th>Status</th><th>Charges</th><th>Last</th><th></th></tr></thead>
+          <thead><tr><th>Tenant</th><th>Plan</th><th>Amount</th><th>Next charge</th><th>Method</th><th>Status</th><th>Collected</th><th>Last</th><th></th></tr></thead>
           <tbody>
             {profiles.map((p) => (
               <tr key={p.id}>
                 <td style={{ fontWeight: 600 }}>{p.tenant_name}</td>
                 <td>{p.plan_name || p.plan_id || "—"}</td>
                 <td>{fmtCents(p.amount_cents, p.currency)}<span className="faint" style={{ fontSize: 11 }}>/{p.interval}</span></td>
+                <td className="faint" style={{ fontSize: 12 }}>{p.active && p.next_charge_at ? timeAgo(p.next_charge_at) : "—"}</td>
                 <td className="faint" style={{ fontSize: 12 }}>{p.payment_method ? `${p.payment_method.brand} ••${p.payment_method.last4}` : <span className="warn">no card</span>}</td>
-                <td><Pill tone={BILLING_STATUS_TONE[p.status] || "info"} dot>{p.active ? p.status : (p.status === "inactive" ? "inactive" : "paused")}</Pill>{p.processor === "test" && <> <Pill tone="warn">TEST</Pill></>}</td>
-                <td className="faint" style={{ fontSize: 12 }}>{p.charges_succeeded}✓ {p.charges_failed ? `${p.charges_failed}✗` : ""}</td>
+                <td><Pill tone={BILLING_STATUS_TONE[p.status] || "info"} dot>{p.active ? p.status : (p.status === "inactive" ? "inactive" : "paused")}</Pill>{p.processor === "test" && <> <Pill tone="warn">TEST</Pill></>}{p.status === "past_due" && p.dunning_attempts ? <span className="faint" style={{ fontSize: 11 }}> · retry {p.dunning_attempts}/4</span> : null}</td>
+                <td className="faint" style={{ fontSize: 12 }}>{fmtCents(p.collected_cents || 0, p.currency)}</td>
                 <td className="faint" style={{ fontSize: 11.5 }}>{p.last_charge_at ? `${p.last_status} · ${timeAgo(p.last_charge_at)}` : "—"}</td>
                 <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                   {p.active
@@ -4109,7 +4140,7 @@ function BillingAdmin() {
                 </td>
               </tr>
             ))}
-            {profiles.length === 0 && <tr><td colSpan={8} className="muted">No billing profiles yet. They're created when a customer saves a card.</td></tr>}
+            {profiles.length === 0 && <tr><td colSpan={9} className="muted">No billing profiles yet. They're created when a customer saves a card.</td></tr>}
           </tbody>
         </table>
       </Card>

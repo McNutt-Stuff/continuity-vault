@@ -92,6 +92,8 @@ class User(Base):
     protection_options = Column(JSON, default=list)
     # Shared/personal account's pending Arkive Cloud deletion (30-day grace, see Tenant).
     cloud_delete_at = Column(DateTime, nullable=True)
+    # Last time this account changed plan tier — enforces the 1-change-per-30-days limit.
+    last_plan_change_at = Column(DateTime, nullable=True)
     last_login_at = Column(DateTime, nullable=True)
     # NULL until the account finishes (or an admin re-triggers) the setup wizard.
     setup_completed_at = Column(DateTime, nullable=True)
@@ -1067,6 +1069,9 @@ class BillingProfile(Base):
     interval = Column(String, default="month")             # month | year
     status = Column(String, default="inactive")            # inactive|active|paused|past_due|canceled
     active = Column(Boolean, default=False)                # admin switch: are recurring charges on?
+    activated_at = Column(DateTime, nullable=True)         # when recurring billing was first turned on
+    next_charge_at = Column(DateTime, nullable=True)       # next scheduled recurring charge (anniversary)
+    dunning_attempts = Column(Integer, default=0)          # consecutive failed charges (reset on success)
     current_period_end = Column(DateTime, nullable=True)
     last_charge_at = Column(DateTime, nullable=True)
     last_status = Column(String, default="")               # last charge outcome

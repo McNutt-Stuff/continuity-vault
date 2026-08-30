@@ -741,6 +741,10 @@ def _ensure_billing_profile(db: Session, tenant: Tenant, user: User,
     prof.currency = cur
     prof.plan_id = plan_id
     prof.plan_name = plan_name
+    # A fresh card after failed charges clears dunning and retries on the next sweep.
+    if prof.active and prof.status == "past_due":
+        prof.dunning_attempts = 0
+        prof.next_charge_at = datetime.utcnow()
     db.commit()
     db.refresh(prof)
     return prof
@@ -755,6 +759,9 @@ def _profile_view(db: Session, prof: BillingProfile) -> dict:
         "interval": prof.interval, "status": prof.status, "active": bool(prof.active),
         "processor_customer": prof.processor_customer,
         "processor_subscription": prof.processor_subscription,
+        "activated_at": prof.activated_at.isoformat() if prof.activated_at else None,
+        "next_charge_at": prof.next_charge_at.isoformat() if prof.next_charge_at else None,
+        "dunning_attempts": prof.dunning_attempts or 0,
         "current_period_end": prof.current_period_end.isoformat() if prof.current_period_end else None,
         "last_charge_at": prof.last_charge_at.isoformat() if prof.last_charge_at else None,
         "last_status": prof.last_status,
@@ -895,14 +902,56 @@ def admin_list_profiles(db: Session = Depends(get_db)):
                    .filter(BillingCharge.profile_id == p.id).all())
         succeeded = sum(1 for c in charges if c.status == "succeeded")
         failed = sum(1 for c in charges if c.status == "failed")
+        collected = sum(c.amount_cents for c in charges if c.status == "succeeded")
         v = _profile_view(db, p)
         t = tenants.get(p.tenant_id)
         v["tenant_name"] = t.name if t else "(unknown)"
         v["charges_total"] = len(charges)
         v["charges_succeeded"] = succeeded
         v["charges_failed"] = failed
+        v["collected_cents"] = collected
         out.append(v)
     return {"profiles": out}
+
+
+@admin_router.get("/summary", dependencies=[Depends(security.require_platform_admin)])
+def admin_billing_summary(db: Session = Depends(get_db)):
+    """Revenue rollups for the admin billing dashboard: MRR / ARR, this fiscal
+    year (ending Dec 31), this calendar month, and per-active-account average."""
+    now = datetime.utcnow()
+    fy_start = datetime(now.year, 1, 1)
+    month_start = datetime(now.year, now.month, 1)
+
+    active = db.query(BillingProfile).filter(BillingProfile.active.is_(True)).all()
+    mrr_cents = sum(p.amount_cents for p in active)
+    active_count = len(active)
+
+    def _collected(since: datetime) -> int:
+        return int(db.query(func.coalesce(func.sum(BillingCharge.amount_cents), 0))
+                   .filter(BillingCharge.status == "succeeded",
+                           BillingCharge.created_at >= since).scalar() or 0)
+
+    all_time = int(db.query(func.coalesce(func.sum(BillingCharge.amount_cents), 0))
+                   .filter(BillingCharge.status == "succeeded").scalar() or 0)
+    succeeded = int(db.query(func.count(BillingCharge.id))
+                    .filter(BillingCharge.status == "succeeded").scalar() or 0)
+    failed = int(db.query(func.count(BillingCharge.id))
+                 .filter(BillingCharge.status == "failed").scalar() or 0)
+
+    return {
+        "currency": "USD",
+        "mrr_cents": mrr_cents,
+        "arr_cents": mrr_cents * 12,
+        "fy_revenue_cents": _collected(fy_start),
+        "fy_label": f"FY{now.year}",
+        "month_revenue_cents": _collected(month_start),
+        "all_time_cents": all_time,
+        "active_subscriptions": active_count,
+        "arpu_cents": int(round(mrr_cents / active_count)) if active_count else 0,
+        "fy_per_user_cents": int(round(_collected(fy_start) / active_count)) if active_count else 0,
+        "charges_succeeded": succeeded,
+        "charges_failed": failed,
+    }
 
 
 @admin_router.get("/profiles/{pid}", dependencies=[Depends(security.require_platform_admin)])
@@ -934,9 +983,9 @@ def _sync_amount(db: Session, prof: BillingProfile) -> None:
 def admin_enable_profile(pid: str,
                          principal: security.Principal = Depends(security.require_platform_admin),
                          db: Session = Depends(get_db)):
-    """Turn recurring charges on: create (or resume) the processor subscription
-    for the plan amount using the tenant's default card."""
-    from .. import payments, services
+    """Turn recurring monthly charges on. The plan amount is billed on the monthly
+    anniversary of activation by the billing sweep."""
+    from .. import billing_engine, payments, services
     prof = db.get(BillingProfile, pid)
     if not prof:
         raise HTTPException(404, "billing profile not found")
@@ -949,29 +998,14 @@ def admin_enable_profile(pid: str,
     _sync_amount(db, prof)
     if prof.amount_cents <= 0:
         raise HTTPException(400, "plan amount is zero — nothing to bill")
-    try:
-        if prof.processor_subscription:
-            res = payments.set_subscription_paused(svc, prof.processor_subscription, False)
-            prof.status = res.get("status", "active")
-        else:
-            res = payments.start_subscription(
-                svc, customer=prof.processor_customer, token=pm.processor_token,
-                amount_cents=prof.amount_cents, currency=prof.currency,
-                interval=prof.interval, plan_name=prof.plan_name or "Arkive protection")
-            prof.processor_subscription = res.get("subscription_id", "")
-            prof.status = res.get("status", "active")
-            cpe = res.get("current_period_end")
-            if cpe:
-                prof.current_period_end = datetime.fromisoformat(cpe).replace(tzinfo=None)
-    except payments.PaymentError as exc:
-        raise HTTPException(400, str(exc))
-    prof.active = True
     if not prof.processor:
         prof.processor = payments._processor_name(svc)
+    charge = billing_engine.activate(db, prof)
     db.commit()
     audit.record(db, actor=principal.user_id, action="admin.billing_enabled",
                  tenant_id=prof.tenant_id, resource=prof.id,
-                 detail={"amount_cents": prof.amount_cents, "sub": prof.processor_subscription})
+                 detail={"amount_cents": prof.amount_cents, "next_charge_at": str(prof.next_charge_at),
+                         "first_charge": charge.status if charge else "resumed"})
     return _profile_view(db, prof)
 
 
@@ -984,12 +1018,6 @@ def admin_disable_profile(pid: str,
     prof = db.get(BillingProfile, pid)
     if not prof:
         raise HTTPException(404, "billing profile not found")
-    svc = services.tenant_payment_service(db, prof.tenant_id)
-    if prof.processor_subscription:
-        try:
-            payments.set_subscription_paused(svc, prof.processor_subscription, True)
-        except payments.PaymentError as exc:
-            raise HTTPException(400, str(exc))
     prof.active = False
     prof.status = "paused"
     db.commit()

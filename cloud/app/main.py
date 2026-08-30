@@ -166,6 +166,8 @@ def startup() -> None:
     if role == "control-plane":
         from .workers.telemetry import start_telemetry_sampler
         start_telemetry_sampler()
+        from .workers.billing import start_billing_worker
+        start_billing_worker()
 
     # Verbose sync diagnostics when enabled (per-source fetch/ingest/errors).
     if settings.sync_debug:

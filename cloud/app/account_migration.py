@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
-from . import audit, emailer, services
+from . import audit, billing_engine, emailer, services
 from .models import (
     Appliance, ApplianceAssignment, ApplianceCommand, ApplianceStorage,
     BillingProfile, Collection, ConnectorAccount, ContactLink, CustomerStorage,
@@ -34,6 +34,7 @@ logger = logging.getLogger("cv.accountmigration")
 
 TB = 1024 ** 4
 DOWNGRADE_GRACE_DAYS = 30
+PLAN_CHANGE_COOLDOWN_DAYS = 30
 DEDICATED_PLANS = {"family", "business", "enterprise"}
 SHARED_PLAN = "personal"
 
@@ -80,9 +81,18 @@ def preview(db: Session, user: User, tenant: Tenant, target_plan: str) -> dict:
 
     upgrade = is_dedicated_plan(target_plan) and not is_dedicated_plan(tenant.plan)
     downgrade = not is_dedicated_plan(target_plan) and is_dedicated_plan(tenant.plan)
+    inplace = is_dedicated_plan(target_plan) and is_dedicated_plan(tenant.plan)
     other_members = _other_members(db, tenant, user) if is_dedicated_plan(tenant.plan) else []
 
+    # One change per cooldown window.
+    cooldown_days = 0
+    if user.last_plan_change_at:
+        elapsed = (_now() - user.last_plan_change_at).days
+        cooldown_days = max(0, PLAN_CHANGE_COOLDOWN_DAYS - elapsed)
+
     warnings: list[str] = []
+    if cooldown_days:
+        warnings.append(f"You changed your plan recently — you can change it again in {cooldown_days} day(s).")
     if upgrade:
         warnings.append("You'll become the administrator of a new organization and be signed out to finish switching.")
     if downgrade:
@@ -92,6 +102,8 @@ def preview(db: Session, user: User, tenant: Tenant, target_plan: str) -> dict:
                 f"{len(other_members)} other member(s) in your organization will be moved to personal "
                 f"accounts and have {DOWNGRADE_GRACE_DAYS} days to set up their own billing before their "
                 "protected data is removed.")
+    if inplace and target_monthly > cur_monthly:
+        warnings.append("You'll be charged a prorated amount now for the remainder of your current billing period.")
     return {
         "current_plan": {"id": tenant.plan, "name": _plan_meta(db, tenant.plan).get("name", tenant.plan)},
         "target_plan": {"id": target_plan, "name": tp.get("name", target_plan),
@@ -101,10 +113,13 @@ def preview(db: Session, user: User, tenant: Tenant, target_plan: str) -> dict:
         "currency": cur.get("currency", "USD"),
         "is_upgrade": upgrade,
         "is_downgrade": downgrade,
+        "is_inplace": inplace,
         "requires_new_tenant": upgrade,
         "requires_relogin": upgrade or downgrade,
         "affected_members": len(other_members),
         "grace_days": DOWNGRADE_GRACE_DAYS,
+        "cooldown_days": cooldown_days,
+        "blocked": cooldown_days > 0,
         "warnings": warnings,
     }
 
@@ -124,9 +139,33 @@ def change_plan(db: Session, user: User, target_plan: str,
     target_plan = (target_plan or "").lower()
     if target_plan == (tenant.plan or "").lower():
         raise ValueError("The account is already on that plan.")
-    if is_dedicated_plan(target_plan):
+    # One plan change per cooldown window.
+    if user.last_plan_change_at:
+        elapsed = (_now() - user.last_plan_change_at).days
+        if elapsed < PLAN_CHANGE_COOLDOWN_DAYS:
+            raise ValueError(f"You can change your plan again in "
+                             f"{PLAN_CHANGE_COOLDOWN_DAYS - elapsed} day(s).")
+    cur_dedicated = is_dedicated_plan(tenant.plan)
+    tgt_dedicated = is_dedicated_plan(target_plan)
+    if tgt_dedicated and not cur_dedicated:
         return _upgrade(db, user, tenant, target_plan, tenant_name, actor)
-    return _downgrade(db, user, tenant, target_plan, actor)
+    if not tgt_dedicated and cur_dedicated:
+        return _downgrade(db, user, tenant, target_plan, actor)
+    if tgt_dedicated and cur_dedicated:
+        return _change_inplace(db, user, tenant, target_plan, actor)
+    raise ValueError("That plan change isn't available for personal accounts.")
+
+
+def _tenant_monthly_cents(db: Session, tenant: Tenant) -> int:
+    from .api.billing import _compute_plan
+    v = _compute_plan(db, tenant)
+    return int(round(float((v.get("costs") or {}).get("total_monthly") or 0.0) * 100))
+
+
+def _plan_base_cents(db: Session, plan_id: str) -> int:
+    tp = _plan_meta(db, plan_id)
+    return int(round(float(tp.get("price_per_tb_month", 0) or 0)
+                     * float(tp.get("min_tb", 0) or 0) * 100))
 
 
 def _upgrade(db: Session, user: User, old_tenant: Tenant, target_plan: str,
@@ -145,7 +184,9 @@ def _upgrade(db: Session, user: User, old_tenant: Tenant, target_plan: str,
         user.role = "owner"
         user.feature_flags = {}        # full capabilities in their own tenant
         user.cloud_delete_at = None
+        user.last_plan_change_at = _now()
         _seed_billing_profile(db, new, user)
+        _carry_billing_cycle(db, old_tenant.id, new.id, target_plan)
         audit.record(db, actor=actor or user.id, action="account.upgraded",
                      tenant_id=new.id, resource=user.id,
                      detail={"from_tenant": old_tenant.id, "plan": target_plan, "name": name})
@@ -157,6 +198,65 @@ def _upgrade(db: Session, user: User, old_tenant: Tenant, target_plan: str,
     _email_change(user, "upgrade", plan_name, name)
     return {"ok": True, "requires_relogin": True, "new_tenant_id": new.id,
             "tenant_name": name, "plan": target_plan}
+
+
+def _change_inplace(db: Session, user: User, tenant: Tenant, target_plan: str,
+                    actor: str | None) -> dict:
+    """Family ↔ Business ↔ Enterprise: change the plan on the SAME dedicated
+    tenant (no move, no relogin) and prorate the delta for the remaining cycle."""
+    new_meta = _plan_meta(db, target_plan)
+    plan_name = new_meta.get("name", target_plan)
+    prorated = 0
+    try:
+        old_amount = _tenant_monthly_cents(db, tenant)
+        tenant.plan = target_plan
+        tenant.licensed_bytes = max(int(tenant.licensed_bytes or 0),
+                                    int(float(new_meta.get("min_tb", 0) or 0) * TB))
+        new_amount = _tenant_monthly_cents(db, tenant)
+        prof = db.query(BillingProfile).filter(BillingProfile.tenant_id == tenant.id).first()
+        if prof is not None:
+            prof.plan_id = target_plan
+            prof.plan_name = plan_name
+            prof.amount_cents = new_amount
+            if prof.active:
+                delta = billing_engine.proration_cents(old_amount, new_amount, prof.next_charge_at)
+                if delta > 0:
+                    billing_engine.charge_profile(db, prof, kind="proration", amount_cents=delta)
+                    prorated = delta
+        user.last_plan_change_at = _now()
+        audit.record(db, actor=actor or user.id, action="account.plan_changed",
+                     tenant_id=tenant.id, resource=user.id,
+                     detail={"plan": target_plan, "prorated_cents": prorated})
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("in-place plan change failed for user %s", user.id)
+        raise
+    _email_change(user, "change", plan_name, tenant.name)
+    return {"ok": True, "requires_relogin": False, "plan": target_plan,
+            "prorated_cents": prorated}
+
+
+def _carry_billing_cycle(db: Session, old_tenant_id: str, new_tenant_id: str,
+                         target_plan: str) -> None:
+    """When an active subscription is upgraded to a new tenant, carry the billing
+    anniversary over, prorate the delta now, and retire the old profile."""
+    old = db.query(BillingProfile).filter(BillingProfile.tenant_id == old_tenant_id).first()
+    new = db.query(BillingProfile).filter(BillingProfile.tenant_id == new_tenant_id).first()
+    if new is None:
+        return
+    new.amount_cents = _plan_base_cents(db, target_plan)
+    new.plan_id = target_plan
+    if old is not None and old.active:
+        new.activated_at = old.activated_at
+        new.next_charge_at = old.next_charge_at
+        new.active = True
+        new.status = "active"
+        delta = billing_engine.proration_cents(old.amount_cents, new.amount_cents, old.next_charge_at)
+        if delta > 0:
+            billing_engine.charge_profile(db, new, kind="proration", amount_cents=delta)
+        old.active = False
+        old.status = "canceled"
 
 
 def _downgrade(db: Session, user: User, old_tenant: Tenant, target_plan: str,
@@ -174,6 +274,7 @@ def _downgrade(db: Session, user: User, old_tenant: Tenant, target_plan: str,
         user.tenant_id = shared.id
         user.role = "member"
         user.cloud_delete_at = None    # the initiator keeps billing continuity
+        user.last_plan_change_at = _now()
         moved = []
         for m in others:
             _reparent_user_data(db, m, old_tenant.id, shared.id)
