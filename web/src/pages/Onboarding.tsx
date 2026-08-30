@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { Card, Pill, bytes, groupScope } from "../components/ui";
 import { Icon } from "../components/Icon";
@@ -45,6 +46,9 @@ export default function Onboarding() {
   const [qty, setQty] = useState<Record<number, number>>({});
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [params] = useSearchParams();
+  const orderingAppliance = params.get("order") === "appliance";
+  const [orderApplied, setOrderApplied] = useState(false);
 
   useEffect(() => {
     api.get<Pricing>("/billing/pricing").then(setPricing).catch(() => {});
@@ -59,6 +63,20 @@ export default function Onboarding() {
       setQty(q);
     }).catch(() => {});
   }, []);
+
+  // Arriving from "Order a new appliance": enable the appliance destination and
+  // pre-add one unit (incremental order) so the user just picks capacity + Save.
+  useEffect(() => {
+    if (!orderingAppliance || orderApplied || !pricing || !plan) return;
+    setOptions((prev) => new Set([...prev, "appliance"]));
+    setQty((cur) => {
+      if (Object.values(cur).some((n) => n > 0)) return cur;
+      const tiers = [...(pricing.appliance_tiers || [])].sort((a, b) => a.capacity_tb - b.capacity_tb);
+      return tiers.length ? { ...cur, [tiers[0].capacity_tb]: 1 } : cur;
+    });
+    setOrderApplied(true);
+    setSaved(false);
+  }, [orderingAppliance, orderApplied, pricing, plan]);
 
   const usedTb = plan?.used_tb || 0;
   const minTb = plan?.license_plan?.min_tb || 0;
@@ -141,6 +159,22 @@ export default function Onboarding() {
           Your selections control which storage destinations are available across the platform.
         </div>
       </div>
+
+      {orderingAppliance && (
+        <Card style={{ marginBottom: 16, borderColor: "var(--brand)" }}>
+          <div className="row" style={{ gap: 12, alignItems: "flex-start" }}>
+            <Icon name="server" size={18} />
+            <div>
+              <div style={{ fontWeight: 700 }}>Ordering a new Arkive appliance</div>
+              <div className="faint" style={{ fontSize: 12.5, marginTop: 2 }}>
+                We've added an appliance to your plan below — pick the capacity and quantity, then <b>Save</b> to place
+                the order. You'll be billed the monthly lease plus a one-time setup fee and we'll ship your appliance;
+                your existing protection isn't changed. Once it arrives, plug it in and it appears here automatically.
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
 
       <div className="grid" style={{ gridTemplateColumns: "1fr 340px", gap: 16, alignItems: "start" }}>
         {/* -------- Left: choices -------- */}

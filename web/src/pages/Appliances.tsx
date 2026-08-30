@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api";
 import { Card, Pill, bytes, timeAgo, serverDate, fmtAbsolute, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { Menu } from "../components/Menu";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { SourceIcon } from "../components/SourceIcon";
 import { confirmDialog, notify, promptDialog } from "../components/dialog";
@@ -110,13 +112,16 @@ function HealthPill({ a }: { a: Appliance }) {
 
 export default function Appliances() {
   const { me } = useAuth();
-  const canAdmin = !!me?.can_admin;
+  const nav = useNavigate();
+  // Personal (shared-tenant) accounts manage their own appliances too, not just org admins.
+  const canManageFleet = !!me?.can_admin || me?.tenant_type === "shared";
   const [apps, setApps] = useState<Appliance[]>([]);
   const [selected, setSelected] = useState<Appliance | null>(null);
   const [code, setCode] = useState<string | null>(null);
   const [installCmd, setInstallCmd] = useState<string | null>(null);
   const [pairCode, setPairCode] = useState("");
   const [pairing, setPairing] = useState(false);
+  const [addMode, setAddMode] = useState<null | "install" | "pair">(null);
   const [toast, setToast] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [prodVersion, setProdVersion] = useState<string>("");
@@ -170,6 +175,7 @@ export default function Appliances() {
     try {
       const r = await api.post<Appliance>("/appliances/pair", { code: c });
       setPairCode("");
+      setAddMode(null);
       setToast(`Paired “${r.name}”`);
       setTimeout(() => setToast(""), 2500);
       await load();
@@ -179,6 +185,13 @@ export default function Appliances() {
     } finally {
       setPairing(false);
     }
+  }
+
+  function openInstall() {
+    setCode(null);
+    setInstallCmd(null);
+    setAddMode("install");
+    void newInstaller();
   }
 
   async function command(a: Appliance, command_type: string, parameters: any = {}) {
@@ -208,134 +221,169 @@ export default function Appliances() {
 
   if (!loaded && apps.length === 0) return <Loading label="Loading appliances…" />;
 
+  if (selected) {
+    return (
+      <>
+        <ApplianceDetail a={selected} onCommand={command} onRemove={remove} reload={load}
+                         onBack={() => setSelected(null)} prodVersion={prodVersion} />
+        {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+      </>
+    );
+  }
+
   return (
     <>
-    <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
-      <h2 style={{ margin: 0 }}>Appliances</h2>
-      <ProductionVersion label="Current appliance software" version={prodVersion} />
-    </div>
-    <div className="grid grid-2" style={{ alignItems: "start" }}>
-      <div style={{ minWidth: 0 }}>
-        {canAdmin && (
-        <Card style={{ marginBottom: 16 }}>
-          <div className="spread" style={{ marginBottom: 8 }}>
-            <h2>Turnkey activation</h2>
-            <div className="row" style={{ gap: 8 }}>
-              <button className="btn sm" onClick={newCode}>
-                <Icon name="link" size={14} /> Linking code
-              </button>
-              <button className="btn primary sm" onClick={newInstaller}>
-                <Icon name="server" size={14} /> Install command
-              </button>
-            </div>
-          </div>
-          <div className="muted" style={{ fontSize: 13 }}>
-            On a clean Ubuntu host, paste the one-line install command below — it downloads,
-            installs, registers, and enables headless self-updates from the cloud. Or generate
-            just a linking code to enter on a pre-installed appliance console.
-          </div>
-          {code && (
-            <div className="card" style={{ marginTop: 14, textAlign: "center", background: "var(--bg-elev)" }}>
-              <div className="faint" style={{ fontSize: 12 }}>Linking code (valid 15 min)</div>
-              <div className="mono" style={{ fontSize: 26, letterSpacing: 2, margin: "8px 0" }}>{code}</div>
-            </div>
+      <div className="spread" style={{ marginBottom: 16, alignItems: "center" }}>
+        <div>
+          <h2 style={{ margin: 0 }}>Appliances</h2>
+          <div className="faint" style={{ fontSize: 12.5 }}>Your on-site secure recovery appliances.</div>
+        </div>
+        <div className="row" style={{ gap: 12, alignItems: "center" }}>
+          <ProductionVersion label="Current appliance software" version={prodVersion} />
+          {canManageFleet && (
+            <Menu align="right"
+                  trigger={<span className="row" style={{ gap: 6 }}><Icon name="server" size={14} /> Add appliance ▾</span>}
+                  items={[
+                    { label: "Install new (on your own hardware)", icon: "server", onClick: openInstall },
+                    { label: "Pair an existing appliance", icon: "link", onClick: () => { setPairCode(""); setAddMode("pair"); } },
+                    "divider",
+                    { label: "Order a new Arkive appliance", icon: "shield", onClick: () => nav("/onboarding?order=appliance") },
+                  ]} />
           )}
-          {installCmd && (
-            <div className="card" style={{ marginTop: 14, background: "var(--bg-elev)" }}>
-              <div className="spread" style={{ marginBottom: 6 }}>
-                <div className="faint" style={{ fontSize: 12 }}>One-line install (run as sudo on Ubuntu)</div>
-                <button
-                  className="btn sm"
-                  onClick={() => {
-                    void navigator.clipboard.writeText(installCmd);
-                    setToast("Install command copied");
-                    setTimeout(() => setToast(""), 2500);
-                  }}
-                >
-                  <Icon name="link" size={13} /> Copy
-                </button>
-              </div>
-              <pre className="mono" style={{ fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0 }}>
-                {installCmd}
-              </pre>
-            </div>
-          )}
-        </Card>
-        )}
-
-        {canAdmin && (
-        <Card style={{ marginBottom: 16 }}>
-          <div className="spread" style={{ marginBottom: 8 }}>
-            <h2>Pair an appliance</h2>
-            <Icon name="server" size={16} />
-          </div>
-          <div className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
-            Set up a new appliance with no code at all — it powers on and shows a pairing
-            code on its own screen (and its web page). Enter that code here to claim it to
-            your account.
-          </div>
-          <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <input
-              className="input mono"
-              style={{ flex: "1 1 220px", letterSpacing: 1, textTransform: "uppercase" }}
-              placeholder="ARK-XXXX-XXXX"
-              value={pairCode}
-              onChange={(e) => setPairCode(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") void pairAppliance(); }}
-            />
-            <button className="btn primary" disabled={pairing || !pairCode.trim()} onClick={pairAppliance}>
-              <Icon name="link" size={14} /> {pairing ? "Pairing…" : "Pair"}
-            </button>
-          </div>
-        </Card>
-        )}
-
-        {apps.map((a) => (
-          <div
-            key={a.id}
-            className={`dest-card ${selected?.id === a.id ? "selected" : ""}`}
-            style={{ marginBottom: 12 }}
-            onClick={() => select(a)}
-          >
-            <div className="spread">
-              <div className="row">
-                <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 36, height: 36 }}>
-                  <Icon name="server" size={18} />
-                </div>
-                <div>
-                  <div style={{ fontWeight: 650 }}>{a.name}</div>
-                  <div className="faint mono" style={{ fontSize: 11 }}>{a.model} · {a.serial}</div>
-                </div>
-              </div>
-              <StatusDot color={isOnline(a) ? "#35d0a5" : "#6b7688"} pulse={isOnline(a)} />
-            </div>
-            <div className="row" style={{ gap: 12, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)", flexWrap: "wrap" }}>
-              <OnlinePill a={a} />
-              <HealthPill a={a} />
-              <VersionPill version={a.software_version} updateAvailable={a.update_available} />
-            </div>
-          </div>
-        ))}
-        {apps.length === 0 && <Card><div className="muted">No appliances linked yet.</div></Card>}
+        </div>
       </div>
 
-      <div style={{ minWidth: 0 }}>
-        {selected ? (
-          <ApplianceDetail a={selected} onCommand={command} onRemove={remove} reload={load} />
-        ) : (
-          <Card><div className="muted">Select an appliance to view its dashboard.</div></Card>
-        )}
-      </div>
+      {apps.length === 0 ? (
+        <Card>
+          <div className="stack" style={{ gap: 8, alignItems: "flex-start", padding: "6px 0" }}>
+            <div className="muted">No appliances yet.</div>
+            {canManageFleet
+              ? <div className="faint" style={{ fontSize: 12.5 }}>
+                  Use <b>Add appliance</b> to install on your own hardware, pair one that's already running, or order a new Arkive appliance.
+                </div>
+              : <div className="faint" style={{ fontSize: 12.5 }}>No appliances are assigned to you.</div>}
+          </div>
+        </Card>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 14 }}>
+          {apps.map((a) => (
+            <div key={a.id} className="dest-card" style={{ cursor: "pointer" }} onClick={() => select(a)}>
+              <div className="spread">
+                <div className="row">
+                  <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 36, height: 36 }}>
+                    <Icon name="server" size={18} />
+                  </div>
+                  <div>
+                    <div style={{ fontWeight: 650 }}>{a.name}</div>
+                    <div className="faint mono" style={{ fontSize: 11 }}>{a.model} · {a.serial}</div>
+                  </div>
+                </div>
+                <StatusDot color={isOnline(a) ? "#35d0a5" : "#6b7688"} pulse={isOnline(a)} />
+              </div>
+              <div className="row" style={{ gap: 12, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)", flexWrap: "wrap" }}>
+                <OnlinePill a={a} />
+                <HealthPill a={a} />
+                <VersionPill version={a.software_version} updateAvailable={a.update_available} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {addMode === "install" && (
+        <InstallModal
+          code={code} installCmd={installCmd}
+          onCopy={(c) => { void navigator.clipboard.writeText(c); setToast("Copied"); setTimeout(() => setToast(""), 2000); }}
+          onCode={newCode} onClose={() => setAddMode(null)} />
+      )}
+      {addMode === "pair" && (
+        <PairModal value={pairCode} onChange={setPairCode} pairing={pairing}
+                   onPair={pairAppliance} onClose={() => setAddMode(null)} />
+      )}
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
-    </div>
     </>
   );
 }
 
-function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onCommand: (a: Appliance, t: string, p?: any) => void; onRemove: (a: Appliance) => void; reload: () => Promise<void> }) {
+function InstallModal({ code, installCmd, onCopy, onCode, onClose }: {
+  code: string | null; installCmd: string | null;
+  onCopy: (c: string) => void; onCode: () => void; onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" style={{ width: "min(680px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread" style={{ marginBottom: 8 }}>
+          <h3 style={{ margin: 0 }}>Install a new appliance</h3>
+          <button className="btn ghost sm" onClick={onClose}>Close</button>
+        </div>
+        <div className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+          On a clean Ubuntu host, paste the one-line install command below — it downloads, installs,
+          registers, and enables headless self-updates. Or generate just a linking code to enter on a
+          pre-installed appliance console.
+        </div>
+        {installCmd ? (
+          <div className="card" style={{ background: "var(--bg-elev)" }}>
+            <div className="spread" style={{ marginBottom: 6 }}>
+              <div className="faint" style={{ fontSize: 12 }}>One-line install (run as sudo on Ubuntu)</div>
+              <button className="btn sm" onClick={() => onCopy(installCmd)}><Icon name="link" size={13} /> Copy</button>
+            </div>
+            <pre className="mono" style={{ fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0 }}>{installCmd}</pre>
+          </div>
+        ) : (
+          <div className="muted">Generating install command…</div>
+        )}
+        {code && (
+          <div className="card" style={{ marginTop: 14, textAlign: "center", background: "var(--bg-elev)" }}>
+            <div className="faint" style={{ fontSize: 12 }}>Linking code (valid 15 min)</div>
+            <div className="mono" style={{ fontSize: 26, letterSpacing: 2, margin: "8px 0" }}>{code}</div>
+          </div>
+        )}
+        <div className="row" style={{ gap: 8, marginTop: 14 }}>
+          <button className="btn sm ghost" onClick={onCode}><Icon name="link" size={13} /> Just a linking code</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PairModal({ value, onChange, pairing, onPair, onClose }: {
+  value: string; onChange: (v: string) => void; pairing: boolean; onPair: () => void; onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" style={{ width: "min(560px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread" style={{ marginBottom: 8 }}>
+          <h3 style={{ margin: 0 }}>Pair an existing appliance</h3>
+          <button className="btn ghost sm" onClick={onClose}>Close</button>
+        </div>
+        <div className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+          A newly deployed appliance powers on and shows a pairing code on its own screen (and its local
+          web page). Enter that code here to claim it to your account.
+        </div>
+        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <input
+            className="input mono"
+            autoFocus
+            style={{ flex: "1 1 220px", letterSpacing: 1, textTransform: "uppercase" }}
+            placeholder="ARK-XXXX-XXXX"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") onPair(); }}
+          />
+          <button className="btn primary" disabled={pairing || !value.trim()} onClick={onPair}>
+            <Icon name="link" size={14} /> {pairing ? "Pairing…" : "Pair"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApplianceDetail({ a, onCommand, onRemove, reload, onBack, prodVersion }: { a: Appliance; onCommand: (a: Appliance, t: string, p?: any) => void; onRemove: (a: Appliance) => void; reload: () => Promise<void>; onBack: () => void; prodVersion?: string }) {
   const t = a.telemetry ?? {};
   const canManage = a.can_manage ?? true;
+  const [tab, setTab] = useState<"overview" | "storage" | "data" | "network" | "integrations">("overview");
   const [kv, setKv] = useState<{ title: string; rows: [string, string][] } | null>(null);
 
   async function renameAppliance() {
@@ -403,6 +451,15 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
 
   return (
     <>
+      <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
+        <button className="btn ghost sm" onClick={onBack}>← Appliances</button>
+        <div className="row" style={{ gap: 12, alignItems: "center" }}>
+          <ProductionVersion label="Current appliance software" version={prodVersion || ""} />
+          <OnlinePill a={a} />
+          <VersionPill version={a.software_version} updateAvailable={a.update_available} />
+        </div>
+      </div>
+
       <Card style={{ marginBottom: 16 }}>
         <div className="spread" style={{ alignItems: "flex-start", gap: 12 }}>
           <div className="row" style={{ gap: 12, alignItems: "center" }}>
@@ -477,37 +534,57 @@ function ApplianceDetail({ a, onCommand, onRemove, reload }: { a: Appliance; onC
         </div>
       </Card>
 
-      <StorageCard a={a} canManage={canManage} onAdd={addStorage} onRename={renameStorage} onDelete={deleteStorage} onAdvanced={setKv} />
+      <div className="row" style={{ gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+        {([
+          { key: "overview", label: "Overview", icon: "activity" },
+          { key: "storage", label: "Storage", icon: "database" },
+          { key: "data", label: "Stored data", icon: "grid" },
+          { key: "network", label: "Network & security", icon: "shield" },
+          { key: "integrations", label: "Integrations", icon: "puzzle" },
+        ] as const).map((tb) => (
+          <button key={tb.key} className={`btn sm ${tab === tb.key ? "primary" : "ghost"}`} onClick={() => setTab(tb.key)}>
+            <Icon name={tb.icon} size={13} /> {tb.label}
+          </button>
+        ))}
+      </div>
 
-      <StoredDataCard a={a} />
+      {tab === "storage" && (
+        <StorageCard a={a} canManage={canManage} onAdd={addStorage} onRename={renameStorage} onDelete={deleteStorage} onAdvanced={setKv} />
+      )}
 
-      <IntegrationsCard a={a} />
+      {tab === "data" && <StoredDataCard a={a} />}
 
-      <NetworkCard a={a} />
+      {tab === "integrations" && <IntegrationsCard a={a} />}
 
-      <Card style={{ marginBottom: 16 }}>
-        <h3 style={{ marginBottom: 12 }}>System &amp; platform</h3>
-        <div className="grid grid-3">
-          <Info label="Type" value={t.model_kind === "vm" ? `VM (${t.virtualization || "?"})` : "Hardware"} />
-          <Info label="Product" value={t.hardware_product ?? "—"} />
-          <Info label="Vendor" value={t.hardware_vendor ?? "—"} />
-          <Info label="OS" value={t.os ?? "—"} />
-          <Info label="Arch" value={t.arch ?? "—"} />
-          <Info label="CPUs" value={String(t.cpu_count ?? "—")} />
-          <Info label="Load" value={Array.isArray(t.load_avg) ? t.load_avg.join(" ") : "—"} />
-          <Info label="Memory" value={t.mem_total_bytes ? `${bytes(t.mem_available_bytes ?? 0)} free / ${bytes(t.mem_total_bytes)}` : "—"} />
-          <Info label="Uptime" value={t.uptime_seconds ? fmtUptime(t.uptime_seconds) : "—"} />
-        </div>
-      </Card>
+      {tab === "network" && <NetworkCard a={a} />}
 
-      {Array.isArray(t.recent_logs) && t.recent_logs.length > 0 && (
-        <Card style={{ marginBottom: 16 }}>
-          <h3 style={{ marginBottom: 10 }}>Recent activity</h3>
-          <pre className="mono" style={{ fontSize: 11, maxHeight: 220, overflow: "auto",
-               background: "rgba(0,0,0,0.28)", padding: 12, borderRadius: 10, margin: 0 }}>
-            {t.recent_logs.join("\n")}
-          </pre>
-        </Card>
+      {tab === "overview" && (
+        <>
+          <Card style={{ marginBottom: 16 }}>
+            <h3 style={{ marginBottom: 12 }}>System &amp; platform</h3>
+            <div className="grid grid-3">
+              <Info label="Type" value={t.model_kind === "vm" ? `VM (${t.virtualization || "?"})` : "Hardware"} />
+              <Info label="Product" value={t.hardware_product ?? "—"} />
+              <Info label="Vendor" value={t.hardware_vendor ?? "—"} />
+              <Info label="OS" value={t.os ?? "—"} />
+              <Info label="Arch" value={t.arch ?? "—"} />
+              <Info label="CPUs" value={String(t.cpu_count ?? "—")} />
+              <Info label="Load" value={Array.isArray(t.load_avg) ? t.load_avg.join(" ") : "—"} />
+              <Info label="Memory" value={t.mem_total_bytes ? `${bytes(t.mem_available_bytes ?? 0)} free / ${bytes(t.mem_total_bytes)}` : "—"} />
+              <Info label="Uptime" value={t.uptime_seconds ? fmtUptime(t.uptime_seconds) : "—"} />
+            </div>
+          </Card>
+
+          {Array.isArray(t.recent_logs) && t.recent_logs.length > 0 && (
+            <Card style={{ marginBottom: 16 }}>
+              <h3 style={{ marginBottom: 10 }}>Recent activity</h3>
+              <pre className="mono" style={{ fontSize: 11, maxHeight: 220, overflow: "auto",
+                   background: "rgba(0,0,0,0.28)", padding: 12, borderRadius: 10, margin: 0 }}>
+                {t.recent_logs.join("\n")}
+              </pre>
+            </Card>
+          )}
+        </>
       )}
 
       {kv && <KVModal title={kv.title} rows={kv.rows} onClose={() => setKv(null)} />}

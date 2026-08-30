@@ -395,15 +395,24 @@ The **Arkive Secure Appliance** is on‑premise hardware that keeps a physically
 isolated, tamper‑evident copy of your data — recoverable offline and beyond the
 reach of network attacks.
 
-## Setting one up
-1. Add the appliance from the **Appliances** page and follow the pairing steps.
-2. It attests its integrity to the control plane and links to your account.
-3. Route sources to it in the **[Data Map](/support/data-map)**.
+## Adding an appliance
+Use the **Add appliance** menu on the Appliances page. You have three options:
+
+- **Install new** — get a one‑line command to install the appliance software on
+  your own clean Ubuntu host. It downloads, installs, registers and enables
+  headless self‑updates automatically.
+- **Pair an existing appliance** — a newly deployed appliance powers on and shows
+  a **pairing code** on its own screen (and its local web page). Enter that code
+  to claim the appliance to your account.
+- **Order a new Arkive appliance** — takes you to **[Protection Setup](/support/protection-setup)**
+  with an appliance added to your plan. Pick the capacity and quantity, then save
+  to place the order; we ship it, and it appears here automatically once plugged in.
 
 ## Monitoring health
-The Appliances page shows each unit's status — attestation, connectivity,
-storage capacity and recent activity. A healthy appliance seals each backup and
-returns a signed receipt marking the recovery point recoverable.
+Click any appliance card to open its details, organized into tabs — **Overview**
+(system & platform), **Storage**, **Stored data**, **Network & security** and
+**Integrations**. A healthy appliance seals each backup and returns a signed
+receipt marking the recovery point recoverable.
 
 ## Recovering from an appliance
 Because the appliance holds a full local copy, you can recover from it even

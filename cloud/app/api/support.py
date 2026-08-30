@@ -16,6 +16,8 @@ Two surfaces:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import secrets
 from datetime import datetime, timezone
 
@@ -254,12 +256,85 @@ def admin_seed_docs(principal: security.Principal = Depends(security.require_pla
     for spec in DEFAULT_SUPPORT_DOCS:
         if db.query(SupportDoc).filter(SupportDoc.slug == spec["slug"]).first():
             continue
-        db.add(SupportDoc(**spec))
+        d = SupportDoc(**spec)
+        d.baseline_hash = _spec_hash(spec)
+        db.add(d)
         created += 1
     db.commit()
     audit.record(db, actor=principal.user_id, action="admin.support_docs_seeded",
                  category="admin", detail={"created": created})
     return {"ok": True, "created": created}
+
+
+# Fields a baseline default controls; used to detect whether a doc still matches
+# the version we seeded (unedited) vs. an admin customization.
+_BASELINE_FIELDS = ("title", "section", "section_order", "nav_order",
+                    "icon", "summary", "body", "help_routes")
+
+
+def _hash_fields(get) -> str:
+    payload = {k: get(k) for k in _BASELINE_FIELDS}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _spec_hash(spec: dict) -> str:
+    return _hash_fields(lambda k: spec.get(k))
+
+
+def _doc_hash(d: SupportDoc) -> str:
+    return _hash_fields(lambda k: getattr(d, k))
+
+
+@admin_router.post("/seed-updates", dependencies=[Depends(security.require_platform_admin)])
+def admin_seed_updates(preview: bool = False, force: bool = False,
+                       principal: security.Principal = Depends(security.require_platform_admin),
+                       db: Session = Depends(get_db)):
+    """Publish the documentation changes that differ from what's live: add new
+    default pages AND refresh existing default pages whose baseline content
+    changed — WITHOUT clobbering admin-edited pages (unless ``force``). Pass
+    ``preview=true`` to see what would change without applying."""
+    created: list[str] = []
+    updated: list[str] = []
+    skipped: list[str] = []
+    sections_added = 0
+    for spec in DEFAULT_SUPPORT_SECTIONS:
+        if not db.query(SupportSection).filter(SupportSection.name == spec["name"]).first():
+            sections_added += 1
+            if not preview:
+                db.add(SupportSection(**spec))
+    for spec in DEFAULT_SUPPORT_DOCS:
+        sh = _spec_hash(spec)
+        d = db.query(SupportDoc).filter(SupportDoc.slug == spec["slug"]).first()
+        if d is None:
+            created.append(spec["slug"])
+            if not preview:
+                nd = SupportDoc(**spec)
+                nd.baseline_hash = sh
+                db.add(nd)
+            continue
+        dh = _doc_hash(d)
+        if dh == sh:
+            # Already matches the latest baseline; adopt the hash so it's tracked.
+            if not preview and d.baseline_hash != sh:
+                d.baseline_hash = sh
+            continue
+        unedited = bool(d.baseline_hash) and dh == d.baseline_hash
+        if force or unedited:
+            updated.append(spec["slug"])
+            if not preview:
+                for k in _BASELINE_FIELDS:
+                    setattr(d, k, spec.get(k))
+                d.baseline_hash = sh
+                _ensure_section(db, spec.get("section") or "General")
+        else:
+            skipped.append(spec["slug"])  # admin-customized — preserved
+    if not preview:
+        db.commit()
+        audit.record(db, actor=principal.user_id, action="admin.support_docs_updated",
+                     category="admin", detail={"created": len(created), "updated": len(updated),
+                                               "skipped": len(skipped), "forced": force})
+    return {"ok": True, "preview": preview, "sections_added": sections_added,
+            "created": created, "updated": updated, "skipped_customized": skipped}
 
 
 # --------------------------------------------------------------------------- #

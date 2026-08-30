@@ -856,6 +856,9 @@ class SupportDoc(Base):
     # so the portal Help icon can deep-link to the right page.
     help_routes = Column(JSON, default=list)
     published = Column(Boolean, default=True, index=True)
+    # Hash of the DEFAULT (baseline) spec this doc was last seeded/updated from,
+    # so "seed updates" can refresh unedited docs without clobbering admin edits.
+    baseline_hash = Column(String, default="")
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 

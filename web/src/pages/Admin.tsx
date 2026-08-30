@@ -4851,6 +4851,25 @@ function SupportDocsAdmin() {
       void load();
     } catch (e: any) { notify({ message: e.message, tone: "danger" }); }
   }
+  async function seedUpdates() {
+    try {
+      const p = await api.post<{ created: string[]; updated: string[]; skipped_customized: string[]; sections_added: number }>(
+        "/admin/support/seed-updates?preview=true", {});
+      const total = p.created.length + p.updated.length + p.sections_added;
+      if (total === 0) { notify({ message: "The Help Center is already up to date.", tone: "ok" }); return; }
+      const ok = await confirmDialog({
+        title: "Publish documentation updates?",
+        confirmLabel: "Publish updates",
+        message: `${p.created.length} new page(s), ${p.updated.length} refreshed page(s)`
+          + (p.sections_added ? `, ${p.sections_added} new section(s)` : "")
+          + (p.skipped_customized.length ? `. ${p.skipped_customized.length} admin-edited page(s) are preserved unchanged.` : "."),
+      });
+      if (!ok) return;
+      const r = await api.post<{ created: string[]; updated: string[] }>("/admin/support/seed-updates", {});
+      notify({ message: `Published ${r.created.length} new + ${r.updated.length} refreshed page(s).`, tone: "ok" });
+      void load();
+    } catch (e: any) { notify({ message: e.message, tone: "danger" }); }
+  }
   async function remove(d: AdminDoc) {
     if (!(await confirmDialog({ title: `Delete “${d.title}”?`, message: "This removes the page from the public Help Center.", tone: "danger", confirmLabel: "Delete" }))) return;
     try { await api.del(`/admin/support/docs/${d.id}`); void load(); }
@@ -4894,6 +4913,7 @@ function SupportDocsAdmin() {
         </div>
         <div className="row" style={{ gap: 8 }}>
           <button className="btn sm" onClick={seed}><Icon name="sparkle" size={14} /> Seed defaults</button>
+          <button className="btn sm" onClick={seedUpdates}><Icon name="clock" size={14} /> Publish updates</button>
           <button className="btn sm primary" onClick={() => setEditing("new")}><Icon name="edit" size={14} /> New page</button>
         </div>
       </div>

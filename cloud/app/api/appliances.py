@@ -76,9 +76,10 @@ class CreateLinkingCodeRequest(BaseModel):
 
 @fleet_router.post("/linking-code")
 def create_linking_code(body: CreateLinkingCodeRequest,
-                        principal: security.Principal = Depends(security.require_security_admin),
+                        principal: security.Principal = Depends(security.get_principal),
                         tenant: Tenant = Depends(security.get_tenant),
                         db: Session = Depends(get_db)):
+    _require_appliance_manager(principal, tenant)
     code = f"CV-{secrets.token_hex(3).upper()}-{secrets.token_hex(3).upper()}"
     lc = LinkingCode(
         tenant_id=tenant.id,
@@ -97,11 +98,12 @@ def create_linking_code(body: CreateLinkingCodeRequest,
 
 @fleet_router.post("/installer")
 def appliance_installer(body: CreateLinkingCodeRequest,
-                        principal: security.Principal = Depends(security.require_security_admin),
+                        principal: security.Principal = Depends(security.get_principal),
                         tenant: Tenant = Depends(security.get_tenant),
                         db: Session = Depends(get_db)):
     """Generate a linking code and return a single-line install command that a
     clean Ubuntu host can run to download, install, and register from the cloud."""
+    _require_appliance_manager(principal, tenant)
     code = f"CV-{secrets.token_hex(3).upper()}-{secrets.token_hex(3).upper()}"
     lc = LinkingCode(
         tenant_id=tenant.id, code=code, model=body.model, name=body.name,
@@ -124,14 +126,25 @@ class PairRequest(BaseModel):
     name: str | None = None
 
 
+def _require_appliance_manager(principal: security.Principal, tenant: Tenant) -> None:
+    """Org admins manage the whole fleet; a personal (shared-tenant) account
+    manages its own appliances. Everyone else is read-only."""
+    if security.is_org_admin(principal.role) or principal.is_platform_admin:
+        return
+    if (tenant.tenant_type or "dedicated") == "shared":
+        return
+    raise HTTPException(403, "not allowed to add appliances")
+
+
 @fleet_router.post("/pair")
 def pair_appliance(body: PairRequest,
-                   principal: security.Principal = Depends(security.require_security_admin),
+                   principal: security.Principal = Depends(security.get_principal),
                    tenant: Tenant = Depends(security.get_tenant),
                    db: Session = Depends(get_db)):
     """Claim a zero-touch appliance to this account using the pairing code shown on
     the appliance's local web UI. Creates the real Appliance; the agent adopts it
     on its next register-heartbeat."""
+    _require_appliance_manager(principal, tenant)
     code = (body.code or "").strip().upper()
     if not code:
         raise HTTPException(400, "enter the pairing code from the appliance screen")
@@ -152,6 +165,15 @@ def pair_appliance(body: PairRequest,
     db.flush()
     pa.paired_appliance_id = a.id
     pa.paired_tenant_id = tenant.id
+    # A non-admin (personal account / member) owns what they pair, so they can see
+    # and manage it — org admins already see the whole fleet.
+    if not (security.is_org_admin(principal.role) or principal.is_platform_admin):
+        exists = (db.query(ApplianceAssignment)
+                  .filter(ApplianceAssignment.appliance_id == a.id,
+                          ApplianceAssignment.user_id == principal.user_id).first())
+        if not exists:
+            db.add(ApplianceAssignment(tenant_id=tenant.id, appliance_id=a.id,
+                                       user_id=principal.user_id, can_manage=True))
     db.commit()
     db.refresh(a)
     _ensure_builtin_store(db, a)
