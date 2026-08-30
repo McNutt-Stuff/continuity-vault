@@ -776,11 +776,20 @@ def get_subscription(principal: security.Principal = Depends(security.get_princi
                      db: Session = Depends(get_db)):
     """The tenant's recurring billing status for the customer's Billing tab."""
     prof = db.query(BillingProfile).filter(BillingProfile.tenant_id == tenant.id).first()
+    amount, cur, plan_id, plan_name = _plan_amount_cents(
+        db, db.get(User, principal.user_id), tenant)
     if not prof:
-        amount, cur, plan_id, plan_name = _plan_amount_cents(
-            db, db.get(User, principal.user_id), tenant)
         return {"profile": None, "quote": {"amount_cents": amount, "currency": cur,
                                            "plan_id": plan_id, "plan_name": plan_name}}
+    # Keep an un-activated profile's displayed amount in sync with the live plan
+    # (self-heals profiles seeded before the amount was known).
+    if not prof.active and (prof.amount_cents != amount or prof.plan_id != plan_id
+                            or not prof.plan_name):
+        prof.amount_cents = amount
+        prof.currency = cur
+        prof.plan_id = plan_id
+        prof.plan_name = plan_name
+        db.commit()
     return {"profile": _profile_view(db, prof)}
 
 
@@ -893,25 +902,59 @@ def _charge_view(c: BillingCharge) -> dict:
 
 @admin_router.get("/profiles", dependencies=[Depends(security.require_platform_admin)])
 def admin_list_profiles(db: Session = Depends(get_db)):
-    """Every tenant's billing profile with its status + recent-charge rollup."""
+    """Every tenant's billing profile with its status + recent-charge rollup.
+    Profiles for tenants with no remaining users (orphaned by a plan migration)
+    are hidden."""
     profs = db.query(BillingProfile).order_by(BillingProfile.updated_at.desc()).all()
     tenants = {t.id: t for t in db.query(Tenant).all()}
+    user_counts = dict(db.query(User.tenant_id, func.count(User.id))
+                       .group_by(User.tenant_id).all())
+    dirty = False
+    for p in profs:
+        # Keep un-activated profiles' amount current for display (they're priced at enable).
+        if not p.active and (p.amount_cents == 0 or not p.plan_name):
+            _sync_amount(db, p)
+            dirty = True
+    if dirty:
+        db.commit()
     out = []
     for p in profs:
+        t = tenants.get(p.tenant_id)
+        if user_counts.get(p.tenant_id, 0) == 0:
+            continue  # orphaned — the account moved to another tenant
         charges = (db.query(BillingCharge)
                    .filter(BillingCharge.profile_id == p.id).all())
         succeeded = sum(1 for c in charges if c.status == "succeeded")
         failed = sum(1 for c in charges if c.status == "failed")
         collected = sum(c.amount_cents for c in charges if c.status == "succeeded")
         v = _profile_view(db, p)
-        t = tenants.get(p.tenant_id)
         v["tenant_name"] = t.name if t else "(unknown)"
+        v["account_name"] = _account_name(db, p, t)
         v["charges_total"] = len(charges)
         v["charges_succeeded"] = succeeded
         v["charges_failed"] = failed
         v["collected_cents"] = collected
         out.append(v)
     return {"profiles": out}
+
+
+def _account_name(db: Session, prof: BillingProfile, tenant: Tenant | None) -> str:
+    """Display name for the billing account: the person for a personal (shared)
+    account, else the organization (dedicated tenant) name."""
+    if tenant is None:
+        return "(unknown)"
+    if (tenant.tenant_type or "") == "shared":
+        owner = None
+        if prof.payment_method_id:
+            pm = db.get(PaymentMethod, prof.payment_method_id)
+            if pm is not None and pm.user_id:
+                owner = db.get(User, pm.user_id)
+        if owner is None:
+            owner = (db.query(User).filter(User.tenant_id == tenant.id)
+                     .order_by(User.created_at.asc()).first())
+        if owner is not None:
+            return owner.display_name or owner.email or tenant.name
+    return tenant.name
 
 
 @admin_router.get("/summary", dependencies=[Depends(security.require_platform_admin)])
@@ -964,6 +1007,7 @@ def admin_profile_detail(pid: str, db: Session = Depends(get_db)):
                .order_by(BillingCharge.created_at.desc()).limit(100).all())
     v = _profile_view(db, prof)
     v["tenant_name"] = t.name if t else "(unknown)"
+    v["account_name"] = _account_name(db, prof, t)
     v["charges"] = [_charge_view(c) for c in charges]
     return v
 

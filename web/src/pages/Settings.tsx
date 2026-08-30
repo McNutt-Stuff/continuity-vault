@@ -465,6 +465,7 @@ function PlanChangeCard() {
   const { logout } = useAuth();
   const [plans, setPlans] = useState<LicensePlanOpt[]>([]);
   const [current, setCurrent] = useState<{ id: string; name: string } | null>(null);
+  const [open, setOpen] = useState(false);
   const [target, setTarget] = useState("");
   const [prev, setPrev] = useState<PlanChangePreview | null>(null);
   const [tenantName, setTenantName] = useState("");
@@ -475,6 +476,9 @@ function PlanChangeCard() {
     api.get<{ license_plans: LicensePlanOpt[] }>("/billing/pricing").then((p) => setPlans(p.license_plans || [])).catch(() => {});
     api.get<any>("/billing/plan").then((v) => v.license_plan && setCurrent({ id: v.license_plan.id, name: v.license_plan.name })).catch(() => {});
   }, []);
+
+  function openModal() { setOpen(true); setTarget(""); setPrev(null); setErr(""); setTenantName(""); }
+  function closeModal() { setOpen(false); setTarget(""); setPrev(null); setErr(""); }
 
   async function choose(id: string) {
     setTarget(id); setPrev(null); setErr(""); setTenantName("");
@@ -487,6 +491,8 @@ function PlanChangeCard() {
     setBusy(true); setErr("");
     try {
       const r = await api.post<any>("/billing/plan-change", { plan: target, tenant_name: tenantName || null });
+      // Close this modal BEFORE any toast/sign-out so nothing stacks behind it.
+      setOpen(false); setBusy(false);
       if (r?.requires_relogin) {
         await notify({ title: "Plan changed", message: "You'll be signed out to finish switching — sign back in to continue.", tone: "ok" });
         logout();
@@ -494,7 +500,6 @@ function PlanChangeCard() {
       }
       const extra = r?.prorated_cents ? ` A prorated ${money(r.prorated_cents / 100)} was charged for the rest of this period.` : "";
       await notify({ title: "Plan changed", message: `You're now on ${prev.target_plan.name}.${extra}`, tone: "ok" });
-      setTarget(""); setPrev(null); setBusy(false);
     } catch (e: any) { setErr(e.message || "Could not change plan"); setBusy(false); }
   }
 
@@ -502,50 +507,77 @@ function PlanChangeCard() {
   if (plans.length === 0) return null;
   return (
     <Card style={{ marginBottom: 16 }}>
-      <h2 style={{ marginBottom: 4 }}>Plan &amp; account type</h2>
-      <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
-        Current plan: <b>{current?.name || "—"}</b>. Upgrading to a Family/Business plan creates your own
-        organization; downgrading returns you to a personal account.
-      </div>
-      <label className="stack" style={{ gap: 5, maxWidth: 360 }}>
-        <span className="faint" style={{ fontSize: 12 }}>Change plan to</span>
-        <select className="input" value={target} onChange={(e) => choose(e.target.value)}>
-          <option value="">— choose a plan —</option>
-          {options.map((p) => <option key={p.id} value={p.id}>{p.name} — ${p.price_per_tb_month}/TB·mo{p.min_tb ? `, min ${p.min_tb} TB` : ""}</option>)}
-        </select>
-      </label>
-
-      {prev && (
-        <div className="card" style={{ marginTop: 12, background: "var(--inset)" }}>
-          <div className="row" style={{ gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
-            <span style={{ fontWeight: 600 }}>{prev.current_plan.name} → {prev.target_plan.name}</span>
-            <span className="faint" style={{ fontSize: 12.5 }}>
-              {money(prev.current_monthly, prev.currency)}/mo → <b style={{ color: "var(--text)" }}>{money(prev.target_monthly, prev.currency)}/mo</b>
-              {prev.target_plan.min_tb ? ` · ${prev.target_plan.min_tb} TB minimum` : ""}
-            </span>
-            {prev.is_upgrade && <Pill tone="ok">Upgrade</Pill>}
-            {prev.is_downgrade && <Pill tone="warn">Downgrade</Pill>}
+      <div className="spread" style={{ alignItems: "flex-start" }}>
+        <div>
+          <h2 style={{ marginBottom: 4 }}>Plan &amp; account type</h2>
+          <div className="muted" style={{ fontSize: 12.5 }}>
+            Current plan: <b>{current?.name || "—"}</b>. Upgrading to a Family/Business plan creates your own
+            organization; downgrading returns you to a personal account.
           </div>
-          {prev.requires_new_tenant && (
-            <div style={{ marginTop: 12, maxWidth: 360 }}>
-              <SettingsField label="Name your organization" value={tenantName} onChange={setTenantName} placeholder="e.g. Smith Family" />
+        </div>
+        <button className="btn primary sm" onClick={openModal} style={{ whiteSpace: "nowrap" }}>
+          <Icon name="credit-card" size={14} /> Change Plan Type
+        </button>
+      </div>
+
+      {open && (
+        <div className="modal-backdrop" onClick={closeModal}>
+          <div className="modal-panel" style={{ width: "min(560px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <div>
+                <h3 style={{ margin: 0 }}>Change plan type</h3>
+                <div className="faint" style={{ fontSize: 12 }}>Currently on {current?.name || "—"}</div>
+              </div>
+              <button className="btn ghost sm" onClick={closeModal}><Icon name="logout" size={14} /></button>
             </div>
-          )}
-          {prev.warnings.map((w, i) => (
-            <div key={i} className="row" style={{ gap: 8, marginTop: 10, alignItems: "flex-start", color: "var(--text-dim)", fontSize: 12.5 }}>
-              <Icon name="alert" size={13} /> <span>{w}</span>
+            <div className="modal-body">
+              <label className="stack" style={{ gap: 5 }}>
+                <span className="faint" style={{ fontSize: 12 }}>New plan</span>
+                <select className="input" value={target} onChange={(e) => choose(e.target.value)}>
+                  <option value="">— choose a plan —</option>
+                  {options.map((p) => <option key={p.id} value={p.id}>{p.name} — ${p.price_per_tb_month}/TB·mo{p.min_tb ? `, min ${p.min_tb} TB` : ""}</option>)}
+                </select>
+              </label>
+
+              {prev && (
+                <div className="card" style={{ marginTop: 14, background: "var(--inset)" }}>
+                  <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>Billing summary</div>
+                  <div className="spread" style={{ marginBottom: 4 }}>
+                    <span>{prev.current_plan.name}</span>
+                    <span className="faint">{money(prev.current_monthly, prev.currency)}/mo</span>
+                  </div>
+                  <div className="spread" style={{ fontWeight: 700 }}>
+                    <span>{prev.target_plan.name}{prev.target_plan.min_tb ? <span className="faint" style={{ fontWeight: 400, fontSize: 12 }}> · {prev.target_plan.min_tb} TB min</span> : null}</span>
+                    <span>{money(prev.target_monthly, prev.currency)}/mo</span>
+                  </div>
+                  <div className="row" style={{ gap: 6, marginTop: 8 }}>
+                    {prev.is_upgrade && <Pill tone="ok">Upgrade</Pill>}
+                    {prev.is_downgrade && <Pill tone="warn">Downgrade</Pill>}
+                    {prev.is_inplace && <Pill tone="info">Plan change</Pill>}
+                  </div>
+                  {prev.requires_new_tenant && (
+                    <div style={{ marginTop: 12 }}>
+                      <SettingsField label="Name your organization" value={tenantName} onChange={setTenantName} placeholder="e.g. Smith Family" />
+                    </div>
+                  )}
+                  {prev.warnings.map((w, i) => (
+                    <div key={i} className="row" style={{ gap: 8, marginTop: 10, alignItems: "flex-start", color: "var(--text-dim)", fontSize: 12.5 }}>
+                      <Icon name="alert" size={13} /> <span>{w}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {err && <div style={{ color: "var(--danger, #ff5d5d)", fontSize: 12.5, marginTop: 10 }}><Icon name="alert" size={13} /> {err}</div>}
             </div>
-          ))}
-          {err && <div style={{ color: "var(--danger, #ff5d5d)", fontSize: 12.5, marginTop: 10 }}><Icon name="alert" size={13} /> {err}</div>}
-          <div className="row" style={{ gap: 8, marginTop: 12 }}>
-            <button className="btn primary sm" disabled={busy || prev.blocked || (prev.requires_new_tenant && !tenantName.trim())} onClick={apply}>
-              {busy ? "Applying…" : `Switch to ${prev.target_plan.name}`}
-            </button>
-            <button className="btn ghost sm" onClick={() => { setTarget(""); setPrev(null); }}>Cancel</button>
+            <div className="modal-foot">
+              <button className="btn ghost sm" onClick={closeModal}>Cancel</button>
+              <button className="btn primary sm" disabled={busy || !prev || prev.blocked || (prev.requires_new_tenant && !tenantName.trim())} onClick={apply}>
+                {busy ? "Applying…" : prev ? `Confirm — switch to ${prev.target_plan.name}` : "Confirm"}
+              </button>
+            </div>
           </div>
         </div>
       )}
-      {err && !prev && <div style={{ color: "var(--danger, #ff5d5d)", fontSize: 12.5, marginTop: 10 }}><Icon name="alert" size={13} /> {err}</div>}
     </Card>
   );
 }

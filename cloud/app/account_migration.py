@@ -171,25 +171,36 @@ def _plan_base_cents(db: Session, plan_id: str) -> int:
 
 def _upgrade(db: Session, user: User, old_tenant: Tenant, target_plan: str,
              tenant_name: str | None, actor: str | None) -> dict:
+    from .api.billing import _user_usage
     plan_name = _plan_meta(db, target_plan).get("name", target_plan)
     name = (tenant_name or "").strip() or f"{(user.display_name or user.email or 'My').split('@')[0]}'s {plan_name}"
+    # Carry the user's protection-setup selections + committed capacity so nothing
+    # gets silently un-selected on the new plan.
+    options = list(user.protection_options or old_tenant.protection_options or [])
+    _total, used_bytes, _bk = _user_usage(db, user)
+    min_bytes = int(float(_plan_meta(db, target_plan).get("min_tb", 0) or 0) * TB)
+    licensed = max(min_bytes, int(used_bytes or 0), int(old_tenant.licensed_bytes or 0))
     try:
         new = Tenant(name=name, tenant_type="dedicated", plan=target_plan,
                      node_id=old_tenant.node_id,
                      storage_prefix=f"t-{secrets.token_hex(4)}",
                      key_ownership_model=old_tenant.key_ownership_model or "customer-managed",
-                     licensed_bytes=int(float(_plan_meta(db, target_plan).get("min_tb", 0) or 0) * TB),
-                     feature_flags={}, protection_options=[])
+                     licensed_bytes=licensed,
+                     feature_flags={}, protection_options=options,
+                     appliance_plan=list(old_tenant.appliance_plan or []))
         db.add(new)
         db.flush()
         _reparent_user_data(db, user, old_tenant.id, new.id)
         user.tenant_id = new.id
         user.role = "owner"
         user.feature_flags = {}        # full capabilities in their own tenant
+        user.protection_options = []   # options now live at the org (tenant) level
         user.cloud_delete_at = None
         user.last_plan_change_at = _now()
         _seed_billing_profile(db, new, user)
         _carry_billing_cycle(db, old_tenant.id, new.id, target_plan)
+        _autostart_billing(db, new)    # auto-switch billing to the new plan — no admin step
+        _cancel_orphaned_billing(db, old_tenant.id)   # retire the old tenant's profile if now empty
         audit.record(db, actor=actor or user.id, action="account.upgraded",
                      tenant_id=new.id, resource=user.id,
                      detail={"from_tenant": old_tenant.id, "plan": target_plan, "name": name})
@@ -201,6 +212,35 @@ def _upgrade(db: Session, user: User, old_tenant: Tenant, target_plan: str,
     _email_change(user, "upgrade", plan_name, name)
     return {"ok": True, "requires_relogin": True, "new_tenant_id": new.id,
             "tenant_name": name, "plan": target_plan}
+
+
+def _autostart_billing(db: Session, tenant: Tenant) -> None:
+    """Turn recurring billing on for the new plan automatically when the tenant has
+    a card + a live payment processor — so an admin never has to re-enable it. A
+    profile whose cycle was already carried over (active) is left as-is."""
+    from .api.billing import _live_processor
+    prof = db.query(BillingProfile).filter(BillingProfile.tenant_id == tenant.id).first()
+    if prof is None or prof.active:
+        return
+    has_card = (db.query(PaymentMethod)
+                .filter(PaymentMethod.tenant_id == tenant.id).first() is not None)
+    if not has_card:
+        return
+    if not _live_processor(services.tenant_payment_service(db, tenant.id)):
+        return
+    billing_engine.activate(db, prof)   # charges the first month on the new plan
+
+
+def _cancel_orphaned_billing(db: Session, tenant_id: str) -> None:
+    """When a tenant has no users left after a migration, retire its billing
+    profile so the sweep never charges it and it doesn't linger in the admin
+    list. Charge history is kept for revenue reporting."""
+    if db.query(User).filter(User.tenant_id == tenant_id).count() > 0:
+        return
+    for p in db.query(BillingProfile).filter(BillingProfile.tenant_id == tenant_id).all():
+        p.active = False
+        p.status = "canceled"
+        p.next_charge_at = None
 
 
 def _change_inplace(db: Session, user: User, tenant: Tenant, target_plan: str,
@@ -276,6 +316,8 @@ def _downgrade(db: Session, user: User, old_tenant: Tenant, target_plan: str,
         _reparent_user_data(db, user, old_tenant.id, shared.id)
         user.tenant_id = shared.id
         user.role = "member"
+        # Personal accounts keep their protection selections on the user record.
+        user.protection_options = list(old_tenant.protection_options or user.protection_options or [])
         user.cloud_delete_at = None    # the initiator keeps billing continuity
         user.last_plan_change_at = _now()
         moved = []
@@ -285,6 +327,7 @@ def _downgrade(db: Session, user: User, old_tenant: Tenant, target_plan: str,
             m.role = "member"
             m.cloud_delete_at = grace   # grace to establish their own billing
             moved.append(m)
+        _cancel_orphaned_billing(db, old_tenant.id)
         audit.record(db, actor=actor or user.id, action="account.downgraded",
                      tenant_id=shared.id, resource=user.id,
                      detail={"from_tenant": old_tenant.id, "plan": target_plan,
@@ -382,6 +425,7 @@ def _default_shared_tenant(db: Session, node_id: str | None) -> Tenant | None:
 
 
 def _seed_billing_profile(db: Session, tenant: Tenant, user: User) -> None:
+    from .api.billing import _plan_amount_cents
     pm = (db.query(PaymentMethod)
           .filter(PaymentMethod.tenant_id == tenant.id, PaymentMethod.user_id == user.id)
           .order_by(PaymentMethod.is_default.desc()).first())
@@ -389,7 +433,11 @@ def _seed_billing_profile(db: Session, tenant: Tenant, user: User) -> None:
     if prof is None:
         prof = BillingProfile(tenant_id=tenant.id, status="inactive", active=False)
         db.add(prof)
-    prof.plan_id = tenant.plan
+    amount, cur, plan_id, plan_name = _plan_amount_cents(db, user, tenant)
+    prof.plan_id = plan_id or tenant.plan
+    prof.plan_name = plan_name
+    prof.amount_cents = amount
+    prof.currency = cur
     if pm is not None:
         prof.processor = pm.processor
         prof.processor_customer = pm.processor_customer

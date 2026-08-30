@@ -4016,7 +4016,7 @@ async function showStorageTestResult(o: ServiceObj, checks: TestCheck[], ok: boo
 }
 
 interface AdminBillingProfile {
-  id: string; tenant_id: string; tenant_name: string; processor: string;
+  id: string; tenant_id: string; tenant_name: string; account_name?: string; processor: string;
   plan_id: string; plan_name: string; amount_cents: number; currency: string;
   interval: string; status: string; active: boolean;
   processor_customer: string; processor_subscription: string;
@@ -4087,7 +4087,7 @@ function BillingAdmin() {
     finally { setBusy(""); }
   }
   async function chargeNow(p: AdminBillingProfile) {
-    if (!await confirmDialog({ title: "Charge now?", message: `Capture ${fmtCents(p.amount_cents, p.currency)} from ${p.tenant_name}'s card via ${p.processor || "the processor"}?`, confirmLabel: "Charge" })) return;
+    if (!await confirmDialog({ title: "Charge now?", message: `Capture ${fmtCents(p.amount_cents, p.currency)} from ${p.account_name || p.tenant_name}'s card via ${p.processor || "the processor"}?`, confirmLabel: "Charge" })) return;
     setBusy(p.id);
     try {
       const c = await api.post<AdminBillingCharge>(`/admin/billing/profiles/${p.id}/charge`, {});
@@ -4119,11 +4119,11 @@ function BillingAdmin() {
           <button className="btn ghost sm" onClick={load}><Icon name="repeat" size={13} /> Refresh</button>
         </div>
         <table className="table">
-          <thead><tr><th>Tenant</th><th>Plan</th><th>Amount</th><th>Next charge</th><th>Method</th><th>Status</th><th>Collected</th><th>Last</th><th></th></tr></thead>
+          <thead><tr><th>Account Name</th><th>Plan</th><th>Amount</th><th>Next charge</th><th>Method</th><th>Status</th><th>Collected</th><th>Last</th><th></th></tr></thead>
           <tbody>
             {profiles.map((p) => (
               <tr key={p.id}>
-                <td style={{ fontWeight: 600 }}>{p.tenant_name}</td>
+                <td style={{ fontWeight: 600 }}>{p.account_name || p.tenant_name}</td>
                 <td>{p.plan_name || p.plan_id || "—"}</td>
                 <td>{fmtCents(p.amount_cents, p.currency)}<span className="faint" style={{ fontSize: 11 }}>/{p.interval}</span></td>
                 <td className="faint" style={{ fontSize: 12 }}>{p.active && p.next_charge_at ? timeAgo(p.next_charge_at) : "—"}</td>
@@ -4150,7 +4150,7 @@ function BillingAdmin() {
           <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
             <div className="spread">
               <div>
-                <h3 style={{ margin: 0 }}>{detail.tenant_name} · billing</h3>
+                <h3 style={{ margin: 0 }}>{detail.account_name || detail.tenant_name} · billing</h3>
                 <div className="faint" style={{ fontSize: 12 }}>
                   {fmtCents(detail.amount_cents, detail.currency)}/{detail.interval} · {detail.processor || "unassigned"}
                   {detail.processor_subscription ? ` · ${detail.processor_subscription}` : ""}
