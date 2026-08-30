@@ -308,20 +308,152 @@ def list_tenants(db: Session = Depends(get_db)):
 @router.get("/fleet")
 def fleet_view(db: Session = Depends(get_db)):
     from .. import versions
+    from ..models import ApplianceStorage
     prod = versions.appliance_production_version()
     rows = db.query(Appliance).all()
-    return [{
-        "id": a.id, "serial": a.serial, "model": a.model, "name": a.name,
-        "tenant_id": a.tenant_id, "state": a.state,
-        "isolation_state": a.isolation_state, "attestation_ok": a.attestation_ok,
-        "tamper_state": a.tamper_state, "software_version": a.software_version,
-        "production_version": prod,
-        "update_available": bool(a.software_version and a.software_version != "0.0.0"
-                                 and a.software_version != prod),
-        "version_updated_at": a.version_updated_at.isoformat() if a.version_updated_at else None,
-        "last_heartbeat_at": a.last_heartbeat_at.isoformat() if a.last_heartbeat_at else None,
-        "config_profile_id": a.config_profile_id,
-    } for a in rows]
+    now = _now()
+    tids = {a.tenant_id for a in rows if a.tenant_id}
+    tnames = ({t.id: t.name for t in db.query(Tenant).filter(Tenant.id.in_(tids)).all()}
+              if tids else {})
+    rp = dict(db.query(SnapshotReceipt.appliance_id, func.count(SnapshotReceipt.id))
+              .filter(SnapshotReceipt.appliance_id.isnot(None))
+              .group_by(SnapshotReceipt.appliance_id).all())
+    caps: dict = {}
+    for aid, cap, used in (db.query(
+            ApplianceStorage.appliance_id,
+            func.coalesce(func.sum(ApplianceStorage.capacity_bytes), 0),
+            func.coalesce(func.sum(ApplianceStorage.used_bytes), 0))
+            .group_by(ApplianceStorage.appliance_id).all()):
+        caps[aid] = (int(cap or 0), int(used or 0))
+    out = []
+    for a in rows:
+        tel = a.telemetry or {}
+        cap, used = caps.get(a.id, (0, 0))
+        if not cap:
+            cap = int(tel.get("capacity_total_bytes") or 0)
+            used = int(tel.get("capacity_used_bytes") or 0)
+        online = bool(a.last_heartbeat_at and (now - a.last_heartbeat_at).total_seconds() < 90)
+        out.append({
+            "id": a.id, "serial": a.serial, "model": a.model, "name": a.name,
+            "tenant_id": a.tenant_id, "tenant_name": tnames.get(a.tenant_id, "—"),
+            "state": a.state, "isolation_state": a.isolation_state,
+            "attestation_ok": a.attestation_ok, "tamper_state": a.tamper_state,
+            "software_version": a.software_version, "production_version": prod,
+            "update_available": bool(a.software_version and a.software_version != "0.0.0"
+                                     and a.software_version != prod),
+            "version_updated_at": a.version_updated_at.isoformat() if a.version_updated_at else None,
+            "last_heartbeat_at": a.last_heartbeat_at.isoformat() if a.last_heartbeat_at else None,
+            "online": online,
+            "capacity_bytes": cap, "used_bytes": used,
+            "storage_pct": round(used / cap * 100, 1) if cap else 0.0,
+            "recovery_points": int(rp.get(a.id, 0)),
+            "drive_health": tel.get("drive_health", "healthy"),
+            "temperature_c": tel.get("temperature_c"),
+            "config_profile_id": a.config_profile_id,
+        })
+    out.sort(key=lambda r: (not r["online"], -r["capacity_bytes"]))
+    return out
+
+
+@router.get("/fleet/stats")
+def fleet_stats(db: Session = Depends(get_db)):
+    """Fleet-wide appliance stats for the admin dashboard cards."""
+    from .. import versions
+    from ..models import ApplianceStorage
+    prod = versions.appliance_production_version()
+    rows = db.query(Appliance).all()
+    now = _now()
+    by_state: dict = {}
+    by_model: dict = {}
+    by_version: dict = {}
+    online = attest_fail = tamper = update_avail = 0
+    for a in rows:
+        by_state[a.state or "unknown"] = by_state.get(a.state or "unknown", 0) + 1
+        by_model[a.model or "—"] = by_model.get(a.model or "—", 0) + 1
+        by_version[a.software_version or "0.0.0"] = by_version.get(a.software_version or "0.0.0", 0) + 1
+        if a.last_heartbeat_at and (now - a.last_heartbeat_at).total_seconds() < 90:
+            online += 1
+        if not a.attestation_ok:
+            attest_fail += 1
+        if (a.tamper_state or "normal") != "normal":
+            tamper += 1
+        if a.software_version and a.software_version != "0.0.0" and a.software_version != prod:
+            update_avail += 1
+    cap = db.query(func.coalesce(func.sum(ApplianceStorage.capacity_bytes), 0)).scalar() or 0
+    used = db.query(func.coalesce(func.sum(ApplianceStorage.used_bytes), 0)).scalar() or 0
+    rp = db.query(func.count(SnapshotReceipt.id)).filter(
+        SnapshotReceipt.appliance_id.isnot(None)).scalar() or 0
+    from ..models import PendingAppliance
+    pending = db.query(func.count(PendingAppliance.id)).filter(
+        PendingAppliance.paired_appliance_id.is_(None)).scalar() or 0
+    return {
+        "total": len(rows), "online": online, "offline": len(rows) - online,
+        "attestation_failed": attest_fail, "tamper_alerts": tamper,
+        "update_available": update_avail, "production_version": prod,
+        "capacity_bytes": int(cap), "used_bytes": int(used),
+        "recovery_points": int(rp), "pending": int(pending),
+        "by_state": [{"state": k, "count": v} for k, v in sorted(by_state.items(), key=lambda x: -x[1])],
+        "by_model": [{"model": k, "count": v} for k, v in sorted(by_model.items(), key=lambda x: -x[1])],
+        "by_version": [{"version": k, "count": v} for k, v in sorted(by_version.items(), key=lambda x: -x[1])],
+    }
+
+
+@router.get("/pending-appliances")
+def pending_appliances(db: Session = Depends(get_db)):
+    """Zero-touch appliances that registered but have not yet been paired to an
+    account. Admins can see the pairing code to assist a customer."""
+    from ..models import PendingAppliance
+    now = _now()
+    out = []
+    for pa in (db.query(PendingAppliance)
+               .filter(PendingAppliance.paired_appliance_id.is_(None))
+               .order_by(PendingAppliance.created_at.desc()).all()):
+        tel = pa.telemetry or {}
+        online = bool(pa.last_seen_at and (now - pa.last_seen_at).total_seconds() < 120)
+        out.append({
+            "id": pa.id, "serial": pa.serial, "model": pa.model,
+            "pairing_code": pa.pairing_code, "online": online,
+            "hostname": tel.get("hostname"), "local_ip": tel.get("local_ip"),
+            "last_seen_at": pa.last_seen_at.isoformat() if pa.last_seen_at else None,
+            "created_at": pa.created_at.isoformat() if pa.created_at else None,
+        })
+    return out
+
+
+@router.get("/appliances/{aid}")
+def admin_appliance_detail(aid: str,
+                           _p: security.Principal = Depends(security.require_platform_admin),
+                           db: Session = Depends(get_db)):
+    """Full admin detail for one appliance (cross-tenant): health, storage,
+    telemetry, stored data, recent commands, tenant + assigned config profile."""
+    from .appliances import _appliance_view, _stored_data
+    from ..models import ApplianceCommand
+    a = db.get(Appliance, aid)
+    if not a:
+        raise HTTPException(404, "appliance not found")
+    now = _now()
+    view = _appliance_view(a)
+    view["online"] = bool(a.last_heartbeat_at and (now - a.last_heartbeat_at).total_seconds() < 90)
+    t = db.get(Tenant, a.tenant_id)
+    view["tenant"] = {"id": t.id, "name": t.name, "tenant_type": t.tenant_type} if t else None
+    try:
+        view["stored_data"] = _stored_data(db, a, None)
+    except Exception:  # noqa: BLE001
+        view["stored_data"] = {"recovery_points": 0, "objects": 0, "bytes": 0, "sources": [], "items": []}
+    view["recent_commands"] = [{
+        "type": ct, "status": st, "sequence": seq,
+        "at": at.isoformat() if at else None,
+    } for ct, st, seq, at in (db.query(
+        ApplianceCommand.command_type, ApplianceCommand.status,
+        ApplianceCommand.sequence, ApplianceCommand.created_at)
+        .filter(ApplianceCommand.appliance_id == aid)
+        .order_by(ApplianceCommand.created_at.desc()).limit(15).all())]
+    prof = db.get(ConfigProfile, a.config_profile_id) if a.config_profile_id else None
+    view["config_profile"] = _profile_view(db, prof) if prof else None
+    view["available_profiles"] = [_profile_view(db, x) for x in
+                                  db.query(ConfigProfile).order_by(ConfigProfile.name).all()
+                                  if _profile_target(x.kind) == "appliance"]
+    return view
 
 
 @router.get("/crypto-profiles")

@@ -115,6 +115,8 @@ export default function Appliances() {
   const [selected, setSelected] = useState<Appliance | null>(null);
   const [code, setCode] = useState<string | null>(null);
   const [installCmd, setInstallCmd] = useState<string | null>(null);
+  const [pairCode, setPairCode] = useState("");
+  const [pairing, setPairing] = useState(false);
   const [toast, setToast] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [prodVersion, setProdVersion] = useState<string>("");
@@ -159,6 +161,24 @@ export default function Appliances() {
     });
     setCode(res.code);
     setInstallCmd(res.command);
+  }
+
+  async function pairAppliance() {
+    const c = pairCode.trim().toUpperCase();
+    if (!c) return;
+    setPairing(true);
+    try {
+      const r = await api.post<Appliance>("/appliances/pair", { code: c });
+      setPairCode("");
+      setToast(`Paired “${r.name}”`);
+      setTimeout(() => setToast(""), 2500);
+      await load();
+      await select(r);
+    } catch (e) {
+      await notify({ title: "Couldn't pair appliance", message: (e as ApiError).message, tone: "danger" });
+    } finally {
+      setPairing(false);
+    }
   }
 
   async function command(a: Appliance, command_type: string, parameters: any = {}) {
@@ -240,6 +260,33 @@ export default function Appliances() {
               </pre>
             </div>
           )}
+        </Card>
+        )}
+
+        {canAdmin && (
+        <Card style={{ marginBottom: 16 }}>
+          <div className="spread" style={{ marginBottom: 8 }}>
+            <h2>Pair an appliance</h2>
+            <Icon name="server" size={16} />
+          </div>
+          <div className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+            Set up a new appliance with no code at all — it powers on and shows a pairing
+            code on its own screen (and its web page). Enter that code here to claim it to
+            your account.
+          </div>
+          <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              className="input mono"
+              style={{ flex: "1 1 220px", letterSpacing: 1, textTransform: "uppercase" }}
+              placeholder="ARK-XXXX-XXXX"
+              value={pairCode}
+              onChange={(e) => setPairCode(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") void pairAppliance(); }}
+            />
+            <button className="btn primary" disabled={pairing || !pairCode.trim()} onClick={pairAppliance}>
+              <Icon name="link" size={14} /> {pairing ? "Pairing…" : "Pair"}
+            </button>
+          </div>
         </Card>
         )}
 

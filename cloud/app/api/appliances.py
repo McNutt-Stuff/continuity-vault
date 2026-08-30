@@ -35,6 +35,7 @@ from ..models import (
     ApplianceCommand,
     ApplianceStorage,
     LinkingCode,
+    PendingAppliance,
     SnapshotReceipt,
     Tenant,
 )
@@ -116,6 +117,47 @@ def appliance_installer(body: CreateLinkingCodeRequest,
         f'sudo CV_CLOUD_URL="{api}" CV_LINKING_CODE="{code}" bash /tmp/arkive-appliance.sh'
     )
     return {"code": code, "expires_at": lc.expires_at.isoformat(), "command": command}
+
+
+class PairRequest(BaseModel):
+    code: str
+    name: str | None = None
+
+
+@fleet_router.post("/pair")
+def pair_appliance(body: PairRequest,
+                   principal: security.Principal = Depends(security.require_security_admin),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    """Claim a zero-touch appliance to this account using the pairing code shown on
+    the appliance's local web UI. Creates the real Appliance; the agent adopts it
+    on its next register-heartbeat."""
+    code = (body.code or "").strip().upper()
+    if not code:
+        raise HTTPException(400, "enter the pairing code from the appliance screen")
+    pa = db.query(PendingAppliance).filter(PendingAppliance.pairing_code == code).first()
+    if not pa:
+        raise HTTPException(404, "no appliance found for that pairing code")
+    if pa.paired_appliance_id:
+        raise HTTPException(400, "that appliance has already been paired")
+    a = (db.query(Appliance)
+         .filter(Appliance.tenant_id == tenant.id, Appliance.serial == pa.serial).first())
+    if a is None:
+        a = Appliance(tenant_id=tenant.id, serial=pa.serial, model=pa.model,
+                      name=(body.name or "Home Appliance"), state="ONLINE_STAGING",
+                      isolation_state="sealed", identity_bundle=pa.identity_bundle,
+                      attestation_ok=True, last_attestation_at=_now(),
+                      software_version="1.0.0", telemetry=pa.telemetry or {})
+        db.add(a)
+    db.flush()
+    pa.paired_appliance_id = a.id
+    pa.paired_tenant_id = tenant.id
+    db.commit()
+    db.refresh(a)
+    _ensure_builtin_store(db, a)
+    audit.record(db, actor=principal.user_id, action="appliance.paired",
+                 tenant_id=tenant.id, resource=a.id, detail={"serial": pa.serial})
+    return _appliance_view(a)
 
 
 @fleet_router.get("")
@@ -688,14 +730,109 @@ def activate(body: ActivateRequest, db: Session = Depends(get_db)):
         "agent_token": token,
         "tenant_id": lc.tenant_id,
         "cloud_public_bundle": fleet.cloud_public_bundle(),
-        "config": {
-            "heartbeat_interval_seconds": settings.heartbeat_interval_seconds,
-            "command_ttl_seconds": settings.command_ttl_seconds,
-            "domain": settings.domain,
-            "retention_floor_days": 365,
-            "immutability": True,
-        },
+        "config": _activation_config(),
     }
+
+
+def _activation_config() -> dict:
+    return {
+        "heartbeat_interval_seconds": settings.heartbeat_interval_seconds,
+        "command_ttl_seconds": settings.command_ttl_seconds,
+        "domain": settings.domain,
+        "retention_floor_days": 365,
+        "immutability": True,
+    }
+
+
+def _gen_pairing_code() -> str:
+    """A short, human-friendly pairing code (no ambiguous characters)."""
+    alpha = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "ARK-" + "-".join(
+        "".join(secrets.choice(alpha) for _ in range(4)) for _ in range(2))
+
+
+def _mint_appliance_token(db: Session, a: Appliance) -> str:
+    token = secrets.token_urlsafe(32)
+    a.agent_token_hash = _hash_token(token)
+    db.commit()
+    _agent_tokens[token] = a.id
+    return token
+
+
+class RegisterRequest(BaseModel):
+    serial: str
+    model: str | None = None
+    identity_bundle: dict
+    attestation: dict = {}
+    telemetry: dict = {}
+
+
+@agent_router.post("/register")
+def register(body: RegisterRequest, db: Session = Depends(get_db)):
+    """Zero-touch registration: an appliance installed WITHOUT a linking code
+    registers here and receives a pairing code to display on its local web UI. No
+    auth — identity is bound to the presented hardware serial + signing bundle."""
+    pa = db.query(PendingAppliance).filter(PendingAppliance.serial == body.serial).first()
+    token = secrets.token_urlsafe(32)
+    if pa is None:
+        pa = PendingAppliance(serial=body.serial, model=body.model or "CV Edge 8",
+                              pairing_code=_gen_pairing_code())
+        db.add(pa)
+    pa.model = body.model or pa.model
+    pa.identity_bundle = body.identity_bundle
+    pa.attestation = body.attestation or {}
+    pa.telemetry = body.telemetry or {}
+    pa.token_hash = _hash_token(token)
+    pa.last_seen_at = _now()
+    if not pa.pairing_code:
+        pa.pairing_code = _gen_pairing_code()
+    db.commit()
+    db.refresh(pa)
+    return {
+        "registration_id": pa.id,
+        "agent_token": token,
+        "pairing_code": pa.pairing_code,
+        "paired": bool(pa.paired_appliance_id),
+        "cloud_public_bundle": fleet.cloud_public_bundle(),
+        "heartbeat_interval_seconds": settings.heartbeat_interval_seconds,
+    }
+
+
+def _pending_by_token(authorization: str, db: Session) -> PendingAppliance:
+    token = (authorization.split(" ", 1)[1] if authorization.lower().startswith("bearer ")
+             else "")
+    pa = (db.query(PendingAppliance).filter(
+        PendingAppliance.token_hash == _hash_token(token)).first() if token else None)
+    if not pa:
+        raise HTTPException(401, "invalid registration token")
+    return pa
+
+
+class RegisterHeartbeatRequest(BaseModel):
+    telemetry: dict = {}
+
+
+@agent_router.post("/register-heartbeat")
+def register_heartbeat(body: RegisterHeartbeatRequest,
+                       authorization: str = Header(default=""),
+                       db: Session = Depends(get_db)):
+    """An unpaired appliance polls this until a customer claims its pairing code.
+    Once claimed, it returns the full activation payload so the agent adopts the
+    real appliance identity and switches to the normal management plane."""
+    pa = _pending_by_token(authorization, db)
+    pa.telemetry = body.telemetry or pa.telemetry
+    pa.last_seen_at = _now()
+    db.commit()
+    if pa.paired_appliance_id:
+        a = db.get(Appliance, pa.paired_appliance_id)
+        if a is not None:
+            token = _mint_appliance_token(db, a)
+            return {"paired": True, "activation": {
+                "appliance_id": a.id, "agent_token": token, "tenant_id": a.tenant_id,
+                "cloud_public_bundle": fleet.cloud_public_bundle(),
+                "config": _activation_config()}}
+    return {"paired": False, "pairing_code": pa.pairing_code,
+            "heartbeat_interval_seconds": settings.heartbeat_interval_seconds}
 
 
 class HeartbeatRequest(BaseModel):

@@ -24,6 +24,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 
 from cv_crypto.command import build_snapshot_manifest
 from cv_crypto.signing import HybridVerifier, SigPolicy
@@ -38,6 +39,95 @@ from . import agent_log, sysinfo
 settings = get_settings()
 app = FastAPI(title="Arkive Appliance Agent", version="1.0.0")
 
+# Local status + pairing web UI served on the appliance LAN address (spec:
+# on-appliance interface). Pure vanilla JS; polls /status and /pairing.
+_HOME_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Arkive Appliance</title>
+<style>
+:root{--bg:#0b1020;--card:#141a2e;--line:#26304d;--fg:#e6ebff;--mut:#93a0c4;--accent:#5b8cff;--ok:#37d67a;--warn:#ffb020;--bad:#ff5d5d}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+.wrap{max-width:860px;margin:0 auto;padding:28px 20px 60px}
+header{display:flex;align-items:center;gap:12px;margin-bottom:24px}
+.logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,#5b8cff,#8b5bff);display:flex;align-items:center;justify-content:center;font-weight:800}
+h1{font-size:20px;margin:0}
+.sub{color:var(--mut);font-size:13px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:18px}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;font-size:13px;font-weight:600}
+.dot{width:9px;height:9px;border-radius:50%}
+.big{font-size:17px;font-weight:700;margin:0 0 4px}
+.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:34px;letter-spacing:3px;font-weight:800;color:#fff;background:#0c1330;border:1px dashed var(--accent);border-radius:12px;padding:18px;text-align:center;margin:14px 0}
+.steps{margin:8px 0 0;padding-left:20px;color:var(--mut)}
+.steps li{margin:4px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
+.kv .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+.kv .v{font-weight:600;margin-top:2px;word-break:break-word}
+.bar{height:8px;border-radius:6px;background:#0c1330;overflow:hidden;margin-top:8px}
+.bar>i{display:block;height:100%;background:linear-gradient(90deg,#5b8cff,#8b5bff)}
+footer{color:var(--mut);font-size:12px;text-align:center;margin-top:24px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<div class="logo">A</div>
+<div><h1>Arkive Appliance</h1><div class="sub" id="sub">Local status</div></div>
+</header>
+<div id="pair" class="card" style="display:none"></div>
+<div id="stat" class="card"><div class="sub">Loading…</div></div>
+<div id="sys" class="card"></div>
+<footer>Continuity Vault &middot; on-appliance interface &middot; refreshes automatically</footer>
+</div>
+<script>
+function h(n){if(n==null)return '—';const u=['B','KB','MB','GB','TB','PB'];let i=0,v=Number(n);while(v>=1024&&i<u.length-1){v/=1024;i++}return v.toFixed(v<10&&i>0?1:0)+' '+u[i]}
+function dur(s){if(!s)return '—';s=Number(s);const d=Math.floor(s/86400),hh=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+'d ':'')+(hh?hh+'h ':'')+m+'m'}
+function esc(t){const d=document.createElement('div');d.textContent=t==null?'':String(t);return d.innerHTML}
+async function j(u){const r=await fetch(u);return r.json()}
+async function tick(){
+ let p={},s={};
+ try{p=await j('/pairing')}catch(e){}
+ try{s=await j('/status')}catch(e){}
+ const t=(s.telemetry)||{};
+ const pairEl=document.getElementById('pair');
+ if(p&&p.paired===false){
+   document.getElementById('sub').textContent='Awaiting pairing';
+   pairEl.style.display='block';
+   pairEl.innerHTML='<div class="pill" style="background:rgba(255,176,32,.15);color:#ffb020"><span class="dot" style="background:#ffb020"></span>Not yet paired</div>'
+     +'<p class="big" style="margin-top:14px">Pair this appliance to your Arkive account</p>'
+     +'<div class="code">'+esc(p.pairing_code||'…')+'</div>'
+     +'<ol class="steps"><li>Sign in at <b>vault.arkive.life</b></li><li>Open <b>Appliances</b> &rarr; <b>Pair an appliance</b></li><li>Enter the code shown above</li></ol>';
+ } else {
+   document.getElementById('sub').textContent='Paired &amp; protected';
+   pairEl.style.display='none';
+ }
+ const online=(p&&p.paired)||s.activated;
+ const stEl=document.getElementById('stat');
+ const stateTxt=esc(s.state||'—');
+ stEl.innerHTML='<div class="pill" style="background:rgba(55,214,122,.15);color:#37d67a"><span class="dot" style="background:'+(online?'#37d67a':'#ffb020')+'"></span>'+(online?'Online':'Starting')+'</div>'
+   +'<div class="grid" style="margin-top:16px">'
+   +kv('State',stateTxt)+kv('Isolation',esc(s.isolation_state))+kv('Tamper',esc(s.tamper_state||'normal'))
+   +kv('Serial',esc(s.serial))+kv('Model',esc((p&&p.model)||t.model))+kv('Version',esc(s.software_version))
+   +'</div>';
+ const cap=t.capacity_total_bytes,used=t.capacity_used_bytes,pct=cap?Math.min(100,used/cap*100):0;
+ const sysEl=document.getElementById('sys');
+ sysEl.innerHTML='<p class="big">Storage &amp; system</p>'
+   +'<div class="kv"><div class="k">Storage used</div><div class="v">'+h(used)+' of '+h(cap)+' ('+pct.toFixed(0)+'%)</div><div class="bar"><i style="width:'+pct+'%"></i></div></div>'
+   +'<div class="grid" style="margin-top:16px">'
+   +kv('Hostname',esc(t.hostname))+kv('Local IP',esc(t.local_ip))+kv('OS',esc(t.os))
+   +kv('Recovery points',esc(t.snapshots))+kv('Drive health',esc(t.drive_health))+kv('Uptime',dur(t.uptime_seconds))
+   +kv('Quantum-safe',t.quantum_safe?'Yes':'Classical')+kv('Encryption',esc(t.content_alg))+kv('Cloud',esc(t.cloud_url))
+   +'</div>';
+}
+function kv(k,v){return '<div class="kv"><div class="k">'+k+'</div><div class="v">'+(v||'—')+'</div></div>'}
+tick();setInterval(tick,5000);
+</script>
+</body>
+</html>"""
+
 
 def _cp_unavailable(exc: BaseException) -> bool:
     """Gateway/connection error that means the control plane is momentarily
@@ -50,6 +140,7 @@ def _cp_unavailable(exc: BaseException) -> bool:
 DATA = Path(settings.data_dir)
 DATA.mkdir(parents=True, exist_ok=True)
 _REG = DATA / "registration.json"
+_PENDING = DATA / "pending.json"
 _LOG_FILE = DATA / "agent.log"
 
 
@@ -68,10 +159,18 @@ class Agent:
         self.log = agent_log.setup_logging(_LOG_FILE)
         self._last_update_note = ""
         self._last_latency_ms: Optional[int] = None  # heartbeat round-trip
+        # Zero-touch pairing: when installed WITHOUT a linking code the appliance
+        # registers with the control plane as an un-claimed unit and shows a
+        # pairing code on its local web UI until a customer claims it.
+        self.registration_id: Optional[str] = None
+        self.reg_token: Optional[str] = None
+        self.pairing_code: Optional[str] = None
         # Assigned customer node (federated fleets): once set, all signaling,
         # commands and receipts go here instead of the control plane.
         self._node_url: Optional[str] = None
         self._load_registration()
+        if not self.activated:
+            self._load_pending()
 
     # -- registration / activation ------------------------------------
 
@@ -112,6 +211,91 @@ class Agent:
         _REG.write_text(json.dumps(d))
         self.log.info("activated as appliance %s (tenant %s)", self.appliance_id, self.tenant_id)
         return d
+
+    # -- zero-touch registration + pairing ----------------------------
+
+    def _load_pending(self) -> None:
+        if _PENDING.exists():
+            try:
+                d = json.loads(_PENDING.read_text())
+                self.registration_id = d.get("registration_id")
+                self.reg_token = d.get("agent_token")
+                self.pairing_code = d.get("pairing_code")
+                if d.get("cloud_public_bundle"):
+                    self.cloud_bundle = d["cloud_public_bundle"]
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("could not load pending registration: %s", exc)
+
+    @property
+    def registered(self) -> bool:
+        return self.reg_token is not None
+
+    async def register(self) -> dict:
+        """Register an un-claimed appliance and obtain a pairing code (spec: zero-
+        touch onboarding). Idempotent on the control plane by hardware serial."""
+        payload = {
+            "serial": self.identity.serial,
+            "model": settings.model,
+            "identity_bundle": self.identity.public_bundle(),
+            "attestation": build_attestation(settings.software_version, self.sm.isolation_state),
+            "telemetry": self._telemetry(),
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(f"{settings.cloud_base_url}/appliance/register", json=payload)
+        if r.status_code != 200:
+            raise RuntimeError(f"registration failed: {r.status_code} {r.text}")
+        d = r.json()
+        self.registration_id = d["registration_id"]
+        self.reg_token = d["agent_token"]
+        self.pairing_code = d["pairing_code"]
+        self.cloud_bundle = d.get("cloud_public_bundle")
+        _PENDING.write_text(json.dumps(d))
+        self.log.info("registered — pairing code %s (awaiting claim)", self.pairing_code)
+        return d
+
+    async def register_heartbeat_once(self) -> bool:
+        """Poll the control plane while awaiting a claim. Returns True once the
+        appliance has been paired and adopted its real identity."""
+        headers = {"Authorization": f"Bearer {self.reg_token}"}
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(f"{settings.cloud_base_url}/appliance/register-heartbeat",
+                                  json={"telemetry": self._telemetry()}, headers=headers)
+        if r.status_code in (502, 503, 504):
+            return False
+        if r.status_code == 401:
+            # Registration was cleared server-side — re-register to get a new code.
+            self.log.warning("registration token rejected — re-registering")
+            self.reg_token = None
+            return False
+        if r.status_code != 200:
+            self.log.warning("register-heartbeat rejected: %s", r.status_code)
+            return False
+        d = r.json()
+        if d.get("paired") and d.get("activation"):
+            self._adopt_activation(d["activation"])
+            return True
+        # Still unclaimed — refresh the displayed pairing code.
+        code = d.get("pairing_code")
+        if code and code != self.pairing_code:
+            self.pairing_code = code
+        return False
+
+    def _adopt_activation(self, d: dict) -> None:
+        """Switch from an un-claimed unit to a fully-activated appliance."""
+        self.appliance_id = d["appliance_id"]
+        self.tenant_id = d["tenant_id"]
+        self.agent_token = d["agent_token"]
+        self.cloud_bundle = d["cloud_public_bundle"]
+        self.config = d.get("config", {})
+        self.sm.state = State.ONLINE_STAGING
+        _REG.write_text(json.dumps(d))
+        try:
+            _PENDING.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        self.reg_token = None
+        self.pairing_code = None
+        self.log.info("paired — now appliance %s (tenant %s)", self.appliance_id, self.tenant_id)
 
     # -- heartbeat + command handling ---------------------------------
 
@@ -340,6 +524,8 @@ class Agent:
                 elif ctype == "QUARANTINE":
                     self.sm.state = State.QUARANTINED
                     result = {"state": self.sm.state.value}
+                elif ctype == "OPEN_TERMINAL":
+                    result = self._open_terminal(payload["parameters"])
                 elif ctype == "STAGE_UPDATE":
                     result = self._stage_update(payload["parameters"])
                 elif ctype == "APPLY_UPDATE":
@@ -462,10 +648,120 @@ class Agent:
         staged.write_text(json.dumps(params))
         return {"staged": True, "version": params.get("version")}
 
+    # -- remote terminal ----------------------------------------------
+
+    def _open_terminal(self, params: dict) -> dict:
+        """Handle a signed OPEN_TERMINAL command: dial an outbound WebSocket back
+        to the control-plane relay and bridge it to a local PTY shell."""
+        ws_path = params.get("wsPath")
+        session_id = params.get("sessionId")
+        session_token = params.get("sessionToken")
+        if not ws_path or not session_token:
+            return {"opened": False, "reason": "missing session parameters"}
+        host = settings.cloud_base_url.split("/api", 1)[0]
+        scheme = "wss" if host.startswith("https") else "ws"
+        host_noscheme = host.split("://", 1)[-1]
+        url = f"{scheme}://{host_noscheme}{ws_path}?token={session_token}"
+        asyncio.create_task(self._run_terminal(url, session_id))
+        self.log.info("terminal session %s: opening (relay %s)", session_id, host)
+        return {"opened": True, "session_id": session_id}
+
+    async def _run_terminal(self, url: str, session_id: str) -> None:
+        import fcntl
+        import os
+        import pty
+        import signal
+        import struct
+        import termios
+
+        import websockets
+
+        def _set_winsize(fd: int, rows: int, cols: int) -> None:
+            try:
+                fcntl.ioctl(fd, termios.TIOCSWINSZ,
+                            struct.pack("HHHH", rows, cols, 0, 0))
+            except Exception:  # noqa: BLE001
+                pass
+
+        pid, master_fd = pty.fork()
+        if pid == 0:  # child: become an interactive login shell
+            os.environ["TERM"] = "xterm-256color"
+            shell = os.environ.get("SHELL", "/bin/bash")
+            try:
+                os.execvp(shell, [shell, "-il"])
+            except Exception:  # noqa: BLE001
+                os.execvp("/bin/sh", ["/bin/sh", "-i"])
+            os._exit(1)
+
+        loop = asyncio.get_running_loop()
+        flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+        fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        closed = asyncio.Event()
+        out_q: asyncio.Queue = asyncio.Queue()
+
+        def _on_readable() -> None:
+            try:
+                data = os.read(master_fd, 65536)
+            except (BlockingIOError, InterruptedError):
+                return
+            except OSError:
+                closed.set()
+                return
+            if not data:
+                closed.set()
+                return
+            out_q.put_nowait(data)
+
+        try:
+            async with websockets.connect(url, max_size=None, ping_interval=20) as ws:
+                self.log.info("terminal session %s: established", session_id)
+                loop.add_reader(master_fd, _on_readable)
+
+                async def sender() -> None:
+                    while True:
+                        data = await out_q.get()
+                        await ws.send(data.decode("utf-8", "replace"))
+
+                async def receiver() -> None:
+                    async for msg in ws:
+                        try:
+                            m = json.loads(msg)
+                        except Exception:  # noqa: BLE001
+                            m = {"type": "input", "data": msg}
+                        if m.get("type") == "resize":
+                            _set_winsize(master_fd, int(m.get("rows", 24)),
+                                         int(m.get("cols", 80)))
+                        else:
+                            os.write(master_fd, (m.get("data") or "").encode())
+                    closed.set()
+
+                tasks = [asyncio.create_task(sender()),
+                         asyncio.create_task(receiver()),
+                         asyncio.create_task(closed.wait())]
+                done, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED)
+                for t in pending:
+                    t.cancel()
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("terminal session %s error: %s", session_id, exc)
+        finally:
+            try:
+                loop.remove_reader(master_fd)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                os.close(master_fd)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            except Exception:  # noqa: BLE001
+                pass
+            self.log.info("terminal session %s: closed", session_id)
+
 
 agent = Agent()
-
-
 def _integration_worker():
     """Single shared integrations worker (its in-memory OTP sessions must persist
     across the data + provisioning loops)."""
@@ -489,6 +785,34 @@ async def startup() -> None:
         except Exception as exc:  # keep the agent up to expose status
             agent.log.error("activation error: %s", exc)
     if agent.activated:
+        asyncio.create_task(_heartbeat_loop())
+        asyncio.create_task(_integrations_loop())
+        asyncio.create_task(_provision_loop())
+    elif not settings.linking_code:
+        # Zero-touch: no linking code was supplied. Register as an un-claimed unit
+        # and show a pairing code on the local web UI until a customer claims it.
+        asyncio.create_task(_registration_loop())
+
+
+async def _registration_loop() -> None:
+    """Register (once) then poll for a pairing claim. On pairing, adopt the real
+    appliance identity and start the normal management-plane loops."""
+    while not agent.activated:
+        try:
+            if not agent.registered:
+                await agent.register()
+            else:
+                if await agent.register_heartbeat_once():
+                    break
+        except Exception as exc:  # noqa: BLE001
+            if _cp_unavailable(exc):
+                agent.log.info("control plane unavailable during registration — "
+                               "will retry: %s", exc)
+            else:
+                agent.log.error("registration error: %s", exc)
+        await asyncio.sleep(10)
+    if agent.activated:
+        agent.log.info("registration complete — starting management plane")
         asyncio.create_task(_heartbeat_loop())
         asyncio.create_task(_integrations_loop())
         asyncio.create_task(_provision_loop())
@@ -549,6 +873,27 @@ def status():
         "telemetry": agent._telemetry(),
         "pending_recovery": list(agent.pending_recovery.keys()),
     }
+
+
+@app.get("/pairing")
+def pairing():
+    """Pairing state for the local web UI. Shows the pairing code until a customer
+    claims this appliance from the portal."""
+    return {
+        "serial": agent.identity.serial,
+        "model": settings.model,
+        "activated": agent.activated,
+        "registered": agent.registered,
+        "paired": agent.activated,
+        "pairing_code": agent.pairing_code,
+        "appliance_id": agent.appliance_id,
+        "software_version": settings.software_version,
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return _HOME_HTML
 
 
 class LinkBody(dict):

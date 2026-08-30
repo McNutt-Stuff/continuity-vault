@@ -11,7 +11,9 @@ EnvironmentFile=/etc/continuity-vault/appliance.env
 # auto-build post-quantum libs at runtime under the sandbox.
 Environment=OQS_INSTALL_PATH=/usr/local
 WorkingDirectory=/opt/continuity-vault/appliance
-ExecStart=/opt/continuity-vault/.venv/bin/uvicorn agent.main:app --host 127.0.0.1 --port 8090
+# Bind on all interfaces so the on-appliance web UI (local status + pairing code)
+# is reachable from the LAN. The management plane remains outbound-only.
+ExecStart=/opt/continuity-vault/.venv/bin/uvicorn agent.main:app --host 0.0.0.0 --port 8090
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

@@ -122,12 +122,21 @@ install_selfupdate() {
 }
 
 verify_agent() {
+  # Confirm the agent's local web UI / status endpoint is serving. On a fresh
+  # zero-touch install the appliance is not yet activated (it is awaiting
+  # pairing), so we check the service is up rather than that it is activated.
   local i
   for i in $(seq 1 15); do
-    curl -fsS "http://127.0.0.1:8090/status" 2>/dev/null | grep -q '"activated"' && return 0
+    curl -fsS "http://127.0.0.1:8090/status" 2>/dev/null | grep -q '"software_version"' && return 0
     sleep 2
   done
   return 1
+}
+
+# Fetch the pairing code the appliance is now displaying (zero-touch installs).
+appliance_pairing_code() {
+  curl -fsS "http://127.0.0.1:8090/pairing" 2>/dev/null \
+    | grep -o '"pairing_code": *"[^"]*"' | head -1 | sed 's/.*"pairing_code": *"\([^"]*\)".*/\1/'
 }
 
 # --- run --------------------------------------------------------------------
@@ -158,8 +167,25 @@ step_always "Validating agent"             validate_app
 step_always "Writing appliance configuration" write_config
 step_always "Starting appliance agent"     install_service
 step_always "Enabling headless self-update" install_selfupdate
-step_always "Verifying activation with cloud" verify_agent
+step_always "Verifying appliance agent"    verify_agent
 
 finish
+LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+LAN_IP="${LAN_IP:-127.0.0.1}"
 printf "  Reporting to: %s%s%s\n" "$BOLD" "$CV_CLOUD_URL" "$RESET"
-printf "  Local status: http://127.0.0.1:8090/status\n\n"
+printf "  Appliance web UI: %shttp://%s:8090%s\n" "$BOLD" "$LAN_IP" "$RESET"
+if [[ -z "$LINKING_CODE" ]]; then
+  # Zero-touch: no linking code was supplied. Surface the pairing code so the
+  # operator can claim the appliance from the portal.
+  PAIR_CODE="$(appliance_pairing_code)"
+  if [[ -n "$PAIR_CODE" ]]; then
+    printf "\n  %sThis appliance is awaiting pairing.%s\n" "$BOLD" "$RESET"
+    printf "  Pairing code: %s%s%s\n" "$BOLD" "$PAIR_CODE" "$RESET"
+    printf "  Sign in at your Arkive portal → Appliances → Pair, and enter this code.\n"
+    printf "  (The code is always visible on the appliance web UI above.)\n"
+  else
+    printf "\n  The appliance is registering with the cloud; open the web UI above\n"
+    printf "  in a moment to see its pairing code.\n"
+  fi
+fi
+printf "\n"

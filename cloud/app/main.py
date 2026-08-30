@@ -33,6 +33,7 @@ from .api import (
     storage_instances,
     support,
     tenant,
+    terminal,
     updates,
 )
 
@@ -86,6 +87,8 @@ app.include_router(appliances.agent_router, prefix=API)
 app.include_router(agents.fleet_router, prefix=API)
 app.include_router(agents.agent_router, prefix=API)
 app.include_router(admin.router, prefix=API)
+app.include_router(terminal.admin_terminal_router, prefix=API)
+app.include_router(terminal.agent_terminal_router, prefix=API)
 app.include_router(debug.router, prefix=API)
 app.include_router(activity.router, prefix=API)
 app.include_router(recovery.router, prefix=API)

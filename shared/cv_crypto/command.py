@@ -39,6 +39,7 @@ COMMAND_TYPES = {
     "COLLECT_DIAGNOSTICS",
     "QUARANTINE",
     "SEAL",
+    "OPEN_TERMINAL",
 }
 
 

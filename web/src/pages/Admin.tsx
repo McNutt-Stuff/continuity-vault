@@ -1,4 +1,5 @@
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useParams } from "react-router-dom";
 import { api, getToken } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo, fmtAbsolute } from "../components/ui";
@@ -2353,52 +2354,388 @@ function CmsField({ label, value, onChange, area }: { label: string; value: stri
 
 function Fleet() {
   const [rows, setRows] = useState<any[]>([]);
-  const [prod, setProd] = useState<string>("");
+  const [stats, setStats] = useState<any>(null);
   const [profiles, setProfiles] = useState<any[]>([]);
-  const [toast, setToast] = useState("");
-  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 2800); }
+  const [pending, setPending] = useState<any[]>([]);
+  const [sel, setSel] = useState<string | null>(null);
   async function loadFleet() { try { setRows(await api.get<any[]>("/admin/fleet")); } catch { /* ignore */ } }
+  async function loadStats() { try { setStats(await api.get<any>("/admin/fleet/stats")); } catch { /* ignore */ } }
+  async function loadPending() { try { setPending(await api.get<any[]>("/admin/pending-appliances")); } catch { /* ignore */ } }
   useEffect(() => {
-    void loadFleet();
-    api.get<{ appliance?: string }>("/admin/versions").then((v) => setProd(v.appliance || "")).catch(() => {});
+    void loadFleet(); void loadStats(); void loadPending();
     api.get<{ profiles: any[] }>("/admin/config-profiles").then((r) => setProfiles((r.profiles || []).filter((p) => p.target === "appliance"))).catch(() => {});
+    const iv = setInterval(() => { void loadPending(); }, 10000);
+    return () => clearInterval(iv);
   }, []);
-  async function assign(a: any, pid: string) {
-    try { await api.put(`/admin/appliances/${a.id}/config-profile`, { profile_id: pid || null }); flash(pid ? "Profile assigned" : "Profile unassigned"); await loadFleet(); }
-    catch (e) { flash((e as { message?: string }).message || "Assignment failed"); }
-  }
+
+  if (sel) return <ApplianceAdminDetail id={sel} profiles={profiles} onBack={() => { setSel(null); void loadFleet(); void loadStats(); }} />;
+
+  const st = stats || {};
   return (
     <>
       <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
         <h3 style={{ margin: 0 }}>Appliance fleet</h3>
-        <ProductionVersion label="Production appliance software" version={prod} />
+        <ProductionVersion label="Production appliance software" version={st.production_version || ""} />
       </div>
+
+      <div className="insights-stats" style={{ marginBottom: 16 }}>
+        <AdminStat icon="server" label="Appliances" value={String(st.total || 0)} tint="#4f7cff" />
+        <AdminStat icon="activity" label="Online now" value={`${st.online || 0}/${st.total || 0}`} tint="#2dbe60" />
+        <AdminStat icon="database" label="Storage used" value={`${bytes(st.used_bytes || 0)} / ${bytes(st.capacity_bytes || 0)}`} tint="#f5a623" />
+        <AdminStat icon="clock" label="Updates available" value={String(st.update_available || 0)} tint="#c56cf0" />
+        <AdminStat icon="link" label="Awaiting pairing" value={String(st.pending || 0)} tint={st.pending ? "#f5a623" : "#2dbe60"} />
+        <AdminStat icon="shield" label="Attestation issues" value={String(st.attestation_failed || 0)} tint={st.attestation_failed ? "#f2545b" : "#2dbe60"} />
+        <AdminStat icon="alert" label="Tamper alerts" value={String(st.tamper_alerts || 0)} tint={st.tamper_alerts ? "#f2545b" : "#2dbe60"} />
+      </div>
+
+      {pending.length > 0 && (
+        <Card style={{ marginBottom: 16, borderColor: "var(--warn, #f5a623)" }}>
+          <div className="spread" style={{ marginBottom: 8 }}>
+            <h3 style={{ margin: 0, fontSize: 14 }}>Awaiting pairing</h3>
+            <Pill tone="warn">{pending.length}</Pill>
+          </div>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
+            Zero-touch appliances that registered but haven’t been claimed by a customer yet.
+            Share the pairing code with the customer to complete setup.
+          </div>
+          <table className="table">
+            <thead><tr><th>Serial</th><th>Model</th><th>Host / IP</th><th>Pairing code</th><th>Seen</th></tr></thead>
+            <tbody>
+              {pending.map((p) => (
+                <tr key={p.id}>
+                  <td className="mono" style={{ fontSize: 12 }}>{p.serial}</td>
+                  <td className="faint" style={{ fontSize: 12 }}>{p.model}</td>
+                  <td className="faint" style={{ fontSize: 12 }}>{p.hostname || "—"}{p.local_ip ? ` · ${p.local_ip}` : ""}</td>
+                  <td><span className="mono" style={{ fontSize: 13, fontWeight: 700, letterSpacing: 1 }}>{p.pairing_code}</span></td>
+                  <td><Pill tone={p.online ? "ok" : "warn"} dot>{p.online ? "online" : timeAgo(p.last_seen_at)}</Pill></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>By state</h3>
+          {(st.by_state || []).map((s: any) => (
+            <div key={s.state} className="spread" style={{ fontSize: 12.5, padding: "3px 0" }}>
+              <span style={{ textTransform: "capitalize" }}>{String(s.state).toLowerCase()}</span><span className="faint">{s.count}</span>
+            </div>
+          ))}
+          {(st.by_state || []).length === 0 && <div className="muted">—</div>}
+        </Card>
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>By software version</h3>
+          {(st.by_version || []).map((s: any) => (
+            <div key={s.version} className="spread" style={{ fontSize: 12.5, padding: "3px 0" }}>
+              <span className="row" style={{ gap: 6 }}>v{s.version}{s.version === st.production_version && <Pill tone="ok">current</Pill>}</span>
+              <span className="faint">{s.count}</span>
+            </div>
+          ))}
+          {(st.by_version || []).length === 0 && <div className="muted">—</div>}
+        </Card>
+      </div>
+
       <Card>
         <table className="table">
-          <thead><tr><th>Serial</th><th>Model</th><th>State</th><th>Attestation</th><th>Version</th><th>Configuration profile</th><th>Heartbeat</th></tr></thead>
+          <thead><tr><th>Appliance</th><th>Customer</th><th>State</th><th>Storage</th><th style={{ textAlign: "right" }}>Recovery pts</th><th>Health</th><th>Version</th><th>Heartbeat</th></tr></thead>
           <tbody>
             {rows.map((a) => (
-              <tr key={a.id}>
-                <td className="mono">{a.serial}</td><td>{a.model}</td>
-                <td><Pill tone="info">{a.state}</Pill></td>
-                <td>{a.attestation_ok ? <Pill tone="ok">ok</Pill> : <Pill tone="danger">failed</Pill>}</td>
-                <td><VersionPill version={a.software_version} updateAvailable={a.update_available} /></td>
+              <tr key={a.id} style={{ cursor: "pointer" }} onClick={() => setSel(a.id)}>
                 <td>
-                  <select className="input sm" style={{ maxWidth: 220 }} value={a.config_profile_id || ""} onChange={(e) => assign(a, e.target.value)}>
-                    <option value="">— none —</option>
-                    {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}{p.enabled ? "" : " (disabled)"}</option>)}
-                  </select>
+                  <div style={{ fontWeight: 600 }}>{a.name || a.serial}</div>
+                  <div className="faint mono" style={{ fontSize: 11 }}>{a.serial} · {a.model}</div>
                 </td>
-                <td className="faint">{timeAgo(a.last_heartbeat_at)}</td>
+                <td className="faint" style={{ fontSize: 12 }}>{a.tenant_name}</td>
+                <td>
+                  <div className="row" style={{ gap: 5 }}>
+                    <Pill tone={a.online ? "ok" : "warn"} dot>{a.online ? "online" : "offline"}</Pill>
+                    <span className="faint" style={{ fontSize: 11 }}>{String(a.state).toLowerCase()}</span>
+                  </div>
+                </td>
+                <td style={{ minWidth: 110 }}>
+                  <div className="faint" style={{ fontSize: 11 }}>{bytes(a.used_bytes || 0)} / {bytes(a.capacity_bytes || 0)}</div>
+                  <div style={{ height: 5, borderRadius: 999, background: "var(--inset)", overflow: "hidden", marginTop: 2 }}>
+                    <div style={{ width: `${Math.min(100, a.storage_pct || 0)}%`, height: "100%", background: (a.storage_pct || 0) >= 90 ? "#f2545b" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
+                  </div>
+                </td>
+                <td style={{ textAlign: "right" }}>{(a.recovery_points || 0).toLocaleString()}</td>
+                <td>
+                  {a.tamper_state && a.tamper_state !== "normal" ? <Pill tone="danger" dot>tamper</Pill>
+                    : !a.attestation_ok ? <Pill tone="warn" dot>attest</Pill>
+                    : <Pill tone="ok" dot>ok</Pill>}
+                </td>
+                <td><VersionPill version={a.software_version} updateAvailable={a.update_available} /></td>
+                <td className="faint" style={{ fontSize: 12 }}>{timeAgo(a.last_heartbeat_at)}</td>
               </tr>
             ))}
           </tbody>
         </table>
         {rows.length === 0 && <div className="muted">No appliances in fleet.</div>}
-        {profiles.length === 0 && rows.length > 0 && (
-          <div className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>No appliance-type configuration profiles exist yet — create one under Configurations → Configuration profiles.</div>
-        )}
       </Card>
+    </>
+  );
+}
+
+function RemoteTerminal({ id, name, onClose }: { id: string; name: string; onClose: () => void }) {
+  const preRef = useRef<HTMLPreElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const [status, setStatus] = useState<"connecting" | "waiting" | "open" | "closed" | "error">("connecting");
+  const bufRef = useRef<string>("");
+
+  function append(text: string) {
+    bufRef.current += text;
+    // Cap the buffer so a long-running session can't grow unbounded.
+    if (bufRef.current.length > 200000) bufRef.current = bufRef.current.slice(-160000);
+    const el = preRef.current;
+    if (el) {
+      el.textContent = bufRef.current;
+      el.scrollTop = el.scrollHeight;
+    }
+  }
+
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        setStatus("waiting");
+        append("Requesting a secure terminal session with the appliance…\r\n");
+        const r = await api.post<{ ws_url: string }>(`/admin/appliances/${id}/terminal`, {});
+        if (cancelled) return;
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        ws = new WebSocket(`${proto}//${location.host}${r.ws_url}`);
+        wsRef.current = ws;
+        ws.onopen = () => { setStatus("open"); append("Connected. Waiting for the appliance to attach…\r\n"); };
+        ws.onmessage = (ev) => append(typeof ev.data === "string" ? ev.data : "");
+        ws.onerror = () => setStatus("error");
+        ws.onclose = () => { setStatus("closed"); append("\r\n[session closed]\r\n"); };
+      } catch (e) {
+        if (!cancelled) { setStatus("error"); append(`\r\nCould not start terminal: ${(e as ApiError).message}\r\n`); }
+      }
+    })();
+    return () => { cancelled = true; try { ws?.close(); } catch { /* ignore */ } };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  function send(data: string) {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
+  }
+
+  function onKeyDown(e: ReactKeyboardEvent<HTMLPreElement>) {
+    if (status !== "open") return;
+    // Let the user copy with Cmd/Ctrl+C when there is a selection.
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c" && (window.getSelection()?.toString())) return;
+    let seq = "";
+    if (e.key === "Enter") seq = "\r";
+    else if (e.key === "Backspace") seq = "\x7f";
+    else if (e.key === "Tab") seq = "\t";
+    else if (e.key === "Escape") seq = "\x1b";
+    else if (e.key === "ArrowUp") seq = "\x1b[A";
+    else if (e.key === "ArrowDown") seq = "\x1b[B";
+    else if (e.key === "ArrowRight") seq = "\x1b[C";
+    else if (e.key === "ArrowLeft") seq = "\x1b[D";
+    else if (e.ctrlKey && e.key.length === 1) {
+      const c = e.key.toLowerCase().charCodeAt(0);
+      if (c >= 97 && c <= 122) seq = String.fromCharCode(c - 96); // Ctrl-A..Z
+    } else if (e.key.length === 1) seq = e.key;
+    if (seq) { e.preventDefault(); send(seq); }
+  }
+
+  const statusLabel = { connecting: "Connecting…", waiting: "Establishing tunnel…", open: "Connected", closed: "Closed", error: "Error" }[status];
+  const statusTone = status === "open" ? "ok" : status === "error" || status === "closed" ? "danger" : "warn";
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" style={{ width: "min(980px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread">
+          <div>
+            <h3 style={{ margin: 0 }}>Remote terminal</h3>
+            <div className="faint" style={{ fontSize: 12 }}>{name} · reverse-tunnel via control plane</div>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <Pill tone={statusTone as any} dot>{statusLabel}</Pill>
+            <button className="btn ghost sm" onClick={onClose}>Close</button>
+          </div>
+        </div>
+        <div className="modal-body">
+          <pre
+            ref={preRef}
+            tabIndex={0}
+            onKeyDown={onKeyDown}
+            className="mono"
+            style={{
+              outline: "none", background: "#0a0e1a", color: "#d7e2ff",
+              border: "1px solid var(--border)", borderRadius: 10, padding: 12,
+              height: 440, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all",
+              fontSize: 12.5, lineHeight: 1.45, cursor: "text",
+            }}
+          />
+          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+            Click the terminal and type to send keystrokes to the appliance shell. The session runs
+            as the unprivileged <span className="mono">cvagent</span> service account and closes automatically when you leave.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: any[]; onBack: () => void }) {
+  const [a, setA] = useState<any>(null);
+  const [toast, setToast] = useState("");
+  const [term, setTerm] = useState(false);
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 2800); }
+  async function load() { try { setA(await api.get<any>(`/admin/appliances/${id}`)); } catch { /* ignore */ } }
+  useEffect(() => { void load(); const iv = setInterval(load, 10000); return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+  async function assign(pid: string) {
+    try { const r = await api.put<any>(`/admin/appliances/${id}/config-profile`, { profile_id: pid || null }); setA((prev: any) => ({ ...prev, config_profile: r.config_profile })); flash(pid ? "Profile assigned" : "Profile unassigned"); }
+    catch (e) { flash((e as { message?: string }).message || "Assignment failed"); }
+  }
+  if (!a) return <Card><button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 10 }}>← Fleet</button><div className="muted">Loading appliance…</div></Card>;
+  const tel = a.telemetry || {};
+  const sd = a.stored_data || {};
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
+        <button className="btn ghost sm" onClick={onBack}>← Fleet</button>
+        <div className="row" style={{ gap: 6 }}>
+          <button className="btn sm" disabled={!a.online} title={a.online ? "Open a remote terminal" : "Appliance is offline"} onClick={() => setTerm(true)}>
+            <Icon name="server" size={14} /> Remote terminal
+          </button>
+          <Pill tone={a.online ? "ok" : "warn"} dot>{a.online ? "Online" : "Offline"}</Pill>
+          <VersionPill version={a.software_version} updateAvailable={a.update_available} />
+        </div>
+      </div>
+
+      {term && <RemoteTerminal id={id} name={a.name || a.serial} onClose={() => setTerm(false)} />}
+
+      <Card style={{ marginBottom: 14 }}>
+        <div className="spread">
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            <div className="result-icon" style={{ width: 40, height: 40, background: "var(--inset)" }}><Icon name="server" size={20} /></div>
+            <div>
+              <h3 style={{ margin: 0 }}>{a.name || a.serial}</h3>
+              <div className="faint" style={{ fontSize: 12 }}>{a.model} · {a.serial} · {a.tenant?.name || "—"}</div>
+            </div>
+          </div>
+          <div className="row" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Pill tone="info">{String(a.state).toLowerCase()}</Pill>
+            <Pill tone={a.attestation_ok ? "ok" : "warn"} dot>{a.attestation_ok ? "attested" : "unattested"}</Pill>
+            {a.tamper_state && a.tamper_state !== "normal" && <Pill tone="danger" dot>tamper: {a.tamper_state}</Pill>}
+            {a.isolation_state && <Pill tone="info">{a.isolation_state}</Pill>}
+          </div>
+        </div>
+        <div className="grid grid-4" style={{ gap: 12, marginTop: 14 }}>
+          <Mini label="Recovery points" value={(sd.recovery_points ?? 0).toLocaleString()} />
+          <Mini label="Objects" value={(sd.objects ?? 0).toLocaleString()} />
+          <Mini label="Protected" value={bytes(sd.bytes || 0)} />
+          <Mini label="Last heartbeat" value={a.last_heartbeat_at ? timeAgo(a.last_heartbeat_at) : "never"} />
+        </div>
+      </Card>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 14 }}>
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Storage volumes</h3>
+          <div className="stack" style={{ gap: 10 }}>
+            {(a.stores || []).map((s: any) => {
+              const pct = s.capacity_bytes ? Math.min(100, (s.used_bytes / s.capacity_bytes) * 100) : 0;
+              return (
+                <div key={s.id}>
+                  <div className="spread" style={{ fontSize: 12.5 }}>
+                    <span style={{ fontWeight: 600 }}>{s.name} <span className="faint" style={{ fontWeight: 400, fontSize: 11 }}>· {s.kind}</span></span>
+                    <span className="faint">{bytes(s.used_bytes || 0)} / {bytes(s.capacity_bytes || 0)}</span>
+                  </div>
+                  <div style={{ height: 6, background: "var(--inset)", borderRadius: 3, marginTop: 3 }}>
+                    <div style={{ height: "100%", width: `${pct}%`, borderRadius: 3, background: pct >= 90 ? "#f2545b" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
+                  </div>
+                  {s.health && (s.health.drive_health || s.health.temperature_c != null) && (
+                    <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>
+                      {s.health.drive_health ? `drive ${s.health.drive_health}` : ""}{s.health.temperature_c != null ? ` · ${s.health.temperature_c}°C` : ""}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {(a.stores || []).length === 0 && <div className="muted">No storage reported.</div>}
+          </div>
+        </Card>
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Network & telemetry</h3>
+          <Row2 label="Local IP" value={tel.local_ip || "—"} />
+          <Row2 label="Public IP" value={tel.public_ip || "—"} />
+          <Row2 label="Channel" value={tel.channel_encryption || "—"} />
+          <Row2 label="Cloud latency" value={tel.cloud_latency_ms != null ? `${tel.cloud_latency_ms} ms` : "—"} />
+          <Row2 label="Data sent / recv" value={`${bytes(tel.net_bytes_sent || 0)} / ${bytes(tel.net_bytes_recv || 0)}`} />
+          <Row2 label="Drive health" value={tel.drive_health || "—"} />
+          <Row2 label="Temperature" value={tel.temperature_c != null ? `${tel.temperature_c}°C` : "—"} />
+        </Card>
+      </div>
+
+      <Card style={{ marginBottom: 14 }}>
+        <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Assigned configuration profile</h3>
+        {a.config_profile ? (
+          <div className="spread" style={{ border: "1px solid var(--border)", borderRadius: 10, padding: "10px 12px", marginBottom: 10 }}>
+            <div>
+              <div style={{ fontWeight: 700 }}>{a.config_profile.name} <span className="faint" style={{ fontWeight: 400, fontSize: 11.5 }}>· {a.config_profile.key_count} setting{a.config_profile.key_count === 1 ? "" : "s"}</span></div>
+              {a.config_profile.description && <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>{a.config_profile.description}</div>}
+            </div>
+            <button className="btn ghost sm" onClick={() => assign("")}>Unassign</button>
+          </div>
+        ) : (
+          <div className="muted" style={{ marginBottom: 10 }}>No configuration profile assigned.</div>
+        )}
+        <label className="row" style={{ gap: 8, alignItems: "center" }}>
+          <span className="faint" style={{ fontSize: 12 }}>Assign profile</span>
+          <select className="input sm" style={{ maxWidth: 300 }} value={a.config_profile?.id || ""} onChange={(e) => assign(e.target.value)}>
+            <option value="">— none —</option>
+            {(a.available_profiles || profiles).map((p: any) => <option key={p.id} value={p.id}>{p.name}{p.enabled ? "" : " (disabled)"}</option>)}
+          </select>
+        </label>
+      </Card>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Stored data by source</h3>
+          {(sd.sources || []).length === 0 ? <div className="muted">No data stored on this appliance.</div> : (
+            <table className="table">
+              <thead><tr><th>Source</th><th style={{ textAlign: "right" }}>Points</th><th style={{ textAlign: "right" }}>Size</th></tr></thead>
+              <tbody>
+                {(sd.sources || []).map((s: any, i: number) => (
+                  <tr key={i}>
+                    <td>
+                      <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                        {brandForSource(s.source_type) ? <BrandIcon name={brandForSource(s.source_type)!} size={15} /> : <Icon name="database" size={14} />}
+                        <span style={{ fontWeight: 600 }}>{s.source}</span>
+                      </div>
+                    </td>
+                    <td style={{ textAlign: "right" }}>{s.recovery_points}</td>
+                    <td style={{ textAlign: "right" }}>{bytes(s.bytes || 0)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Card>
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Recent commands</h3>
+          {(a.recent_commands || []).length === 0 ? <div className="muted">No commands issued.</div> : (
+            <div className="stack" style={{ gap: 6 }}>
+              {(a.recent_commands || []).map((c: any, i: number) => (
+                <div key={i} className="row" style={{ gap: 8, fontSize: 12.5, alignItems: "center" }}>
+                  <span style={{ fontWeight: 600 }}>{c.type}</span>
+                  <Pill tone={c.status === "acked" ? "ok" : c.status === "rejected" || c.status === "expired" ? "danger" : "info"} dot>{c.status}</Pill>
+                  <span className="faint" style={{ marginLeft: "auto" }}>{c.at ? timeAgo(c.at) : ""}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );

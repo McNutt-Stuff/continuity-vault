@@ -315,6 +315,27 @@ class LinkingCode(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class PendingAppliance(Base):
+    """A zero-touch appliance that registered with the control plane WITHOUT a
+    linking code. It displays a pairing code on its local web UI until a customer
+    claims it; on pairing a real Appliance is created and the agent adopts the
+    returned activation payload."""
+
+    __tablename__ = "pending_appliances"
+    id = Column(String, primary_key=True, default=_uuid)
+    serial = Column(String, nullable=False, unique=True, index=True)
+    model = Column(String, default="CV Edge 8")
+    pairing_code = Column(String, unique=True, index=True)
+    token_hash = Column(String, index=True)          # sha256 of the registration token
+    identity_bundle = Column(JSON, nullable=True)
+    attestation = Column(JSON, nullable=True)
+    telemetry = Column(JSON, default=dict)
+    paired_appliance_id = Column(String, nullable=True)  # set when claimed
+    paired_tenant_id = Column(String, nullable=True)
+    last_seen_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now, index=True)
+
+
 class DesktopAgent(Base):
     """A managed endpoint agent (e.g. macOS) that collects locally via native
     tools (1Password CLI, etc.) and pushes encrypted data to the platform."""
