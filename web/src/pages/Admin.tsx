@@ -2512,7 +2512,7 @@ function RemoteTerminal({ id, name, onClose }: { id: string; name: string; onClo
         ws.onerror = () => setStatus("error");
         ws.onclose = () => { setStatus("closed"); append("\r\n[session closed]\r\n"); };
       } catch (e) {
-        if (!cancelled) { setStatus("error"); append(`\r\nCould not start terminal: ${(e as ApiError).message}\r\n`); }
+        if (!cancelled) { setStatus("error"); append(`\r\nCould not start terminal: ${(e as { message?: string }).message || "failed"}\r\n`); }
       }
     })();
     return () => { cancelled = true; try { ws?.close(); } catch { /* ignore */ } };
