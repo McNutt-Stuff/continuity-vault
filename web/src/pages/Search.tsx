@@ -169,8 +169,10 @@ const SOCIAL_SOURCES = ["reddit", "facebook", "instagram", "twitter", "mastodon"
 
 // A clean, styled dropdown shell (checkbox multi-selects) — mirrors the date
 // popover: a narrow trigger showing a summary, opening a wider menu panel.
+// Children may be a render-prop receiving a `close` fn (for single-select menus).
 function FilterMenu({ label, summary, active, width, children }: {
-  label: string; summary: string; active: boolean; width?: number; children: ReactNode;
+  label: string; summary: string; active: boolean; width?: number;
+  children: ReactNode | ((close: () => void) => ReactNode);
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -183,7 +185,9 @@ function FilterMenu({ label, summary, active, width, children }: {
       {open && (
         <>
           <div className="fs-overlay" onClick={() => setOpen(false)} />
-          <div className="fs-menu" style={width ? { minWidth: width } : undefined}>{children}</div>
+          <div className="fs-menu" style={width ? { minWidth: width } : undefined}>
+            {typeof children === "function" ? children(() => setOpen(false)) : children}
+          </div>
         </>
       )}
     </div>
@@ -196,6 +200,43 @@ function FilterCheck({ state }: { state: "on" | "partial" | "off" }) {
       {state === "on" && <Icon name="check" size={11} />}
       {state === "partial" && <span className="fs-dash" />}
     </span>
+  );
+}
+
+// A styled combobox for the attribute value: free-form typing plus a suggestion
+// list (facet values) rendered in the same menu style as the other filters.
+function AttrValue({ label, value, suggestions, onChange }: {
+  label: string; value: string; suggestions: [string, number][]; onChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(value);
+  useEffect(() => { setText(value); }, [value]);
+  const q = text.trim().toLowerCase();
+  const filtered = suggestions.filter(([v]) => !q || v.toLowerCase().includes(q)).slice(0, 12);
+  return (
+    <div className="filter-select" style={{ position: "relative" }}>
+      <span style={{ textTransform: "capitalize" }}>{label}</span>
+      <input
+        className="fs-input"
+        placeholder="Any value — type to filter…"
+        value={text}
+        onChange={(e) => { setText(e.target.value); onChange(e.target.value.trim()); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+      />
+      {open && filtered.length > 0 && (
+        <>
+          <div className="fs-overlay" onClick={() => setOpen(false)} />
+          <div className="fs-menu" style={{ minWidth: 200 }}>
+            {filtered.map(([v, n]) => (
+              <div key={v} className="fs-opt" onClick={() => { setText(v); onChange(v); setOpen(false); }}>
+                <span className="fs-opt-label">{v}</span>
+                <span className="fs-opt-count">{n}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -984,28 +1025,29 @@ export default function Search() {
                 </FilterMenu>
               )}
               {attrKeys.length > 0 && (
-                <label className="filter-select">
-                  <span>Attribute</span>
-                  <select value={attrKey} onChange={(e) => { setAttrKey(e.target.value); setAttr(null); }}>
-                    <option value="">Choose…</option>
-                    {attrKeys.map((k) => <option key={k} value={k}>{k}</option>)}
-                  </select>
-                </label>
+                <FilterMenu label="Attribute" summary={attrKey || "Choose…"} active={!!attrKey} width={200}>
+                  {(close) => (
+                    <>
+                      <div className="fs-menu-head">
+                        <button className="fs-linkbtn" onClick={() => { setAttrKey(""); setAttr(null); close(); }}>Clear</button>
+                      </div>
+                      {attrKeys.map((k) => (
+                        <div key={k} className="fs-opt" onClick={() => { setAttrKey(k); setAttr(null); close(); }}>
+                          <FilterCheck state={attrKey === k ? "on" : "off"} />
+                          <span className="fs-opt-label" style={{ textTransform: "capitalize" }}>{k}</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </FilterMenu>
               )}
               {attrKey && (
-                <label className="filter-select">
-                  <span style={{ textTransform: "capitalize" }}>{attrKey}</span>
-                  <input
-                    list={`attr-vals-${attrKey}`}
-                    key={attrKey}
-                    placeholder="Any value — type to filter…"
-                    defaultValue={attrValue}
-                    onChange={(e) => { const v = e.target.value.trim(); setAttr(v ? `${attrKey}:${v}` : null); }}
-                  />
-                  <datalist id={`attr-vals-${attrKey}`}>
-                    {Object.entries(attrVals || {}).map(([v, n]) => <option key={v} value={v}>{`${v} (${n})`}</option>)}
-                  </datalist>
-                </label>
+                <AttrValue
+                  label={attrKey}
+                  value={attrValue}
+                  suggestions={Object.entries(attrVals || {})}
+                  onChange={(v) => setAttr(v ? `${attrKey}:${v}` : null)}
+                />
               )}
               {hasFilters && (
                 <button className="btn ghost sm" style={{ alignSelf: "flex-end" }} onClick={clearAll}>Clear all</button>

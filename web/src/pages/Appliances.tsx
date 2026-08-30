@@ -242,7 +242,8 @@ export default function Appliances() {
           <ProductionVersion label="Current appliance software" version={prodVersion} />
           {canManageFleet && (
             <Menu align="right"
-                  trigger={<span className="row" style={{ gap: 6 }}><Icon name="server" size={14} /> Add appliance ▾</span>}
+                  triggerClassName="btn primary"
+                  trigger={<span className="row" style={{ gap: 6 }}><Icon name="server" size={15} /> Add appliance ▾</span>}
                   items={[
                     { label: "Install new (on your own hardware)", icon: "server", onClick: openInstall },
                     { label: "Pair an existing appliance", icon: "link", onClick: () => { setPairCode(""); setAddMode("pair"); } },

@@ -318,7 +318,7 @@ def admin_seed_updates(preview: bool = False, force: bool = False,
             if not preview and d.baseline_hash != sh:
                 d.baseline_hash = sh
             continue
-        unedited = bool(d.baseline_hash) and dh == d.baseline_hash
+        unedited = (not d.baseline_hash) or (dh == d.baseline_hash)
         if force or unedited:
             updated.append(spec["slug"])
             if not preview:

@@ -136,6 +136,24 @@ def _require_appliance_manager(principal: security.Principal, tenant: Tenant) ->
     raise HTTPException(403, "not allowed to add appliances")
 
 
+def _require_can_manage_appliance(principal: security.Principal, tenant: Tenant,
+                                  appliance_id: str, db: Session) -> None:
+    """Org admins manage the whole fleet; a personal (shared-tenant) account and
+    any member the appliance was assigned to with can_manage may rename, command,
+    and adjust storage on that appliance. Everyone else is read-only."""
+    if security.is_org_admin(principal.role) or principal.is_platform_admin:
+        return
+    if (tenant.tenant_type or "dedicated") == "shared":
+        return
+    asn = (db.query(ApplianceAssignment)
+           .filter(ApplianceAssignment.tenant_id == tenant.id,
+                   ApplianceAssignment.appliance_id == appliance_id,
+                   ApplianceAssignment.user_id == principal.user_id).first())
+    if asn and asn.can_manage:
+        return
+    raise HTTPException(403, "you don't have permission to manage this appliance")
+
+
 @fleet_router.post("/pair")
 def pair_appliance(body: PairRequest,
                    principal: security.Principal = Depends(security.get_principal),
@@ -215,7 +233,7 @@ def appliance_versions(tenant: Tenant = Depends(security.get_tenant)):
 
 @fleet_router.delete("/{appliance_id}")
 def delete_appliance(appliance_id: str,
-                     principal: security.Principal = Depends(security.require_security_admin),
+                     principal: security.Principal = Depends(security.get_principal),
                      tenant: Tenant = Depends(security.get_tenant),
                      db: Session = Depends(get_db)):
     """Remove an appliance from the fleet (e.g. a decommissioned or stale test
@@ -224,6 +242,7 @@ def delete_appliance(appliance_id: str,
     a = db.get(Appliance, appliance_id)
     if not a or a.tenant_id != tenant.id:
         raise HTTPException(404, "appliance not found")
+    _require_can_manage_appliance(principal, tenant, appliance_id, db)
     db.query(ApplianceCommand).filter(ApplianceCommand.appliance_id == appliance_id).delete()
     db.query(ApplianceStorage).filter(ApplianceStorage.appliance_id == appliance_id).delete()
     (db.query(SnapshotReceipt)
@@ -379,12 +398,13 @@ class CommandRequest(BaseModel):
 
 @fleet_router.post("/{appliance_id}/command")
 def send_command(appliance_id: str, body: CommandRequest,
-                 principal: security.Principal = Depends(security.require_security_admin),
+                 principal: security.Principal = Depends(security.get_principal),
                  tenant: Tenant = Depends(security.get_tenant),
                  db: Session = Depends(get_db)):
     a = db.get(Appliance, appliance_id)
     if not a or a.tenant_id != tenant.id:
         raise HTTPException(404, "appliance not found")
+    _require_can_manage_appliance(principal, tenant, appliance_id, db)
     # Prohibited unilateral operations are simply not exposed here (spec 5.1).
     cmd = fleet.issue_command(db, a, body.command_type, principal.user_id, body.parameters)
     audit.record(db, actor=principal.user_id, action="appliance.command_issued",
@@ -494,12 +514,13 @@ class RenameApplianceRequest(BaseModel):
 
 @fleet_router.put("/{appliance_id}")
 def rename_appliance(appliance_id: str, body: RenameApplianceRequest,
-                     principal: security.Principal = Depends(security.require_security_admin),
+                     principal: security.Principal = Depends(security.get_principal),
                      tenant: Tenant = Depends(security.get_tenant),
                      db: Session = Depends(get_db)):
     a = db.get(Appliance, appliance_id)
     if not a or a.tenant_id != tenant.id:
         raise HTTPException(404, "appliance not found")
+    _require_can_manage_appliance(principal, tenant, appliance_id, db)
     if body.name is not None:
         a.name = body.name.strip() or a.name
     if body.location_label is not None:
@@ -517,12 +538,13 @@ class StorageRequest(BaseModel):
 
 @fleet_router.post("/{appliance_id}/storage")
 def add_storage(appliance_id: str, body: StorageRequest,
-                principal: security.Principal = Depends(security.require_security_admin),
+                principal: security.Principal = Depends(security.get_principal),
                 tenant: Tenant = Depends(security.get_tenant),
                 db: Session = Depends(get_db)):
     a = db.get(Appliance, appliance_id)
     if not a or a.tenant_id != tenant.id:
         raise HTTPException(404, "appliance not found")
+    _require_can_manage_appliance(principal, tenant, appliance_id, db)
     s = ApplianceStorage(tenant_id=tenant.id, appliance_id=a.id,
                          name=body.name.strip() or "Storage",
                          kind="builtin" if body.kind == "builtin" else "external")
@@ -536,12 +558,13 @@ def add_storage(appliance_id: str, body: StorageRequest,
 
 @fleet_router.put("/{appliance_id}/storage/{storage_id}")
 def rename_storage(appliance_id: str, storage_id: str, body: StorageRequest,
-                   principal: security.Principal = Depends(security.require_security_admin),
+                   principal: security.Principal = Depends(security.get_principal),
                    tenant: Tenant = Depends(security.get_tenant),
                    db: Session = Depends(get_db)):
     s = db.get(ApplianceStorage, storage_id)
     if not s or s.tenant_id != tenant.id or s.appliance_id != appliance_id:
         raise HTTPException(404, "storage not found")
+    _require_can_manage_appliance(principal, tenant, appliance_id, db)
     s.name = body.name.strip() or s.name
     db.commit()
     audit.record(db, actor=principal.user_id, action="appliance.storage_renamed",
@@ -551,12 +574,13 @@ def rename_storage(appliance_id: str, storage_id: str, body: StorageRequest,
 
 @fleet_router.delete("/{appliance_id}/storage/{storage_id}")
 def delete_storage(appliance_id: str, storage_id: str,
-                   principal: security.Principal = Depends(security.require_security_admin),
+                   principal: security.Principal = Depends(security.get_principal),
                    tenant: Tenant = Depends(security.get_tenant),
                    db: Session = Depends(get_db)):
     s = db.get(ApplianceStorage, storage_id)
     if not s or s.tenant_id != tenant.id or s.appliance_id != appliance_id:
         raise HTTPException(404, "storage not found")
+    _require_can_manage_appliance(principal, tenant, appliance_id, db)
     if s.kind == "builtin":
         raise HTTPException(400, "the built-in storage cannot be removed")
     db.delete(s)

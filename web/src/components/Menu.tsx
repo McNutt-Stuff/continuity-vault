@@ -12,10 +12,11 @@ export type MenuEntry = MenuAction | "divider";
 
 // A small accessible dropdown menu (click to open, closes on outside click / Esc).
 // Use for row action overflow so cards stay uncluttered.
-export function Menu({ items, trigger, align = "right" }: {
+export function Menu({ items, trigger, align = "right", triggerClassName }: {
   items: MenuEntry[];
   trigger?: ReactNode;
   align?: "left" | "right";
+  triggerClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -36,7 +37,7 @@ export function Menu({ items, trigger, align = "right" }: {
 
   return (
     <div className="menu-wrap" ref={ref}>
-      <button className="btn sm ghost menu-trigger" aria-haspopup="menu" aria-expanded={open}
+      <button className={triggerClassName ?? "btn sm ghost menu-trigger"} aria-haspopup="menu" aria-expanded={open}
               onClick={() => setOpen((v) => !v)} title="Actions">
         {trigger ?? <span className="menu-dots">⋯</span>}
       </button>

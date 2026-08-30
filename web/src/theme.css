@@ -395,11 +395,28 @@ h3 { font-size: 15px; }
   border: 1px solid var(--border); border-radius: 8px; color: var(--text);
   font-size: 12.5px; padding: 7px 26px 7px 10px; min-width: 130px; max-width: 220px; cursor: pointer; }
 .filter-select select:hover { border-color: var(--brand); }
-.filter-select input { appearance: none; background: var(--bg-elev-2); border: 1px solid var(--border);
-  border-radius: 8px; color: var(--text); font-size: 12.5px; padding: 7px 10px;
-  min-width: 150px; max-width: 240px; }
-.filter-select input:hover { border-color: var(--brand); }
-.filter-select input:focus { border-color: var(--brand); outline: none; }
+/* Styled combobox input for the attribute value (matches .fs-trigger, smaller font). */
+.fs-input { width: 180px; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg-elev-2); color: var(--text); font-size: 12px; }
+.fs-input::placeholder { color: var(--text-dim); }
+.fs-input:hover { border-color: var(--brand); }
+.fs-input:focus { border-color: var(--brand); outline: none; }
+
+/* Account settings — in-page sidebar nav + content (modern settings layout). */
+.settings-layout { display: grid; grid-template-columns: 240px 1fr; gap: 24px; align-items: start; }
+.settings-nav { display: flex; flex-direction: column; gap: 3px; position: sticky; top: 16px; }
+.settings-nav-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  padding: 9px 12px; border-radius: 9px; border: none; background: transparent; color: var(--text-dim);
+  font-size: 13.5px; font-weight: 500; cursor: pointer; transition: background .12s, color .12s; }
+.settings-nav-item:hover { background: var(--hover); color: var(--text); }
+.settings-nav-item.active { background: rgba(79,124,255,.10); color: var(--brand); font-weight: 600; }
+.settings-content { min-width: 0; }
+.settings-content > .card { margin-bottom: 16px; }
+@media (max-width: 780px) {
+  .settings-layout { grid-template-columns: 1fr; }
+  .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; }
+  .settings-nav-item { width: auto; }
+}
 /* Contact-linked name chip on message results (name resolved from contacts). */
 .contact-link { display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
   padding: 2px 9px; border-radius: 999px; color: var(--text);

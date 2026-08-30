@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, Me } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
@@ -13,6 +13,27 @@ interface KeyInfo {
   strength_bits: number; pq_hybrid: boolean; ownership_model: string | null; root_key_hash: string | null;
 }
 
+type SettingsTab = "personal" | "look" | "notifications" | "features" | "security" | "data";
+const SETTINGS_TABS: { key: SettingsTab; label: string; icon: IconName }[] = [
+  { key: "personal", label: "Personal information", icon: "user" },
+  { key: "look", label: "Look & feel", icon: "sun" },
+  { key: "notifications", label: "Notification preferences", icon: "mail" },
+  { key: "features", label: "Account features", icon: "grid" },
+  { key: "security", label: "Security settings", icon: "lock" },
+  { key: "data", label: "Data protection", icon: "shield" },
+];
+
+const FEATURE_LABELS: Record<string, string> = {
+  purge_enabled: "Permanent data purge",
+  cloud_storage_enabled: "Bring your own cloud storage",
+  integrations_enabled: "Network integrations",
+  contact_linking: "Contact linking",
+};
+function featureLabel(key: string): string {
+  return FEATURE_LABELS[key]
+    || key.replace(/_/g, " ").replace(/\benabled\b/i, "").trim().replace(/^\w/, (c) => c.toUpperCase());
+}
+
 export default function Settings() {
   const { me, enrollPasskey, refresh } = useAuth();
   const [tenant, setTenant] = useState<Tenant | null>(null);
@@ -20,6 +41,7 @@ export default function Settings() {
   const [toast, setToast] = useState("");
   const [theme, setThemeState] = useState<Theme>(getTheme());
   const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState<SettingsTab>("personal");
 
   useEffect(() => {
     api.get<Tenant>("/tenant").then(setTenant).catch(() => {}).finally(() => setLoaded(true));
@@ -72,134 +94,244 @@ export default function Settings() {
   if (!loaded && !tenant) return <Loading label="Loading settings…" />;
 
   return (
-    <>
-      <Card style={{ marginBottom: 16 }}>
-        <h2 style={{ marginBottom: 4 }}>Appearance</h2>
-        <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
-          Choose how Arkive looks on this device.
-        </div>
-        <div className="row" style={{ gap: 12 }}>
-          {([
-            { id: "dark" as Theme, label: "Dark", icon: "moon" as const },
-            { id: "light" as Theme, label: "Light", icon: "sun" as const },
-          ]).map((opt) => {
-            const on = theme === opt.id;
-            return (
-              <div key={opt.id} onClick={() => pickTheme(opt.id)}
-                   style={{ cursor: "pointer", flex: "0 0 150px", border: `1.5px solid ${on ? "var(--brand)" : "var(--border-soft)"}`,
-                            borderRadius: 12, padding: 14, background: on ? "rgba(79,124,255,.08)" : "var(--inset)", transition: "all .12s" }}>
-                <div className="spread" style={{ marginBottom: 10 }}>
-                  <Icon name={opt.icon} size={16} />
-                  {on && <Icon name="check" size={15} />}
-                </div>
-                {/* Mini preview swatch */}
-                <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-                  <span style={{ width: 30, height: 20, borderRadius: 4, background: opt.id === "light" ? "#f4f6fb" : "#0b0f17", border: "1px solid var(--border-soft)" }} />
-                  <span style={{ width: 30, height: 20, borderRadius: 4, background: opt.id === "light" ? "#ffffff" : "#141b2b", border: "1px solid var(--border-soft)" }} />
-                  <span style={{ width: 20, height: 20, borderRadius: 4, background: "#4f7cff" }} />
-                </div>
-                <div style={{ fontWeight: 600, fontSize: 13 }}>{opt.label}</div>
-              </div>
-            );
-          })}
-        </div>
-      </Card>
-
-      <NotificationSettings />
-
-      <ContactLinkingSettings />
-
-      <Card style={{ marginBottom: 16 }}>
-        <h2 style={{ marginBottom: 4 }}>Your encryption keys</h2>
-        <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
-          You hold the keys to your data. These live in your key broker record and are shown here so you can
-          confirm their type, strength and status — the key material itself is never exposed.
-        </div>
-        {keys.map((k) => (
-          <div key={k.vault_id} className="result-row">
-            <div className="result-icon" style={{ background: "var(--bg-elev-2)" }}><Icon name="key" size={16} /></div>
-            <div className="flex1">
-              <div style={{ fontWeight: 600 }}>{k.vault_name}</div>
-              <div className="faint" style={{ fontSize: 12 }}>
-                {k.content_algorithm} · {k.pq_hybrid ? "hybrid post-quantum" : "classical"} · {k.recovery_kem || "ML-KEM"} · {k.strength_bits}-bit
-                {k.root_key_hash ? ` · ${k.root_key_hash.slice(0, 16)}…` : ""}
-              </div>
-            </div>
-            <Pill tone={k.pq_hybrid ? "ok" : "info"} dot>{k.pq_hybrid ? "quantum-safe" : "classical"}</Pill>
-            <Pill tone={k.status === "active" ? "ok" : "warn"} dot>{k.status}</Pill>
-          </div>
+    <div className="settings-layout">
+      <nav className="settings-nav">
+        {SETTINGS_TABS.map((t) => (
+          <button key={t.key} className={`settings-nav-item ${tab === t.key ? "active" : ""}`}
+                  onClick={() => setTab(t.key)}>
+            <Icon name={t.icon} size={16} /> <span>{t.label}</span>
+          </button>
         ))}
-        {keys.length === 0 && <div className="muted" style={{ fontSize: 12.5 }}>No keys provisioned yet.</div>}
-        <div className="divider" />
-        <h3 style={{ marginBottom: 8 }}>How your keys are used</h3>
-        <ul className="faint" style={{ fontSize: 12.5, margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
-          <li>A unique root key encrypts your vault's contents with <b>AES-256-GCM</b>. Every vault has its own key.</li>
-          <li>Your key is <b>wrapped</b> (never stored in the clear) and only unwrapped for operations you authorize by unlocking with your passkey.</li>
-          <li><b>ML-KEM</b> protects recovery key exchange and <b>ML-DSA</b> signs appliance receipts — a hybrid, quantum-safe design.</li>
-          <li>Arkive can't read your data: content stays encrypted end-to-end. Only you — or, for continuity, an authorized organization-admin key recovery — can unwrap it.</li>
-        </ul>
-      </Card>
+      </nav>
 
-      <div className="grid grid-2" style={{ alignItems: "start" }}>
-        <Card>
-          <h2 style={{ marginBottom: 12 }}>Identity & unlock</h2>
-          <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
-            Passkeys and hardware tokens unlock the interfaces where you access protected data.
-          </div>
-          {me?.passkeys.map((p) => (
-            <div key={p.id} className="result-row">
-              <div className="result-icon" style={{ background: "var(--bg-elev-2)" }}><Icon name="key" size={16} /></div>
-              <div className="flex1">
-                <div style={{ fontWeight: 600 }}>{p.label}</div>
-                <div className="faint" style={{ fontSize: 12 }}>{p.transport}</div>
-              </div>
-              <Pill tone="ok" dot>active</Pill>
-            </div>
-          ))}
-          <div className="row" style={{ marginTop: 12, gap: 8 }}>
-            <button className="btn sm" onClick={() => addPasskey("internal")}>
-              <Icon name="key" size={14} /> Add device passkey
-            </button>
-            <button className="btn sm" onClick={() => addPasskey("usb")}>
-              <Icon name="lock" size={14} /> Add hardware token
-            </button>
-          </div>
-        </Card>
+      <div className="settings-content">
+        {tab === "personal" && <PersonalInfo me={me} tenant={tenant} refresh={refresh} />}
 
-        <Card>
-          <h2 style={{ marginBottom: 12 }}>Organization</h2>
-          <Row label="Organization" value={tenant?.name} />
-          <Row label="Plan" value={tenant?.plan} />
-          <Row label="Key ownership" value={tenant?.key_ownership_model} />
-          <Row label="Your role" value={me?.role} />
-          <div className="divider" />
-          <div className="spread" style={{ marginBottom: 10 }}>
-            <h3 style={{ margin: 0 }}>Your vaults</h3>
-            <button className="btn primary sm" onClick={createVault}>
-              <Icon name="shield" size={14} /> New vault
-            </button>
-          </div>
-          {tenant?.vaults.map((v) => (
-            <div key={v.id} className="result-row">
-              <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
-                <Icon name="shield" size={16} />
-              </div>
-              <div className="flex1">
-                <div style={{ fontWeight: 600 }}>{v.name}</div>
-                <div className="faint mono" style={{ fontSize: 11 }}>{v.crypto_profile_id}</div>
-              </div>
-              <Pill tone="info">{v.key_ownership_model}</Pill>
+        {tab === "look" && (
+          <Card>
+            <h2 style={{ marginBottom: 4 }}>Look &amp; feel</h2>
+            <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
+              Choose how Arkive looks on this device.
             </div>
-          ))}
-          {(!tenant?.vaults || tenant.vaults.length === 0) && (
-            <div className="muted" style={{ fontSize: 12.5 }}>
-              You don't have a vault yet. Create one to start protecting data.
+            <div className="row" style={{ gap: 12 }}>
+              {([
+                { id: "dark" as Theme, label: "Dark", icon: "moon" as const },
+                { id: "light" as Theme, label: "Light", icon: "sun" as const },
+              ]).map((opt) => {
+                const on = theme === opt.id;
+                return (
+                  <div key={opt.id} onClick={() => pickTheme(opt.id)}
+                       style={{ cursor: "pointer", flex: "0 0 150px", border: `1.5px solid ${on ? "var(--brand)" : "var(--border-soft)"}`,
+                                borderRadius: 12, padding: 14, background: on ? "rgba(79,124,255,.08)" : "var(--inset)", transition: "all .12s" }}>
+                    <div className="spread" style={{ marginBottom: 10 }}>
+                      <Icon name={opt.icon} size={16} />
+                      {on && <Icon name="check" size={15} />}
+                    </div>
+                    <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                      <span style={{ width: 30, height: 20, borderRadius: 4, background: opt.id === "light" ? "#f4f6fb" : "#0b0f17", border: "1px solid var(--border-soft)" }} />
+                      <span style={{ width: 30, height: 20, borderRadius: 4, background: opt.id === "light" ? "#ffffff" : "#141b2b", border: "1px solid var(--border-soft)" }} />
+                      <span style={{ width: 20, height: 20, borderRadius: 4, background: "#4f7cff" }} />
+                    </div>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{opt.label}</div>
+                  </div>
+                );
+              })}
             </div>
-          )}
-        </Card>
+          </Card>
+        )}
+
+        {tab === "notifications" && <NotificationSettings />}
+
+        {tab === "features" && <AccountFeatures me={me} />}
+
+        {tab === "security" && (
+          <>
+            <Card style={{ marginBottom: 16 }}>
+              <h2 style={{ marginBottom: 12 }}>Identity &amp; unlock</h2>
+              <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
+                Passkeys and hardware tokens unlock the interfaces where you access protected data.
+              </div>
+              {me?.passkeys.map((p) => (
+                <div key={p.id} className="result-row">
+                  <div className="result-icon" style={{ background: "var(--bg-elev-2)" }}><Icon name="key" size={16} /></div>
+                  <div className="flex1">
+                    <div style={{ fontWeight: 600 }}>{p.label}</div>
+                    <div className="faint" style={{ fontSize: 12 }}>{p.transport}</div>
+                  </div>
+                  <Pill tone="ok" dot>active</Pill>
+                </div>
+              ))}
+              <div className="row" style={{ marginTop: 12, gap: 8 }}>
+                <button className="btn sm" onClick={() => addPasskey("internal")}>
+                  <Icon name="key" size={14} /> Add device passkey
+                </button>
+                <button className="btn sm" onClick={() => addPasskey("usb")}>
+                  <Icon name="lock" size={14} /> Add hardware token
+                </button>
+              </div>
+            </Card>
+
+            <Card>
+              <h2 style={{ marginBottom: 4 }}>Your encryption keys</h2>
+              <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
+                You hold the keys to your data. These live in your key broker record and are shown here so you can
+                confirm their type, strength and status — the key material itself is never exposed.
+              </div>
+              {keys.map((k) => (
+                <div key={k.vault_id} className="result-row">
+                  <div className="result-icon" style={{ background: "var(--bg-elev-2)" }}><Icon name="key" size={16} /></div>
+                  <div className="flex1">
+                    <div style={{ fontWeight: 600 }}>{k.vault_name}</div>
+                    <div className="faint" style={{ fontSize: 12 }}>
+                      {k.content_algorithm} · {k.pq_hybrid ? "hybrid post-quantum" : "classical"} · {k.recovery_kem || "ML-KEM"} · {k.strength_bits}-bit
+                      {k.root_key_hash ? ` · ${k.root_key_hash.slice(0, 16)}…` : ""}
+                    </div>
+                  </div>
+                  <Pill tone={k.pq_hybrid ? "ok" : "info"} dot>{k.pq_hybrid ? "quantum-safe" : "classical"}</Pill>
+                  <Pill tone={k.status === "active" ? "ok" : "warn"} dot>{k.status}</Pill>
+                </div>
+              ))}
+              {keys.length === 0 && <div className="muted" style={{ fontSize: 12.5 }}>No keys provisioned yet.</div>}
+              <div className="divider" />
+              <h3 style={{ marginBottom: 8 }}>How your keys are used</h3>
+              <ul className="faint" style={{ fontSize: 12.5, margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
+                <li>A unique root key encrypts your vault's contents with <b>AES-256-GCM</b>. Every vault has its own key.</li>
+                <li>Your key is <b>wrapped</b> (never stored in the clear) and only unwrapped for operations you authorize by unlocking with your passkey.</li>
+                <li><b>ML-KEM</b> protects recovery key exchange and <b>ML-DSA</b> signs appliance receipts — a hybrid, quantum-safe design.</li>
+                <li>Arkive can't read your data: content stays encrypted end-to-end. Only you — or, for continuity, an authorized organization-admin key recovery — can unwrap it.</li>
+              </ul>
+            </Card>
+          </>
+        )}
+
+        {tab === "data" && (
+          <>
+            <ContactLinkingSettings />
+            <Card>
+              <div className="spread" style={{ marginBottom: 10 }}>
+                <div>
+                  <h2 style={{ margin: 0 }}>Your vaults</h2>
+                  <div className="muted" style={{ fontSize: 12.5 }}>Each vault is an independently encrypted store with its own root key.</div>
+                </div>
+                <button className="btn primary sm" onClick={createVault}>
+                  <Icon name="shield" size={14} /> New vault
+                </button>
+              </div>
+              {tenant?.vaults.map((v) => (
+                <div key={v.id} className="result-row">
+                  <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
+                    <Icon name="shield" size={16} />
+                  </div>
+                  <div className="flex1">
+                    <div style={{ fontWeight: 600 }}>{v.name}</div>
+                    <div className="faint mono" style={{ fontSize: 11 }}>{v.crypto_profile_id}</div>
+                  </div>
+                  <Pill tone="info">{v.key_ownership_model}</Pill>
+                </div>
+              ))}
+              {(!tenant?.vaults || tenant.vaults.length === 0) && (
+                <div className="muted" style={{ fontSize: 12.5 }}>
+                  You don't have a vault yet. Create one to start protecting data.
+                </div>
+              )}
+            </Card>
+          </>
+        )}
       </div>
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
-    </>
+    </div>
+  );
+}
+
+function PersonalInfo({ me, tenant, refresh }: { me: Me | null; tenant: Tenant | null; refresh: () => Promise<void> }) {
+  const [first, setFirst] = useState(me?.first_name || "");
+  const [last, setLast] = useState(me?.last_name || "");
+  const [phone, setPhone] = useState(me?.phone || "");
+  const [saving, setSaving] = useState(false);
+  const [savedMsg, setSavedMsg] = useState("");
+  useEffect(() => {
+    setFirst(me?.first_name || ""); setLast(me?.last_name || ""); setPhone(me?.phone || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me?.user_id]);
+  const dirty = first !== (me?.first_name || "") || last !== (me?.last_name || "") || phone !== (me?.phone || "");
+  async function save() {
+    setSaving(true);
+    try {
+      await api.put("/auth/me/profile", { first_name: first, last_name: last, phone });
+      await refresh();
+      setSavedMsg("Saved"); setTimeout(() => setSavedMsg(""), 2000);
+    } catch (e: any) { notify({ message: e.message || "Could not save", tone: "danger" }); }
+    finally { setSaving(false); }
+  }
+  return (
+    <Card>
+      <h2 style={{ marginBottom: 4 }}>Personal information</h2>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 16 }}>
+        Your name and contact details. Your email is your sign-in and is changed through a separate verified flow.
+      </div>
+      <div className="grid grid-2" style={{ gap: 12, marginBottom: 4 }}>
+        <SettingsField label="First name" value={first} onChange={setFirst} placeholder="First name" />
+        <SettingsField label="Last name" value={last} onChange={setLast} placeholder="Last name" />
+        <SettingsField label="Phone" value={phone} onChange={setPhone} placeholder="+1 555 123 4567" />
+        <label className="stack" style={{ gap: 5 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Email (sign-in)</span>
+          <input className="input" value={me?.email || ""} disabled readOnly />
+        </label>
+      </div>
+      <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 12 }}>
+        <button className="btn primary" disabled={saving || !dirty} onClick={save}>
+          {saving ? "Saving…" : "Save changes"}
+        </button>
+        {savedMsg && <span className="faint" style={{ fontSize: 12.5, color: "var(--ok, #35d0a5)" }}><Icon name="check" size={13} /> {savedMsg}</span>}
+      </div>
+
+      <div className="divider" />
+      <h3 style={{ marginBottom: 8 }}>Account</h3>
+      <Row label="Organization" value={tenant?.name} />
+      <Row label="Plan" value={tenant?.plan} />
+      <Row label="Your role" value={me?.role} />
+      <Row label="Key ownership" value={tenant?.key_ownership_model} />
+    </Card>
+  );
+}
+
+function SettingsField({ label, value, onChange, placeholder }: {
+  label: string; value: string; onChange: (v: string) => void; placeholder?: string;
+}) {
+  return (
+    <label className="stack" style={{ gap: 5 }}>
+      <span className="faint" style={{ fontSize: 12 }}>{label}</span>
+      <input className="input" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
+    </label>
+  );
+}
+
+function AccountFeatures({ me }: { me: Me | null }) {
+  const features = Object.entries(me?.features || {});
+  return (
+    <Card>
+      <h2 style={{ marginBottom: 4 }}>Account features</h2>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
+        Capabilities enabled for your account. These are managed by your administrator.
+      </div>
+      {features.length === 0 ? (
+        <div className="muted" style={{ fontSize: 12.5 }}>No optional features configured.</div>
+      ) : (
+        <div className="stack" style={{ gap: 0 }}>
+          {features.map(([key, on]) => (
+            <div key={key} className="spread" style={{ padding: "12px 0", borderTop: "1px solid var(--border-soft)", alignItems: "center" }}>
+              <div className="row" style={{ gap: 12, alignItems: "center" }}>
+                <div className="result-icon" style={{ width: 32, height: 32, background: "var(--inset)", color: on ? "var(--brand)" : "var(--text-dim)" }}>
+                  <Icon name={on ? "check" : "lock"} size={15} />
+                </div>
+                <div style={{ fontWeight: 600, fontSize: 13.5 }}>{featureLabel(key)}</div>
+              </div>
+              <Pill tone={on ? "ok" : "warn"} dot>{on ? "Enabled" : "Disabled"}</Pill>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }
 

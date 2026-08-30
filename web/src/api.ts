@@ -66,6 +66,10 @@ export interface Me {
   user_id: string;
   email: string;
   display_name: string;
+  full_name?: string;
+  first_name?: string;
+  last_name?: string;
+  phone?: string;
   role: string;
   tenant_id: string;
   tenant_type?: string;

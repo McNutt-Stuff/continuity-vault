@@ -514,6 +514,10 @@ def me(principal: security.Principal = Depends(security.get_principal),
         "user_id": user.id,
         "email": user.email,
         "display_name": user.display_name,
+        "full_name": user.full_name,
+        "first_name": user.first_name or "",
+        "last_name": user.last_name or "",
+        "phone": user.phone or "",
         "role": user.role,
         "tenant_id": user.tenant_id,
         "tenant_type": ttype,
@@ -527,6 +531,37 @@ def me(principal: security.Principal = Depends(security.get_principal),
         "passkeys": [{"id": p.id, "label": p.label, "transport": p.transport}
                      for p in user.passkeys],
     }
+
+
+class ProfileUpdate(BaseModel):
+    first_name: str | None = None
+    last_name: str | None = None
+    phone: str | None = None
+    display_name: str | None = None
+
+
+@router.put("/me/profile")
+def update_profile(body: ProfileUpdate,
+                   principal: security.Principal = Depends(security.get_principal),
+                   db: Session = Depends(get_db)):
+    """Self-service edit of the signed-in user's personal information (name +
+    phone). Email is the login and is changed through a separate verified flow."""
+    user = db.get(User, principal.user_id)
+    if body.first_name is not None:
+        user.first_name = body.first_name.strip()
+    if body.last_name is not None:
+        user.last_name = body.last_name.strip()
+    if body.phone is not None:
+        user.phone = body.phone.strip()
+    if body.display_name is not None and body.display_name.strip():
+        user.display_name = body.display_name.strip()
+    elif body.first_name is not None or body.last_name is not None:
+        derived = " ".join(p for p in [user.first_name, user.last_name] if p).strip()
+        if derived:
+            user.display_name = derived
+    db.commit()
+    return {"ok": True, "display_name": user.display_name, "first_name": user.first_name or "",
+            "last_name": user.last_name or "", "phone": user.phone or ""}
 
 
 @router.post("/complete-setup")
