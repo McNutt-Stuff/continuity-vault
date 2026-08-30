@@ -485,13 +485,6 @@ function BillingSettings() {
         {cfg?.processor && <Pill tone="info">{cfg.processor === "paypal" ? "PayPal" : "Stripe"}</Pill>}
       </div>
 
-      {!cfg?.configured && (
-        <div className="muted" style={{ fontSize: 12.5, padding: "10px 0" }}>
-          <Icon name="info" size={13} /> Online payments aren’t enabled yet. An administrator assigns a payment
-          processor to this node in <b>Configuration → Services</b>. You can still save a card below in test mode.
-        </div>
-      )}
-
       {methods.length === 0 && !adding && (
         <div className="muted" style={{ fontSize: 12.5, padding: "8px 0" }}>No payment methods on file.</div>
       )}
