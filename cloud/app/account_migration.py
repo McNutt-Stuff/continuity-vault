@@ -16,6 +16,7 @@ partially-migrated account can never result (the built-in rollback procedure).
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
@@ -175,6 +176,8 @@ def _upgrade(db: Session, user: User, old_tenant: Tenant, target_plan: str,
     try:
         new = Tenant(name=name, tenant_type="dedicated", plan=target_plan,
                      node_id=old_tenant.node_id,
+                     storage_prefix=f"t-{secrets.token_hex(4)}",
+                     key_ownership_model=old_tenant.key_ownership_model or "customer-managed",
                      licensed_bytes=int(float(_plan_meta(db, target_plan).get("min_tb", 0) or 0) * TB),
                      feature_flags={}, protection_options=[])
         db.add(new)
