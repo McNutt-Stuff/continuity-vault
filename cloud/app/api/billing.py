@@ -778,11 +778,82 @@ def get_subscription(principal: security.Principal = Depends(security.get_princi
 
 
 # --------------------------------------------------------------------------- #
-# Admin billing — view every tenant's billing profile, toggle recurring        #
-# charges, run a charge now, and inspect the charge history.                    #
+# Account-type upgrade / downgrade (moves the user between tenants).            #
+# --------------------------------------------------------------------------- #
+
+@router.get("/plan-change/preview")
+def plan_change_preview(plan: str,
+                        principal: security.Principal = Depends(security.get_principal),
+                        tenant: Tenant = Depends(security.get_tenant),
+                        db: Session = Depends(get_db)):
+    """Pricing + warnings for switching this account to ``plan``, before applying."""
+    from .. import account_migration
+    user = db.get(User, principal.user_id)
+    return account_migration.preview(db, user, tenant, plan)
+
+
+class PlanChange(BaseModel):
+    plan: str
+    tenant_name: str | None = None
+
+
+@router.post("/plan-change")
+def plan_change(body: PlanChange,
+                principal: security.Principal = Depends(security.require_passkey),
+                tenant: Tenant = Depends(security.get_tenant),
+                db: Session = Depends(get_db)):
+    """Apply an upgrade/downgrade for the signed-in account. Only the account
+    owner (or a shared-tenant personal user) may change their own plan; the user
+    must sign out and back in afterward (their session points at the old tenant)."""
+    from .. import account_migration
+    user = db.get(User, principal.user_id)
+    shared = (tenant.tenant_type or "dedicated") == "shared"
+    if not shared and not (security.is_org_admin(principal.role) or principal.is_platform_admin):
+        raise HTTPException(403, "only the account owner can change the plan")
+    try:
+        return account_migration.change_plan(db, user, body.plan, body.tenant_name,
+                                             actor=principal.user_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+# --------------------------------------------------------------------------- #
+# Admin billing — plan changes, plus view every tenant's billing profile,      #
+# toggle recurring charges, run a charge now, and inspect charge history.       #
 # --------------------------------------------------------------------------- #
 
 admin_router = APIRouter(prefix="/admin/billing", tags=["admin-billing"])
+
+
+@admin_router.get("/plan-change/preview", dependencies=[Depends(security.require_platform_admin)])
+def admin_plan_change_preview(user_id: str, plan: str, db: Session = Depends(get_db)):
+    from .. import account_migration
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "user not found")
+    return account_migration.preview(db, user, db.get(Tenant, user.tenant_id), plan)
+
+
+class AdminPlanChange(BaseModel):
+    user_id: str
+    plan: str
+    tenant_name: str | None = None
+
+
+@admin_router.post("/plan-change", dependencies=[Depends(security.require_platform_admin)])
+def admin_plan_change(body: AdminPlanChange,
+                      principal: security.Principal = Depends(security.require_platform_admin),
+                      db: Session = Depends(get_db)):
+    """Platform-admin performs an upgrade/downgrade on a user's behalf."""
+    from .. import account_migration
+    user = db.get(User, body.user_id)
+    if not user:
+        raise HTTPException(404, "user not found")
+    try:
+        return account_migration.change_plan(db, user, body.plan, body.tenant_name,
+                                             actor=principal.user_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 def _live_processor(svc: dict | None) -> bool:

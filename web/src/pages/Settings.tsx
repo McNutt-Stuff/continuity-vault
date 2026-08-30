@@ -97,7 +97,7 @@ export default function Settings() {
       <div className="settings-content">
         {tab === "personal" && <PersonalInfo me={me} tenant={tenant} refresh={refresh} />}
 
-        {tab === "billing" && <BillingSettings />}
+        {tab === "billing" && <><PlanChangeCard /><BillingSettings /></>}
 
         {tab === "look" && (
           <Card>
@@ -448,6 +448,101 @@ const BRAND_LABEL: Record<string, string> = {
   visa: "Visa", mastercard: "Mastercard", amex: "American Express",
   discover: "Discover", diners: "Diners Club", jcb: "JCB", card: "Card",
 };
+
+interface LicensePlanOpt { id: string; name: string; price_per_tb_month: number; min_tb: number }
+interface PlanChangePreview {
+  current_plan: { id: string; name: string };
+  target_plan: { id: string; name: string; price_per_tb_month: number; min_tb: number };
+  current_monthly: number; target_monthly: number; currency: string;
+  is_upgrade: boolean; is_downgrade: boolean; requires_new_tenant: boolean;
+  affected_members: number; grace_days: number; warnings: string[];
+}
+function money(n: number, cur = "USD"): string {
+  return `${cur === "USD" ? "$" : ""}${(n || 0).toFixed(2)}${cur === "USD" ? "" : " " + cur}`;
+}
+
+function PlanChangeCard() {
+  const { logout } = useAuth();
+  const [plans, setPlans] = useState<LicensePlanOpt[]>([]);
+  const [current, setCurrent] = useState<{ id: string; name: string } | null>(null);
+  const [target, setTarget] = useState("");
+  const [prev, setPrev] = useState<PlanChangePreview | null>(null);
+  const [tenantName, setTenantName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    api.get<{ license_plans: LicensePlanOpt[] }>("/billing/pricing").then((p) => setPlans(p.license_plans || [])).catch(() => {});
+    api.get<any>("/billing/plan").then((v) => v.license_plan && setCurrent({ id: v.license_plan.id, name: v.license_plan.name })).catch(() => {});
+  }, []);
+
+  async function choose(id: string) {
+    setTarget(id); setPrev(null); setErr(""); setTenantName("");
+    if (!id) return;
+    try { setPrev(await api.get<PlanChangePreview>(`/billing/plan-change/preview?plan=${encodeURIComponent(id)}`)); }
+    catch (e: any) { setErr(e.message || "Could not preview this plan"); }
+  }
+  async function apply() {
+    if (!prev) return;
+    setBusy(true); setErr("");
+    try {
+      await api.post("/billing/plan-change", { plan: target, tenant_name: tenantName || null });
+      await notify({ title: "Plan changed", message: "You'll be signed out to finish switching — sign back in to continue.", tone: "ok" });
+      logout();
+    } catch (e: any) { setErr(e.message || "Could not change plan"); setBusy(false); }
+  }
+
+  const options = plans.filter((p) => p.id !== current?.id);
+  if (plans.length === 0) return null;
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <h2 style={{ marginBottom: 4 }}>Plan &amp; account type</h2>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
+        Current plan: <b>{current?.name || "—"}</b>. Upgrading to a Family/Business plan creates your own
+        organization; downgrading returns you to a personal account.
+      </div>
+      <label className="stack" style={{ gap: 5, maxWidth: 360 }}>
+        <span className="faint" style={{ fontSize: 12 }}>Change plan to</span>
+        <select className="input" value={target} onChange={(e) => choose(e.target.value)}>
+          <option value="">— choose a plan —</option>
+          {options.map((p) => <option key={p.id} value={p.id}>{p.name} — ${p.price_per_tb_month}/TB·mo{p.min_tb ? `, min ${p.min_tb} TB` : ""}</option>)}
+        </select>
+      </label>
+
+      {prev && (
+        <div className="card" style={{ marginTop: 12, background: "var(--inset)" }}>
+          <div className="row" style={{ gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+            <span style={{ fontWeight: 600 }}>{prev.current_plan.name} → {prev.target_plan.name}</span>
+            <span className="faint" style={{ fontSize: 12.5 }}>
+              {money(prev.current_monthly, prev.currency)}/mo → <b style={{ color: "var(--text)" }}>{money(prev.target_monthly, prev.currency)}/mo</b>
+              {prev.target_plan.min_tb ? ` · ${prev.target_plan.min_tb} TB minimum` : ""}
+            </span>
+            {prev.is_upgrade && <Pill tone="ok">Upgrade</Pill>}
+            {prev.is_downgrade && <Pill tone="warn">Downgrade</Pill>}
+          </div>
+          {prev.requires_new_tenant && (
+            <div style={{ marginTop: 12, maxWidth: 360 }}>
+              <SettingsField label="Name your organization" value={tenantName} onChange={setTenantName} placeholder="e.g. Smith Family" />
+            </div>
+          )}
+          {prev.warnings.map((w, i) => (
+            <div key={i} className="row" style={{ gap: 8, marginTop: 10, alignItems: "flex-start", color: "var(--text-dim)", fontSize: 12.5 }}>
+              <Icon name="alert" size={13} /> <span>{w}</span>
+            </div>
+          ))}
+          {err && <div style={{ color: "var(--danger, #ff5d5d)", fontSize: 12.5, marginTop: 10 }}><Icon name="alert" size={13} /> {err}</div>}
+          <div className="row" style={{ gap: 8, marginTop: 12 }}>
+            <button className="btn primary sm" disabled={busy || (prev.requires_new_tenant && !tenantName.trim())} onClick={apply}>
+              {busy ? "Applying…" : `Switch to ${prev.target_plan.name}`}
+            </button>
+            <button className="btn ghost sm" onClick={() => { setTarget(""); setPrev(null); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {err && !prev && <div style={{ color: "var(--danger, #ff5d5d)", fontSize: 12.5, marginTop: 10 }}><Icon name="alert" size={13} /> {err}</div>}
+    </Card>
+  );
+}
 
 function BillingSettings() {
   const [cfg, setCfg] = useState<PaymentConfig | null>(null);

@@ -1970,7 +1970,7 @@ def _node_local_defaults(n: Node) -> dict:
 
 def _config_service_options(db: Session) -> dict:
     """Service objects grouped for the config service.* pickers."""
-    out = {"storage-service": [], "email-service": [], "payment-service": []}
+    out = {"storage-service": [], "email-service": [], "payment-service": [], "shared-tenant": []}
     for s in db.query(ServiceObject).order_by(ServiceObject.name.asc()).all():
         v = _service_view(db, s)
         if s.kind.startswith("storage-"):
@@ -1981,6 +1981,10 @@ def _config_service_options(db: Session) -> dict:
             bucket = "email-service"
         out[bucket].append({"id": s.id, "name": s.name, "kind": s.kind,
                             "enabled": bool(s.enabled), "configured": v["configured"]})
+    for t in (db.query(Tenant).filter(Tenant.tenant_type == "shared")
+              .order_by(Tenant.name.asc()).all()):
+        out["shared-tenant"].append({"id": t.id, "name": t.name,
+                                     "kind": "shared", "configured": True})
     return out
 
 

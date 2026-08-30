@@ -567,6 +567,35 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
     try { await api.post(`/admin/users/${id}/reset-setup`, {}); flash("Setup wizard will re-run for this user"); await load(); }
     catch { flash("Couldn't reset setup"); }
   }
+  async function changePlan() {
+    try {
+      const pricing = await api.get<any>("/billing/pricing").catch(() => null);
+      const plans: any[] = pricing?.license_plans || [];
+      const cur = u.tenant?.plan;
+      const pick = await formDialog({
+        title: "Change account type",
+        message: `Change ${u.email}'s plan. This moves the user to a new tenant and signs them out.`,
+        fields: [{ name: "plan", label: "New plan", defaultValue: "",
+          options: [{ label: "— choose a plan —", value: "" },
+            ...plans.filter((p) => p.id !== cur).map((p) => ({ label: `${p.name} — $${p.price_per_tb_month}/TB·mo${p.min_tb ? `, min ${p.min_tb}TB` : ""}`, value: p.id }))] }],
+        confirmLabel: "Preview",
+      });
+      if (!pick || !pick.plan) return;
+      const prev = await api.get<any>(`/admin/billing/plan-change/preview?user_id=${id}&plan=${encodeURIComponent(pick.plan)}`);
+      let tenant_name: string | null = null;
+      if (prev.requires_new_tenant) {
+        const nm = await promptDialog({ title: "Name the organization", label: "Organization name", placeholder: "e.g. Smith Family", confirmLabel: "Next" });
+        if (!nm || !nm.trim()) return;
+        tenant_name = nm.trim();
+      }
+      const msg = `${prev.current_plan.name} → ${prev.target_plan.name}  ·  ${money(prev.current_monthly)}/mo → ${money(prev.target_monthly)}/mo`
+        + (prev.warnings?.length ? `\n\n${prev.warnings.join("\n")}` : "");
+      if (!await confirmDialog({ title: "Apply plan change?", message: msg, confirmLabel: "Apply", tone: prev.is_downgrade ? "danger" : undefined })) return;
+      await api.post("/admin/billing/plan-change", { user_id: id, plan: pick.plan, tenant_name });
+      flash("Plan changed — the user must sign back in.");
+      await load();
+    } catch (e) { flash((e as { message?: string }).message || "Plan change failed"); }
+  }
 
   if (!u) return (
     <Card>
@@ -586,6 +615,7 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
         <button className="btn ghost sm" onClick={onBack}>← {backLabel}</button>
         <div className="row" style={{ gap: 8 }}>
           <button className="btn sm" onClick={edit}>Edit</button>
+          <button className="btn ghost sm" onClick={changePlan}><Icon name="credit-card" size={13} /> Change plan</button>
           <button className="btn ghost sm" onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /> Insights</button>
           <button className="btn ghost sm" onClick={rerunSetup}><Icon name="restore" size={13} /> Re-run setup</button>
           <button className="btn ghost sm" onClick={reset}>Reset access</button>

@@ -60,6 +60,9 @@ CONFIG_CATALOG: list[dict] = [
     {"key": "service.payment", "label": "Payment processor",
      "type": "string", "group": "Services", "choices": "payment-service",
      "description": "Which payment ServiceObject this node uses to process billing (Stripe / PayPal)."},
+    {"key": "tenant.default_shared", "label": "Default shared account tenant",
+     "type": "string", "group": "Services", "choices": "shared-tenant",
+     "description": "The shared tenant that personal (downgraded) accounts on this node belong to."},
 ]
 
 _INDEX = {c["key"]: c for c in CONFIG_CATALOG}
