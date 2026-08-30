@@ -4043,6 +4043,7 @@ function ServiceObjectsAdmin() {
 
   const storage = items.filter((i) => i.category === "storage");
   const email = items.filter((i) => i.category === "email");
+  const payment = items.filter((i) => i.category === "payment");
   const draftSpec = draft ? specFor(draft.kind) : undefined;
   const settingOptions = (key: string): string[] | null =>
     key === "storage_class" ? STORAGE_CLASS_OPTS : key === "access_tier" ? ACCESS_TIER_OPTS : null;
@@ -4053,7 +4054,7 @@ function ServiceObjectsAdmin() {
         <div className="spread" style={{ marginBottom: 10 }}>
           <div>
             <h3 style={{ margin: 0 }}>Service objects</h3>
-            <div className="muted" style={{ fontSize: 12.5 }}>Storage &amp; email backends for Arkive Cloud. Credentials come from a linked configuration object; assign a service to a node under Nodes.</div>
+            <div className="muted" style={{ fontSize: 12.5 }}>Storage, email &amp; payment backends. Credentials come from a linked configuration object; assign a service to a node under Nodes / Configuration.</div>
           </div>
           <div className="row" style={{ gap: 6 }}>
             {kinds.map((k) => <button key={k.kind} className="btn sm" onClick={() => newDraft(k.kind)}>+ {k.label}</button>)}
@@ -4127,10 +4128,13 @@ function ServiceObjectsAdmin() {
         <ServiceTable title="Storage services" rows={storage} onEdit={editDraft} onDelete={delObject} onTest={testObject} testable />
         <div style={{ height: 14 }} />
         <ServiceTable title="Email services" rows={email} onEdit={editDraft} onDelete={delObject} onTest={testObject} testable />
+        <div style={{ height: 14 }} />
+        <ServiceTable title="Payment services" rows={payment} onEdit={editDraft} onDelete={delObject} onTest={testObject} />
         <div className="muted" style={{ fontSize: 12, marginTop: 12 }}>
           Storage services back Arkive Cloud: mappings routed to <b>cv-cloud</b> store and restore through
           the storage service selected on the running node. S3 defaults to Intelligent-Tiering and Azure to the
-          Cool tier for low cost while keeping restore instant.
+          Cool tier for low cost while keeping restore instant. Payment services (Stripe / PayPal) process customer
+          billing; assign one to a node under <b>Configuration → Services</b> (<code>service.payment</code>).
         </div>
       </Card>
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
