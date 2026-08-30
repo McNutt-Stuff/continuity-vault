@@ -880,9 +880,11 @@ def register_heartbeat(body: RegisterHeartbeatRequest,
             if body.telemetry:
                 a.telemetry = body.telemetry
             db.commit()
+            from .. import services
             return {"paired": True, "activation": {
                 "appliance_id": a.id, "agent_token": token, "tenant_id": a.tenant_id,
                 "cloud_public_bundle": fleet.cloud_public_bundle(),
+                "node_url": services.tenant_node_url(db, a.tenant_id),
                 "config": _activation_config()}}
     return {"paired": False, "pairing_code": pa.pairing_code,
             "heartbeat_interval_seconds": settings.heartbeat_interval_seconds}

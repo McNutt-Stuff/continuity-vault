@@ -23,17 +23,6 @@ const SETTINGS_TABS: { key: SettingsTab; label: string; icon: IconName }[] = [
   { key: "data", label: "Data protection", icon: "shield" },
 ];
 
-const FEATURE_LABELS: Record<string, string> = {
-  purge_enabled: "Permanent data purge",
-  cloud_storage_enabled: "Bring your own cloud storage",
-  integrations_enabled: "Network integrations",
-  contact_linking: "Contact linking",
-};
-function featureLabel(key: string): string {
-  return FEATURE_LABELS[key]
-    || key.replace(/_/g, " ").replace(/\benabled\b/i, "").trim().replace(/^\w/, (c) => c.toUpperCase());
-}
-
 export default function Settings() {
   const { me, enrollPasskey, refresh } = useAuth();
   const [tenant, setTenant] = useState<Tenant | null>(null);
@@ -142,7 +131,7 @@ export default function Settings() {
 
         {tab === "notifications" && <NotificationSettings />}
 
-        {tab === "features" && <AccountFeatures me={me} />}
+        {tab === "features" && <ContactLinkingSettings />}
 
         {tab === "security" && (
           <>
@@ -206,7 +195,6 @@ export default function Settings() {
 
         {tab === "data" && (
           <>
-            <ContactLinkingSettings />
             <Card>
               <div className="spread" style={{ marginBottom: 10 }}>
                 <div>
@@ -303,35 +291,6 @@ function SettingsField({ label, value, onChange, placeholder }: {
       <span className="faint" style={{ fontSize: 12 }}>{label}</span>
       <input className="input" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
     </label>
-  );
-}
-
-function AccountFeatures({ me }: { me: Me | null }) {
-  const features = Object.entries(me?.features || {});
-  return (
-    <Card>
-      <h2 style={{ marginBottom: 4 }}>Account features</h2>
-      <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
-        Capabilities enabled for your account. These are managed by your administrator.
-      </div>
-      {features.length === 0 ? (
-        <div className="muted" style={{ fontSize: 12.5 }}>No optional features configured.</div>
-      ) : (
-        <div className="stack" style={{ gap: 0 }}>
-          {features.map(([key, on]) => (
-            <div key={key} className="spread" style={{ padding: "12px 0", borderTop: "1px solid var(--border-soft)", alignItems: "center" }}>
-              <div className="row" style={{ gap: 12, alignItems: "center" }}>
-                <div className="result-icon" style={{ width: 32, height: 32, background: "var(--inset)", color: on ? "var(--brand)" : "var(--text-dim)" }}>
-                  <Icon name={on ? "check" : "lock"} size={15} />
-                </div>
-                <div style={{ fontWeight: 600, fontSize: 13.5 }}>{featureLabel(key)}</div>
-              </div>
-              <Pill tone={on ? "ok" : "warn"} dot>{on ? "Enabled" : "Disabled"}</Pill>
-            </div>
-          ))}
-        </div>
-      )}
-    </Card>
   );
 }
 

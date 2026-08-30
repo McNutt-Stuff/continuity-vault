@@ -22,16 +22,15 @@ _TTL = 20.0
 def tenant_node_url(db, tenant_id: str) -> Optional[str]:
     """API base URL of the node a tenant is assigned to (federated mode), so its
     agents/appliances signal, take commands, back up and ingest there instead of
-    the control plane. None when unassigned or federation is off."""
-    from .config import get_settings
+    the control plane. An explicit ``tenant.node_id`` is honored on any server so
+    the control plane can redirect a paired appliance to its dedicated node;
+    returns None when unassigned, the node is this same server, or it's inactive."""
     from .models import Node, Tenant
-    if not get_settings().node_sync_scope:
-        return None
     t = db.get(Tenant, tenant_id)
     if not t or not t.node_id:
         return None
     n = db.get(Node, t.node_id)
-    if n and n.endpoint:
+    if n and n.endpoint and not n.is_self and (n.status or "active") == "active":
         return n.endpoint.rstrip("/")
     return None
 

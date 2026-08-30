@@ -289,6 +289,9 @@ class Agent:
         self.config = d.get("config", {})
         self.sm.state = State.ONLINE_STAGING
         _REG.write_text(json.dumps(d))
+        # Route to the tenant's assigned node from the first heartbeat when the
+        # control plane pins one at pairing (else stay on the control plane).
+        self._set_node_url(d.get("node_url") or None)
         try:
             _PENDING.unlink(missing_ok=True)
         except Exception:  # noqa: BLE001
