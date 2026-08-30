@@ -622,10 +622,11 @@ def list_payment_methods(principal: security.Principal = Depends(security.get_pr
 
 
 class AddCard(BaseModel):
-    number: str
-    exp_month: int
-    exp_year: int
-    cvc: str
+    payment_method_token: str | None = None   # Stripe.js PaymentMethod id (preferred, PCI-safe)
+    number: str | None = None                 # raw card only for the test/unconfigured path
+    exp_month: int | None = None
+    exp_year: int | None = None
+    cvc: str | None = None
     holder_name: str | None = None
     billing_address_id: str | None = None
     make_default: bool = True
@@ -637,11 +638,16 @@ def add_payment_method(body: AddCard,
                        tenant: Tenant = Depends(security.get_tenant),
                        db: Session = Depends(get_db)):
     """Vault a card with the tenant's assigned processor and store only the
-    PCI-safe fields + processor references (never the PAN / CVC)."""
+    PCI-safe fields + processor references (never the PAN / CVC). Stripe cards are
+    tokenized client-side (Stripe.js) and arrive as a payment_method token."""
     from .. import payments, services
     svc = services.tenant_payment_service(db, tenant.id)
     try:
-        res = payments.add_card(svc, body.model_dump())
+        if body.payment_method_token:
+            res = payments.attach_card_token(
+                svc, token=body.payment_method_token, holder_name=body.holder_name or "")
+        else:
+            res = payments.add_card(svc, body.model_dump())
     except payments.PaymentError as exc:
         raise HTTPException(400, str(exc))
     make_default = body.make_default or (
@@ -779,6 +785,27 @@ def get_subscription(principal: security.Principal = Depends(security.get_princi
 admin_router = APIRouter(prefix="/admin/billing", tags=["admin-billing"])
 
 
+def _live_processor(svc: dict | None) -> bool:
+    """True when the resolved payment ServiceObject has live credentials — i.e. a
+    charge/subscription will actually reach the processor (else it's a no-op)."""
+    if not svc:
+        return False
+    kind = svc.get("kind", "")
+    cfg = svc.get("config", {}) or {}
+    if kind == "payment-stripe":
+        return bool(cfg.get("secret_key"))
+    if kind == "payment-paypal":
+        return bool(cfg.get("client_id") and cfg.get("client_secret"))
+    return False
+
+
+_NO_PROCESSOR = (
+    "No live payment processor is assigned to this tenant's node. In the node's "
+    "configuration profile set service.payment to your Stripe/PayPal service, then "
+    "re-add the customer's card so it vaults with the real processor."
+)
+
+
 def _charge_view(c: BillingCharge) -> dict:
     return {"id": c.id, "amount_cents": c.amount_cents, "currency": c.currency,
             "status": c.status, "attempt": c.attempt, "kind": c.kind,
@@ -846,6 +873,8 @@ def admin_enable_profile(pid: str,
     if not pm:
         raise HTTPException(400, "no payment method on file for this tenant")
     svc = services.tenant_payment_service(db, prof.tenant_id)
+    if not _live_processor(svc):
+        raise HTTPException(400, _NO_PROCESSOR)
     _sync_amount(db, prof)
     if prof.amount_cents <= 0:
         raise HTTPException(400, "plan amount is zero — nothing to bill")
@@ -911,6 +940,8 @@ def admin_charge_now(pid: str,
     if not pm:
         raise HTTPException(400, "no payment method on file for this tenant")
     svc = services.tenant_payment_service(db, prof.tenant_id)
+    if not _live_processor(svc):
+        raise HTTPException(400, _NO_PROCESSOR)
     _sync_amount(db, prof)
     attempt = (db.query(func.count(BillingCharge.id))
                .filter(BillingCharge.profile_id == prof.id).scalar() or 0) + 1

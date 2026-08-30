@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, Me } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, Loading } from "../components/ui";
@@ -426,6 +426,24 @@ function fmtCents(cents: number, cur = "USD"): string {
   const sym = cur === "USD" ? "$" : "";
   return `${sym}${(cents / 100).toFixed(2)}${cur === "USD" ? "" : " " + cur}`;
 }
+
+// Load Stripe.js once and return a Stripe instance for the publishable key.
+let _stripeScript: Promise<void> | null = null;
+function loadStripe(pk: string): Promise<any> {
+  const w = window as any;
+  if (!_stripeScript) {
+    _stripeScript = new Promise<void>((resolve, reject) => {
+      if (w.Stripe) { resolve(); return; }
+      const s = document.createElement("script");
+      s.src = "https://js.stripe.com/v3/";
+      s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error("Could not load Stripe.js"));
+      document.head.appendChild(s);
+    });
+  }
+  return _stripeScript.then(() => w.Stripe(pk));
+}
 const BRAND_LABEL: Record<string, string> = {
   visa: "Visa", mastercard: "Mastercard", amex: "American Express",
   discover: "Discover", diners: "Diners Club", jcb: "JCB", card: "Card",
@@ -440,6 +458,11 @@ function BillingSettings() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [form, setForm] = useState({ number: "", exp: "", cvc: "", holder_name: "", billing_address_id: "" });
+  const stripeRef = useRef<any>(null);
+  const cardElRef = useRef<any>(null);
+  const cardMountRef = useRef<HTMLDivElement | null>(null);
+
+  const stripeMode = cfg?.processor === "stripe" && !!cfg.publishable_key;
 
   async function load() {
     const [c, m, a, s] = await Promise.all([
@@ -452,20 +475,60 @@ function BillingSettings() {
   }
   useEffect(() => { void load(); }, []);
 
+  // Mount a Stripe Elements card field when adding a card in Stripe mode, so the
+  // PAN is entered in Stripe's iframe and never touches our servers.
+  useEffect(() => {
+    if (!adding || !stripeMode || !cfg?.publishable_key) return;
+    let disposed = false;
+    (async () => {
+      try {
+        const stripe = await loadStripe(cfg.publishable_key!);
+        if (disposed) return;
+        stripeRef.current = stripe;
+        const elements = stripe.elements();
+        const dark = getComputedStyle(document.documentElement).getPropertyValue("--text").trim() || "#e6ebff";
+        const card = elements.create("card", {
+          style: { base: { color: dark, fontSize: "14px", "::placeholder": { color: "#8a93a6" } } },
+        });
+        if (cardMountRef.current) card.mount(cardMountRef.current);
+        cardElRef.current = card;
+      } catch (e: any) { setErr(e.message || "Could not load the card form."); }
+    })();
+    return () => {
+      disposed = true;
+      try { cardElRef.current?.destroy(); } catch { /* ignore */ }
+      cardElRef.current = null;
+    };
+  }, [adding, stripeMode, cfg?.publishable_key]);
+
   async function addCard() {
     setErr("");
-    const [mm, yy] = form.exp.split("/").map((s) => s.trim());
-    const exp_month = parseInt(mm || "", 10);
-    let exp_year = parseInt(yy || "", 10);
-    if (exp_year && exp_year < 100) exp_year += 2000;
-    if (!exp_month || !exp_year) { setErr("Enter the expiry as MM/YY."); return; }
     setBusy(true);
     try {
-      await api.post("/billing/payment-methods", {
-        number: form.number, exp_month, exp_year, cvc: form.cvc,
-        holder_name: form.holder_name, billing_address_id: form.billing_address_id || null,
-        make_default: methods.length === 0,
-      });
+      if (stripeMode) {
+        const stripe = stripeRef.current;
+        if (!stripe || !cardElRef.current) { setErr("Card form isn't ready yet."); return; }
+        const { paymentMethod, error } = await stripe.createPaymentMethod({
+          type: "card", card: cardElRef.current,
+          billing_details: { name: form.holder_name || undefined },
+        });
+        if (error) { setErr(error.message || "That card was declined."); return; }
+        await api.post("/billing/payment-methods", {
+          payment_method_token: paymentMethod.id, holder_name: form.holder_name,
+          billing_address_id: form.billing_address_id || null, make_default: methods.length === 0,
+        });
+      } else {
+        const [mm, yy] = form.exp.split("/").map((s) => s.trim());
+        const exp_month = parseInt(mm || "", 10);
+        let exp_year = parseInt(yy || "", 10);
+        if (exp_year && exp_year < 100) exp_year += 2000;
+        if (!exp_month || !exp_year) { setErr("Enter the expiry as MM/YY."); return; }
+        await api.post("/billing/payment-methods", {
+          number: form.number, exp_month, exp_year, cvc: form.cvc,
+          holder_name: form.holder_name, billing_address_id: form.billing_address_id || null,
+          make_default: methods.length === 0,
+        });
+      }
       setForm({ number: "", exp: "", cvc: "", holder_name: "", billing_address_id: "" });
       setAdding(false);
       await load();
@@ -549,13 +612,22 @@ function BillingSettings() {
         <div className="card" style={{ marginTop: 12, background: "var(--inset)" }}>
           <h3 style={{ marginTop: 0, marginBottom: 10 }}>Add a card</h3>
           <div className="grid grid-2" style={{ gap: 10 }}>
-            <label className="stack" style={{ gap: 5, gridColumn: "1 / -1" }}>
-              <span className="faint" style={{ fontSize: 12 }}>Card number</span>
-              <input className="input" inputMode="numeric" autoComplete="cc-number" placeholder="1234 1234 1234 1234"
-                     value={form.number} onChange={(e) => setForm({ ...form, number: e.target.value })} />
-            </label>
-            <SettingsField label="Expiry (MM/YY)" value={form.exp} onChange={(v) => setForm({ ...form, exp: v })} placeholder="MM/YY" />
-            <SettingsField label="CVC" value={form.cvc} onChange={(v) => setForm({ ...form, cvc: v })} placeholder="123" />
+            {stripeMode ? (
+              <label className="stack" style={{ gap: 5, gridColumn: "1 / -1" }}>
+                <span className="faint" style={{ fontSize: 12 }}>Card details</span>
+                <div ref={cardMountRef} className="input" style={{ padding: "11px 12px" }} />
+              </label>
+            ) : (
+              <>
+                <label className="stack" style={{ gap: 5, gridColumn: "1 / -1" }}>
+                  <span className="faint" style={{ fontSize: 12 }}>Card number</span>
+                  <input className="input" inputMode="numeric" autoComplete="cc-number" placeholder="1234 1234 1234 1234"
+                         value={form.number} onChange={(e) => setForm({ ...form, number: e.target.value })} />
+                </label>
+                <SettingsField label="Expiry (MM/YY)" value={form.exp} onChange={(v) => setForm({ ...form, exp: v })} placeholder="MM/YY" />
+                <SettingsField label="CVC" value={form.cvc} onChange={(v) => setForm({ ...form, cvc: v })} placeholder="123" />
+              </>
+            )}
             <SettingsField label="Cardholder name" value={form.holder_name} onChange={(v) => setForm({ ...form, holder_name: v })} placeholder="Name on card" />
             <label className="stack" style={{ gap: 5 }}>
               <span className="faint" style={{ fontSize: 12 }}>Billing address</span>
@@ -573,7 +645,9 @@ function BillingSettings() {
             <button className="btn ghost sm" onClick={() => { setAdding(false); setErr(""); }}>Cancel</button>
           </div>
           <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
-            <Icon name="lock" size={11} /> Card details are sent over TLS to your payment processor and tokenized — Arkive stores only the brand, last four digits and expiry.
+            <Icon name="lock" size={11} /> {stripeMode
+              ? "Your card is entered directly into Stripe and tokenized in your browser — the number never reaches Arkive's servers. We store only the brand, last four digits and expiry."
+              : "Card details are tokenized by your payment processor — Arkive stores only the brand, last four digits and expiry."}
           </div>
         </div>
       )}

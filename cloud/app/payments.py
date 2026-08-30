@@ -172,6 +172,54 @@ def _stripe_error(resp: httpx.Response) -> str:
     except Exception:  # noqa: BLE001
         return "Card was declined."
 
+def attach_card_token(service: dict | None, *, token: str, holder_name: str) -> dict:
+    """Attach a card tokenized client-side (Stripe.js / Elements PaymentMethod id)
+    to a new customer and validate it with a SetupIntent — no PAN touches us.
+    Returns the PCI-safe stored fields + processor references."""
+    kind = (service or {}).get("kind", "")
+    cfg = (service or {}).get("config", {}) or {}
+    if kind == "payment-stripe" and cfg.get("secret_key"):
+        return _stripe_attach_token(cfg, token, holder_name)
+    raise PaymentError("This processor doesn't support tokenized card entry.")
+
+
+def _stripe_attach_token(cfg: dict, token: str, holder_name: str) -> dict:
+    if not token.startswith("pm_"):
+        raise PaymentError("Invalid card token.")
+    auth = (cfg["secret_key"], "")
+    base = "https://api.stripe.com/v1"
+    try:
+        with httpx.Client(timeout=25) as client:
+            cust = client.post(f"{base}/customers", auth=auth, data={"name": holder_name})
+            if cust.status_code >= 400:
+                raise PaymentError(_stripe_error(cust))
+            cust_id = cust.json()["id"]
+            # Confirm a SetupIntent to attach AND validate the card is chargeable.
+            si = client.post(f"{base}/setup_intents", auth=auth, data={
+                "customer": cust_id, "payment_method": token,
+                "confirm": "true", "usage": "off_session",
+                "automatic_payment_methods[enabled]": "true",
+                "automatic_payment_methods[allow_redirects]": "never",
+            })
+            body = si.json()
+            if si.status_code >= 400:
+                raise PaymentError(_stripe_error(si))
+            status = body.get("status")
+            if status == "requires_action":
+                raise PaymentError("This card requires 3-D Secure verification. Please try another card.")
+            if status not in ("succeeded", "processing"):
+                raise PaymentError("The card could not be verified. Please check the details and try again.")
+            pm = client.get(f"{base}/payment_methods/{token}", auth=auth)
+            card = pm.json().get("card", {}) if pm.status_code < 400 else {}
+    except PaymentError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stripe attach_card_token failed: %s", exc)
+        raise PaymentError("Could not reach the payment processor. Try again.")
+    v = {"brand": card.get("brand") or "card", "last4": card.get("last4") or token[-4:],
+         "exp_month": card.get("exp_month") or 0, "exp_year": card.get("exp_year") or 0,
+         "holder_name": holder_name}
+    return _base_result("stripe", v, customer=cust_id, token=token)
 
 def _paypal_add_card(cfg: dict, v: dict) -> dict:
     """Vault a card as a PayPal payment token (Advanced Card Payments)."""

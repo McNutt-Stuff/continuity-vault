@@ -4067,7 +4067,7 @@ function BillingAdmin() {
                 <td>{p.plan_name || p.plan_id || "—"}</td>
                 <td>{fmtCents(p.amount_cents, p.currency)}<span className="faint" style={{ fontSize: 11 }}>/{p.interval}</span></td>
                 <td className="faint" style={{ fontSize: 12 }}>{p.payment_method ? `${p.payment_method.brand} ••${p.payment_method.last4}` : <span className="warn">no card</span>}</td>
-                <td><Pill tone={BILLING_STATUS_TONE[p.status] || "info"} dot>{p.active ? p.status : (p.status === "inactive" ? "inactive" : "paused")}</Pill></td>
+                <td><Pill tone={BILLING_STATUS_TONE[p.status] || "info"} dot>{p.active ? p.status : (p.status === "inactive" ? "inactive" : "paused")}</Pill>{p.processor === "test" && <> <Pill tone="warn">TEST</Pill></>}</td>
                 <td className="faint" style={{ fontSize: 12 }}>{p.charges_succeeded}✓ {p.charges_failed ? `${p.charges_failed}✗` : ""}</td>
                 <td className="faint" style={{ fontSize: 11.5 }}>{p.last_charge_at ? `${p.last_status} · ${timeAgo(p.last_charge_at)}` : "—"}</td>
                 <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
