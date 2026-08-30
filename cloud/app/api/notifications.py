@@ -32,7 +32,9 @@ def get_notifications(principal: security.Principal = Depends(security.get_princ
     user = db.get(User, principal.user_id)
     types = _applicable_types(db, user)
     prefs = notifications.normalized_prefs(user)
-    return {"types": types, "prefs": {t["key"]: prefs[t["key"]] for t in types}}
+    return {"types": types, "prefs": {t["key"]: prefs[t["key"]] for t in types},
+            "emails": notifications.normalized_emails(user),
+            "max_emails": notifications.MAX_NOTIFICATION_EMAILS}
 
 
 class PrefsIn(BaseModel):
@@ -52,3 +54,19 @@ def set_notifications(body: PrefsIn,
     user.notification_prefs = prefs
     db.commit()
     return {"ok": True, "prefs": notifications.normalized_prefs(user)}
+
+
+class EmailsIn(BaseModel):
+    emails: list[str]
+
+
+@router.put("/notification-emails")
+def set_notification_emails(body: EmailsIn,
+                            principal: security.Principal = Depends(security.get_principal),
+                            db: Session = Depends(get_db)):
+    """Manage the additional addresses that also receive this account's email
+    notifications. These are never used for login."""
+    user = db.get(User, principal.user_id)
+    user.notification_emails = notifications.sanitize_emails(body.emails)
+    db.commit()
+    return {"ok": True, "emails": notifications.normalized_emails(user)}

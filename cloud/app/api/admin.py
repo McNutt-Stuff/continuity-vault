@@ -798,6 +798,7 @@ def _user_view(u: User) -> dict:
             "tenant_id": u.tenant_id,
             "feature_flags": u.feature_flags or {},
             "notification_prefs": notifications.normalized_prefs(u),
+            "notification_emails": notifications.normalized_emails(u),
             "notification_types": notifications.NOTIFICATION_TYPES,
             "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
             "setup_completed_at": u.setup_completed_at.isoformat() if u.setup_completed_at else None,
@@ -863,6 +864,7 @@ class UserUpdate(BaseModel):
     status: str | None = None
     is_platform_admin: bool | None = None
     notification_prefs: dict | None = None
+    notification_emails: list[str] | None = None
 
 
 def _user_data_rollup(db: Session, collection_ids: list) -> tuple[dict, int, list, list]:
@@ -1138,6 +1140,8 @@ def update_user(uid: str, body: UserUpdate,
             if k in valid:
                 prefs[k] = bool(v)
         u.notification_prefs = prefs
+    if body.notification_emails is not None:
+        u.notification_emails = notifications.sanitize_emails(body.notification_emails)
     db.commit()
     audit.record(db, actor=principal.user_id, action="admin.user_updated",
                  tenant_id=u.tenant_id, category="admin", detail={"email": u.email})

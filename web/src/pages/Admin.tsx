@@ -1,6 +1,8 @@
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useParams } from "react-router-dom";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 import { api, getToken } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo, fmtAbsolute } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
@@ -78,11 +80,17 @@ async function editUserDialog(u: any, isShared: boolean): Promise<boolean> {
       ];
   fields.push({ name: "status", label: "Status", defaultValue: u.status,
     options: ["active", "suspended"].map((v) => ({ label: v, value: v })) });
+  fields.push({ name: "notification_emails", label: "Additional notification emails",
+    type: "textarea", defaultValue: (u.notification_emails || []).join(", "),
+    hint: "Extra addresses that also receive this account's email notifications (comma-separated). Never used for login." });
   // Per-account feature flags. A tenant-level block wins regardless of this.
   fields.push(...flagFields(await flagCatalog(), u.feature_flags, "user"));
   const r = await formDialog({ title: `Edit ${u.email}`, confirmLabel: "Save", fields, wide: true });
   if (!r) return false;
   const flags = extractFlags(r, await flagCatalog());
+  // Parse the comma/space/semicolon-separated list into the array the API expects.
+  r.notification_emails = String(r.notification_emails ?? "")
+    .split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean) as any;
   await api.put(`/admin/users/${u.id}`, r);
   if (Object.keys(flags).length) {
     await api.put(`/admin/users/${u.id}/flags`, { feature_flags: flags });
@@ -2479,70 +2487,99 @@ function Fleet() {
 }
 
 function RemoteTerminal({ id, name, onClose }: { id: string; name: string; onClose: () => void }) {
-  const preRef = useRef<HTMLPreElement>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
   const [status, setStatus] = useState<"connecting" | "waiting" | "open" | "closed" | "error">("connecting");
-  const bufRef = useRef<string>("");
-
-  function append(text: string) {
-    bufRef.current += text;
-    // Cap the buffer so a long-running session can't grow unbounded.
-    if (bufRef.current.length > 200000) bufRef.current = bufRef.current.slice(-160000);
-    const el = preRef.current;
-    if (el) {
-      el.textContent = bufRef.current;
-      el.scrollTop = el.scrollHeight;
-    }
-  }
 
   useEffect(() => {
-    let ws: WebSocket | null = null;
     let cancelled = false;
+    let ws: WebSocket | null = null;
+
+    const term = new Terminal({
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+      theme: { background: "#0a0e1a", foreground: "#d7e2ff", cursor: "#4f7cff" },
+      scrollback: 5000,
+      convertEol: true,
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    termRef.current = term;
+    fitRef.current = fit;
+    // Full keyboard UX: copy the selection with Cmd+C / Ctrl+Shift+C (a bare
+    // Ctrl+C still sends SIGINT). Paste (Cmd+V / Ctrl+V / Ctrl+Shift+V) is handled
+    // natively by xterm's browser paste event → onData, which also brackets
+    // multi-line pastes. Tab, arrows and control keys flow through onData for
+    // shell completion and line editing.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown") return true;
+      if (e.key.toLowerCase() === "c" && (e.metaKey || (e.ctrlKey && e.shiftKey))) {
+        const sel = term.getSelection();
+        if (sel) {
+          e.preventDefault();
+          void navigator.clipboard?.writeText(sel).catch(() => {});
+          return false;
+        }
+      }
+      return true;
+    });
+    if (hostRef.current) term.open(hostRef.current);
+    // Give the modal a frame to lay out before sizing the grid.
+    requestAnimationFrame(() => { try { fit.fit(); term.focus(); } catch { /* ignore */ } });
+    term.writeln("Requesting a secure terminal session with the appliance…");
+
+    const sendResize = () => {
+      const w = wsRef.current;
+      if (w && w.readyState === WebSocket.OPEN) {
+        w.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      }
+    };
+    // Typed input / paste → appliance PTY.
+    term.onData((data) => {
+      const w = wsRef.current;
+      if (w && w.readyState === WebSocket.OPEN) w.send(JSON.stringify({ type: "input", data }));
+    });
+    const onWinResize = () => { try { fit.fit(); sendResize(); } catch { /* ignore */ } };
+    window.addEventListener("resize", onWinResize);
+
     (async () => {
       try {
         setStatus("waiting");
-        append("Requesting a secure terminal session with the appliance…\r\n");
         const r = await api.post<{ ws_url: string }>(`/admin/appliances/${id}/terminal`, {});
         if (cancelled) return;
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
         ws = new WebSocket(`${proto}//${location.host}${r.ws_url}`);
         wsRef.current = ws;
-        ws.onopen = () => { setStatus("open"); append("Connected. Waiting for the appliance to attach…\r\n"); };
-        ws.onmessage = (ev) => append(typeof ev.data === "string" ? ev.data : "");
+        ws.onopen = () => {
+          setStatus("open");
+          try { fit.fit(); } catch { /* ignore */ }
+          sendResize();
+          term.focus();
+        };
+        ws.onmessage = (ev) => { if (typeof ev.data === "string") term.write(ev.data); };
         ws.onerror = () => setStatus("error");
-        ws.onclose = () => { setStatus("closed"); append("\r\n[session closed]\r\n"); };
+        ws.onclose = () => { setStatus("closed"); term.write("\r\n\x1b[90m[session closed]\x1b[0m\r\n"); };
       } catch (e) {
-        if (!cancelled) { setStatus("error"); append(`\r\nCould not start terminal: ${(e as { message?: string }).message || "failed"}\r\n`); }
+        if (!cancelled) {
+          setStatus("error");
+          term.write(`\r\n\x1b[31mCould not start terminal: ${(e as { message?: string }).message || "failed"}\x1b[0m\r\n`);
+        }
       }
     })();
-    return () => { cancelled = true; try { ws?.close(); } catch { /* ignore */ } };
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("resize", onWinResize);
+      try { ws?.close(); } catch { /* ignore */ }
+      try { term.dispose(); } catch { /* ignore */ }
+      termRef.current = null;
+      fitRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
-
-  function send(data: string) {
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
-  }
-
-  function onKeyDown(e: ReactKeyboardEvent<HTMLPreElement>) {
-    if (status !== "open") return;
-    // Let the user copy with Cmd/Ctrl+C when there is a selection.
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c" && (window.getSelection()?.toString())) return;
-    let seq = "";
-    if (e.key === "Enter") seq = "\r";
-    else if (e.key === "Backspace") seq = "\x7f";
-    else if (e.key === "Tab") seq = "\t";
-    else if (e.key === "Escape") seq = "\x1b";
-    else if (e.key === "ArrowUp") seq = "\x1b[A";
-    else if (e.key === "ArrowDown") seq = "\x1b[B";
-    else if (e.key === "ArrowRight") seq = "\x1b[C";
-    else if (e.key === "ArrowLeft") seq = "\x1b[D";
-    else if (e.ctrlKey && e.key.length === 1) {
-      const c = e.key.toLowerCase().charCodeAt(0);
-      if (c >= 97 && c <= 122) seq = String.fromCharCode(c - 96); // Ctrl-A..Z
-    } else if (e.key.length === 1) seq = e.key;
-    if (seq) { e.preventDefault(); send(seq); }
-  }
 
   const statusLabel = { connecting: "Connecting…", waiting: "Establishing tunnel…", open: "Connected", closed: "Closed", error: "Error" }[status];
   const statusTone = status === "open" ? "ok" : status === "error" || status === "closed" ? "danger" : "warn";
@@ -2561,16 +2598,12 @@ function RemoteTerminal({ id, name, onClose }: { id: string; name: string; onClo
           </div>
         </div>
         <div className="modal-body">
-          <pre
-            ref={preRef}
-            tabIndex={0}
-            onKeyDown={onKeyDown}
-            className="mono"
+          <div
+            ref={hostRef}
+            onClick={() => termRef.current?.focus()}
             style={{
-              outline: "none", background: "#0a0e1a", color: "#d7e2ff",
-              border: "1px solid var(--border)", borderRadius: 10, padding: 12,
-              height: 440, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all",
-              fontSize: 12.5, lineHeight: 1.45, cursor: "text",
+              background: "#0a0e1a", border: "1px solid var(--border)", borderRadius: 10,
+              padding: 8, height: 440, overflow: "hidden",
             }}
           />
           <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
@@ -2583,13 +2616,39 @@ function RemoteTerminal({ id, name, onClose }: { id: string; name: string; onClo
   );
 }
 
+type ApplianceTab = "health" | "storage" | "config" | "security" | "logs" | "commands";
+const APPLIANCE_TABS: { key: ApplianceTab; label: string; icon: IconName }[] = [
+  { key: "health", label: "System health", icon: "activity" },
+  { key: "storage", label: "Storage & data", icon: "database" },
+  { key: "config", label: "Configuration", icon: "puzzle" },
+  { key: "security", label: "Keys & security", icon: "lock" },
+  { key: "logs", label: "Logs", icon: "note" },
+  { key: "commands", label: "Commands", icon: "grid" },
+];
+
 function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: any[]; onBack: () => void }) {
   const [a, setA] = useState<any>(null);
+  const [tab, setTab] = useState<ApplianceTab>("health");
   const [toast, setToast] = useState("");
   const [term, setTerm] = useState(false);
+  const buf = useRef<Record<string, number[]>>({ cpu: [], mem: [], disk: [] });
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 2800); }
-  async function load() { try { setA(await api.get<any>(`/admin/appliances/${id}`)); } catch { /* ignore */ } }
-  useEffect(() => { void load(); const iv = setInterval(load, 10000); return () => clearInterval(iv);
+  async function load() {
+    try {
+      const d = await api.get<any>(`/admin/appliances/${id}`);
+      setA(d);
+      const t = d.telemetry || {};
+      const cc = Number(t.cpu_count) || 0;
+      const l1 = Array.isArray(t.load_avg) ? Number(t.load_avg[0]) : 0;
+      const mt = Number(t.mem_total_bytes) || 0, ma = Number(t.mem_available_bytes) || 0;
+      const ct = Number(t.capacity_total_bytes) || 0, cu = Number(t.capacity_used_bytes) || 0;
+      const push = (k: string, v: number) => { const arr = buf.current[k]; arr.push(Number(v) || 0); if (arr.length > MAX_LIVE) arr.shift(); };
+      push("cpu", cc ? Math.min(100, (l1 / cc) * 100) : 0);
+      push("mem", mt ? ((mt - ma) / mt) * 100 : 0);
+      push("disk", ct ? (cu / ct) * 100 : 0);
+    } catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); const iv = setInterval(load, 7000); return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
   async function assign(pid: string) {
@@ -2597,18 +2656,32 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
     catch (e) { flash((e as { message?: string }).message || "Assignment failed"); }
   }
   if (!a) return <Card><button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 10 }}>← Fleet</button><div className="muted">Loading appliance…</div></Card>;
+
   const tel = a.telemetry || {};
   const sd = a.stored_data || {};
+  const cpuCount = Number(tel.cpu_count) || 0;
+  const load1 = Array.isArray(tel.load_avg) ? Number(tel.load_avg[0]) : undefined;
+  const cpuPct = (load1 != null && cpuCount) ? Math.min(100, (load1 / cpuCount) * 100) : undefined;
+  const memTotal = Number(tel.mem_total_bytes) || 0;
+  const memUsed = memTotal ? memTotal - (Number(tel.mem_available_bytes) || 0) : 0;
+  const memPct = memTotal ? (memUsed / memTotal) * 100 : undefined;
+  const capTotal = Number(tel.capacity_total_bytes) || 0;
+  const capUsed = Number(tel.capacity_used_bytes) || 0;
+  const diskPct = capTotal ? (capUsed / capTotal) * 100 : undefined;
+  const logLines: string[] = Array.isArray(tel.recent_logs) ? tel.recent_logs : [];
+
   return (
     <>
       <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
         <button className="btn ghost sm" onClick={onBack}>← Fleet</button>
-        <div className="row" style={{ gap: 6 }}>
-          <button className="btn sm" disabled={!a.online} title={a.online ? "Open a remote terminal" : "Appliance is offline"} onClick={() => setTerm(true)}>
-            <Icon name="server" size={14} /> Remote terminal
-          </button>
-          <Pill tone={a.online ? "ok" : "warn"} dot>{a.online ? "Online" : "Offline"}</Pill>
-          <VersionPill version={a.software_version} updateAvailable={a.update_available} />
+        <div className="row" style={{ gap: 12, alignItems: "center" }}>
+          <ProductionVersion label="Production appliance software" version={a.production_version || ""} />
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn sm" disabled={!a.online} title={a.online ? "Open a remote terminal" : "Appliance is offline"} onClick={() => setTerm(true)}>
+              <Icon name="server" size={13} /> Remote terminal
+            </button>
+            <button className="btn sm" onClick={() => void load()}><Icon name="activity" size={13} /> Refresh</button>
+          </div>
         </div>
       </div>
 
@@ -2617,19 +2690,33 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
       <Card style={{ marginBottom: 14 }}>
         <div className="spread">
           <div className="row" style={{ gap: 12, alignItems: "center" }}>
-            <div className="result-icon" style={{ width: 40, height: 40, background: "var(--inset)" }}><Icon name="server" size={20} /></div>
+            <div className="result-icon" style={{ width: 40, height: 40, background: "var(--inset)", color: a.online ? "#35d0a5" : "#8a94a7" }}>
+              <Icon name="server" size={20} />
+            </div>
             <div>
               <h3 style={{ margin: 0 }}>{a.name || a.serial}</h3>
-              <div className="faint" style={{ fontSize: 12 }}>{a.model} · {a.serial} · {a.tenant?.name || "—"}</div>
+              <div className="faint" style={{ fontSize: 12 }}>
+                {a.model} · {a.serial} · {a.tenant?.name || "—"}{a.software_version ? ` · v${a.software_version}` : ""}
+                {tel.uptime_seconds ? ` · ${uptimeShort(tel.uptime_seconds)}` : ""}
+              </div>
             </div>
           </div>
           <div className="row" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Pill tone={a.online ? "ok" : "warn"} dot>{a.online ? "Online" : "Offline"}</Pill>
             <Pill tone="info">{String(a.state).toLowerCase()}</Pill>
             <Pill tone={a.attestation_ok ? "ok" : "warn"} dot>{a.attestation_ok ? "attested" : "unattested"}</Pill>
             {a.tamper_state && a.tamper_state !== "normal" && <Pill tone="danger" dot>tamper: {a.tamper_state}</Pill>}
-            {a.isolation_state && <Pill tone="info">{a.isolation_state}</Pill>}
+            <VersionPill version={a.software_version} updateAvailable={a.update_available} />
           </div>
         </div>
+        {(tel.hostname || tel.local_ip || tel.model_kind) && (
+          <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+            {tel.model_kind && <Pill tone="info"><Icon name="server" size={11} /> {tel.model_kind === "vm" ? `VM · ${tel.virtualization || "virtual"}` : "Hardware"}</Pill>}
+            {tel.hostname && <span className="faint" style={{ fontSize: 11.5 }}>{tel.hostname}</span>}
+            {tel.os && <span className="faint" style={{ fontSize: 11.5 }}>{tel.os}</span>}
+            {tel.local_ip && <span className="faint" style={{ fontSize: 11.5 }}>{tel.local_ip}</span>}
+          </div>
+        )}
         <div className="grid grid-4" style={{ gap: 12, marginTop: 14 }}>
           <Mini label="Recovery points" value={(sd.recovery_points ?? 0).toLocaleString()} />
           <Mini label="Objects" value={(sd.objects ?? 0).toLocaleString()} />
@@ -2638,104 +2725,195 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
         </div>
       </Card>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 14 }}>
-        <Card>
-          <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Storage volumes</h3>
-          <div className="stack" style={{ gap: 10 }}>
-            {(a.stores || []).map((s: any) => {
-              const pct = s.capacity_bytes ? Math.min(100, (s.used_bytes / s.capacity_bytes) * 100) : 0;
-              return (
-                <div key={s.id}>
-                  <div className="spread" style={{ fontSize: 12.5 }}>
-                    <span style={{ fontWeight: 600 }}>{s.name} <span className="faint" style={{ fontWeight: 400, fontSize: 11 }}>· {s.kind}</span></span>
-                    <span className="faint">{bytes(s.used_bytes || 0)} / {bytes(s.capacity_bytes || 0)}</span>
-                  </div>
-                  <div style={{ height: 6, background: "var(--inset)", borderRadius: 3, marginTop: 3 }}>
-                    <div style={{ height: "100%", width: `${pct}%`, borderRadius: 3, background: pct >= 90 ? "#f2545b" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
-                  </div>
-                  {s.health && (s.health.drive_health || s.health.temperature_c != null) && (
-                    <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>
-                      {s.health.drive_health ? `drive ${s.health.drive_health}` : ""}{s.health.temperature_c != null ? ` · ${s.health.temperature_c}°C` : ""}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {(a.stores || []).length === 0 && <div className="muted">No storage reported.</div>}
-          </div>
-        </Card>
-        <Card>
-          <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Network & telemetry</h3>
-          <Row2 label="Local IP" value={tel.local_ip || "—"} />
-          <Row2 label="Public IP" value={tel.public_ip || "—"} />
-          <Row2 label="Channel" value={tel.channel_encryption || "—"} />
-          <Row2 label="Cloud latency" value={tel.cloud_latency_ms != null ? `${tel.cloud_latency_ms} ms` : "—"} />
-          <Row2 label="Data sent / recv" value={`${bytes(tel.net_bytes_sent || 0)} / ${bytes(tel.net_bytes_recv || 0)}`} />
-          <Row2 label="Drive health" value={tel.drive_health || "—"} />
-          <Row2 label="Temperature" value={tel.temperature_c != null ? `${tel.temperature_c}°C` : "—"} />
-        </Card>
+      <div className="row" style={{ gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+        {APPLIANCE_TABS.map((t) => (
+          <button key={t.key} className={`btn sm ${tab === t.key ? "primary" : "ghost"}`} onClick={() => setTab(t.key)}>
+            <Icon name={t.icon} size={13} /> {t.label}
+          </button>
+        ))}
       </div>
 
-      <Card style={{ marginBottom: 14 }}>
-        <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Assigned configuration profile</h3>
-        {a.config_profile ? (
-          <div className="spread" style={{ border: "1px solid var(--border)", borderRadius: 10, padding: "10px 12px", marginBottom: 10 }}>
-            <div>
-              <div style={{ fontWeight: 700 }}>{a.config_profile.name} <span className="faint" style={{ fontWeight: 400, fontSize: 11.5 }}>· {a.config_profile.key_count} setting{a.config_profile.key_count === 1 ? "" : "s"}</span></div>
-              {a.config_profile.description && <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>{a.config_profile.description}</div>}
-            </div>
-            <button className="btn ghost sm" onClick={() => assign("")}>Unassign</button>
+      {tab === "health" && (
+        <>
+          <div className="grid grid-4" style={{ marginBottom: 14 }}>
+            <Card><div style={{ display: "flex", justifyContent: "center" }}><Ring value={cpuPct ?? 0} label="CPU load" sub={`${cpuCount || "—"} core${cpuCount === 1 ? "" : "s"}`} /></div>
+              <div style={{ marginTop: 6 }}><Sparkline data={buf.current.cpu} width={999} color="#4f7cff" max={100} /></div></Card>
+            <Card><div style={{ display: "flex", justifyContent: "center" }}><Ring value={memPct ?? 0} label="Memory" sub={memTotal ? `${bytes(memUsed)}/${bytes(memTotal)}` : ""} color="#35d0a5" /></div>
+              <div style={{ marginTop: 6 }}><Sparkline data={buf.current.mem} width={999} color="#35d0a5" max={100} /></div></Card>
+            <Card><div style={{ display: "flex", justifyContent: "center" }}><Ring value={diskPct ?? 0} label="Storage" sub={capTotal ? `${bytes(capUsed)}/${bytes(capTotal)}` : ""} color="#f5a623" /></div>
+              <div style={{ marginTop: 6 }}><Sparkline data={buf.current.disk} width={999} color="#f5a623" max={100} /></div></Card>
+            <Card>
+              <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>Network &amp; cloud</div>
+              <div style={{ fontWeight: 700 }}>↓ {bytes(tel.net_bytes_recv || 0)}</div>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>↑ {bytes(tel.net_bytes_sent || 0)}</div>
+              <Row2 label="Latency" value={tel.cloud_latency_ms != null ? `${tel.cloud_latency_ms} ms` : "—"} />
+              <Row2 label="Channel" value={tel.channel_encryption || "—"} />
+              <div className="faint" style={{ fontSize: 10.5, marginTop: 4 }}>Load {(tel.load_avg || []).join(" ") || "—"}</div>
+            </Card>
           </div>
-        ) : (
-          <div className="muted" style={{ marginBottom: 10 }}>No configuration profile assigned.</div>
-        )}
-        <label className="row" style={{ gap: 8, alignItems: "center" }}>
-          <span className="faint" style={{ fontSize: 12 }}>Assign profile</span>
-          <select className="input sm" style={{ maxWidth: 300 }} value={a.config_profile?.id || ""} onChange={(e) => assign(e.target.value)}>
-            <option value="">— none —</option>
-            {(a.available_profiles || profiles).map((p: any) => <option key={p.id} value={p.id}>{p.name}{p.enabled ? "" : " (disabled)"}</option>)}
-          </select>
-        </label>
-      </Card>
+          <div className="grid grid-2">
+            <Card>
+              <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>System</h3>
+              <Row2 label="Hostname" value={tel.hostname || "—"} />
+              <Row2 label="Operating system" value={tel.os || "—"} />
+              <Row2 label="Kernel" value={tel.kernel || "—"} />
+              <Row2 label="Architecture" value={tel.arch || "—"} />
+              <Row2 label="CPU cores" value={cpuCount || "—"} />
+              <Row2 label="Uptime" value={tel.uptime_seconds ? uptimeShort(tel.uptime_seconds).replace("up ", "") : "—"} />
+              <Row2 label="Data path" value={tel.data_path || "—"} />
+            </Card>
+            <Card>
+              <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Hardware &amp; environment</h3>
+              <Row2 label="Model" value={a.model || "—"} />
+              <Row2 label="Type" value={tel.model_kind === "vm" ? `Virtual · ${tel.virtualization || "—"}` : tel.model_kind === "hardware" ? "Physical hardware" : "—"} />
+              {tel.hardware_product && <Row2 label="Product" value={`${tel.hardware_vendor ? tel.hardware_vendor + " " : ""}${tel.hardware_product}`} />}
+              <Row2 label="Drive health" value={tel.drive_health || "—"} />
+              <Row2 label="Temperature" value={tel.temperature_c != null ? `${tel.temperature_c}°C` : "—"} />
+              <Row2 label="Power" value={tel.power || "—"} />
+              <Row2 label="Free space" value={tel.disk_free_bytes != null ? bytes(tel.disk_free_bytes) : "—"} />
+            </Card>
+          </div>
+        </>
+      )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-        <Card>
-          <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Stored data by source</h3>
-          {(sd.sources || []).length === 0 ? <div className="muted">No data stored on this appliance.</div> : (
-            <table className="table">
-              <thead><tr><th>Source</th><th style={{ textAlign: "right" }}>Points</th><th style={{ textAlign: "right" }}>Size</th></tr></thead>
-              <tbody>
-                {(sd.sources || []).map((s: any, i: number) => (
-                  <tr key={i}>
-                    <td>
-                      <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                        {brandForSource(s.source_type) ? <BrandIcon name={brandForSource(s.source_type)!} size={15} /> : <Icon name="database" size={14} />}
-                        <span style={{ fontWeight: 600 }}>{s.source}</span>
+      {tab === "storage" && (
+        <div className="grid grid-2">
+          <Card>
+            <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Storage volumes</h3>
+            <div className="stack" style={{ gap: 10 }}>
+              {(a.stores || []).map((s: any) => {
+                const pct = s.capacity_bytes ? Math.min(100, (s.used_bytes / s.capacity_bytes) * 100) : 0;
+                return (
+                  <div key={s.id}>
+                    <div className="spread" style={{ fontSize: 12.5 }}>
+                      <span style={{ fontWeight: 600 }}>{s.name} <span className="faint" style={{ fontWeight: 400, fontSize: 11 }}>· {s.kind}</span></span>
+                      <span className="faint">{bytes(s.used_bytes || 0)} / {bytes(s.capacity_bytes || 0)}</span>
+                    </div>
+                    <div style={{ height: 6, background: "var(--inset)", borderRadius: 3, marginTop: 3 }}>
+                      <div style={{ height: "100%", width: `${pct}%`, borderRadius: 3, background: pct >= 90 ? "#f2545b" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
+                    </div>
+                    {s.health && (s.health.drive_health || s.health.temperature_c != null) && (
+                      <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>
+                        {s.health.drive_health ? `drive ${s.health.drive_health}` : ""}{s.health.temperature_c != null ? ` · ${s.health.temperature_c}°C` : ""}
                       </div>
-                    </td>
-                    <td style={{ textAlign: "right" }}>{s.recovery_points}</td>
-                    <td style={{ textAlign: "right" }}>{bytes(s.bytes || 0)}</td>
+                    )}
+                  </div>
+                );
+              })}
+              {(a.stores || []).length === 0 && <div className="muted">No storage reported.</div>}
+            </div>
+          </Card>
+          <Card>
+            <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Stored data by source</h3>
+            {(sd.sources || []).length === 0 ? <div className="muted">No data stored on this appliance.</div> : (
+              <table className="table">
+                <thead><tr><th>Source</th><th style={{ textAlign: "right" }}>Points</th><th style={{ textAlign: "right" }}>Size</th></tr></thead>
+                <tbody>
+                  {(sd.sources || []).map((s: any, i: number) => (
+                    <tr key={i}>
+                      <td>
+                        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                          {brandForSource(s.source_type) ? <BrandIcon name={brandForSource(s.source_type)!} size={15} /> : <Icon name="database" size={14} />}
+                          <span style={{ fontWeight: 600 }}>{s.source}</span>
+                        </div>
+                      </td>
+                      <td style={{ textAlign: "right" }}>{s.recovery_points}</td>
+                      <td style={{ textAlign: "right" }}>{bytes(s.bytes || 0)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {tab === "config" && (
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Assigned configuration profile</h3>
+          {a.config_profile ? (
+            <div className="spread" style={{ border: "1px solid var(--border)", borderRadius: 10, padding: "10px 12px", marginBottom: 10 }}>
+              <div>
+                <div style={{ fontWeight: 700 }}>{a.config_profile.name} <span className="faint" style={{ fontWeight: 400, fontSize: 11.5 }}>· {a.config_profile.key_count} setting{a.config_profile.key_count === 1 ? "" : "s"}</span></div>
+                {a.config_profile.description && <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>{a.config_profile.description}</div>}
+              </div>
+              <button className="btn ghost sm" onClick={() => assign("")}>Unassign</button>
+            </div>
+          ) : (
+            <div className="muted" style={{ marginBottom: 10 }}>No configuration profile assigned.</div>
+          )}
+          <label className="row" style={{ gap: 8, alignItems: "center" }}>
+            <span className="faint" style={{ fontSize: 12 }}>Assign profile</span>
+            <select className="input sm" style={{ maxWidth: 300 }} value={a.config_profile?.id || ""} onChange={(e) => assign(e.target.value)}>
+              <option value="">— none —</option>
+              {(a.available_profiles || profiles).map((p: any) => <option key={p.id} value={p.id}>{p.name}{p.enabled ? "" : " (disabled)"}</option>)}
+            </select>
+          </label>
+        </Card>
+      )}
+
+      {tab === "security" && (
+        <div className="grid grid-2">
+          <Card>
+            <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Encryption</h3>
+            <div className="row" style={{ gap: 6, marginBottom: 10 }}>
+              <Pill tone={tel.quantum_safe ? "ok" : "info"} dot>{tel.quantum_safe ? "Quantum-safe (hybrid)" : "Classical"}</Pill>
+            </div>
+            <Row2 label="Content cipher" value={tel.content_alg || "—"} />
+            <Row2 label="Signing algorithm" value={tel.signing_alg || "—"} />
+            <Row2 label="Isolation state" value={a.isolation_state || tel.isolation_state || "—"} />
+          </Card>
+          <Card>
+            <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Attestation &amp; integrity</h3>
+            <div className="row" style={{ gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+              <Pill tone={a.attestation_ok ? "ok" : "warn"} dot>{a.attestation_ok ? "Attested" : "Unattested"}</Pill>
+              <Pill tone={(a.tamper_state || "normal") === "normal" ? "ok" : "danger"} dot>{(a.tamper_state || "normal") === "normal" ? "No tamper" : `tamper: ${a.tamper_state}`}</Pill>
+            </div>
+            <Row2 label="State" value={String(a.state).toLowerCase()} />
+            <Row2 label="Last attestation" value={a.last_attestation_at ? timeAgo(a.last_attestation_at) : "—"} />
+            <Row2 label="Last heartbeat" value={a.last_heartbeat_at ? timeAgo(a.last_heartbeat_at) : "—"} />
+            <Row2 label="Software version" value={a.software_version || "—"} />
+          </Card>
+        </div>
+      )}
+
+      {tab === "logs" && (
+        <Card>
+          <div className="spread" style={{ marginBottom: 10 }}>
+            <h3 style={{ margin: 0, fontSize: 15 }}>Recent agent logs</h3>
+            <button className="btn ghost sm" onClick={() => void load()}>Refresh</button>
+          </div>
+          <div className="mono" style={{ fontSize: 11, background: "var(--bg-elev-2,#0b0f17)", borderRadius: 8, padding: 12, maxHeight: 460, overflow: "auto", lineHeight: 1.5 }}>
+            {logLines.length ? logLines.map((line, i) => {
+              const low = String(line).toLowerCase();
+              const color = low.includes("error") ? "#f2545b" : (low.includes("warn") ? "#f5a623" : "var(--muted-c,#8a94a7)");
+              return <div key={i} style={{ color, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{line}</div>;
+            }) : <div className="muted">No log output reported. The appliance forwards its recent agent log on each heartbeat.</div>}
+          </div>
+        </Card>
+      )}
+
+      {tab === "commands" && (
+        <Card>
+          <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Recent signed commands</h3>
+          {(a.recent_commands || []).length === 0 ? <div className="muted">No commands issued.</div> : (
+            <table className="table">
+              <thead><tr><th>Command</th><th>Status</th><th style={{ textAlign: "right" }}>Seq</th><th style={{ textAlign: "right" }}>When</th></tr></thead>
+              <tbody>
+                {(a.recent_commands || []).map((c: any, i: number) => (
+                  <tr key={i}>
+                    <td style={{ fontWeight: 600 }}>{c.type}</td>
+                    <td><Pill tone={c.status === "acked" ? "ok" : c.status === "rejected" || c.status === "expired" ? "danger" : "info"} dot>{c.status}</Pill></td>
+                    <td className="faint" style={{ textAlign: "right" }}>{c.sequence ?? "—"}</td>
+                    <td className="faint" style={{ textAlign: "right" }}>{c.at ? timeAgo(c.at) : "—"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           )}
         </Card>
-        <Card>
-          <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Recent commands</h3>
-          {(a.recent_commands || []).length === 0 ? <div className="muted">No commands issued.</div> : (
-            <div className="stack" style={{ gap: 6 }}>
-              {(a.recent_commands || []).map((c: any, i: number) => (
-                <div key={i} className="row" style={{ gap: 8, fontSize: 12.5, alignItems: "center" }}>
-                  <span style={{ fontWeight: 600 }}>{c.type}</span>
-                  <Pill tone={c.status === "acked" ? "ok" : c.status === "rejected" || c.status === "expired" ? "danger" : "info"} dot>{c.status}</Pill>
-                  <span className="faint" style={{ marginLeft: "auto" }}>{c.at ? timeAgo(c.at) : ""}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
+      )}
+
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );

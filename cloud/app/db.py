@@ -205,6 +205,7 @@ def _apply_additive_migrations() -> None:
         # correct value for legacy rows in the background.
         "ALTER TABLE search_documents ADD COLUMN IF NOT EXISTS is_current BOOLEAN DEFAULT true",
         "ALTER TABLE users ADD COLUMN notification_prefs JSON",
+        "ALTER TABLE users ADD COLUMN notification_emails JSON",
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",
         "ALTER TABLE audit_events ADD COLUMN category VARCHAR DEFAULT 'activity'",
         "ALTER TABLE connector_accounts ADD COLUMN sync_cursor JSON",

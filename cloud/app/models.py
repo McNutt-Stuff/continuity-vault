@@ -98,6 +98,9 @@ class User(Base):
     # Per-type email notification preferences {type_key: bool}. Missing key = the
     # type's default. Managed by the user (account settings) and admins.
     notification_prefs = Column(JSON, default=dict)
+    # Additional addresses that also receive this account's email notifications
+    # (never used for login; may duplicate another account's login email).
+    notification_emails = Column(JSON, default=list)
     created_at = Column(DateTime, default=_now)
 
     tenant = relationship("Tenant", back_populates="users")

@@ -133,10 +133,10 @@ verify_agent() {
   return 1
 }
 
-# Fetch the pairing code the appliance is now displaying (zero-touch installs).
-appliance_pairing_code() {
-  curl -fsS "http://127.0.0.1:8090/pairing" 2>/dev/null \
-    | grep -o '"pairing_code": *"[^"]*"' | head -1 | sed 's/.*"pairing_code": *"\([^"]*\)".*/\1/'
+# Read the appliance's local pairing state. Must never fail the installer:
+# the script runs under `set -Eeuo pipefail`, so every pipeline ends in `|| true`.
+appliance_pairing_json() {
+  curl -fsS "http://127.0.0.1:8090/pairing" 2>/dev/null || true
 }
 
 # --- run --------------------------------------------------------------------
@@ -170,14 +170,18 @@ step_always "Enabling headless self-update" install_selfupdate
 step_always "Verifying appliance agent"    verify_agent
 
 finish
-LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 LAN_IP="${LAN_IP:-127.0.0.1}"
 printf "  Reporting to: %s%s%s\n" "$BOLD" "$CV_CLOUD_URL" "$RESET"
 printf "  Appliance web UI: %shttp://%s:8090%s\n" "$BOLD" "$LAN_IP" "$RESET"
-if [[ -z "$LINKING_CODE" ]]; then
-  # Zero-touch: no linking code was supplied. Surface the pairing code so the
-  # operator can claim the appliance from the portal.
-  PAIR_CODE="$(appliance_pairing_code)"
+# Surface pairing guidance ONLY when the appliance is genuinely unpaired — an
+# update/re-install of an already-linked appliance must skip this (and must never
+# abort here, hence the tolerant pipelines).
+PAIRING_JSON="$(appliance_pairing_json)"
+if printf '%s' "$PAIRING_JSON" | grep -q '"paired": *false'; then
+  PAIR_CODE="$(printf '%s' "$PAIRING_JSON" \
+    | grep -o '"pairing_code": *"[^"]*"' | head -1 \
+    | sed 's/.*"pairing_code": *"\([^"]*\)".*/\1/' || true)"
   if [[ -n "$PAIR_CODE" ]]; then
     printf "\n  %sThis appliance is awaiting pairing.%s\n" "$BOLD" "$RESET"
     printf "  Pairing code: %s%s%s\n" "$BOLD" "$PAIR_CODE" "$RESET"

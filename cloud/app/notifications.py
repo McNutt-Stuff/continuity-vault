@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import html as _html
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func
@@ -57,6 +58,45 @@ def normalized_prefs(user: User) -> dict:
     """Every type resolved to an explicit on/off for the settings UI."""
     prefs = getattr(user, "notification_prefs", None) or {}
     return {t["key"]: bool(prefs.get(t["key"], t["default"])) for t in NOTIFICATION_TYPES}
+
+
+# --------------------------------------------------------------------------- #
+# Additional notification recipients                                          #
+# --------------------------------------------------------------------------- #
+
+MAX_NOTIFICATION_EMAILS = 5
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def sanitize_emails(raw) -> list[str]:
+    """Normalize a list of extra recipient addresses: lowercase, trim, drop
+    invalid/duplicate entries, cap the count. No global-uniqueness check — a
+    notification address may match another account's login email."""
+    out: list[str] = []
+    for item in (raw or []):
+        addr = str(item or "").strip().lower()
+        if addr and _EMAIL_RE.match(addr) and addr not in out:
+            out.append(addr)
+        if len(out) >= MAX_NOTIFICATION_EMAILS:
+            break
+    return out
+
+
+def normalized_emails(user: User) -> list[str]:
+    return sanitize_emails(getattr(user, "notification_emails", None) or [])
+
+
+def _recipients(user: User) -> list[str]:
+    """Primary login email plus any additional notification addresses (deduped;
+    the primary may not appear in the extras)."""
+    out: list[str] = []
+    primary = (user.email or "").strip().lower()
+    if primary:
+        out.append(primary)
+    for addr in normalized_emails(user):
+        if addr not in out:
+            out.append(addr)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -510,24 +550,28 @@ def _already_sent(db, user_id: str, dedupe_key: str) -> bool:
 
 def _deliver(db, user: User, key: str, built: dict, dedupe_key: str = "") -> bool:
     """Render + send + log one notification. Returns True if it was sent."""
-    if not user.email:
+    recipients = _recipients(user)
+    if not recipients:
         logger.warning("notify %s skipped: user %s has no email", key, user.id)
         return False
     html = emailer.render(built["title"], built["body_html"],
                           cta=built.get("cta"), preheader=built.get("preheader", ""),
                           footer_note="You're receiving this because email notifications are on for your "
                                       "Arkive account. Manage them in Settings.")
-    channel = emailer.send(user.email, built["subject"], html=html, text=built.get("text", ""),
-                           category=f"notification:{key}")
-    logger.info("notify %s -> %s via %s (subject=%r)", key, user.email, channel, built["subject"])
-    try:
-        db.add(NotificationLog(user_id=user.id, tenant_id=user.tenant_id, type=key,
-                               dedupe_key=dedupe_key, subject=built["subject"],
-                               to_email=user.email, ok=channel in ("ses", "smtp", "log")))
-        db.commit()
-    except Exception:  # noqa: BLE001
-        db.rollback()
-    return True
+    sent_any = False
+    for to_email in recipients:
+        channel = emailer.send(to_email, built["subject"], html=html, text=built.get("text", ""),
+                               category=f"notification:{key}")
+        logger.info("notify %s -> %s via %s (subject=%r)", key, to_email, channel, built["subject"])
+        try:
+            db.add(NotificationLog(user_id=user.id, tenant_id=user.tenant_id, type=key,
+                                   dedupe_key=dedupe_key, subject=built["subject"],
+                                   to_email=to_email, ok=channel in ("ses", "smtp", "log")))
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+        sent_any = True
+    return sent_any
 
 
 def send_notification(db, user: User, key: str, *, dedupe_key: str = "",

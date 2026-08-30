@@ -215,11 +215,13 @@ interface NotifType { key: string; label: string; icon: string; desc: string; }
 function NotificationSettings() {
   const [types, setTypes] = useState<NotifType[]>([]);
   const [prefs, setPrefs] = useState<Record<string, boolean>>({});
+  const [emails, setEmails] = useState<string[]>([]);
+  const [maxEmails, setMaxEmails] = useState(5);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    api.get<{ types: NotifType[]; prefs: Record<string, boolean> }>("/me/notifications")
-      .then((r) => { setTypes(r.types || []); setPrefs(r.prefs || {}); })
+    api.get<{ types: NotifType[]; prefs: Record<string, boolean>; emails: string[]; max_emails: number }>("/me/notifications")
+      .then((r) => { setTypes(r.types || []); setPrefs(r.prefs || {}); setEmails(r.emails || []); setMaxEmails(r.max_emails || 5); })
       .catch(() => {}).finally(() => setLoaded(true));
   }, []);
 
@@ -230,6 +232,35 @@ function NotificationSettings() {
     try { await api.put("/me/notifications", { prefs: { [key]: next[key] } }); }
     catch (e: any) { notify({ message: e.message || "Could not save", tone: "danger" }); setPrefs(prev); }
   }
+
+  async function saveEmails(next: string[]) {
+    const prev = emails;
+    setEmails(next);
+    try {
+      const r = await api.put<{ emails: string[] }>("/me/notification-emails", { emails: next });
+      setEmails(r.emails || []);
+    } catch (e: any) {
+      notify({ message: e.message || "Could not save", tone: "danger" });
+      setEmails(prev);
+    }
+  }
+
+  async function addEmail() {
+    const r = await formDialog({
+      title: "Add a notification email",
+      message: "This address will also receive your Arkive email notifications. It's never used to sign in, and it can be the same as another account's login email.",
+      confirmLabel: "Add email",
+      fields: [{ name: "email", label: "Email address", required: true, placeholder: "you@example.com" }],
+    });
+    if (!r) return;
+    const addr = String(r.email || "").trim().toLowerCase();
+    const ok = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr);
+    if (!ok) { notify({ message: "Enter a valid email address.", tone: "warn" }); return; }
+    if (emails.includes(addr)) { notify({ message: "That address is already on the list.", tone: "warn" }); return; }
+    await saveEmails([...emails, addr]);
+  }
+
+  function removeEmail(addr: string) { void saveEmails(emails.filter((e) => e !== addr)); }
 
   if (!loaded || types.length === 0) return null;
   return (
@@ -254,6 +285,37 @@ function NotificationSettings() {
             <Toggle on={!!prefs[t.key]} onClick={() => toggle(t.key)} />
           </div>
         ))}
+      </div>
+
+      <div style={{ borderTop: "1px solid var(--border-soft)", marginTop: 8, paddingTop: 14 }}>
+        <div className="spread" style={{ alignItems: "center", marginBottom: 4 }}>
+          <h3 style={{ margin: 0, fontSize: 15 }}>Additional notification emails</h3>
+          <button className="btn sm" disabled={emails.length >= maxEmails} onClick={addEmail}>
+            <Icon name="mail" size={13} /> Add email
+          </button>
+        </div>
+        <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+          Copy your notifications to another address (a backup or family email). These addresses only receive
+          notifications — they're never used to sign in.
+        </div>
+        {emails.length === 0 ? (
+          <div className="faint" style={{ fontSize: 12.5 }}>No additional emails. Your notifications go to your login email only.</div>
+        ) : (
+          <div className="stack" style={{ gap: 8 }}>
+            {emails.map((addr) => (
+              <div key={addr} className="spread" style={{ alignItems: "center", padding: "9px 12px", background: "var(--inset)", borderRadius: 10 }}>
+                <span className="row" style={{ gap: 9, minWidth: 0, alignItems: "center" }}>
+                  <Icon name="mail" size={15} />
+                  <span style={{ fontWeight: 600, fontSize: 13.5, wordBreak: "break-all" }}>{addr}</span>
+                </span>
+                <button className="btn ghost sm" title="Remove" onClick={() => removeEmail(addr)}><Icon name="trash" size={13} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+        {emails.length >= maxEmails && (
+          <div className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>You've reached the maximum of {maxEmails} additional emails.</div>
+        )}
       </div>
     </Card>
   );
