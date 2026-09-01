@@ -156,13 +156,47 @@ def smart_status() -> dict:
 
 
 def raid_status() -> dict:
-    """Best-effort software-RAID health from /proc/mdstat."""
+    """Best-effort software-RAID health from /proc/mdstat (Ubuntu mdadm), with the
+    per-array detail (device, level, member state) so the UI can show the array."""
     md = _read("/proc/mdstat")
     if not md or "active" not in md:
         return {"enabled": False}
-    # [UU] = all members up; a '_' means a member is down/degraded.
-    degraded = any("_" in seg for seg in md.split() if seg.startswith("[") and seg.endswith("]"))
-    return {"enabled": True, "status": "degraded" if degraded else "optimal"}
+    arrays: list[dict] = []
+    lines = md.splitlines()
+    for i, line in enumerate(lines):
+        if not line.startswith("md"):
+            continue
+        parts = line.split()
+        name = parts[0]
+        level = next((p for p in parts if p.startswith("raid")), "")
+        members = [p.split("[")[0] for p in parts if "[" in p and "]" in p and not p.startswith("[")]
+        # The following line carries the [N/M] count and [UU_] member map.
+        status_line = lines[i + 1] if i + 1 < len(lines) else ""
+        umap = ""
+        for seg in status_line.split():
+            if seg.startswith("[") and seg.endswith("]") and set(seg[1:-1]) <= {"U", "_"}:
+                umap = seg
+        degraded = "_" in umap
+        recovering = "recovery" in status_line or "resync" in status_line
+        arrays.append({
+            "name": name, "level": level, "members": members,
+            "state": "rebuilding" if recovering else ("degraded" if degraded else "optimal"),
+            "member_map": umap,
+        })
+    degraded = any(a["state"] != "optimal" for a in arrays)
+    return {"enabled": True,
+            "status": "degraded" if degraded else "optimal",
+            "arrays": arrays}
+
+
+def is_dedicated_mount(path: str) -> bool:
+    """True when ``path`` is a separate, writable mount point — i.e. a dedicated
+    disk/RAID volume (e.g. /arkive), not just a directory on the system disk."""
+    try:
+        return (os.path.isdir(path) and os.path.ismount(path)
+                and os.access(path, os.W_OK))
+    except Exception:
+        return False
 
 
 def drive_temperature_c() -> Optional[int]:

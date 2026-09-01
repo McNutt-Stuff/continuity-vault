@@ -3321,15 +3321,18 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
                 return (
                   <div key={s.id}>
                     <div className="spread" style={{ fontSize: 12.5 }}>
-                      <span style={{ fontWeight: 600 }}>{s.name} <span className="faint" style={{ fontWeight: 400, fontSize: 11 }}>· {s.kind}</span></span>
+                      <span style={{ fontWeight: 600 }}>{s.name} <span className="faint" style={{ fontWeight: 400, fontSize: 11 }}>· {s.kind === "dedicated" ? "Dedicated" : s.kind === "builtin" ? "Built-in" : "External"}</span></span>
                       <span className="faint">{bytes(s.used_bytes || 0)} / {bytes(s.capacity_bytes || 0)}</span>
                     </div>
                     <div style={{ height: 6, background: "var(--inset)", borderRadius: 3, marginTop: 3 }}>
                       <div style={{ height: "100%", width: `${pct}%`, borderRadius: 3, background: pct >= 90 ? "#f2545b" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
                     </div>
-                    {s.health && (s.health.drive_health || s.health.temperature_c != null) && (
-                      <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>
-                        {s.health.drive_health ? `drive ${s.health.drive_health}` : ""}{s.health.temperature_c != null ? ` · ${s.health.temperature_c}°C` : ""}
+                    {s.health && (s.health.drive_health || s.health.temperature_c != null || s.health.raid?.enabled) && (
+                      <div className="row" style={{ gap: 6, marginTop: 5, flexWrap: "wrap" }}>
+                        {s.health.drive_health && <Pill tone={s.health.drive_health === "healthy" ? "ok" : "danger"} dot>drive {s.health.drive_health}</Pill>}
+                        {s.health.raid?.enabled && <Pill tone={s.health.raid.status === "optimal" ? "ok" : s.health.raid.status === "rebuilding" ? "warn" : "danger"} dot>RAID {s.health.raid.status}{s.health.raid.arrays?.[0]?.level ? ` · ${s.health.raid.arrays[0].level}` : ""}</Pill>}
+                        {s.health.smart?.enabled && <Pill tone={s.health.smart.status === "passed" ? "ok" : "danger"} dot>SMART {s.health.smart.status}</Pill>}
+                        {s.health.temperature_c != null && <Pill tone={s.health.temperature_c >= 60 ? "warn" : "info"}>{s.health.temperature_c}°C</Pill>}
                       </div>
                     )}
                   </div>

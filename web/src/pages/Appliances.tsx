@@ -21,6 +21,12 @@ interface Store {
   capacity_bytes: number; used_bytes: number; free_bytes: number;
   path?: string | null; mount?: string | null; health: StoreHealth;
 }
+const STORE_KIND_LABEL: Record<string, string> = {
+  builtin: "Built-in storage", dedicated: "Dedicated storage", external: "External storage",
+};
+const STORE_KIND_SHORT: Record<string, string> = {
+  builtin: "Built-in", dedicated: "Dedicated", external: "External",
+};
 interface StoredItem {
   snapshot_id: string; source: string; storage: string; path?: string;
   object_count: number; total_bytes: number; recoverable: boolean; at: string;
@@ -790,6 +796,8 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced }:
     onAdvanced: (m: { title: string; rows: [string, string][] }) => void }) {
   const pct = s.capacity_bytes ? Math.min(100, (s.used_bytes / s.capacity_bytes) * 100) : 0;
   const h = s.health || {};
+  const kindLabel = STORE_KIND_LABEL[s.kind] || "External storage";
+  const kindShort = STORE_KIND_SHORT[s.kind] || "External";
   const barTone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : undefined;
   const chips: { label: string; value: string; tone: "ok" | "warn" | "danger" | "info" }[] = [];
   if (h.drive_health) chips.push({ label: "Drive", value: h.drive_health, tone: h.drive_health === "healthy" ? "ok" : "danger" });
@@ -801,7 +809,7 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced }:
   function showAdvanced() {
     const rows: [string, string][] = [
       ["Name", s.name],
-      ["Type", s.kind === "builtin" ? "Built-in storage" : "External storage"],
+      ["Type", kindLabel],
       ["Storage ID", `store:${s.id}`],
       ["Data path", s.path || "—"],
       ["Mount / device", s.mount || "—"],
@@ -828,17 +836,17 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced }:
           <div>
             <div style={{ fontWeight: 600 }}>{s.name}</div>
             <div className="faint" style={{ fontSize: 11.5 }}>
-              {s.kind === "builtin" ? "Built-in storage" : "External storage"}
+              {kindLabel}
             </div>
           </div>
         </div>
         <div className="row" style={{ gap: 6 }}>
-          <Pill tone={s.kind === "builtin" ? "info" : "ok"}>{s.kind === "builtin" ? "Built-in" : "External"}</Pill>
+          <Pill tone={s.kind === "builtin" ? "info" : "ok"}>{kindShort}</Pill>
           <button className="btn sm ghost" onClick={showAdvanced} title="Advanced details">
             <Icon name="gear" size={13} />
           </button>
           {canManage && <button className="btn sm ghost" onClick={() => onRename(s)}>Rename</button>}
-          {canManage && s.kind !== "builtin" && <button className="btn sm ghost" onClick={() => onDelete(s)}>Remove</button>}
+          {canManage && s.kind === "external" && <button className="btn sm ghost" onClick={() => onDelete(s)}>Remove</button>}
         </div>
       </div>
       <div className="spread faint" style={{ fontSize: 12, margin: "10px 0 4px" }}>

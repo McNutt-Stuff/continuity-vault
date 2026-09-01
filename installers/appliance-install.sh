@@ -101,6 +101,21 @@ EOF
   chown -R "$CV_USER":"$CV_USER" "$INSTALL_DIR" "$DATA_DIR" /etc/continuity-vault
 }
 
+# Detect a dedicated Arkive storage volume (a separate RAID disk mounted at
+# /arkive) and grant the agent write access so backups land there. When absent
+# the agent falls back to the built-in system-disk path (VMs).
+setup_dedicated_storage() {
+  local ded="${CVA_DEDICATED_PATH:-/arkive}"
+  if mountpoint -q "$ded" 2>/dev/null; then
+    mkdir -p "$ded/vault" 2>/dev/null || true
+    chown -R "$CV_USER":"$CV_USER" "$ded" 2>/dev/null || true
+    chmod 750 "$ded" 2>/dev/null || true
+    note "Dedicated storage detected at ${ded} — backups will be stored there (owner ${CV_USER})"
+  else
+    note "No dedicated storage mounted at ${ded}; using built-in path (${DATA_DIR}/data)"
+  fi
+}
+
 install_service() {
   cp "$INSTALL_DIR/infra/systemd/cv-appliance-agent.service" /etc/systemd/system/
   systemctl daemon-reload
@@ -184,6 +199,7 @@ step_if_changed "Building quantum-safe crypto (liboqs)" \
   build_pqcrypto
 step_always "Validating agent"             validate_app
 step_always "Writing appliance configuration" write_config
+step_always "Preparing dedicated storage"  setup_dedicated_storage
 step_always "Starting appliance agent"     install_service
 step_always "Enabling headless self-update" install_selfupdate
 step_always "Verifying appliance agent"    verify_agent

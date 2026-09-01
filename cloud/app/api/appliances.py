@@ -44,6 +44,44 @@ settings = get_settings()
 router = APIRouter(tags=["appliances"])
 logger = logging.getLogger("cv.appliances")
 
+_TB = 1024 ** 4
+
+# OEM hardware signatures the Arkive appliance ships on (lowercased). We present
+# these under the Arkive brand in the UI rather than the ODM's DMI strings.
+_ARKIVE_OEM_VENDORS = {"azw", "arkive", "beelink"}
+
+
+def _brand_telemetry(tel: dict, model: str) -> dict:
+    """Rebrand raw DMI hardware strings (e.g. vendor 'AZW', product 'ME Pro') to
+    the Arkive product line for display — vendor 'Arkive', product the CV Edge
+    model — keeping the originals in *_raw. Only real hardware is rebranded."""
+    if tel.get("model_kind") == "hardware":
+        tel["hardware_vendor_raw"] = tel.get("hardware_vendor") or ""
+        tel["hardware_product_raw"] = tel.get("hardware_product") or ""
+        tel["hardware_vendor"] = "Arkive"
+        tel["hardware_product"] = model or tel.get("hardware_product") or "CV Edge"
+    return tel
+
+
+def _model_for_capacity(db: Session, total_bytes: int, fallback: str) -> str:
+    """Map the dedicated-storage capacity to the nearest CV Edge model from the
+    platform pricing tiers (e.g. ~1-2 TB → CV Edge 1, ~4-5 TB → CV Edge 5)."""
+    if not total_bytes:
+        return fallback
+    from .billing import get_pricing
+    tiers = get_pricing(db).appliance_tiers or []
+    avail_tb = total_bytes / _TB
+    best = None  # (distance, capacity_tb, model)
+    for t in tiers:
+        model = t.get("model")
+        if not model:
+            continue
+        cap = float(t.get("capacity_tb") or 0)
+        d = abs(cap - avail_tb)
+        if best is None or d < best[0] or (d == best[0] and cap > best[1]):
+            best = (d, cap, model)
+    return best[2] if best else fallback
+
 # In-memory fast path; the durable source of truth is the sha256 hash persisted
 # on the Appliance row, so tokens survive cloud restarts.
 _agent_tokens: dict[str, str] = {}  # token -> appliance_id
@@ -425,9 +463,10 @@ def _appliance_view(a: Appliance) -> dict:
             cap = s.capacity_bytes or 0
             used = s.used_bytes or 0
             health = s.health or {}
+            primary = s.kind in ("builtin", "dedicated")
             # Fallback: if the storage record hasn't been synced from a heartbeat
-            # yet, show the appliance's reported capacity for the built-in volume.
-            if s.kind == "builtin" and not cap:
+            # yet, show the appliance's reported capacity for the primary volume.
+            if primary and not cap:
                 cap = int(tel.get("capacity_total_bytes") or 0)
                 used = int(tel.get("capacity_used_bytes") or 0)
                 if not health:
@@ -436,8 +475,8 @@ def _appliance_view(a: Appliance) -> dict:
             stores.append({"id": s.id, "name": s.name, "kind": s.kind,
                            "capacity_bytes": cap, "used_bytes": used,
                            "free_bytes": max(cap - used, 0),
-                           "path": tel.get("data_path") if s.kind == "builtin" else None,
-                           "mount": tel.get("data_mount") if s.kind == "builtin" else None,
+                           "path": tel.get("data_path") if primary else None,
+                           "mount": tel.get("data_mount") if primary else None,
                            "health": health})
     finally:
         db.close()
@@ -464,9 +503,12 @@ def _appliance_view(a: Appliance) -> dict:
 
 
 def _ensure_builtin_store(db: Session, a: Appliance) -> ApplianceStorage:
+    # The appliance's primary volume — a dedicated Arkive RAID disk when present,
+    # else the built-in system-disk store (VMs). Only one primary row exists.
     store = (db.query(ApplianceStorage)
              .filter(ApplianceStorage.appliance_id == a.id,
-                     ApplianceStorage.kind == "builtin").first())
+                     ApplianceStorage.kind.in_(["builtin", "dedicated"]))
+             .order_by(ApplianceStorage.kind.desc()).first())
     if not store:
         store = ApplianceStorage(tenant_id=a.tenant_id, appliance_id=a.id,
                                  name="Built-In Storage", kind="builtin")
@@ -493,13 +535,18 @@ def _sync_storage_telemetry(db: Session, a: Appliance, telemetry: dict) -> None:
                                     .filter(ApplianceStorage.appliance_id == a.id).all())}
     for rep in reported:
         name = rep.get("name") or "Storage"
+        kind = rep.get("kind", "external")
         s = existing.get(name)
-        if not s:
-            # Prefer updating the built-in row for the primary volume.
-            s = builtin if rep.get("kind") == "builtin" else None
+        if not s and kind in ("builtin", "dedicated"):
+            # Repurpose the single primary store row (built-in → dedicated) when a
+            # dedicated Arkive volume is detected, so existing store:<id> mappings
+            # keep resolving to the same storage object.
+            s = builtin
+            s.name = name
+            s.kind = kind
         if not s:
             s = ApplianceStorage(tenant_id=a.tenant_id, appliance_id=a.id,
-                                 name=name, kind=rep.get("kind", "external"))
+                                 name=name, kind=kind)
             db.add(s)
         s.capacity_bytes = int(rep.get("capacity_bytes") or 0)
         s.used_bytes = int(rep.get("used_bytes") or 0)
@@ -917,6 +964,15 @@ def heartbeat(body: HeartbeatRequest,
     if body.software_version and body.software_version != appliance.software_version:
         appliance.software_version = body.software_version
         appliance.version_updated_at = _now()
+    # Auto-map a dedicated-storage appliance's capacity to its CV Edge model, then
+    # rebrand the OEM DMI strings to the Arkive product line for the UI.
+    if tel.get("storage_kind") == "dedicated":
+        cap_total = int(tel.get("capacity_total_bytes") or 0)
+        if cap_total:
+            mapped = _model_for_capacity(db, cap_total, appliance.model)
+            if mapped and mapped != appliance.model:
+                appliance.model = mapped
+    _brand_telemetry(tel, appliance.model)
     appliance.telemetry = tel
     appliance.tamper_state = body.tamper_state
     appliance.last_heartbeat_at = _now()

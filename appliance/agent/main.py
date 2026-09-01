@@ -144,11 +144,26 @@ _PENDING = DATA / "pending.json"
 _LOG_FILE = DATA / "agent.log"
 
 
+def _resolve_storage() -> tuple[Path, str, str]:
+    """(vault_root, storage_kind, storage_name).
+
+    Prefer a dedicated Arkive RAID volume mounted separately (e.g. /arkive) for
+    backups — the built-in path on the system disk is only used on VMs / when no
+    dedicated volume is present. Identity + registration stay on ``data_dir`` so a
+    dedicated disk change never re-pairs the appliance."""
+    if sysinfo.is_dedicated_mount(settings.dedicated_path):
+        return Path(settings.dedicated_path), "dedicated", "Dedicated Storage"
+    return DATA, "builtin", "Built-In Storage"
+
+
+STORAGE_ROOT, STORAGE_KIND, STORAGE_NAME = _resolve_storage()
+
+
 class Agent:
     def __init__(self) -> None:
         self.identity = ApplianceIdentity(settings.data_dir)
         self.sm = StateMachine(State.PROVISIONING)
-        self.vault = VaultStore(str(DATA / "vault"), self.sm)
+        self.vault = VaultStore(str(STORAGE_ROOT / "vault"), self.sm)
         self.appliance_id: Optional[str] = None
         self.tenant_id: Optional[str] = None
         self.agent_token: Optional[str] = None
@@ -423,9 +438,14 @@ class Agent:
         cap = self.vault.capacity()
         plat = sysinfo.detect_platform()
         sysd = sysinfo.system_stats()
-        disk = sysinfo.disk_stats(str(DATA))
-        # Physical appliances advertise a fixed raw capacity; VMs report the disk.
-        raw_total = 8 * 1024**4 if plat["kind"] == "hardware" else disk["disk_total_bytes"]
+        # Capacity + usage reflect the volume the vault actually writes to — the
+        # dedicated Arkive RAID volume when present, else the system disk.
+        disk = sysinfo.disk_stats(str(STORAGE_ROOT))
+        raw_total = disk["disk_total_bytes"]
+        # On a dedicated volume the filesystem usage is the real footprint; on the
+        # shared system disk fall back to the vault's own content size.
+        vol_used = (disk["disk_used_bytes"] if STORAGE_KIND == "dedicated"
+                    else cap.get("used_bytes", 0))
         pq = sysinfo.pq_available()
         net = sysinfo.net_io()
         return {
@@ -455,20 +475,21 @@ class Agent:
             "cloud_latency_ms": self._last_latency_ms,
             # Storage / stored data
             "capacity_total_bytes": raw_total,
-            "capacity_used_bytes": cap.get("used_bytes", 0),
+            "capacity_used_bytes": vol_used,
             "disk_free_bytes": disk["disk_free_bytes"],
             "snapshots": cap.get("snapshots", 0),
             "objects": cap.get("objects", cap.get("snapshots", 0)),
             "drive_health": "healthy",
             "power": "ok",
-            "temperature_c": 34,
+            "temperature_c": sysinfo.drive_temperature_c() or 34,
             # Where recovery data physically lives on the appliance.
-            "data_path": str(DATA),
-            "data_mount": sysinfo.mount_device(str(DATA)),
+            "data_path": str(STORAGE_ROOT / "vault" / "protected"),
+            "data_mount": sysinfo.mount_device(str(STORAGE_ROOT)),
+            "storage_kind": STORAGE_KIND,
             # Per-storage capacity + health (mapped onto the cloud storage objects).
             "storages": sysinfo.storage_report(
-                str(DATA), "Built-In Storage", "builtin",
-                raw_total, cap.get("used_bytes", 0)),
+                str(STORAGE_ROOT), STORAGE_NAME, STORAGE_KIND,
+                raw_total, vol_used),
             # Encryption
             "quantum_safe": bool(pq),
             "content_alg": "AES-256-GCM",

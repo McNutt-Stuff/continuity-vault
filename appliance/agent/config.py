@@ -12,6 +12,9 @@ class ApplianceSettings(BaseSettings):
 
     cloud_base_url: str = "http://localhost:8000/api"
     data_dir: str = "./cv_appliance_data"
+    # Dedicated Arkive storage volume (a separate RAID disk mounted here). When it
+    # is present the appliance stores backups on it instead of the system disk.
+    dedicated_path: str = "/arkive"
     # Linking code from the turnkey activation ceremony (entered once).
     linking_code: str = ""
     model: str = "CV Edge 8"
