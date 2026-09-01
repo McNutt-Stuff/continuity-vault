@@ -518,6 +518,7 @@ def me(principal: security.Principal = Depends(security.get_principal),
         "first_name": user.first_name or "",
         "last_name": user.last_name or "",
         "phone": user.phone or "",
+        "timezone": user.timezone or "",
         "role": user.role,
         "tenant_id": user.tenant_id,
         "tenant_type": ttype,
@@ -537,6 +538,7 @@ class ProfileUpdate(BaseModel):
     first_name: str | None = None
     last_name: str | None = None
     phone: str | None = None
+    timezone: str | None = None
     display_name: str | None = None
 
 
@@ -553,6 +555,8 @@ def update_profile(body: ProfileUpdate,
         user.last_name = body.last_name.strip()
     if body.phone is not None:
         user.phone = body.phone.strip()
+    if body.timezone is not None:
+        user.timezone = body.timezone.strip()
     if body.display_name is not None and body.display_name.strip():
         user.display_name = body.display_name.strip()
     elif body.first_name is not None or body.last_name is not None:

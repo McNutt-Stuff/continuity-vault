@@ -61,6 +61,19 @@ export function serverDate(iso: string): Date {
   return new Date(hasTz ? iso : iso + "Z");
 }
 
+// The user's chosen display timezone (IANA). Blank = the browser's local zone.
+// Set from /me on sign-in so every rendered timestamp matches the user's zone.
+let _userTz = "";
+export function setUserTimezone(tz: string | undefined | null): void {
+  _userTz = (tz || "").trim();
+}
+export function userTimezone(): string {
+  return _userTz || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+function _tzOpts(): Intl.DateTimeFormatOptions {
+  return _userTz ? { timeZone: _userTz } : {};
+}
+
 // Softer, plan-appropriate language for the shared/group data scope: a Family
 // plan says "family"; Business/Enterprise say "organization"; personal accounts
 // have no group scope (just "Me"). Returns null when there's no group scope.
@@ -78,6 +91,6 @@ export function fmtAbsolute(iso: string | null): string {
   if (!iso) return "—";
   return serverDate(iso).toLocaleString([], {
     year: "numeric", month: "short", day: "numeric",
-    hour: "2-digit", minute: "2-digit",
+    hour: "2-digit", minute: "2-digit", ..._tzOpts(),
   });
 }

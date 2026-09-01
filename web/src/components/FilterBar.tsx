@@ -17,7 +17,7 @@ export function FilterBar({ query, onQuery, placeholder, filters, right }: {
   right?: ReactNode;
 }) {
   return (
-    <div className="filter-bar">
+    <div className="filter-bar filter-toolbar">
       <div className="search-bar filter-bar-search">
         <Icon name="search" size={16} />
         <input value={query} placeholder={placeholder ?? "Search…"}

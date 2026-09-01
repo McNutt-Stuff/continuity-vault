@@ -150,9 +150,15 @@ def _resolve_storage() -> tuple[Path, str, str]:
     Prefer a dedicated Arkive RAID volume mounted separately (e.g. /arkive) for
     backups — the built-in path on the system disk is only used on VMs / when no
     dedicated volume is present. Identity + registration stay on ``data_dir`` so a
-    dedicated disk change never re-pairs the appliance."""
+    dedicated disk change never re-pairs the appliance. Falls back to the built-in
+    path if the dedicated volume can't actually be written (never blocks startup)."""
     if sysinfo.is_dedicated_mount(settings.dedicated_path):
-        return Path(settings.dedicated_path), "dedicated", "Dedicated Storage"
+        root = Path(settings.dedicated_path)
+        try:
+            (root / "vault").mkdir(parents=True, exist_ok=True)
+            return root, "dedicated", "Dedicated Storage"
+        except Exception:  # noqa: BLE001 — unwritable dedicated volume → use built-in
+            pass
     return DATA, "builtin", "Built-In Storage"
 
 
@@ -368,13 +374,26 @@ class Agent:
                 else:
                     raise
             self._last_latency_ms = round((time.perf_counter() - t0) * 1000)
+            # A node that doesn't yet recognize this appliance (its token hasn't
+            # replicated, or the appliance was just reassigned) answers 401/403/404.
+            # Fall back to the control plane so a routing hiccup never strands the
+            # appliance as "offline" while it thinks it's online.
+            if (self._node_url and base == self._node_url
+                    and r.status_code in (401, 403, 404)):
+                self.log.warning("assigned node %s rejected heartbeat (%s); falling back to "
+                                 "control plane", self._node_url, r.status_code)
+                self._set_node_url(None)
+                base = settings.cloud_base_url
+                r = await client.post(f"{base}/appliance/heartbeat",
+                                      json=body, headers=self._headers())
             if r.status_code in (502, 503, 504):
                 # Control plane momentarily unreachable (most often mid-deploy).
                 self.log.info("control plane unavailable (%s) — update in progress? "
                               "will retry", r.status_code)
                 return
             if r.status_code != 200:
-                self.log.warning("heartbeat rejected: %s", r.status_code)
+                self.log.warning("heartbeat rejected by %s: %s — %s",
+                                 base, r.status_code, r.text[:200])
                 return
             data = r.json()
             # Adopt the assigned node URL for all subsequent signaling.
@@ -397,10 +416,12 @@ class Agent:
                 self.log.warning("control-plane key drift: cloud=%s pinned=%s — re-pinning",
                                  cp_key, local_key)
                 await self._retrust_control_plane(client, cp_key)
+            ncmd = len(data.get("commands", []))
             for command in data.get("commands", []):
                 await self._handle_command(client, command)
-        self.log.debug("heartbeat ok (state=%s, isolation=%s)",
-                       self.sm.state.value, self.sm.isolation_state)
+        # Visible so heartbeat activity can be confirmed in the appliance log.
+        self.log.info("heartbeat ok → %s (%dms, state=%s%s)", base, self._last_latency_ms,
+                      self.sm.state.value, f", {ncmd} command(s)" if ncmd else "")
 
     async def _retrust_control_plane(self, client: httpx.AsyncClient, expected_key: str | None = None) -> None:
         """Re-pin the cloud's current command-signing bundle after a key rotation,

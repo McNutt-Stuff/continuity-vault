@@ -246,11 +246,18 @@ h3 { font-size: 15px; }
 .search-bar input { background: none; border: none; outline: none; color: var(--text);
   font-size: 15px; width: 100%; }
 .filter-bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
-.filter-bar-search { flex: 1; min-width: 240px; padding: 8px 13px; }
+.filter-toolbar { align-items: center; }
+.filter-bar-search { flex: 1; min-width: 240px; padding: 9px 14px; }
 .filter-bar-search input { font-size: 14px; }
 .filter-bar-clear { background: none; border: none; color: var(--faint); cursor: pointer;
   font-size: 18px; line-height: 1; padding: 0 2px; }
-.filter-bar-select { min-width: 130px; }
+.filter-bar-select { min-width: 150px; appearance: none; -webkit-appearance: none;
+  background: var(--bg-elev) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 3.5L5 6.5L8 3.5' stroke='%239aa7bf' fill='none' stroke-width='1.4'/%3E%3C/svg%3E") no-repeat right 12px center;
+  border: 1px solid var(--border); border-radius: 10px; color: var(--text);
+  font-size: 13.5px; padding: 10px 34px 10px 14px; cursor: pointer; transition: border-color .12s; }
+.filter-bar-select:hover { border-color: var(--brand); }
+.filter-bar-select:focus { outline: none; border-color: var(--brand); }
+@media (max-width: 640px) { .filter-bar-search { flex-basis: 100%; } .filter-bar-select { flex: 1; } }
 
 /* Dropdown action menu */
 .menu-wrap { position: relative; display: inline-block; }

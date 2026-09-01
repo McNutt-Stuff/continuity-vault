@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { startRegistration, startAuthentication } from "@simplewebauthn/browser";
 import { api, setToken, getToken, setOnUnauthorized, ApiError, Me, LoginResponse } from "./api";
+import { setUserTimezone } from "./components/ui";
 
 interface StartResult {
   exists: boolean;
@@ -43,7 +44,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function refresh() {
     try {
-      setMe(await api.get<Me>("/auth/me"));
+      const m = await api.get<Me>("/auth/me");
+      setUserTimezone(m.timezone);
+      setMe(m);
       setSessionExpired(false);
     } catch (e) {
       // A 401 while a token is stored means the session expired (vs. never

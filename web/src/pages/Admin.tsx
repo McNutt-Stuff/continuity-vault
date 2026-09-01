@@ -4,7 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { api, getToken } from "../api";
-import { Card, Pill, Stat, bytes, timeAgo, fmtAbsolute } from "../components/ui";
+import { Card, Pill, Stat, bytes, timeAgo, fmtAbsolute, userTimezone } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { DestIcon } from "../components/DestIcon";
@@ -476,7 +476,7 @@ function Users() {
           </tr></thead>
           <tbody>
             {sorted.map((u) => (
-              <tr key={u.id}>
+              <tr key={u.id} style={{ cursor: "pointer" }} onClick={() => setSel(u.id)}>
                 <td>
                   <div style={{ fontWeight: 600 }}>{u.full_name || u.display_name || u.email}</div>
                   {u.is_platform_admin && <div className="faint" style={{ fontSize: 11 }}>platform admin</div>}
@@ -492,11 +492,7 @@ function Users() {
                 <td style={{ textAlign: "right" }}>{bytes(u.usage_bytes || 0)}</td>
                 <td style={{ textAlign: "right" }}>{money(u.billing_monthly || 0)}/mo</td>
                 <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
-                <td style={{ textAlign: "right" }}>
-                  <button className="btn ghost sm" title="Generate a digital-footprint insights report"
-                          onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /> Insights</button>{" "}
-                  <button className="btn ghost sm" onClick={() => setSel(u.id)}>Manage</button>
-                </td>
+                <td className="faint" style={{ textAlign: "right" }}>Manage →</td>
               </tr>
             ))}
             {sorted.length === 0 && <tr><td colSpan={10} className="muted">{loading ? "Loading…" : "No users match."}</td></tr>}
@@ -655,6 +651,23 @@ function BillingInfoPanel({ billing }: { billing: UserBilling | null }) {
         <Card><div className="muted">No billing profile yet{billing.quote ? ` — plan quote ${fmtCents(billing.quote.amount_cents, billing.quote.currency)}/mo (${billing.quote.plan_name})` : ""}. A profile is created when a card is saved.</div></Card>
       ) : (
         <>
+          <Card style={{ marginBottom: 16 }}>
+            <div className="spread" style={{ marginBottom: 10 }}>
+              <h3 style={{ margin: 0 }}>Subscription</h3>
+              <Pill tone={BILLING_STATUS_TONE[p.status] || "info"} dot>{p.status}</Pill>
+            </div>
+            <div className="grid grid-4" style={{ gap: 12 }}>
+              <Mini label="Plan" value={p.plan_name || p.plan_id || "—"} />
+              <Mini label="Amount" value={`${fmtCents(p.amount_cents, p.currency)}/${p.interval}`} />
+              <Mini label="Next billing date" value={p.active && p.next_charge_at ? billDate(p.next_charge_at) : (p.status === "canceled" ? "canceled" : "not scheduled")} />
+              <Mini label="Collected to date" value={fmtCents(p.collected_cents || 0, p.currency)} />
+            </div>
+            {p.active && p.next_charge_at && (
+              <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
+                Next charge of {fmtCents(p.amount_cents, p.currency)} on <b>{billDate(p.next_charge_at)}</b> ({timeAgo(p.next_charge_at)}).
+              </div>
+            )}
+          </Card>
           <Card style={{ marginBottom: 16 }}>
             <div className="spread" style={{ marginBottom: 10 }}>
               <h3 style={{ margin: 0 }}>Payment method</h3>
@@ -4519,7 +4532,7 @@ function fmtCents(cents: number, cur = "USD"): string {
 function billDate(s: string | null | undefined): string {
   if (!s) return "—";
   const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : s + "Z");
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric", timeZone: userTimezone() });
 }
 const CHARGE_KIND_LABEL: Record<string, string> = {
   recurring: "Subscription", "one-time": "One-time", setup: "Setup fee", manual: "Manual",

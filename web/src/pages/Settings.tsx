@@ -13,6 +13,21 @@ interface KeyInfo {
   strength_bits: number; pq_hybrid: boolean; ownership_model: string | null; root_key_hash: string | null;
 }
 
+// IANA timezone names (browser list with a small fallback for old engines).
+let _TZ_CACHE: string[] | null = null;
+function tzList(): string[] {
+  if (_TZ_CACHE) return _TZ_CACHE;
+  try {
+    const f = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf;
+    if (typeof f === "function") { _TZ_CACHE = f("timeZone"); return _TZ_CACHE; }
+  } catch { /* ignore */ }
+  _TZ_CACHE = ["UTC", "America/New_York", "America/Chicago", "America/Denver",
+    "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu", "Europe/London",
+    "Europe/Paris", "Europe/Berlin", "Asia/Dubai", "Asia/Kolkata", "Asia/Shanghai",
+    "Asia/Tokyo", "Australia/Sydney"];
+  return _TZ_CACHE;
+}
+
 type SettingsTab = "personal" | "billing" | "look" | "notifications" | "features" | "security" | "data";
 const SETTINGS_TABS: { key: SettingsTab; label: string; icon: IconName }[] = [
   { key: "personal", label: "Personal information", icon: "user" },
@@ -238,22 +253,26 @@ function PersonalInfo({ me, tenant, refresh }: { me: Me | null; tenant: Tenant |
   const [first, setFirst] = useState(me?.first_name || "");
   const [last, setLast] = useState(me?.last_name || "");
   const [phone, setPhone] = useState(me?.phone || "");
+  const [tz, setTz] = useState(me?.timezone || "");
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState("");
   useEffect(() => {
     setFirst(me?.first_name || ""); setLast(me?.last_name || ""); setPhone(me?.phone || "");
+    setTz(me?.timezone || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [me?.user_id]);
-  const dirty = first !== (me?.first_name || "") || last !== (me?.last_name || "") || phone !== (me?.phone || "");
+  const dirty = first !== (me?.first_name || "") || last !== (me?.last_name || "")
+    || phone !== (me?.phone || "") || tz !== (me?.timezone || "");
   async function save() {
     setSaving(true);
     try {
-      await api.put("/auth/me/profile", { first_name: first, last_name: last, phone });
+      await api.put("/auth/me/profile", { first_name: first, last_name: last, phone, timezone: tz });
       await refresh();
       setSavedMsg("Saved"); setTimeout(() => setSavedMsg(""), 2000);
     } catch (e: any) { notify({ message: e.message || "Could not save", tone: "danger" }); }
     finally { setSaving(false); }
   }
+  const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return (
     <Card>
       <h2 style={{ marginBottom: 4 }}>Personal information</h2>
@@ -267,6 +286,14 @@ function PersonalInfo({ me, tenant, refresh }: { me: Me | null; tenant: Tenant |
         <label className="stack" style={{ gap: 5 }}>
           <span className="faint" style={{ fontSize: 12 }}>Email (sign-in)</span>
           <input className="input" value={me?.email || ""} disabled readOnly />
+        </label>
+        <label className="stack" style={{ gap: 5 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Time zone</span>
+          <select className="input" value={tz} onChange={(e) => setTz(e.target.value)}>
+            <option value="">Automatic — this device ({browserTz})</option>
+            {tzList().map((z) => <option key={z} value={z}>{z}</option>)}
+          </select>
+          <span className="faint" style={{ fontSize: 11 }}>All dates and times across Arkive (including appliances) are shown in this zone.</span>
         </label>
       </div>
       <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 12 }}>

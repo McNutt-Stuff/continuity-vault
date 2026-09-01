@@ -70,6 +70,7 @@ export interface Me {
   first_name?: string;
   last_name?: string;
   phone?: string;
+  timezone?: string;
   role: string;
   tenant_id: string;
   tenant_type?: string;
