@@ -152,13 +152,26 @@ def _resolve_storage() -> tuple[Path, str, str]:
     dedicated volume is present. Identity + registration stay on ``data_dir`` so a
     dedicated disk change never re-pairs the appliance. Falls back to the built-in
     path if the dedicated volume can't actually be written (never blocks startup)."""
-    if sysinfo.is_dedicated_mount(settings.dedicated_path):
-        root = Path(settings.dedicated_path)
+    ded = settings.dedicated_path
+    exists = os.path.isdir(ded)
+    is_mount = exists and os.path.ismount(ded)
+    writable = is_mount and os.access(ded, os.W_OK)
+    if writable:
+        root = Path(ded)
         try:
             (root / "vault").mkdir(parents=True, exist_ok=True)
+            print(f"[storage] using dedicated volume {ded} (mounted+writable)", flush=True)
             return root, "dedicated", "Dedicated Storage"
-        except Exception:  # noqa: BLE001 — unwritable dedicated volume → use built-in
-            pass
+        except Exception as exc:  # noqa: BLE001 — unwritable dedicated volume → use built-in
+            # Most often the systemd sandbox (ProtectSystem=strict) hasn't allow-
+            # listed the path in ReadWritePaths — surface it so it's diagnosable.
+            print(f"[storage] dedicated volume {ded} not writable by the agent "
+                  f"({exc}); using built-in storage. Add '{ded}' to the service "
+                  f"ReadWritePaths.", flush=True)
+    else:
+        print(f"[storage] no dedicated volume at {ded} "
+              f"(exists={exists} mounted={is_mount} writable={writable}); "
+              f"using built-in storage", flush=True)
     return DATA, "builtin", "Built-In Storage"
 
 

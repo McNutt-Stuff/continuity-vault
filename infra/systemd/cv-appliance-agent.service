@@ -19,7 +19,10 @@ RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/continuity-vault-appliance
+# The system disk data dir plus the optional dedicated Arkive storage volume
+# (a separate RAID disk mounted at /arkive). The '-' prefix makes /arkive
+# optional so the unit still starts on appliances without a dedicated volume.
+ReadWritePaths=/var/lib/continuity-vault-appliance -/arkive
 PrivateTmp=true
 
 [Install]

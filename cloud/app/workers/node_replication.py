@@ -88,6 +88,16 @@ _PULL_EXCLUDE = {
     # plane's stale copy (NULL, since the node — not the CP — runs these tenants)
     # would make every source look "due" again and re-back-up every tick.
     "collections": {"last_backup_run_at"},
+    # A node-routed appliance heartbeats its assigned NODE, so the node owns these
+    # runtime fields. Pulling the control plane's stale copy back down would clobber
+    # the just-recorded liveness/telemetry before it's pushed up — freezing the
+    # appliance as perpetually "offline" in the portal.
+    "appliances": {"last_heartbeat_at", "last_attestation_at", "telemetry",
+                   "state", "isolation_state", "tamper_state", "attestation_ok",
+                   "software_version", "version_updated_at"},
+    # Per-storage capacity/health come from the appliance's heartbeat telemetry,
+    # applied on the node — the CP's copy would be stale/empty.
+    "appliance_storages": {"capacity_bytes", "used_bytes", "health"},
     # Integration instances are created + driven on the node (portal calls are
     # proxied there), so they're node-authoritative and pushed up, never pulled.
 }

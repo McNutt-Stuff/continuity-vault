@@ -226,7 +226,7 @@ _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id"
 _AGENT_FIELDS = ("state", "version", "telemetry", "last_heartbeat_at", "collectors")
 _APPLIANCE_FIELDS = ("state", "isolation_state", "software_version", "telemetry",
                      "tamper_state", "attestation_ok", "last_heartbeat_at",
-                     "last_attestation_at")
+                     "last_attestation_at", "model", "version_updated_at")
 
 
 def _apply(obj, data: dict, fields: tuple) -> None:

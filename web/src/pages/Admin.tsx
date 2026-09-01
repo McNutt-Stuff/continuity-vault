@@ -332,11 +332,11 @@ function Tenants() {
         <FilterBar
           query={q} onQuery={setQ} placeholder="Search tenants, node…"
           filters={[
-            { value: typeF, onChange: setTypeF, options: [
+            { label: "Type", value: typeF, onChange: setTypeF, options: [
               { label: "All types", value: "" },
               ...["shared", "dedicated", "restricted", "internal"].map((v) => ({ label: TENANT_TYPE_LABEL[v], value: v })),
             ] },
-            { value: statusF, onChange: setStatusF, options: [
+            { label: "Status", value: statusF, onChange: setStatusF, options: [
               { label: "Any status", value: "" },
               ...["active", "suspended", "trial"].map((v) => ({ label: v, value: v })),
             ] },
@@ -441,19 +441,19 @@ function Users() {
         <FilterBar
           query={q} onQuery={setQ} placeholder="Search name, email, phone…"
           filters={[
-            { value: tenantId, onChange: setTenantId, options: [
+            { label: "Tenant", value: tenantId, onChange: setTenantId, options: [
               { label: "All tenants", value: "" },
               ...tenants.map((t) => ({ label: t.name, value: t.id })),
             ] },
-            { value: typeF, onChange: setTypeF, options: [
+            { label: "Type", value: typeF, onChange: setTypeF, options: [
               { label: "All types", value: "" },
               ...["shared", "dedicated", "restricted", "internal"].map((v) => ({ label: TENANT_TYPE_LABEL[v], value: v })),
             ] },
-            { value: plan, onChange: setPlan, options: [
+            { label: "Plan", value: plan, onChange: setPlan, options: [
               { label: "All plans", value: "" },
               ...plans.map((p) => ({ label: p.name, value: p.id })),
             ] },
-            { value: statusF, onChange: setStatusF, options: [
+            { label: "Status", value: statusF, onChange: setStatusF, options: [
               { label: "Any status", value: "" },
               ...["active", "suspended"].map((v) => ({ label: v, value: v })),
             ] },
