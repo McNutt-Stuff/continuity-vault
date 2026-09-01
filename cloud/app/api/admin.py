@@ -456,6 +456,41 @@ def admin_appliance_detail(aid: str,
     return view
 
 
+class ReassignAppliance(BaseModel):
+    tenant_id: str
+
+
+@router.post("/appliances/{aid}/reassign")
+def admin_reassign_appliance(aid: str, body: ReassignAppliance,
+                             principal: security.Principal = Depends(security.require_platform_admin),
+                             db: Session = Depends(get_db)):
+    """Move an appliance (and its storage / commands / assignments) to another
+    tenant. Used to re-link an appliance that was orphaned when its owner's account
+    was migrated to a new plan (which creates a new tenant). The appliance keeps its
+    identity + agent token, so it stays paired — only its ownership changes, and it
+    reappears in the target account's fleet + the customer's Appliances view."""
+    from ..models import ApplianceStorage, ApplianceCommand, ApplianceAssignment
+    a = db.get(Appliance, aid)
+    if not a:
+        raise HTTPException(404, "appliance not found")
+    target = db.get(Tenant, body.tenant_id)
+    if not target:
+        raise HTTPException(404, "target tenant not found")
+    old_tid = a.tenant_id
+    a.tenant_id = target.id
+    db.query(ApplianceStorage).filter(ApplianceStorage.appliance_id == aid).update(
+        {ApplianceStorage.tenant_id: target.id}, synchronize_session=False)
+    db.query(ApplianceCommand).filter(ApplianceCommand.appliance_id == aid).update(
+        {ApplianceCommand.tenant_id: target.id}, synchronize_session=False)
+    db.query(ApplianceAssignment).filter(ApplianceAssignment.appliance_id == aid).update(
+        {ApplianceAssignment.tenant_id: target.id}, synchronize_session=False)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.appliance_reassigned",
+                 tenant_id=target.id, resource=aid, category="admin", severity="notice",
+                 detail={"from_tenant": old_tid, "to_tenant": target.id, "serial": a.serial})
+    return {"ok": True, "tenant_id": target.id, "tenant_name": target.name}
+
+
 @router.get("/crypto-profiles")
 def crypto_profiles():
     """Cryptographic-profile registry + quantum-transition inventory (spec 9.7)."""

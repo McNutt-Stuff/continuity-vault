@@ -3203,6 +3203,20 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
     try { const r = await api.put<any>(`/admin/appliances/${id}/config-profile`, { profile_id: pid || null }); setA((prev: any) => ({ ...prev, config_profile: r.config_profile })); flash(pid ? "Profile assigned" : "Profile unassigned"); }
     catch (e) { flash((e as { message?: string }).message || "Assignment failed"); }
   }
+  async function reassign() {
+    let tenants: any[] = [];
+    try { tenants = await api.get<any[]>("/admin/tenants"); } catch { flash("Could not load tenants"); return; }
+    const r = await formDialog({
+      title: "Re-link appliance to an account",
+      message: `Move ${a.name || a.serial} to another tenant. The appliance keeps its identity and stays paired — only its ownership changes. Use this to re-link an appliance that was orphaned when its owner upgraded/downgraded their plan.`,
+      confirmLabel: "Re-link",
+      fields: [{ name: "tenant_id", label: "Target account / tenant", defaultValue: a.tenant?.id || "",
+        options: tenants.map((t) => ({ label: `${t.name} (${TENANT_TYPE_LABEL[t.tenant_type] || t.tenant_type})`, value: t.id })) }],
+    });
+    if (!r || !r.tenant_id) return;
+    try { const res = await api.post<any>(`/admin/appliances/${id}/reassign`, { tenant_id: r.tenant_id }); flash(`Re-linked to ${res.tenant_name}`); await load(); }
+    catch (e) { flash((e as { message?: string }).message || "Re-link failed"); }
+  }
   if (!a) return <Card><button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 10 }}>← Fleet</button><div className="muted">Loading appliance…</div></Card>;
 
   const tel = a.telemetry || {};
@@ -3227,6 +3241,9 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
           <div className="row" style={{ gap: 8 }}>
             <button className="btn sm" disabled={!a.online} title={a.online ? "Open a remote terminal" : "Appliance is offline"} onClick={() => setTerm(true)}>
               <Icon name="server" size={13} /> Remote terminal
+            </button>
+            <button className="btn sm" onClick={reassign} title="Move this appliance to another account/tenant (re-link)">
+              <Icon name="link" size={13} /> Re-link
             </button>
             <button className="btn sm" onClick={() => void load()}><Icon name="activity" size={13} /> Refresh</button>
           </div>
