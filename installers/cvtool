@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+#
+# cvtool — Arkive appliance troubleshooting CLI.
+#
+# Usage: cvtool <command> [options]   (run `cvtool help` for the full reference)
+#
+# Runs on every appliance type (hardware + VM). Read-only commands (info/stats)
+# work as any user; privileged commands (update/restart/link/unlink/re-link)
+# auto-elevate with sudo so they also work from the reverse-tunnel shell (cvagent).
+#
+# ADDING A COMMAND (kept simple so future commands drop in without ceremony):
+#   1. add a cmd_<name>() function below,
+#   2. add it to the dispatch case in main(),
+#   3. if it changes the system, add its bare name to the PRIVILEGED case,
+#   4. add a line to cmd_help() and a row to appliance/CVTOOL.md.
+#   Keep those in sync. See appliance/CVTOOL.md for the full convention.
+
+set -u
+
+INSTALL_DIR="/opt/continuity-vault"
+ENV_FILE="/etc/continuity-vault/appliance.env"
+AGENT_URL="http://127.0.0.1:8090"
+SELF="/usr/local/bin/cvtool"
+CV_USER="cvagent"
+
+# --- helpers ----------------------------------------------------------------
+env_get() { sed -n "s/^$1=//p" "$ENV_FILE" 2>/dev/null | tr -d '"' | head -1; }
+data_dir() { local d; d="$(env_get CVA_DATA_DIR)"; echo "${d:-/var/lib/continuity-vault-appliance/data}"; }
+status_json() { curl -fsS --max-time 4 "$AGENT_URL/status" 2>/dev/null || true; }
+pairing_json() { curl -fsS --max-time 4 "$AGENT_URL/pairing" 2>/dev/null || true; }
+
+set_env() {
+  local k="$1" v="$2"
+  [ -f "$ENV_FILE" ] || { echo "config not found: $ENV_FILE" >&2; return 1; }
+  if grep -q "^$k=" "$ENV_FILE"; then sed -i "s#^$k=.*#$k=$v#" "$ENV_FILE"
+  else echo "$k=$v" >> "$ENV_FILE"; fi
+}
+
+# --- commands ---------------------------------------------------------------
+cmd_info() {
+  local js; js="$(status_json)"
+  [ -z "$js" ] && echo "(agent not responding on $AGENT_URL — is cv-appliance-agent running?)"
+  CVTOOL_CLOUD="$(env_get CVA_CLOUD_BASE_URL)" python3 - "$js" <<'PY'
+import sys, json, os
+try: d = json.loads(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] else {}
+except Exception: d = {}
+t = d.get("telemetry", {}) or {}
+def line(k, v): print(f"  {k:<15}: {v}")
+print("Arkive Appliance")
+line("Serial", d.get("serial", "—"))
+line("Model", t.get("model", "—"))
+line("Type", "Virtual machine" if t.get("model_kind") == "vm" else "Physical hardware")
+line("Version", d.get("software_version", "—"))
+line("Activated", d.get("activated"))
+line("Appliance ID", d.get("appliance_id") or "— (awaiting pairing)")
+line("State", d.get("state", "—"))
+line("Hostname", t.get("hostname", "—"))
+line("Local IP", t.get("local_ip", "—"))
+line("Cloud", os.environ.get("CVTOOL_CLOUD") or t.get("cloud_url", "—"))
+line("Storage", f"{t.get('storage_kind','—')} @ {t.get('data_path','—')}")
+PY
+}
+
+cmd_stats() {
+  local js; js="$(status_json)"
+  [ -z "$js" ] && { echo "(agent not responding on $AGENT_URL)"; return 1; }
+  python3 - "$js" <<'PY'
+import sys, json
+d = json.loads(sys.argv[1]); t = d.get("telemetry", {}) or {}
+def gib(n):
+    try: n = float(n)
+    except Exception: return "—"
+    for u in ("B","KB","MB","GB","TB","PB"):
+        if n < 1024: return f"{n:.1f} {u}"
+        n /= 1024
+    return f"{n:.1f} EB"
+def pct(u, tot):
+    try: return f"{(float(u)/float(tot)*100):.0f}%"
+    except Exception: return "—"
+print("Appliance stats")
+cap_t, cap_u = t.get("capacity_total_bytes",0), t.get("capacity_used_bytes",0)
+print(f"  {t.get('storage_kind','built-in').title()} storage : {gib(cap_u)} / {gib(cap_t)} ({pct(cap_u,cap_t)})")
+osd = t.get("os_storage") or {}
+if osd:
+    print(f"  OS / system disk    : {gib(osd.get('used_bytes'))} / {gib(osd.get('total_bytes'))} ({osd.get('pct','—')}%)  {osd.get('filesystem','')} {osd.get('device','')}")
+la = t.get("load_avg") or []
+print(f"  Load average        : {' '.join(str(x) for x in la) if la else '—'}  ({t.get('cpu_count','—')} cores)")
+mt, ma = t.get("mem_total_bytes",0), t.get("mem_available_bytes",0)
+print(f"  Memory              : {gib((mt-ma) if mt else 0)} / {gib(mt)}")
+up = t.get("uptime_seconds") or 0
+print(f"  Uptime              : {up//86400}d {up%86400//3600}h {up%3600//60}m")
+print(f"  Recovery points     : {t.get('snapshots','—')}   Objects: {t.get('objects','—')}")
+print(f"  State               : {d.get('state','—')}   Tamper: {d.get('tamper_state','—')}")
+for s in t.get("storages", []) or []:
+    h = s.get("health", {}) or {}
+    raid = h.get("raid", {}) or {}; smart = h.get("smart", {}) or {}
+    print(f"  Volume {s.get('name','?')}: RAID={raid.get('status') if raid.get('enabled') else 'none'} "
+          f"SMART={smart.get('status') if smart.get('enabled') else 'n/a'} FS={h.get('filesystem','—')}")
+PY
+}
+
+cmd_update() {
+  local force=0 a
+  for a in "$@"; do [ "$a" = "--force" ] && force=1; done
+  local script="$INSTALL_DIR/installers/appliance-update.sh"
+  [ -f "$script" ] || { echo "update script not found: $script" >&2; return 1; }
+  echo "Running appliance self-update$([ "$force" = 1 ] && echo ' (forced)')…"
+  if [ "$force" = 1 ]; then CV_FORCE=1 bash "$script"; else bash "$script"; fi
+}
+
+cmd_restart() {
+  case "${1:-service}" in
+    service|agent) systemctl restart cv-appliance-agent.service && echo "cv-appliance-agent restarted." ;;
+    system|host|reboot) echo "Rebooting the appliance…"; reboot ;;
+    *) echo "usage: cvtool restart [service|system]" >&2; return 1 ;;
+  esac
+}
+
+cmd_link() {
+  local code="${1:-}"
+  if [ -z "$code" ]; then
+    local pj; pj="$(pairing_json)"
+    if printf '%s' "$pj" | grep -q '"activated": *true\|"activated":true'; then
+      echo "This appliance is already linked. Use 'cvtool re-link CODE' to move it."
+    else
+      local pc; pc="$(printf '%s' "$pj" | sed -n 's/.*"pairing_code": *"\([^"]*\)".*/\1/p')"
+      echo "This appliance is NOT linked yet."
+      [ -n "$pc" ] && echo "Pairing code: $pc  (enter it in the Arkive portal, or run: cvtool link <linking-code>)"
+      [ -z "$pc" ] && echo "Run 'cvtool link <linking-code>' with a code from the Arkive portal."
+    fi
+    return 0
+  fi
+  set_env CVA_LINKING_CODE "$code" || return 1
+  systemctl restart cv-appliance-agent.service
+  echo "Linking code applied — the agent is activating. Check 'cvtool info' in a moment."
+}
+
+cmd_unlink() {
+  systemctl stop cv-appliance-agent.service 2>/dev/null || true
+  local dd; dd="$(data_dir)"
+  rm -f "$dd/registration.json" "$dd/pending.json" 2>/dev/null || true
+  set_env CVA_LINKING_CODE "" || true
+  systemctl start cv-appliance-agent.service 2>/dev/null || true
+  echo "Appliance unlinked (cloud registration cleared; serial + keys kept)."
+  echo "It will re-register and show a new pairing code — run 'cvtool link' to see it."
+}
+
+cmd_relink() {
+  cmd_unlink
+  if [ -n "${1:-}" ]; then sleep 2; cmd_link "$1"; fi
+}
+
+cmd_help() {
+  cat <<'EOF'
+cvtool — Arkive appliance troubleshooting CLI
+
+Usage: cvtool <command> [options]
+
+Commands:
+  info                 Identity, model/type, version, cloud routing, storage
+  stats                Live storage (dedicated + OS disk), CPU/memory, uptime, drive health
+  update [--force]     Pull + apply the latest appliance software (--force skips the version check)
+  restart service      Restart the appliance agent (cv-appliance-agent)
+  restart system       Reboot the appliance host
+  link [CODE]          Link to an account with a portal linking code; no CODE shows the pairing code
+  unlink               Forget the cloud link (keeps serial/keys); re-registers for pairing
+  re-link [CODE]       Unlink, then link again (optionally with a new CODE)
+  help                 Show this reference
+
+Privileged commands (update/restart/link/unlink/re-link) auto-elevate with sudo,
+so they also work from the reverse-tunnel shell.
+EOF
+}
+
+# --- dispatch ---------------------------------------------------------------
+main() {
+  local cmd="${1:-help}"; shift 2>/dev/null || true
+  case "$cmd" in
+    -h|--help|help|"") cmd_help; return 0 ;;
+  esac
+  # Auto-elevate the system-changing commands.
+  case "$cmd" in
+    update|restart|link|unlink|re-link|relink)
+      if [ "$(id -u)" -ne 0 ]; then
+        if sudo -n true 2>/dev/null; then exec sudo -n "$SELF" "$cmd" "$@"; fi
+        echo "cvtool: '$cmd' requires root. Try: sudo cvtool $cmd $*" >&2; exit 1
+      fi ;;
+  esac
+  case "$cmd" in
+    info) cmd_info "$@" ;;
+    stats) cmd_stats "$@" ;;
+    update) cmd_update "$@" ;;
+    restart) cmd_restart "$@" ;;
+    link) cmd_link "$@" ;;
+    unlink) cmd_unlink "$@" ;;
+    re-link|relink) cmd_relink "$@" ;;
+    *) echo "cvtool: unknown command '$cmd'"; echo; cmd_help; exit 1 ;;
+  esac
+}
+
+main "$@"

@@ -653,6 +653,7 @@ _BUNDLE_FILES = (
     "installers/appliance-install.sh",
     "installers/appliance-bootstrap.sh",
     "installers/appliance-update.sh",
+    "installers/cvtool",
     "infra/systemd/cv-appliance-agent.service",
     "infra/systemd/cv-appliance-selfupdate.service",
     "infra/systemd/cv-appliance-selfupdate.timer",
@@ -965,8 +966,12 @@ def heartbeat(body: HeartbeatRequest,
         appliance.software_version = body.software_version
         appliance.version_updated_at = _now()
     # Auto-map a dedicated-storage appliance's capacity to its CV Edge model, then
-    # rebrand the OEM DMI strings to the Arkive product line for the UI.
-    if tel.get("storage_kind") == "dedicated":
+    # rebrand the OEM DMI strings to the Arkive product line for the UI. A VM is
+    # always the CV Edge VM model.
+    if tel.get("model_kind") == "vm":
+        if appliance.model != "CV Edge VM":
+            appliance.model = "CV Edge VM"
+    elif tel.get("storage_kind") == "dedicated":
         cap_total = int(tel.get("capacity_total_bytes") or 0)
         if cap_total:
             mapped = _model_for_capacity(db, cap_total, appliance.model)

@@ -123,6 +123,15 @@ install_service() {
   systemctl restart cv-appliance-agent.service
 }
 
+# Install the cvtool troubleshooting CLI to /usr/local/bin and let the reverse-
+# tunnel service account run its privileged commands via sudo (NOPASSWD).
+install_cvtool() {
+  install -m 0755 "$INSTALL_DIR/installers/cvtool" /usr/local/bin/cvtool 2>/dev/null || \
+    { cp "$INSTALL_DIR/installers/cvtool" /usr/local/bin/cvtool && chmod 0755 /usr/local/bin/cvtool; }
+  echo "${CV_USER} ALL=(root) NOPASSWD: /usr/local/bin/cvtool" > /etc/sudoers.d/cvtool
+  chmod 0440 /etc/sudoers.d/cvtool
+}
+
 install_selfupdate() {
   # Headless self-update: a timer periodically pulls the cloud bundle and
   # re-installs when the version changed (no git required).
@@ -201,6 +210,7 @@ step_always "Validating agent"             validate_app
 step_always "Writing appliance configuration" write_config
 step_always "Preparing dedicated storage"  setup_dedicated_storage
 step_always "Starting appliance agent"     install_service
+step_always "Installing cvtool CLI"        install_cvtool
 step_always "Enabling headless self-update" install_selfupdate
 step_always "Verifying appliance agent"    verify_agent
 step_always "Setting system hostname"      set_appliance_hostname

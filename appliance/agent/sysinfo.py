@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -146,13 +147,64 @@ def net_io() -> dict:
     return {"bytes_sent": sent, "bytes_recv": recv}
 
 
-def smart_status() -> dict:
-    """Best-effort SMART health for the primary disk (needs smartmontools)."""
-    out = _run(["smartctl", "-H", "/dev/sda"])
+def smart_status(device: str = "/dev/sda") -> dict:
+    """Best-effort SMART health for a single device (needs smartmontools)."""
+    out = _run(["smartctl", "-H", device])
     if not out:
         return {"enabled": False}
     passed = "PASSED" in out or "OK" in out.upper()
     return {"enabled": True, "status": "passed" if passed else "failing"}
+
+
+def fs_type(path: str) -> str:
+    """Filesystem type backing a path (ext4/xfs/zfs/btrfs…), best-effort."""
+    out = _run(["findmnt", "-n", "-o", "FSTYPE", "--target", path])
+    return out.strip() if out else ""
+
+
+def _backing_devices(path: str) -> list[str]:
+    """Whole physical disks backing a mount, resolving software-RAID members."""
+    src = mount_device(path)
+    if not src.startswith("/dev/"):
+        return []
+    base = src.rsplit("/", 1)[-1]
+    if base.startswith("md"):
+        devs: list[str] = []
+        for line in _read("/proc/mdstat").splitlines():
+            if line.startswith(base + " ") or line.startswith(base + ":"):
+                for p in line.split():
+                    if "[" in p and not p.startswith("["):
+                        m = "/dev/" + re.sub(r"\d+$", "", p.split("[")[0])
+                        if m not in devs:
+                            devs.append(m)
+        return devs
+    return ["/dev/" + re.sub(r"\d+$", "", base)]
+
+
+def smart_for_path(path: str) -> dict:
+    """Aggregate SMART health across the physical drives backing ``path``."""
+    drives: list[dict] = []
+    all_ok = True
+    for d in _backing_devices(path) or ["/dev/sda"]:
+        s = smart_status(d)
+        if not s.get("enabled"):
+            continue
+        ok = s.get("status") == "passed"
+        all_ok = all_ok and ok
+        drives.append({"device": d, "status": s.get("status", "unknown")})
+    if not drives:
+        return {"enabled": False}
+    return {"enabled": True, "status": "passed" if all_ok else "failing", "drives": drives}
+
+
+def os_disk() -> dict:
+    """Usage + identity of the built-in OS / system disk (root filesystem) — tracked
+    separately from the dedicated Arkive storage volume."""
+    d = disk_stats("/")
+    total, used = d["disk_total_bytes"], d["disk_used_bytes"]
+    return {"total_bytes": total, "used_bytes": used, "free_bytes": d["disk_free_bytes"],
+            "pct": round(used / total * 100, 1) if total else 0.0,
+            "device": mount_device("/"), "filesystem": fs_type("/")}
 
 
 def raid_status() -> dict:
@@ -217,8 +269,10 @@ def storage_report(path: str, name: str, kind: str, raw_total: int, used_bytes: 
     used = used_bytes or disk["disk_used_bytes"]
     health = {
         "drive_health": "healthy",
-        "smart": smart_status(),
+        "smart": smart_for_path(path),
         "raid": raid_status(),
+        "filesystem": fs_type(path),
+        "device": mount_device(path),
     }
     temp = drive_temperature_c()
     if temp is not None:

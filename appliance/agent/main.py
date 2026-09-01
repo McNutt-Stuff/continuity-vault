@@ -512,6 +512,9 @@ class Agent:
             "capacity_total_bytes": raw_total,
             "capacity_used_bytes": vol_used,
             "disk_free_bytes": disk["disk_free_bytes"],
+            # The built-in OS / system disk, tracked separately from the dedicated
+            # Arkive storage volume (admins monitor both).
+            "os_storage": sysinfo.os_disk(),
             "snapshots": cap.get("snapshots", 0),
             "objects": cap.get("objects", cap.get("snapshots", 0)),
             "drive_health": "healthy",

@@ -3179,7 +3179,8 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
   const [tab, setTab] = useState<ApplianceTab>("health");
   const [toast, setToast] = useState("");
   const [term, setTerm] = useState(false);
-  const buf = useRef<Record<string, number[]>>({ cpu: [], mem: [], disk: [] });
+  const [openStore, setOpenStore] = useState<string | null>(null);
+  const buf = useRef<Record<string, number[]>>({ cpu: [], mem: [], disk: [], os: [] });
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 2800); }
   async function load() {
     try {
@@ -3194,6 +3195,7 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
       push("cpu", cc ? Math.min(100, (l1 / cc) * 100) : 0);
       push("mem", mt ? ((mt - ma) / mt) * 100 : 0);
       push("disk", ct ? (cu / ct) * 100 : 0);
+      push("os", Number(t.os_storage?.pct) || 0);
     } catch { /* ignore */ }
   }
   useEffect(() => { void load(); const iv = setInterval(load, 7000); return () => clearInterval(iv);
@@ -3230,6 +3232,9 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
   const capTotal = Number(tel.capacity_total_bytes) || 0;
   const capUsed = Number(tel.capacity_used_bytes) || 0;
   const diskPct = capTotal ? (capUsed / capTotal) * 100 : undefined;
+  const osTotal = Number(tel.os_storage?.total_bytes) || 0;
+  const osUsed = Number(tel.os_storage?.used_bytes) || 0;
+  const osPct = osTotal ? (osUsed / osTotal) * 100 : undefined;
   const logLines: string[] = Array.isArray(tel.recent_logs) ? tel.recent_logs : [];
 
   return (
@@ -3300,13 +3305,15 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
 
       {tab === "health" && (
         <>
-          <div className="grid grid-4" style={{ marginBottom: 14 }}>
+          <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(165px, 1fr))", gap: 12, marginBottom: 14 }}>
             <Card><div style={{ display: "flex", justifyContent: "center" }}><Ring value={cpuPct ?? 0} label="CPU load" sub={`${cpuCount || "—"} core${cpuCount === 1 ? "" : "s"}`} /></div>
               <div style={{ marginTop: 6 }}><Sparkline data={buf.current.cpu} width={999} color="#4f7cff" max={100} /></div></Card>
             <Card><div style={{ display: "flex", justifyContent: "center" }}><Ring value={memPct ?? 0} label="Memory" sub={memTotal ? `${bytes(memUsed)}/${bytes(memTotal)}` : ""} color="#35d0a5" /></div>
               <div style={{ marginTop: 6 }}><Sparkline data={buf.current.mem} width={999} color="#35d0a5" max={100} /></div></Card>
-            <Card><div style={{ display: "flex", justifyContent: "center" }}><Ring value={diskPct ?? 0} label="Storage" sub={capTotal ? `${bytes(capUsed)}/${bytes(capTotal)}` : ""} color="#f5a623" /></div>
+            <Card><div style={{ display: "flex", justifyContent: "center" }}><Ring value={diskPct ?? 0} label={tel.storage_kind === "dedicated" ? "Dedicated storage" : "Storage"} sub={capTotal ? `${bytes(capUsed)}/${bytes(capTotal)}` : ""} color="#f5a623" /></div>
               <div style={{ marginTop: 6 }}><Sparkline data={buf.current.disk} width={999} color="#f5a623" max={100} /></div></Card>
+            <Card><div style={{ display: "flex", justifyContent: "center" }}><Ring value={osPct ?? 0} label="OS / system disk" sub={osTotal ? `${bytes(osUsed)}/${bytes(osTotal)}` : "—"} color="#c56cf0" /></div>
+              <div style={{ marginTop: 6 }}><Sparkline data={buf.current.os} width={999} color="#c56cf0" max={100} /></div></Card>
             <Card>
               <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>Network &amp; cloud</div>
               <div style={{ fontWeight: 700 }}>↓ {bytes(tel.net_bytes_recv || 0)}</div>
@@ -3348,6 +3355,10 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
             <div className="stack" style={{ gap: 10 }}>
               {(a.stores || []).map((s: any) => {
                 const pct = s.capacity_bytes ? Math.min(100, (s.used_bytes / s.capacity_bytes) * 100) : 0;
+                const h = s.health || {};
+                const raid = h.raid || {};
+                const smart = h.smart || {};
+                const open = openStore === s.id;
                 return (
                   <div key={s.id}>
                     <div className="spread" style={{ fontSize: 12.5 }}>
@@ -3357,18 +3368,53 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
                     <div style={{ height: 6, background: "var(--inset)", borderRadius: 3, marginTop: 3 }}>
                       <div style={{ height: "100%", width: `${pct}%`, borderRadius: 3, background: pct >= 90 ? "#f2545b" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
                     </div>
-                    {s.health && (s.health.drive_health || s.health.temperature_c != null || s.health.raid?.enabled) && (
-                      <div className="row" style={{ gap: 6, marginTop: 5, flexWrap: "wrap" }}>
-                        {s.health.drive_health && <Pill tone={s.health.drive_health === "healthy" ? "ok" : "danger"} dot>drive {s.health.drive_health}</Pill>}
-                        {s.health.raid?.enabled && <Pill tone={s.health.raid.status === "optimal" ? "ok" : s.health.raid.status === "rebuilding" ? "warn" : "danger"} dot>RAID {s.health.raid.status}{s.health.raid.arrays?.[0]?.level ? ` · ${s.health.raid.arrays[0].level}` : ""}</Pill>}
-                        {s.health.smart?.enabled && <Pill tone={s.health.smart.status === "passed" ? "ok" : "danger"} dot>SMART {s.health.smart.status}</Pill>}
-                        {s.health.temperature_c != null && <Pill tone={s.health.temperature_c >= 60 ? "warn" : "info"}>{s.health.temperature_c}°C</Pill>}
+                    <div className="row" style={{ gap: 6, marginTop: 5, flexWrap: "wrap", alignItems: "center" }}>
+                      <Pill tone={h.drive_health === "healthy" ? "ok" : h.drive_health ? "danger" : "info"} dot>Drive {h.drive_health || "unknown"}</Pill>
+                      <Pill tone={!raid.enabled ? "info" : raid.status === "optimal" ? "ok" : raid.status === "rebuilding" ? "warn" : "danger"} dot={!!raid.enabled}>RAID {raid.enabled ? raid.status : "not configured"}</Pill>
+                      <Pill tone={!smart.enabled ? "info" : smart.status === "passed" ? "ok" : "danger"} dot={!!smart.enabled}>SMART {smart.enabled ? smart.status : "n/a"}</Pill>
+                      {h.temperature_c != null && <Pill tone={h.temperature_c >= 60 ? "warn" : "info"}>{h.temperature_c}°C</Pill>}
+                      <button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => setOpenStore(open ? null : s.id)}>
+                        {open ? "Hide" : "Drive health"} {open ? "▴" : "▾"}
+                      </button>
+                    </div>
+                    {open && (
+                      <div style={{ marginTop: 8, padding: "4px 12px", background: "var(--inset)", borderRadius: 8 }}>
+                        <Row2 label="Drive health" value={<Pill tone={h.drive_health === "healthy" ? "ok" : h.drive_health ? "danger" : "info"} dot>{h.drive_health || "unknown"}</Pill>} />
+                        <Row2 label="Filesystem" value={h.filesystem || "—"} />
+                        <Row2 label="Backing device" value={h.device || "—"} />
+                        <Row2 label="Temperature" value={h.temperature_c != null ? `${h.temperature_c}°C` : "not reported"} />
+                        <Row2 label="RAID" value={raid.enabled
+                          ? <span className="row" style={{ gap: 6, alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap" }}>
+                              <Pill tone={raid.status === "optimal" ? "ok" : raid.status === "rebuilding" ? "warn" : "danger"} dot>{raid.status}</Pill>
+                              {(raid.arrays || []).map((ar: any) => <span key={ar.name} className="faint" style={{ fontSize: 11 }}>{ar.name} · {ar.level}{ar.member_map ? ` ${ar.member_map}` : ""}</span>)}
+                            </span>
+                          : "Not configured (single disk)"} />
+                        <Row2 label="SMART" value={smart.enabled
+                          ? <span className="row" style={{ gap: 6, alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap" }}>
+                              <Pill tone={smart.status === "passed" ? "ok" : "danger"} dot>{smart.status}</Pill>
+                              {(smart.drives || []).map((dr: any) => <span key={dr.device} className="faint" style={{ fontSize: 11 }}>{dr.device.replace("/dev/", "")}:{dr.status}</span>)}
+                            </span>
+                          : "Not available (no SMART passthrough / smartmontools)"} />
                       </div>
                     )}
                   </div>
                 );
               })}
               {(a.stores || []).length === 0 && <div className="muted">No storage reported.</div>}
+              {tel.os_storage && (
+                <div style={{ borderTop: "1px solid var(--border-soft)", paddingTop: 10 }}>
+                  <div className="spread" style={{ fontSize: 12.5 }}>
+                    <span style={{ fontWeight: 600 }}>OS / system disk <span className="faint" style={{ fontWeight: 400, fontSize: 11 }}>· built-in</span></span>
+                    <span className="faint">{bytes(tel.os_storage.used_bytes || 0)} / {bytes(tel.os_storage.total_bytes || 0)}</span>
+                  </div>
+                  <div style={{ height: 6, background: "var(--inset)", borderRadius: 3, marginTop: 3 }}>
+                    <div style={{ height: "100%", width: `${Math.min(100, tel.os_storage.pct || 0)}%`, borderRadius: 3, background: (tel.os_storage.pct || 0) >= 90 ? "#f2545b" : "#c56cf0" }} />
+                  </div>
+                  <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+                    {tel.os_storage.filesystem || "—"} · {tel.os_storage.device || "—"} · {bytes(tel.os_storage.free_bytes || 0)} free
+                  </div>
+                </div>
+              )}
             </div>
           </Card>
           <Card>
