@@ -1091,10 +1091,38 @@ class BillingCharge(Base):
     currency = Column(String, default="USD")
     status = Column(String, default="pending")             # succeeded | failed | pending
     attempt = Column(Integer, default=1)
-    kind = Column(String, default="recurring")             # recurring | manual | setup
+    kind = Column(String, default="recurring")             # recurring | manual | setup | one-time
+    description = Column(String, default="")               # line-item label (one-time charges, e.g. appliance)
     processor_charge_id = Column(String, default="")
     error = Column(String, default="")
     created_at = Column(DateTime, default=_now)
+
+
+class QueueItem(Base):
+    """Durable registry of a protection activity that must be delivered to a
+    destination which may be temporarily unreachable — an offline appliance, or
+    a cloud/customer-storage backend that failed to accept a write. The queue
+    self-drains: a background worker retries due items with backoff and marks
+    them done once the connection is restored, so no backup is silently lost."""
+
+    __tablename__ = "queue_items"
+    id = Column(String, primary_key=True, default=_uuid)
+    node_id = Column(String, nullable=True, index=True)     # owning node (None = control plane)
+    tenant_id = Column(String, index=True)
+    collection_id = Column(String, nullable=True, index=True)
+    snapshot_id = Column(String, nullable=True)
+    kind = Column(String, default="storage_write")          # storage_write | appliance_ingest | cloud_sync
+    target = Column(String, default="")                     # dest kind: cv-cloud | customer-s3 | byos:<id> | store:<id> | appliance:<id>
+    label = Column(String, default="")                      # human label (source → destination)
+    status = Column(String, default="queued", index=True)   # queued | delivering | done | failed | canceled
+    attempts = Column(Integer, default=0)
+    max_attempts = Column(Integer, default=10)
+    next_attempt_at = Column(DateTime, nullable=True)
+    last_error = Column(String, default="")
+    detail = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+    resolved_at = Column(DateTime, nullable=True)
 
 
 class CustomerStorage(Base):

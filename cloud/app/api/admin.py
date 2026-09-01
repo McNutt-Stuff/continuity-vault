@@ -1059,6 +1059,13 @@ def get_user(uid: str,
     }
     view["sources"] = sources
     view["activity"] = activity
+    # Contact / mailing addresses (from the account's address book).
+    from ..models import UserAddress
+    from .auth import _address_view
+    addrs = (db.query(UserAddress).filter(UserAddress.user_id == uid)
+             .order_by(UserAddress.kind.asc(), UserAddress.is_default.desc(),
+                       UserAddress.created_at.asc()).all())
+    view["addresses"] = [_address_view(a) for a in addrs]
     return view
 
 
@@ -1850,6 +1857,51 @@ def node_backup_now(nid: str,
         raise HTTPException(400, "public-web nodes serve the marketing site only — "
                                  "they have no database or keys to back up")
     raise HTTPException(400, "backups can't be triggered remotely for this node type")
+
+
+@router.get("/nodes/{nid}/queue")
+def node_queue(nid: str, db: Session = Depends(get_db)):
+    """Durable activity queue for a node — backups pending delivery to an offline
+    appliance or unreachable storage backend, plus their retry schedule. Reads the
+    self node's local queue, or proxies to a remote customer node."""
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    from .. import queue_registry
+    if n.is_self:
+        return queue_registry.list_items(db, node_id=nid, include_self_null=True)
+    if _remote_capable(n):
+        try:
+            return _node_call(n, "/nodes/sync/queue")
+        except Exception:  # noqa: BLE001
+            return {"active": [], "recent": [], "counts": {"active": 0, "failed": 0},
+                    "unreachable": True}
+    return queue_registry.list_items(db, node_id=nid)
+
+
+class QueueAction(BaseModel):
+    action: str  # retry | cancel
+
+
+@router.post("/nodes/{nid}/queue/{qid}/action")
+def node_queue_action(nid: str, qid: str, body: QueueAction, db: Session = Depends(get_db)):
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    from .. import queue_registry
+    if n.is_self:
+        if body.action == "retry":
+            queue_registry.retry(db, qid)
+        elif body.action == "cancel":
+            queue_registry.cancel(db, qid)
+        return {"ok": True}
+    if _remote_capable(n):
+        try:
+            return _node_call(n, "/nodes/sync/queue/action", method="POST",
+                              json={"id": qid, "action": body.action})
+        except Exception:  # noqa: BLE001
+            raise HTTPException(502, "node unreachable")
+    raise HTTPException(400, "queue actions are not available for this node type")
 
 
 @router.get("/nodes/{nid}/tenants")

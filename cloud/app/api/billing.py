@@ -896,8 +896,47 @@ _NO_PROCESSOR = (
 def _charge_view(c: BillingCharge) -> dict:
     return {"id": c.id, "amount_cents": c.amount_cents, "currency": c.currency,
             "status": c.status, "attempt": c.attempt, "kind": c.kind,
+            "description": getattr(c, "description", "") or "",
+            "recurring": (c.kind == "recurring"),
             "processor_charge_id": c.processor_charge_id, "error": c.error,
             "created_at": c.created_at.isoformat() if c.created_at else None}
+
+
+def _invoice_lines(db: Session, prof: BillingProfile) -> dict:
+    """Itemized breakdown of what the tenant's recurring charge is composed of —
+    the line items shown on the invoice for a recurring subscription."""
+    t = db.get(Tenant, prof.tenant_id)
+    if t is None:
+        return {"lines": [], "total_cents": int(prof.amount_cents or 0),
+                "currency": prof.currency or "USD"}
+    owner = (db.query(User).filter(User.tenant_id == t.id)
+             .order_by(User.created_at.asc()).first())
+    try:
+        view = plan_view(db, owner, t)
+    except Exception:  # noqa: BLE001
+        return {"lines": [], "total_cents": int(prof.amount_cents or 0),
+                "currency": prof.currency or "USD"}
+    costs = view.get("costs") or {}
+    plan = view.get("license_plan") or {}
+    cur = view.get("currency") or "USD"
+    lines: list[dict] = []
+    prot = float(costs.get("protection_monthly") or 0)
+    if prot:
+        lines.append({"label": f"{plan.get('name', 'Plan')} — data protection",
+                      "detail": f"{view.get('billable_tb', 0)} TB × ${plan.get('price_per_tb_month', 0)}/TB·mo",
+                      "amount_cents": int(round(prot * 100))})
+    cloud = float(costs.get("cloud_storage_monthly") or 0)
+    if cloud:
+        lines.append({"label": "Arkive Cloud storage",
+                      "detail": f"{view.get('used_tb', 0)} TB stored",
+                      "amount_cents": int(round(cloud * 100))})
+    appl = float(costs.get("appliance_monthly") or 0)
+    if appl:
+        lines.append({"label": "Appliance lease", "detail": "",
+                      "amount_cents": int(round(appl * 100))})
+    total = int(round(float(costs.get("total_monthly") or 0) * 100)) or int(prof.amount_cents or 0)
+    return {"lines": lines, "total_cents": total, "currency": cur,
+            "interval": prof.interval or "month"}
 
 
 @admin_router.get("/profiles", dependencies=[Depends(security.require_platform_admin)])
@@ -1004,12 +1043,144 @@ def admin_profile_detail(pid: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "billing profile not found")
     t = db.get(Tenant, prof.tenant_id)
     charges = (db.query(BillingCharge).filter(BillingCharge.profile_id == pid)
-               .order_by(BillingCharge.created_at.desc()).limit(100).all())
+               .order_by(BillingCharge.created_at.desc()).limit(200).all())
     v = _profile_view(db, prof)
     v["tenant_name"] = t.name if t else "(unknown)"
     v["account_name"] = _account_name(db, prof, t)
-    v["charges"] = [_charge_view(c) for c in charges]
+    all_charges = [_charge_view(c) for c in charges]
+    v["charges"] = all_charges
+    # Split the ledger: recurring subscription charges vs one-time (appliance
+    # purchase, manual, setup) — the customer's "Billing history".
+    v["recurring_charges"] = [c for c in all_charges if c["recurring"]]
+    v["onetime_charges"] = [c for c in all_charges if not c["recurring"]]
+    v["invoice"] = _invoice_lines(db, prof)
     return v
+
+
+class OneTimeCharge(BaseModel):
+    amount_cents: int
+    description: str = ""
+    kind: str = "one-time"
+
+
+@admin_router.post("/profiles/{pid}/charge-once", dependencies=[Depends(security.require_platform_admin)])
+def admin_charge_one_time(pid: str, body: OneTimeCharge,
+                          principal: security.Principal = Depends(security.require_platform_admin),
+                          db: Session = Depends(get_db)):
+    """Capture a one-time, non-recurring charge against the tenant's card (e.g. an
+    appliance purchase or setup fee). Recorded in Billing history, never scheduled."""
+    from .. import payments, services
+    prof = db.get(BillingProfile, pid)
+    if not prof:
+        raise HTTPException(404, "billing profile not found")
+    amount = int(body.amount_cents or 0)
+    if amount <= 0:
+        raise HTTPException(400, "amount must be greater than zero")
+    pm = db.get(PaymentMethod, prof.payment_method_id) if prof.payment_method_id else None
+    if not pm:
+        raise HTTPException(400, "no payment method on file for this tenant")
+    svc = services.tenant_payment_service(db, prof.tenant_id)
+    if not _live_processor(svc):
+        raise HTTPException(400, _NO_PROCESSOR)
+    kind = body.kind if body.kind in ("one-time", "setup", "manual") else "one-time"
+    desc = (body.description or "").strip() or "One-time charge"
+    attempt = (db.query(func.count(BillingCharge.id))
+               .filter(BillingCharge.profile_id == prof.id).scalar() or 0) + 1
+    res = payments.charge_once(
+        svc, customer=prof.processor_customer, token=pm.processor_token,
+        amount_cents=amount, currency=prof.currency, description=desc)
+    charge = BillingCharge(
+        tenant_id=prof.tenant_id, profile_id=prof.id, amount_cents=amount,
+        currency=prof.currency, status=res["status"], attempt=attempt, kind=kind,
+        description=desc, processor_charge_id=res.get("charge_id", ""), error=res.get("error", ""))
+    db.add(charge)
+    prof.last_charge_at = datetime.utcnow()
+    prof.last_status = res["status"]
+    db.commit()
+    db.refresh(charge)
+    audit.record(db, actor=principal.user_id, action="admin.billing_charged_one_time",
+                 tenant_id=prof.tenant_id, resource=prof.id,
+                 detail={"amount_cents": amount, "description": desc, "status": res["status"]})
+    return _charge_view(charge)
+
+
+@admin_router.get("/users/{uid}", dependencies=[Depends(security.require_platform_admin)])
+def admin_user_billing(uid: str, db: Session = Depends(get_db)):
+    """Billing for one account: their tenant's subscription + full billing history
+    (recurring + one-time). For a member of an organization, billing is managed at
+    the organization level — flagged so the UI can point there."""
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "user not found")
+    t = db.get(Tenant, u.tenant_id) if u.tenant_id else None
+    shared = ((t.tenant_type if t else "shared") or "shared") == "shared"
+    prof = (db.query(BillingProfile).filter(BillingProfile.tenant_id == u.tenant_id).first()
+            if u.tenant_id else None)
+    out: dict = {
+        "tenant_id": u.tenant_id, "tenant_name": t.name if t else None,
+        "tenant_type": (t.tenant_type if t else None),
+        "is_personal": shared,
+        "org_managed": (t is not None and not shared),
+    }
+    amount, cur, plan_id, plan_name = (0, "USD", "", "")
+    if t is not None:
+        try:
+            amount, cur, plan_id, plan_name = _plan_amount_cents(db, u, t)
+        except Exception:  # noqa: BLE001
+            pass
+    if prof:
+        v = _profile_view(db, prof)
+        charges = (db.query(BillingCharge).filter(BillingCharge.profile_id == prof.id)
+                   .order_by(BillingCharge.created_at.desc()).limit(200).all())
+        cv = [_charge_view(c) for c in charges]
+        v["charges"] = cv
+        v["recurring_charges"] = [c for c in cv if c["recurring"]]
+        v["onetime_charges"] = [c for c in cv if not c["recurring"]]
+        v["invoice"] = _invoice_lines(db, prof)
+        collected = sum(c["amount_cents"] for c in cv if c["status"] == "succeeded")
+        v["collected_cents"] = collected
+        out["profile"] = v
+    else:
+        out["profile"] = None
+        out["quote"] = {"amount_cents": amount, "currency": cur,
+                        "plan_id": plan_id, "plan_name": plan_name}
+    return out
+
+
+@admin_router.get("/tenants/{tid}", dependencies=[Depends(security.require_platform_admin)])
+def admin_tenant_billing(tid: str, db: Session = Depends(get_db)):
+    """A tenant's subscription + full billing history (recurring + one-time),
+    for the admin tenant detail Billing Information tab."""
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    prof = db.query(BillingProfile).filter(BillingProfile.tenant_id == tid).first()
+    owner = (db.query(User).filter(User.tenant_id == tid)
+             .order_by(User.created_at.asc()).first())
+    out: dict = {"tenant_id": tid, "tenant_name": t.name,
+                 "tenant_type": t.tenant_type or "dedicated"}
+    if not prof:
+        amount, cur, plan_id, plan_name = (0, "USD", "", "")
+        if owner is not None:
+            try:
+                amount, cur, plan_id, plan_name = _plan_amount_cents(db, owner, t)
+            except Exception:  # noqa: BLE001
+                pass
+        out["profile"] = None
+        out["quote"] = {"amount_cents": amount, "currency": cur,
+                        "plan_id": plan_id, "plan_name": plan_name}
+        return out
+    v = _profile_view(db, prof)
+    charges = (db.query(BillingCharge).filter(BillingCharge.profile_id == prof.id)
+               .order_by(BillingCharge.created_at.desc()).limit(200).all())
+    cv = [_charge_view(c) for c in charges]
+    v["charges"] = cv
+    v["recurring_charges"] = [c for c in cv if c["recurring"]]
+    v["onetime_charges"] = [c for c in cv if not c["recurring"]]
+    v["invoice"] = _invoice_lines(db, prof)
+    v["collected_cents"] = sum(c["amount_cents"] for c in cv if c["status"] == "succeeded")
+    out["profile"] = v
+    return out
 
 
 def _sync_amount(db: Session, prof: BillingProfile) -> None:

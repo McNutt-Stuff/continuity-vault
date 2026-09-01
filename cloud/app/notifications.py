@@ -345,7 +345,12 @@ def build_daily_summary(db, user: User, *, force: bool = False) -> dict | None:
         return None  # nothing to report today
 
     parts: list[str] = []
-    parts.append(f'<p style="margin:0 0 14px;">Here\'s what Arkive protected for you today.</p>')
+    quiet = (len(receipts) == 0 and not issues)
+    if quiet:
+        parts.append('<p style="margin:0 0 14px;">No new backups in the last 24 hours — '
+                     'everything already protected stays safe.</p>')
+    else:
+        parts.append('<p style="margin:0 0 14px;">Here\'s what Arkive protected for you today.</p>')
     parts.append(_stat_grid([
         {"icon": "clock", "label": "Recovery points", "value": len(receipts)},
         {"icon": "object", "label": "New items", "value": f"{new_objects:,}"},
@@ -601,7 +606,10 @@ def send_notification(db, user: User, key: str, *, dedupe_key: str = "",
 
 def _build(db, user: User, key: str, ctx: dict) -> dict | None:
     if key == "daily_summary":
-        return build_daily_summary(db, user, force=bool(ctx.get("force")))
+        # build_force lets the SCHEDULED daily digest send even on a quiet day
+        # (so the configured send time is observable), without bypassing the
+        # per-user enable + once-a-day dedupe that send_notification enforces.
+        return build_daily_summary(db, user, force=bool(ctx.get("force") or ctx.get("build_force")))
     if key == "source_problem":
         return build_source_problem(db, user, ctx.get("issues"))
     if key == "plan_change":

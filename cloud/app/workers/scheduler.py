@@ -377,10 +377,14 @@ def _run_notifications() -> None:
         today = local.strftime("%Y-%m-%d")
         daily_hour = node_config.get_int(db, "notif.daily_hour", 0)
         send_daily = local.hour >= daily_hour
+        logger.info("daily digest gate: local=%s tz=%s daily_hour=%d send_daily=%s users=%d",
+                    local.strftime("%Y-%m-%d %H:%M"), node_config.timezone_name(db) or "UTC",
+                    daily_hour, send_daily, len(users))
         for u in users:
             if send_daily:
                 try:
-                    notif.send_notification(db, u, "daily_summary", dedupe_key=f"daily:{today}")
+                    notif.send_notification(db, u, "daily_summary",
+                                            dedupe_key=f"daily:{today}", build_force=True)
                 except Exception:  # noqa: BLE001
                     db.rollback()
                     logger.exception("daily summary failed for %s", u.id)

@@ -162,6 +162,11 @@ def startup() -> None:
     else:
         start_scheduler()
 
+    # Every node drains its own durable activity queue (retries to offline
+    # appliances / unreachable storage) so pending backups deliver on reconnect.
+    from .workers.queue import start_queue_worker
+    start_queue_worker()
+
     # The control plane samples the whole fleet's health into 90-day history.
     if role == "control-plane":
         from .workers.telemetry import start_telemetry_sampler

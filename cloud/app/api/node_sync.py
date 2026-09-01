@@ -529,6 +529,32 @@ def node_config_state(authorization: str = Header(default=""), db: Session = Dep
     return {"settings": node_config.effective(db)}
 
 
+@router.get("/queue")
+def node_queue(authorization: str = Header(default=""), db: Session = Depends(get_db)):
+    """This node's durable activity queue (backups pending delivery to an offline
+    appliance / unreachable storage), read by the control-plane admin."""
+    _require_fleet(authorization)
+    from .. import queue_registry
+    return queue_registry.list_items(db)
+
+
+class QueueActionReq(BaseModel):
+    id: str
+    action: str
+
+
+@router.post("/queue/action")
+def node_queue_action(body: QueueActionReq, authorization: str = Header(default=""),
+                      db: Session = Depends(get_db)):
+    _require_fleet(authorization)
+    from .. import queue_registry
+    if body.action == "retry":
+        queue_registry.retry(db, body.id)
+    elif body.action == "cancel":
+        queue_registry.cancel(db, body.id)
+    return {"ok": True}
+
+
 class ControlReq(BaseModel):
     action: str
     unit: str = ""

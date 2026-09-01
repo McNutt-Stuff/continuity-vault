@@ -248,6 +248,9 @@ function Tenants() {
   const [rows, setRows] = useState<any[]>([]);
   const [sel, setSel] = useState<string | null>(null);
   const [toast, setToast] = useState("");
+  const [q, setQ] = useState("");
+  const [typeF, setTypeF] = useState("");
+  const [statusF, setStatusF] = useState("");
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
   async function load() { try { setRows(await api.get<any[]>("/admin/tenants")); } catch { /* ignore */ } }
   useEffect(() => { void load(); }, []);
@@ -313,17 +316,38 @@ function Tenants() {
 
   if (sel) return <TenantDetail id={sel} onBack={() => { setSel(null); void load(); }} />;
 
+  const ql = q.trim().toLowerCase();
+  const filtered = rows.filter((t) =>
+    (!ql || (t.name || "").toLowerCase().includes(ql) || (t.node || "").toLowerCase().includes(ql))
+    && (!typeF || t.tenant_type === typeF)
+    && (!statusF || t.status === statusF));
+
   return (
     <>
       <div className="spread" style={{ marginBottom: 12 }}>
         <h3 style={{ margin: 0 }}>Tenants</h3>
         <button className="btn primary sm" onClick={newTenant}><Icon name="user" size={14} /> New tenant</button>
       </div>
+      <Card style={{ marginBottom: 14 }}>
+        <FilterBar
+          query={q} onQuery={setQ} placeholder="Search tenants, node…"
+          filters={[
+            { value: typeF, onChange: setTypeF, options: [
+              { label: "All types", value: "" },
+              ...["shared", "dedicated", "restricted", "internal"].map((v) => ({ label: TENANT_TYPE_LABEL[v], value: v })),
+            ] },
+            { value: statusF, onChange: setStatusF, options: [
+              { label: "Any status", value: "" },
+              ...["active", "suspended", "trial"].map((v) => ({ label: v, value: v })),
+            ] },
+          ]}
+        />
+      </Card>
       <Card>
         <table className="table">
           <thead><tr><th>Tenant</th><th>Type</th><th>Node</th><th>Plan</th><th>Accounts</th><th>Sources</th><th>Status</th><th></th></tr></thead>
           <tbody>
-            {rows.map((t) => (
+            {filtered.map((t) => (
               <tr key={t.id} style={{ cursor: "pointer" }} onClick={() => setSel(t.id)}>
                 <td style={{ fontWeight: 600 }}>{t.name}</td>
                 <td><Pill tone={TENANT_TYPE_TONE[t.tenant_type] || "info"}>{TENANT_TYPE_LABEL[t.tenant_type] || t.tenant_type}</Pill></td>
@@ -337,7 +361,7 @@ function Tenants() {
                 <td className="faint" style={{ textAlign: "right" }}>Manage →</td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={8} className="muted">No tenants.</td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={8} className="muted">No tenants match.</td></tr>}
           </tbody>
         </table>
       </Card>
@@ -533,16 +557,154 @@ const ACT_SEV: Record<string, "ok" | "info" | "warn" | "danger"> = {
   info: "info", notice: "info", warning: "warn", critical: "danger",
 };
 
+// ---- Shared billing render pieces (admin user/tenant detail) ----------------
+interface UserBilling {
+  tenant_id: string | null; tenant_name: string | null; tenant_type: string | null;
+  is_personal: boolean; org_managed: boolean;
+  profile: (AdminBillingProfile & {
+    charges: AdminBillingCharge[]; recurring_charges?: AdminBillingCharge[];
+    onetime_charges?: AdminBillingCharge[]; invoice?: Invoice; collected_cents?: number;
+  }) | null;
+  quote?: { amount_cents: number; currency: string; plan_id: string; plan_name: string };
+}
+
+function InvoiceBlock({ invoice }: { invoice: Invoice }) {
+  if (!invoice.lines?.length) return null;
+  return (
+    <div style={{ border: "1px solid var(--border-soft)", borderRadius: 10, overflow: "hidden" }}>
+      {invoice.lines.map((l, i) => (
+        <div key={i} className="spread" style={{ padding: "9px 12px", borderBottom: "1px solid var(--border-soft)" }}>
+          <div>
+            <div style={{ fontSize: 12.5, fontWeight: 600 }}>{l.label}</div>
+            {l.detail && <div className="faint" style={{ fontSize: 11 }}>{l.detail}</div>}
+          </div>
+          <div style={{ fontWeight: 600 }}>{fmtCents(l.amount_cents, invoice.currency)}</div>
+        </div>
+      ))}
+      <div className="spread" style={{ padding: "10px 12px", background: "var(--inset)" }}>
+        <div style={{ fontWeight: 700 }}>Total per {invoice.interval || "month"}</div>
+        <div style={{ fontWeight: 700 }}>{fmtCents(invoice.total_cents, invoice.currency)}</div>
+      </div>
+    </div>
+  );
+}
+
+function RecurringChargesTable({ charges }: { charges: AdminBillingCharge[] }) {
+  return (
+    <table className="table">
+      <thead><tr><th>When</th><th>Amount</th><th>Attempt</th><th>Status</th><th>Detail</th></tr></thead>
+      <tbody>
+        {charges.map((c) => (
+          <tr key={c.id}>
+            <td className="faint" style={{ fontSize: 12 }}>{c.created_at ? billDate(c.created_at) : "—"}</td>
+            <td>{fmtCents(c.amount_cents, c.currency)}</td>
+            <td className="faint" style={{ fontSize: 12 }}>#{c.attempt}</td>
+            <td><Pill tone={BILLING_STATUS_TONE[c.status] || "info"} dot>{c.status}</Pill></td>
+            <td className="faint" style={{ fontSize: 11.5 }}>{c.error || c.processor_charge_id || "—"}</td>
+          </tr>
+        ))}
+        {charges.length === 0 && <tr><td colSpan={5} className="muted">No subscription charges yet.</td></tr>}
+      </tbody>
+    </table>
+  );
+}
+
+function OneTimeChargesTable({ charges }: { charges: AdminBillingCharge[] }) {
+  return (
+    <table className="table">
+      <thead><tr><th>When</th><th>Description</th><th>Type</th><th>Amount</th><th>Status</th></tr></thead>
+      <tbody>
+        {charges.map((c) => (
+          <tr key={c.id}>
+            <td className="faint" style={{ fontSize: 12 }}>{c.created_at ? billDate(c.created_at) : "—"}</td>
+            <td style={{ fontSize: 12.5 }}>{c.description || <span className="faint">—</span>}</td>
+            <td><Pill tone="info">{CHARGE_KIND_LABEL[c.kind] || c.kind}</Pill></td>
+            <td>{fmtCents(c.amount_cents, c.currency)}</td>
+            <td><Pill tone={BILLING_STATUS_TONE[c.status] || "info"} dot>{c.status}</Pill></td>
+          </tr>
+        ))}
+        {charges.length === 0 && <tr><td colSpan={5} className="muted">No one-time charges (e.g. appliance purchases) yet.</td></tr>}
+      </tbody>
+    </table>
+  );
+}
+
+// Full "Billing Information" panel — payment method, recurring + one-time history,
+// with an org-managed notice for organization members.
+function BillingInfoPanel({ billing }: { billing: UserBilling | null }) {
+  if (!billing) return <Card><div className="muted">Loading billing…</div></Card>;
+  const p = billing.profile;
+  const recurring = p?.recurring_charges ?? (p?.charges || []).filter((c) => c.recurring ?? c.kind === "recurring");
+  const onetime = p?.onetime_charges ?? (p?.charges || []).filter((c) => !(c.recurring ?? c.kind === "recurring"));
+  return (
+    <>
+      {billing.org_managed && (
+        <Card style={{ marginBottom: 16, borderLeft: "3px solid var(--brand)" }}>
+          <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
+            <Icon name="user" size={16} />
+            <div>
+              <div style={{ fontWeight: 600 }}>Billing is managed at the organization level</div>
+              <div className="faint" style={{ fontSize: 12 }}>
+                This account belongs to <b>{billing.tenant_name}</b>. Its subscription and invoices are billed to the organization — shown below for reference.
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
+      {!p ? (
+        <Card><div className="muted">No billing profile yet{billing.quote ? ` — plan quote ${fmtCents(billing.quote.amount_cents, billing.quote.currency)}/mo (${billing.quote.plan_name})` : ""}. A profile is created when a card is saved.</div></Card>
+      ) : (
+        <>
+          <Card style={{ marginBottom: 16 }}>
+            <div className="spread" style={{ marginBottom: 10 }}>
+              <h3 style={{ margin: 0 }}>Payment method</h3>
+              <Pill tone={BILLING_STATUS_TONE[p.status] || "info"} dot>{p.status}</Pill>
+            </div>
+            {p.payment_method
+              ? <div className="result-row" style={{ background: "var(--inset)", borderRadius: 10 }}>
+                  <div className="result-icon" style={{ background: "var(--inset)" }}><Icon name="credit-card" size={16} /></div>
+                  <div className="flex1">
+                    <div style={{ fontWeight: 600 }}>{p.payment_method.brand} •••• {p.payment_method.last4}</div>
+                    <div className="faint" style={{ fontSize: 12 }}>Expires {String(p.payment_method.exp_month).padStart(2, "0")}/{p.payment_method.exp_year} · {p.processor || "processor"}</div>
+                  </div>
+                </div>
+              : <div className="muted">No card on file.</div>}
+          </Card>
+          <Card style={{ marginBottom: 16 }}>
+            <div className="spread" style={{ marginBottom: 10 }}>
+              <h3 style={{ margin: 0 }}>Recurring payments</h3>
+              <span className="faint" style={{ fontSize: 12 }}>Collected {fmtCents(p.collected_cents || 0, p.currency)}</span>
+            </div>
+            <RecurringChargesTable charges={recurring} />
+          </Card>
+          <Card style={{ marginBottom: 16 }}>
+            <h3 style={{ margin: "0 0 10px" }}>Billing history · one-time charges</h3>
+            <OneTimeChargesTable charges={onetime} />
+          </Card>
+        </>
+      )}
+    </>
+  );
+}
+
+type UserTab = "overview" | "personal" | "settings" | "usage" | "subscription" | "activity" | "billing";
+
 function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void; backLabel: string }) {
   const [u, setU] = useState<any>(null);
+  const [billing, setBilling] = useState<UserBilling | null>(null);
   const [err, setErr] = useState("");
   const [toast, setToast] = useState("");
+  const [tab, setTab] = useState<UserTab>("overview");
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3200); }
   async function load() {
     try { setErr(""); setU(await api.get<any>(`/admin/users/${id}`)); }
     catch (e) { setErr((e as { message?: string }).message || "Failed to load user"); }
   }
-  useEffect(() => { void load(); }, [id]);
+  async function loadBilling() {
+    try { setBilling(await api.get<UserBilling>(`/admin/billing/users/${id}`)); }
+    catch { setBilling(null); }
+  }
+  useEffect(() => { void load(); void loadBilling(); }, [id]);
 
   const money = (n: number) => "$" + (Math.round((n || 0) * 100) / 100)
     .toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
@@ -609,6 +771,20 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
   const s = u.storage || {};
   const c = u.counts || {};
   const name = u.full_name || u.display_name || u.email;
+  const shared = isShared();
+  const addrs: any[] = u.addresses || [];
+  const prof = billing?.profile || null;
+  const USER_TABS: { key: UserTab; label: string; icon: IconName }[] = [
+    { key: "overview", label: "Overview", icon: "grid" },
+    { key: "personal", label: "Personal information", icon: "user" },
+    { key: "settings", label: "Settings", icon: "puzzle" },
+    { key: "usage", label: "Usage", icon: "database" },
+    ...(shared ? [{ key: "subscription" as UserTab, label: "Subscription", icon: "credit-card" as IconName }] : []),
+    { key: "activity", label: "Activity", icon: "activity" },
+    { key: "billing", label: "Billing information", icon: "credit-card" },
+  ];
+  const curTab = USER_TABS.some((t) => t.key === tab) ? tab : "overview";
+
   return (
     <>
       <div className="spread" style={{ marginBottom: 12 }}>
@@ -623,7 +799,7 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
         </div>
       </div>
 
-      <Card style={{ marginBottom: 16 }}>
+      <Card style={{ marginBottom: 14 }}>
         <div className="spread">
           <div className="row" style={{ gap: 12, alignItems: "center" }}>
             <div className="brand-logo" style={{ width: 44, height: 44, fontSize: 16 }}>
@@ -645,113 +821,258 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
           </div>
         </div>
         <div className="grid grid-4" style={{ gap: 12, marginTop: 14 }}>
-          <Mini label={isShared() ? "Plan" : "Role"} value={isShared() ? (b?.plan?.name || "Personal") : u.role} />
+          <Mini label={shared ? "Plan" : "Role"} value={shared ? (b?.plan?.name || "Personal") : u.role} />
           <Mini label="Last login" value={u.last_login_at ? timeAgo(u.last_login_at) : "Never"} />
           <Mini label="Created" value={u.created_at ? timeAgo(u.created_at) : "—"} />
           <Mini label="Passkeys" value={c.passkeys ?? 0} />
         </div>
       </Card>
 
-      <AdminUserNotifs user={u} onSaved={load} />
+      <div className="row" style={{ gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+        {USER_TABS.map((t) => (
+          <button key={t.key} className={`btn sm ${curTab === t.key ? "primary" : "ghost"}`} onClick={() => setTab(t.key)}>
+            <Icon name={t.icon} size={13} /> {t.label}
+          </button>
+        ))}
+      </div>
 
-      <Card style={{ marginBottom: 16 }}>
-        <h3 style={{ margin: "0 0 12px" }}>Usage & storage</h3>
-        <div className="grid grid-4" style={{ gap: 12, marginBottom: 14 }}>
-          <Mini label="Objects protected" value={(c.objects ?? 0).toLocaleString()} />
-          <Mini label="Recovery points" value={c.recovery_points ?? 0} />
-          <Mini label="Sources" value={c.sources ?? 0} />
-          <Mini label="Vaults" value={c.vaults ?? 0} />
-          <Mini label="Data stored" value={bytes((s.cloud_bytes || 0) + (s.appliance_bytes || 0) + (s.customer_bytes || 0))} />
-          {b && <Mini label="Billing" value={`${money(b.total_monthly || 0)}/mo`} />}
-        </div>
-        <table className="table">
-          <thead><tr><th>Storage channel</th><th>Stored</th></tr></thead>
-          <tbody>
-            <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="cv-cloud" size={13} /> Arkive Cloud</span></td><td>{bytes(s.cloud_bytes || 0)}</td></tr>
-            <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="appliance" size={13} /> Appliance storage</span></td><td>{bytes(s.appliance_bytes || 0)}</td></tr>
-            <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="byos:x" size={13} /> Your cloud bucket</span></td><td>{bytes(s.customer_bytes || 0)}</td></tr>
-          </tbody>
-        </table>
-      </Card>
-
-      <Card style={{ marginBottom: 16 }}>
-        <div className="spread" style={{ margin: "0 0 12px" }}>
-          <h3 style={{ margin: 0 }}>Sources</h3>
-          <span className="faint" style={{ fontSize: 11.5 }}>{(u.sources || []).length} connected</span>
-        </div>
-        {(u.sources || []).length === 0 ? (
-          <div className="muted">No sources connected by this user yet.</div>
-        ) : (
+      {curTab === "overview" && (
+        <Card style={{ marginBottom: 16 }}>
+          <h3 style={{ margin: "0 0 12px" }}>At a glance</h3>
+          <div className="grid grid-4" style={{ gap: 12, marginBottom: 14 }}>
+            <Mini label="Objects protected" value={(c.objects ?? 0).toLocaleString()} />
+            <Mini label="Recovery points" value={c.recovery_points ?? 0} />
+            <Mini label="Sources" value={c.sources ?? 0} />
+            <Mini label="Vaults" value={c.vaults ?? 0} />
+            <Mini label="Data stored" value={bytes((s.cloud_bytes || 0) + (s.appliance_bytes || 0) + (s.customer_bytes || 0))} />
+            {b && <Mini label="Billing" value={`${money(b.total_monthly || 0)}/mo`} />}
+            {prof && <Mini label="Subscription" value={prof.active ? "Active" : (prof.status || "inactive")} />}
+            {prof && prof.active && <Mini label="Next charge" value={billDate(prof.next_charge_at)} />}
+          </div>
           <table className="table">
-            <thead><tr><th>Source</th><th>Type</th><th style={{ textAlign: "right" }}>Objects</th><th style={{ textAlign: "right" }}>Protected</th><th>Last sync</th><th>Status</th></tr></thead>
+            <thead><tr><th>Storage channel</th><th>Stored</th></tr></thead>
             <tbody>
-              {u.sources.map((src: any) => (
-                <tr key={src.id}>
-                  <td>
-                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                      {brandForSource(src.source_type)
-                        ? <BrandIcon name={brandForSource(src.source_type)!} size={16} />
-                        : <Icon name="database" size={15} />}
-                      <div>
-                        <div style={{ fontWeight: 600 }}>{src.name}</div>
-                        {src.account_username && <div className="faint" style={{ fontSize: 11 }}>{src.account_username}</div>}
-                      </div>
-                    </div>
-                  </td>
-                  <td className="faint" style={{ fontSize: 12 }}>{src.source_type}</td>
-                  <td style={{ textAlign: "right" }}>{(src.object_count || 0).toLocaleString()}</td>
-                  <td style={{ textAlign: "right" }}>{bytes(src.protected_bytes || 0)}</td>
-                  <td className="faint" style={{ fontSize: 12 }}>{src.last_backup_at ? timeAgo(src.last_backup_at) : "never"}</td>
-                  <td>
-                    {src.needs_reauth ? <Pill tone="warn" dot>reconnect</Pill>
-                      : !src.active ? <Pill tone="warn">deactivated</Pill>
-                      : src.has_error ? <Pill tone="danger" dot>issue</Pill>
-                      : <Pill tone="ok" dot>healthy</Pill>}
-                  </td>
-                </tr>
-              ))}
+              <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="cv-cloud" size={13} /> Arkive Cloud</span></td><td>{bytes(s.cloud_bytes || 0)}</td></tr>
+              <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="appliance" size={13} /> Appliance storage</span></td><td>{bytes(s.appliance_bytes || 0)}</td></tr>
+              <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="byos:x" size={13} /> Your cloud bucket</span></td><td>{bytes(s.customer_bytes || 0)}</td></tr>
             </tbody>
           </table>
-        )}
-      </Card>
+        </Card>
+      )}
 
-      <Card style={{ marginBottom: 16 }}>
-        <h3 style={{ margin: "0 0 12px" }}>Recent activity</h3>
-        {(u.activity || []).length === 0 ? (
-          <div className="muted">No recorded activity for this user yet.</div>
-        ) : (
-          <div className="stack" style={{ gap: 8 }}>
-            {u.activity.map((e: any, i: number) => (
-              <div key={i} className="row" style={{ gap: 8, fontSize: 12.5, alignItems: "center", flexWrap: "wrap" }}>
-                <Icon name={ACT_ICON[e.category] || "activity"} size={14} />
-                <span style={{ fontWeight: 600 }}>{humanizeAction(e.action)}</span>
-                {e.resource && <span className="faint" style={{ fontSize: 11 }}>{e.resource}</span>}
-                {e.severity && e.severity !== "info" && <Pill tone={ACT_SEV[e.severity] || "info"} dot>{e.severity}</Pill>}
-                <span className="faint" style={{ marginLeft: "auto" }} title={e.at ? fmtAbsolute(e.at) : ""}>{e.at ? timeAgo(e.at) : ""}</span>
+      {curTab === "personal" && (
+        <>
+          <Card style={{ marginBottom: 16 }}>
+            <h3 style={{ margin: "0 0 12px" }}>Contact details</h3>
+            <Row2 label="Full name" value={u.full_name || u.display_name || "—"} />
+            <Row2 label="First name" value={u.first_name || "—"} />
+            <Row2 label="Last name" value={u.last_name || "—"} />
+            <Row2 label="Email (sign-in)" value={u.email} />
+            <Row2 label="Phone" value={u.phone || "—"} />
+            <Row2 label="Organization" value={u.tenant?.name || "—"} />
+            <Row2 label="Role" value={u.role} />
+            <div className="row" style={{ marginTop: 12 }}>
+              <button className="btn sm" onClick={edit}><Icon name="edit" size={13} /> Edit details</button>
+            </div>
+          </Card>
+          <Card style={{ marginBottom: 16 }}>
+            <div className="spread" style={{ marginBottom: 10 }}>
+              <h3 style={{ margin: 0 }}>Addresses</h3>
+              <span className="faint" style={{ fontSize: 11.5 }}>{addrs.length} on file</span>
+            </div>
+            {addrs.length === 0 ? <div className="muted">No addresses saved for this account.</div> : (
+              <div className="stack" style={{ gap: 8 }}>
+                {addrs.map((a) => (
+                  <div key={a.id} className="result-row" style={{ background: "var(--inset)", borderRadius: 10 }}>
+                    <div className="result-icon" style={{ background: "var(--inset)" }}><Icon name="note" size={16} /></div>
+                    <div className="flex1">
+                      <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                        <span style={{ fontWeight: 600, textTransform: "capitalize" }}>{a.kind}</span>
+                        {a.label && <span className="faint" style={{ fontSize: 12 }}>· {a.label}</span>}
+                        {a.is_default && <Pill tone="ok">Default</Pill>}
+                      </div>
+                      <div className="faint" style={{ fontSize: 12 }}>
+                        {[a.name, a.line1, a.line2, [a.city, a.region, a.postal_code].filter(Boolean).join(", "), a.country]
+                          .filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        )}
-      </Card>
+            )}
+          </Card>
+        </>
+      )}
 
-      <CommsHistory userId={id} />
+      {curTab === "settings" && (
+        <>
+          <Card style={{ marginBottom: 16 }}>
+            <div className="spread" style={{ marginBottom: 8 }}>
+              <div>
+                <h3 style={{ margin: 0 }}>Account settings</h3>
+                <div className="faint" style={{ fontSize: 12 }}>Feature flags, status and additional notification addresses.</div>
+              </div>
+              <button className="btn sm" onClick={edit}><Icon name="edit" size={13} /> Edit settings</button>
+            </div>
+            <Row2 label="Status" value={<Pill tone={u.status === "active" ? "ok" : "warn"} dot>{u.status}</Pill>} />
+            <Row2 label="Additional notification emails" value={(u.notification_emails || []).join(", ") || "—"} />
+            <div className="divider" />
+            <div className="faint" style={{ fontSize: 11.5, textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 }}>Feature flags</div>
+            {Object.keys(u.feature_flags || {}).length === 0
+              ? <div className="muted" style={{ fontSize: 12.5 }}>Using defaults for all features. Click “Edit settings” to override.</div>
+              : <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                  {Object.entries(u.feature_flags || {}).map(([k, v]) => (
+                    <Pill key={k} tone={v ? "ok" : "danger"} dot>{k}: {v ? "allowed" : "blocked"}</Pill>
+                  ))}
+                </div>}
+          </Card>
+          <AdminUserNotifs user={u} onSaved={load} />
+        </>
+      )}
+
+      {curTab === "usage" && (
+        <>
+          <Card style={{ marginBottom: 16 }}>
+            <h3 style={{ margin: "0 0 12px" }}>Usage & storage</h3>
+            <div className="grid grid-4" style={{ gap: 12, marginBottom: 14 }}>
+              <Mini label="Objects protected" value={(c.objects ?? 0).toLocaleString()} />
+              <Mini label="Recovery points" value={c.recovery_points ?? 0} />
+              <Mini label="Sources" value={c.sources ?? 0} />
+              <Mini label="Vaults" value={c.vaults ?? 0} />
+              <Mini label="Data stored" value={bytes((s.cloud_bytes || 0) + (s.appliance_bytes || 0) + (s.customer_bytes || 0))} />
+              {b && <Mini label="Billing" value={`${money(b.total_monthly || 0)}/mo`} />}
+            </div>
+            <table className="table">
+              <thead><tr><th>Storage channel</th><th>Stored</th></tr></thead>
+              <tbody>
+                <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="cv-cloud" size={13} /> Arkive Cloud</span></td><td>{bytes(s.cloud_bytes || 0)}</td></tr>
+                <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="appliance" size={13} /> Appliance storage</span></td><td>{bytes(s.appliance_bytes || 0)}</td></tr>
+                <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="byos:x" size={13} /> Your cloud bucket</span></td><td>{bytes(s.customer_bytes || 0)}</td></tr>
+              </tbody>
+            </table>
+          </Card>
+          <Card style={{ marginBottom: 16 }}>
+            <div className="spread" style={{ margin: "0 0 12px" }}>
+              <h3 style={{ margin: 0 }}>Sources</h3>
+              <span className="faint" style={{ fontSize: 11.5 }}>{(u.sources || []).length} connected</span>
+            </div>
+            {(u.sources || []).length === 0 ? (
+              <div className="muted">No sources connected by this user yet.</div>
+            ) : (
+              <table className="table">
+                <thead><tr><th>Source</th><th>Type</th><th style={{ textAlign: "right" }}>Objects</th><th style={{ textAlign: "right" }}>Protected</th><th>Last sync</th><th>Status</th></tr></thead>
+                <tbody>
+                  {u.sources.map((src: any) => (
+                    <tr key={src.id}>
+                      <td>
+                        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                          {brandForSource(src.source_type)
+                            ? <BrandIcon name={brandForSource(src.source_type)!} size={16} />
+                            : <Icon name="database" size={15} />}
+                          <div>
+                            <div style={{ fontWeight: 600 }}>{src.name}</div>
+                            {src.account_username && <div className="faint" style={{ fontSize: 11 }}>{src.account_username}</div>}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="faint" style={{ fontSize: 12 }}>{src.source_type}</td>
+                      <td style={{ textAlign: "right" }}>{(src.object_count || 0).toLocaleString()}</td>
+                      <td style={{ textAlign: "right" }}>{bytes(src.protected_bytes || 0)}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>{src.last_backup_at ? timeAgo(src.last_backup_at) : "never"}</td>
+                      <td>
+                        {src.needs_reauth ? <Pill tone="warn" dot>reconnect</Pill>
+                          : !src.active ? <Pill tone="warn">deactivated</Pill>
+                          : src.has_error ? <Pill tone="danger" dot>issue</Pill>
+                          : <Pill tone="ok" dot>healthy</Pill>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Card>
+        </>
+      )}
+
+      {curTab === "subscription" && shared && (
+        <>
+          <Card style={{ marginBottom: 16 }}>
+            <div className="spread" style={{ marginBottom: 10 }}>
+              <div>
+                <h3 style={{ margin: 0 }}>Subscription</h3>
+                <div className="faint" style={{ fontSize: 12 }}>The account's recurring Arkive plan.</div>
+              </div>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                {prof && <Pill tone={BILLING_STATUS_TONE[prof.status] || "info"} dot>{prof.status}</Pill>}
+                <button className="btn ghost sm" onClick={changePlan}><Icon name="credit-card" size={13} /> Change plan</button>
+              </div>
+            </div>
+            <div className="grid grid-4" style={{ gap: 12 }}>
+              <Mini label="Plan" value={prof?.plan_name || b?.plan?.name || "Personal"} />
+              <Mini label="Amount" value={prof ? `${fmtCents(prof.amount_cents, prof.currency)}/${prof.interval}` : (b ? `${money(b.total_monthly || 0)}/mo` : "—")} />
+              <Mini label="Next charge" value={prof?.active ? billDate(prof.next_charge_at) : "—"} />
+              <Mini label="Data protected" value={`${b?.used_tb ?? 0} TB`} />
+            </div>
+          </Card>
+          {prof?.invoice && prof.invoice.lines.length > 0 && (
+            <Card style={{ marginBottom: 16 }}>
+              <h3 style={{ margin: "0 0 10px" }}>Itemized invoice · recurring {prof.invoice.interval || "month"}</h3>
+              <InvoiceBlock invoice={prof.invoice} />
+            </Card>
+          )}
+        </>
+      )}
+
+      {curTab === "activity" && (
+        <>
+          <Card style={{ marginBottom: 16 }}>
+            <h3 style={{ margin: "0 0 12px" }}>Recent activity</h3>
+            {(u.activity || []).length === 0 ? (
+              <div className="muted">No recorded activity for this user yet.</div>
+            ) : (
+              <div className="stack" style={{ gap: 8 }}>
+                {u.activity.map((e: any, i: number) => (
+                  <div key={i} className="row" style={{ gap: 8, fontSize: 12.5, alignItems: "center", flexWrap: "wrap" }}>
+                    <Icon name={ACT_ICON[e.category] || "activity"} size={14} />
+                    <span style={{ fontWeight: 600 }}>{humanizeAction(e.action)}</span>
+                    {e.resource && <span className="faint" style={{ fontSize: 11 }}>{e.resource}</span>}
+                    {e.severity && e.severity !== "info" && <Pill tone={ACT_SEV[e.severity] || "info"} dot>{e.severity}</Pill>}
+                    <span className="faint" style={{ marginLeft: "auto" }} title={e.at ? fmtAbsolute(e.at) : ""}>{e.at ? timeAgo(e.at) : ""}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+          <CommsHistory userId={id} />
+        </>
+      )}
+
+      {curTab === "billing" && <BillingInfoPanel billing={billing} />}
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
 }
 
+type TenantTab = "overview" | "settings" | "usage" | "subscription" | "billing";
+
 function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [t, setT] = useState<any>(null);
+  const [billing, setBilling] = useState<UserBilling | null>(null);
   const [err, setErr] = useState("");
   const [toast, setToast] = useState("");
+  const [tab, setTab] = useState<TenantTab>("overview");
   const [userSel, setUserSel] = useState<string | null>(null);
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3200); }
   async function load() {
     try { setErr(""); setT(await api.get<any>(`/admin/tenants/${id}`)); }
     catch (e) { setErr((e as { message?: string }).message || "Failed to load tenant"); }
   }
-  useEffect(() => { void load(); }, [id]);
+  async function loadBilling() {
+    try { setBilling(await api.get<UserBilling>(`/admin/billing/tenants/${id}`)); }
+    catch { setBilling(null); }
+  }
+  useEffect(() => { void load(); void loadBilling(); }, [id]);
 
   async function editTenant() {
     const isShared = t.tenant_type === "shared";
@@ -854,8 +1175,85 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
     </Card>
   );
   const licensedTb = ((t.licensed_bytes || 0) / (1024 ** 4)).toFixed(2);
+  const isShared = t.tenant_type === "shared";
 
   if (userSel) return <UserDetail id={userSel} backLabel={t.name} onBack={() => { setUserSel(null); void load(); }} />;
+
+  const money = (n: number) => "$" + (Math.round((n || 0) * 100) / 100)
+    .toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  const b = t.billing;
+  const su = t.storage_usage;
+  const channelLabel: Record<string, string> = {
+    "cv-cloud": "Arkive Cloud", "appliance": "Offline appliance",
+    "customer-cloud": "Your cloud (S3 / Azure)",
+  };
+  const options: string[] = b?.options || t.protection_options || [];
+
+  const TENANT_TABS: { key: TenantTab; label: string; icon: IconName }[] = [
+    { key: "overview", label: "Overview", icon: "grid" },
+    { key: "settings", label: "Settings", icon: "puzzle" },
+    { key: "usage", label: "Usage", icon: "database" },
+    { key: "subscription", label: "Subscription", icon: "credit-card" },
+    { key: "billing", label: "Billing information", icon: "credit-card" },
+  ];
+
+  const membersTable = (
+    <Card>
+      <div className="spread" style={{ marginBottom: 10 }}>
+        <h3 style={{ margin: 0 }}>{isShared ? "Accounts" : "Users"}</h3>
+        <button className="btn primary sm" onClick={newUser}>
+          <Icon name="user" size={14} /> {isShared ? "Add account" : "Add user"}
+        </button>
+      </div>
+      {isShared ? (
+        <table className="table">
+          <thead><tr><th>Account</th><th>Contact</th><th>Last login</th><th>Usage</th><th>Billing</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {(t.members || []).map((u: any) => (
+              <tr key={u.id}>
+                <td>
+                  <div style={{ fontWeight: 600 }}>{u.full_name || u.display_name || u.email}</div>
+                  <div className="faint" style={{ fontSize: 11.5 }}>{u.email}</div>
+                </td>
+                <td className="faint" style={{ fontSize: 12 }}>{u.phone || "—"}</td>
+                <td className="faint" style={{ fontSize: 12 }}>{u.last_login_at ? timeAgo(u.last_login_at) : "Never"}</td>
+                <td>{bytes(u.billing?.used_bytes || 0)}</td>
+                <td>{money(u.billing?.total_monthly || 0)}/mo<div className="faint" style={{ fontSize: 11 }}>{u.billing?.plan?.name || "Personal"}</div></td>
+                <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  <button className="btn ghost sm" onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /></button>{" "}
+                  <button className="btn ghost sm" onClick={() => setUserSel(u.id)}>Manage</button>{" "}
+                  <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
+                  <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
+                </td>
+              </tr>
+            ))}
+            {(t.members || []).length === 0 && <tr><td colSpan={7} className="muted">No accounts yet.</td></tr>}
+          </tbody>
+        </table>
+      ) : (
+        <table className="table">
+          <thead><tr><th>User</th><th>Role</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {(t.members || []).map((u: any) => (
+              <tr key={u.id}>
+                <td><div style={{ fontWeight: 600 }}>{u.display_name || u.email}</div><div className="faint" style={{ fontSize: 11.5 }}>{u.email}{u.is_platform_admin ? " · platform admin" : ""}</div></td>
+                <td><Pill tone="info">{u.role}</Pill></td>
+                <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  <button className="btn ghost sm" onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /></button>{" "}
+                  <button className="btn ghost sm" onClick={() => setUserSel(u.id)}>Manage</button>{" "}
+                  <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
+                  <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
+                </td>
+              </tr>
+            ))}
+            {(t.members || []).length === 0 && <tr><td colSpan={4} className="muted">No users.</td></tr>}
+          </tbody>
+        </table>
+      )}
+    </Card>
+  );
 
   return (
     <>
@@ -866,13 +1264,14 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
           <button className="btn danger sm" onClick={suspend}>Suspend</button>
         </div>
       </div>
-      <Card style={{ marginBottom: 16 }}>
+
+      <Card style={{ marginBottom: 14 }}>
         <div className="spread">
           <div>
             <h3 style={{ margin: 0 }}>{t.name}</h3>
             <div className="faint" style={{ fontSize: 12 }}>
               {TENANT_TYPE_LABEL[t.tenant_type] || t.tenant_type || "Dedicated"}
-              {t.tenant_type === "shared"
+              {isShared
                 ? ` · ${t.users} account${t.users === 1 ? "" : "s"} · per-account Personal plan`
                 : ` · ${t.plan} · ${licensedTb} TB licensed`}
               {` · ${t.key_ownership_model}`}
@@ -882,7 +1281,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
           <Pill tone={t.status === "active" ? "ok" : "warn"}>{t.status}</Pill>
         </div>
         <div className="grid grid-4" style={{ gap: 12, marginTop: 14 }}>
-          <Mini label={t.tenant_type === "shared" ? "Accounts" : "Users"} value={t.users} />
+          <Mini label={isShared ? "Accounts" : "Users"} value={t.users} />
           <Mini label="Appliances" value={t.appliances} />
           <Mini label="Agents" value={t.agents} />
           <Mini label="Sources" value={t.sources} />
@@ -893,39 +1292,101 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
         </div>
       </Card>
 
-      {(() => {
-        const b = t.billing;
-        const su = t.storage_usage;
-        const isShared = t.tenant_type === "shared";
-        const money = (n: number) => "$" + (Math.round((n || 0) * 100) / 100)
-          .toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
-        const channelLabel: Record<string, string> = {
-          "cv-cloud": "Arkive Cloud", "appliance": "Offline appliance",
-          "customer-cloud": "Your cloud (S3 / Azure)",
-        };
-        const options: string[] = b?.options || t.protection_options || [];
-        return (
-          <Card style={{ marginBottom: 16 }}>
-            <div className="spread" style={{ marginBottom: 6 }}>
-              <h3 style={{ margin: 0 }}>{isShared ? "Accounts & storage" : "Protection & billing"}</h3>
-              {isShared
-                ? <Pill tone="info">{t.users} account{t.users === 1 ? "" : "s"}</Pill>
-                : (b?.costs && <Pill tone="info">{money(b.costs.total_monthly)}/mo to Arkive</Pill>)}
+      <div className="row" style={{ gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+        {TENANT_TABS.map((tt) => (
+          <button key={tt.key} className={`btn sm ${tab === tt.key ? "primary" : "ghost"}`} onClick={() => setTab(tt.key)}>
+            <Icon name={tt.icon} size={13} /> {tt.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "overview" && membersTable}
+
+      {tab === "settings" && (
+        <Card style={{ marginBottom: 16 }}>
+          <div className="spread" style={{ marginBottom: 8 }}>
+            <div>
+              <h3 style={{ margin: 0 }}>Tenant settings</h3>
+              <div className="faint" style={{ fontSize: 12 }}>Type, processing node, plan{isShared ? "" : ", licensed capacity and feature flags"}.</div>
             </div>
-            <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>
-              {isShared
-                ? "A pool of isolated personal accounts — each self-manages its own Personal plan; there is no shared organization plan or licensed amount."
-                : "Coupled to what the customer selected in Protection Setup — licensed amount, storage channels, and what they pay us."}
+            <button className="btn sm" onClick={editTenant}><Icon name="edit" size={13} /> Edit settings</button>
+          </div>
+          <Row2 label="Tenant type" value={<Pill tone={TENANT_TYPE_TONE[t.tenant_type] || "info"}>{TENANT_TYPE_LABEL[t.tenant_type] || t.tenant_type}</Pill>} />
+          <Row2 label="Status" value={<Pill tone={t.status === "active" ? "ok" : "warn"} dot>{t.status}</Pill>} />
+          <Row2 label="Processing node" value={t.node?.name || "Control plane"} />
+          <Row2 label="Key ownership" value={t.key_ownership_model} />
+          {!isShared && <Row2 label="License plan" value={t.plan} />}
+          {!isShared && <Row2 label="Licensed capacity" value={`${licensedTb} TB`} />}
+          {!isShared && (
+            <>
+              <div className="divider" />
+              <div className="faint" style={{ fontSize: 11.5, textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 }}>Feature flags</div>
+              {Object.keys(t.feature_flags || {}).length === 0
+                ? <div className="muted" style={{ fontSize: 12.5 }}>All features use platform defaults. Click “Edit settings” to override tenant-wide.</div>
+                : <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                    {Object.entries(t.feature_flags || {}).map(([k, v]) => (
+                      <Pill key={k} tone={v ? "ok" : "danger"} dot>{k}: {v ? "allowed" : "blocked"}</Pill>
+                    ))}
+                  </div>}
+            </>
+          )}
+          {isShared && (
+            <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
+              Feature flags for a shared tenant are managed per-account (open an account → Settings).
             </div>
-            {!isShared && (
+          )}
+        </Card>
+      )}
+
+      {tab === "usage" && (
+        <Card style={{ marginBottom: 16 }}>
+          <div className="spread" style={{ marginBottom: 6 }}>
+            <h3 style={{ margin: 0 }}>Usage & storage</h3>
+            <span className="faint" style={{ fontSize: 12 }}>{(t.objects ?? 0).toLocaleString()} objects · {t.recovery_points} recovery points</span>
+          </div>
+          {!isShared && (
+            <div className="grid grid-4" style={{ gap: 12, marginBottom: 14 }}>
+              <Mini label="Licensed" value={`${b?.licensed_tb ?? licensedTb} TB`} />
+              <Mini label="Billable" value={b?.billable_tb != null ? `${b.billable_tb} TB` : "—"} />
+              <Mini label="Used" value={`${b?.used_tb ?? 0} TB${b?.percent != null ? ` · ${b.percent}%` : ""}`} />
+              <Mini label="Objects" value={(t.objects ?? 0).toLocaleString()} />
+            </div>
+          )}
+          <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>
+            {isShared ? "Storage footprint across all accounts in this tenant" : "Storage footprint"}
+          </div>
+          <table className="table">
+            <thead><tr><th>Storage channel</th><th>Stored</th><th>Monthly cost</th></tr></thead>
+            <tbody>
+              <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="cv-cloud" size={13} /> Arkive Cloud</span></td><td>{bytes(su?.cloud_bytes || 0)}</td><td>{money(b?.costs?.cloud_storage_monthly || 0)}</td></tr>
+              <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="appliance" size={13} /> Appliance storage</span></td><td>{bytes(su?.appliance_bytes || 0)}</td><td className="faint">{b?.costs?.appliance_monthly ? `${money(b.costs.appliance_monthly)}/mo lease` : "on-prem · no per-TB cost"}</td></tr>
+              <tr><td><span className="row" style={{ gap: 6 }}><DestIcon dest="byos:x" size={13} /> Customer cloud bucket</span></td><td>{bytes(su?.customer_bytes || 0)}</td><td className="faint">{money(b?.costs?.third_party_estimate_monthly || 0)} est. (you pay provider)</td></tr>
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      {tab === "subscription" && (
+        <Card style={{ marginBottom: 16 }}>
+          <div className="spread" style={{ marginBottom: 6 }}>
+            <h3 style={{ margin: 0 }}>{isShared ? "Plans & subscriptions" : "Protection & subscription"}</h3>
+            {isShared
+              ? <Pill tone="info">{t.users} account{t.users === 1 ? "" : "s"}</Pill>
+              : (b?.costs && <Pill tone="info">{money(b.costs.total_monthly)}/mo to Arkive</Pill>)}
+          </div>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>
+            {isShared
+              ? "A pool of isolated personal accounts — each self-manages its own Personal plan; there is no shared organization plan."
+              : "Coupled to what the customer selected in Protection Setup — licensed amount, storage channels, and what they pay us."}
+          </div>
+          {!isShared && (
+            <>
               <div className="grid grid-4" style={{ gap: 12, marginBottom: 14 }}>
                 <Mini label="License plan" value={b?.license_plan?.name || t.plan} />
                 <Mini label="Licensed" value={`${b?.licensed_tb ?? licensedTb} TB`} />
                 <Mini label="Billable" value={b?.billable_tb != null ? `${b.billable_tb} TB` : "—"} />
                 <Mini label="Used" value={`${b?.used_tb ?? 0} TB${b?.percent != null ? ` · ${b.percent}%` : ""}`} />
               </div>
-            )}
-            {!isShared && (
               <div style={{ marginBottom: 12 }}>
                 <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>Storage channels the customer enabled</div>
                 <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
@@ -933,89 +1394,22 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
                   {options.map((o) => <Pill key={o} tone="info">{channelLabel[o] || o}</Pill>)}
                 </div>
               </div>
-            )}
-            <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>
-              {isShared ? "Storage footprint across all accounts in this tenant" : "Storage footprint"}
-            </div>
-            <table className="table">
-              <thead><tr><th>Storage channel</th><th>Stored</th><th>Monthly cost</th></tr></thead>
-              <tbody>
-                <tr><td>Arkive Cloud</td><td>{bytes(su?.cloud_bytes || 0)}</td><td>{money(b?.costs?.cloud_storage_monthly || 0)}</td></tr>
-                <tr><td>Appliance storage</td><td>{bytes(su?.appliance_bytes || 0)}</td><td className="faint">{b?.costs?.appliance_monthly ? `${money(b.costs.appliance_monthly)}/mo lease` : "on-prem · no per-TB cost"}</td></tr>
-                <tr><td>Customer cloud bucket</td><td>{bytes(su?.customer_bytes || 0)}</td><td className="faint">{money(b?.costs?.third_party_estimate_monthly || 0)} est. (you pay provider)</td></tr>
-              </tbody>
-            </table>
-            {!isShared && b?.costs && (
-              <div className="grid grid-4" style={{ gap: 12, marginTop: 14 }}>
-                <Mini label="Protection / license" value={`${money(b.costs.protection_monthly)}/mo`} />
-                <Mini label="Cloud storage" value={`${money(b.costs.cloud_storage_monthly)}/mo`} />
-                <Mini label="Appliance plan" value={`${money(b.costs.appliance_monthly)}/mo`} />
-                <Mini label="Total to Arkive" value={`${money(b.costs.total_monthly)}/mo`} />
-              </div>
-            )}
-          </Card>
-        );
-      })()}
+              {b?.costs && (
+                <div className="grid grid-4" style={{ gap: 12 }}>
+                  <Mini label="Protection / license" value={`${money(b.costs.protection_monthly)}/mo`} />
+                  <Mini label="Cloud storage" value={`${money(b.costs.cloud_storage_monthly)}/mo`} />
+                  <Mini label="Appliance plan" value={`${money(b.costs.appliance_monthly)}/mo`} />
+                  <Mini label="Total to Arkive" value={`${money(b.costs.total_monthly)}/mo`} />
+                </div>
+              )}
+            </>
+          )}
+          {isShared && membersTable}
+        </Card>
+      )}
 
-      <Card>
-        <div className="spread" style={{ marginBottom: 10 }}>
-          <h3 style={{ margin: 0 }}>{t.tenant_type === "shared" ? "Accounts" : "Users"}</h3>
-          <button className="btn primary sm" onClick={newUser}>
-            <Icon name="user" size={14} /> {t.tenant_type === "shared" ? "Add account" : "Add user"}
-          </button>
-        </div>
-        {t.tenant_type === "shared" ? (() => {
-          const money = (n: number) => "$" + (Math.round((n || 0) * 100) / 100)
-            .toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
-          return (
-            <table className="table">
-              <thead><tr><th>Account</th><th>Contact</th><th>Last login</th><th>Usage</th><th>Billing</th><th>Status</th><th></th></tr></thead>
-              <tbody>
-                {(t.members || []).map((u: any) => (
-                  <tr key={u.id}>
-                    <td>
-                      <div style={{ fontWeight: 600 }}>{u.full_name || u.display_name || u.email}</div>
-                      <div className="faint" style={{ fontSize: 11.5 }}>{u.email}</div>
-                    </td>
-                    <td className="faint" style={{ fontSize: 12 }}>{u.phone || "—"}</td>
-                    <td className="faint" style={{ fontSize: 12 }}>{u.last_login_at ? timeAgo(u.last_login_at) : "Never"}</td>
-                    <td>{bytes(u.billing?.used_bytes || 0)}</td>
-                    <td>{money(u.billing?.total_monthly || 0)}/mo<div className="faint" style={{ fontSize: 11 }}>{u.billing?.plan?.name || "Personal"}</div></td>
-                    <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
-                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                      <button className="btn ghost sm" onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /></button>{" "}
-                      <button className="btn ghost sm" onClick={() => setUserSel(u.id)}>Manage</button>{" "}
-                      <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
-                      <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
-                    </td>
-                  </tr>
-                ))}
-                {(t.members || []).length === 0 && <tr><td colSpan={7} className="muted">No accounts yet.</td></tr>}
-              </tbody>
-            </table>
-          );
-        })() : (
-          <table className="table">
-            <thead><tr><th>User</th><th>Role</th><th>Status</th><th></th></tr></thead>
-            <tbody>
-              {(t.members || []).map((u: any) => (
-                <tr key={u.id}>
-                  <td><div style={{ fontWeight: 600 }}>{u.display_name || u.email}</div><div className="faint" style={{ fontSize: 11.5 }}>{u.email}{u.is_platform_admin ? " · platform admin" : ""}</div></td>
-                  <td><Pill tone="info">{u.role}</Pill></td>
-                  <td><Pill tone={u.status === "active" ? "ok" : "warn"}>{u.status}</Pill></td>
-                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                    <button className="btn ghost sm" onClick={() => void generateInsightsFor(u)}><Icon name="insights" size={13} /></button>{" "}
-                    <button className="btn ghost sm" onClick={() => setUserSel(u.id)}>Manage</button>{" "}
-                    <button className="btn ghost sm" onClick={() => resetUser(u)}>Reset</button>{" "}
-                    <button className="btn danger sm" onClick={() => delUser(u)}>Delete</button>
-                  </td>
-                </tr>
-              ))}
-              {(t.members || []).length === 0 && <tr><td colSpan={4} className="muted">No users.</td></tr>}
-            </tbody>
-          </table>
-        )}
-      </Card>
+      {tab === "billing" && <BillingInfoPanel billing={billing} />}
+
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
@@ -1359,17 +1753,25 @@ function uptimeShort(s?: number | null): string {
   return `up ${m}m`;
 }
 
-type NodeTab = "health" | "processes" | "keys" | "logs" | "tenants" | "config";
+type NodeTab = "health" | "processes" | "keys" | "logs" | "tenants" | "config" | "queue";
 const NODE_TABS: { key: NodeTab; label: string; icon: IconName }[] = [
   { key: "health", label: "System health", icon: "activity" },
   { key: "processes", label: "Processes & services", icon: "grid" },
   { key: "config", label: "Configuration", icon: "puzzle" },
+  { key: "queue", label: "Activity queue", icon: "clock" },
   { key: "keys", label: "Keys & certificates", icon: "lock" },
   { key: "logs", label: "Logs", icon: "note" },
   { key: "tenants", label: "Tenant usage", icon: "user" },
 ];
 const HISTORY_WINDOWS = ["1h", "6h", "24h", "7d", "30d", "90d"];
 const MAX_LIVE = 60; // ~5 min of 5s live samples
+
+const QUEUE_KIND_LABEL: Record<string, string> = {
+  storage_write: "Storage write", appliance_ingest: "Sync to appliance", cloud_sync: "Sync to cloud",
+};
+const QUEUE_STATUS_TONE: Record<string, "ok" | "info" | "warn" | "danger"> = {
+  queued: "warn", delivering: "info", done: "ok", failed: "danger", canceled: "info",
+};
 
 function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onRemove }: {
   id: string; onBack: () => void; storageSvcs: ServiceObj[]; emailSvcs: ServiceObj[];
@@ -1386,6 +1788,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
   const [tenants, setTenants] = useState<any>(null);
   const [config, setConfig] = useState<any>(null);
   const [ov, setOv] = useState<Record<string, string>>({});
+  const [queue, setQueue] = useState<any>(null);
   const [logs, setLogs] = useState<any[]>([]);
   const [logSource, setLogSource] = useState("app");
   const [logPaused, setLogPaused] = useState(false);
@@ -1472,6 +1875,11 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
     await saveOverridesMap(next);
   }
   async function loadLogs() { try { setLogs((await api.get<any>(`/admin/nodes/${id}/logs?source=${logSource}&lines=250`)).lines || []); } catch { /* ignore */ } }
+  async function loadQueue() { try { setQueue(await api.get<any>(`/admin/nodes/${id}/queue`)); } catch { /* ignore */ } }
+  async function queueAction(qid: string, action: string) {
+    try { await api.post(`/admin/nodes/${id}/queue/${qid}/action`, { action }); flash(action === "retry" ? "Retrying now" : "Removed from queue"); await loadQueue(); }
+    catch (e) { flash((e as { message?: string }).message || "Action failed"); }
+  }
 
   useEffect(() => { void loadNode(); void loadLive(); void loadKeys(); void loadTenants();
     const iv = setInterval(loadLive, 5000); const nv = setInterval(loadNode, 15000);
@@ -1486,6 +1894,10 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, logSource, logPaused, id]);
   useEffect(() => { if (tab === "config") void loadConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, id]);
+  useEffect(() => { if (tab !== "queue") return; void loadQueue();
+    const iv = setInterval(() => void loadQueue(), 6000); return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, id]);
 
@@ -1874,6 +2286,57 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
             )}
           </Card>
         </>
+      )}
+      {tab === "queue" && (
+        <Card>
+          <div className="spread" style={{ marginBottom: 8 }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: 15 }}>Activity queue</h3>
+              <div className="faint" style={{ fontSize: 12 }}>
+                Backups pending delivery to an offline appliance or unreachable storage (appliance, Arkive Cloud, or your cloud). Retries run automatically and the queue empties once the connection is restored.
+              </div>
+            </div>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <Pill tone={(queue?.counts?.active || 0) > 0 ? "warn" : "ok"} dot>{queue?.counts?.active || 0} pending</Pill>
+              {(queue?.counts?.failed || 0) > 0 && <Pill tone="danger" dot>{queue.counts.failed} failed</Pill>}
+              <button className="btn ghost sm" onClick={() => void loadQueue()}><Icon name="repeat" size={13} /> Refresh</button>
+            </div>
+          </div>
+          {queue?.unreachable && <div className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>Node unreachable — can't read its live queue right now.</div>}
+          {!queue ? <div className="muted">Loading…</div>
+            : ([...(queue.active || []), ...(queue.recent || [])].length === 0 ? (
+              <div className="result-row" style={{ background: "var(--inset)", borderRadius: 10 }}>
+                <div className="result-icon" style={{ background: "var(--inset)", color: "#35d0a5" }}><Icon name="check" size={16} /></div>
+                <div className="flex1"><div style={{ fontWeight: 600 }}>Queue is empty</div><div className="faint" style={{ fontSize: 12 }}>All destinations reachable — nothing waiting to deliver.</div></div>
+              </div>
+            ) : (
+              <table className="table">
+                <thead><tr><th>Activity</th><th>Destination</th><th>Status</th><th>Attempts</th><th>Next retry</th><th>Last error</th><th></th></tr></thead>
+                <tbody>
+                  {[...(queue.active || []), ...(queue.recent || [])].map((q: any) => (
+                    <tr key={q.id}>
+                      <td>
+                        <div style={{ fontWeight: 600, fontSize: 12.5 }}>{q.label || q.target_label}</div>
+                        <div className="faint" style={{ fontSize: 11 }}>{QUEUE_KIND_LABEL[q.kind] || q.kind}</div>
+                      </td>
+                      <td><span className="row" style={{ gap: 6 }}><DestIcon dest={q.target} size={13} /> {q.target_label}</span></td>
+                      <td><Pill tone={QUEUE_STATUS_TONE[q.status] || "info"} dot>{q.status}</Pill></td>
+                      <td className="faint" style={{ fontSize: 12 }}>{q.attempts}/{q.max_attempts}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>
+                        {q.status === "queued" && q.next_attempt_at ? timeAgo(q.next_attempt_at)
+                          : q.status === "done" ? "delivered" : "—"}
+                      </td>
+                      <td className="faint" style={{ fontSize: 11.5, maxWidth: 260, whiteSpace: "normal" }}>{q.last_error || "—"}</td>
+                      <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                        {["queued", "failed", "delivering"].includes(q.status) && <button className="btn ghost sm" onClick={() => void queueAction(q.id, "retry")}>Retry now</button>}{" "}
+                        {["queued", "failed"].includes(q.status) && <button className="btn ghost sm" onClick={() => void queueAction(q.id, "cancel")}>Cancel</button>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ))}
+        </Card>
       )}
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
@@ -4033,14 +4496,31 @@ interface AdminBillingSummary {
 }
 interface AdminBillingCharge {
   id: string; amount_cents: number; currency: string; status: string; attempt: number;
-  kind: string; processor_charge_id: string; error: string; created_at: string | null;
+  kind: string; description?: string; recurring?: boolean;
+  processor_charge_id: string; error: string; created_at: string | null;
 }
-interface AdminBillingDetail extends AdminBillingProfile { charges: AdminBillingCharge[] }
+interface InvoiceLine { label: string; detail?: string; amount_cents: number }
+interface Invoice { lines: InvoiceLine[]; total_cents: number; currency: string; interval?: string }
+interface AdminBillingDetail extends AdminBillingProfile {
+  charges: AdminBillingCharge[];
+  recurring_charges?: AdminBillingCharge[];
+  onetime_charges?: AdminBillingCharge[];
+  invoice?: Invoice;
+}
 
 function fmtCents(cents: number, cur = "USD"): string {
   const sym = cur === "USD" ? "$" : "";
   return `${sym}${(cents / 100).toFixed(2)}${cur === "USD" ? "" : " " + cur}`;
 }
+// Absolute billing date (naive-UTC API datetimes → append Z), date only.
+function billDate(s: string | null | undefined): string {
+  if (!s) return "—";
+  const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : s + "Z");
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+const CHARGE_KIND_LABEL: Record<string, string> = {
+  recurring: "Subscription", "one-time": "One-time", setup: "Setup fee", manual: "Manual",
+};
 const BILLING_STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "info"> = {
   active: "ok", paused: "warn", inactive: "info", past_due: "danger", canceled: "danger",
   succeeded: "ok", failed: "danger", pending: "warn",
@@ -4097,6 +4577,35 @@ function BillingAdmin() {
     } catch (e: any) { flash(e.message || "Charge failed"); }
     finally { setBusy(""); }
   }
+  async function chargeOnce(p: AdminBillingProfile) {
+    const r = await formDialog({
+      title: "One-time charge",
+      message: `A non-recurring charge against ${p.account_name || p.tenant_name}'s card (e.g. an appliance purchase or setup fee). Shows in Billing history, never scheduled.`,
+      confirmLabel: "Charge",
+      fields: [
+        { name: "description", label: "Description", placeholder: "e.g. Arkive appliance — CV Edge 5", required: true },
+        { name: "amount", label: "Amount (USD)", placeholder: "149.00", required: true },
+        { name: "kind", label: "Type", defaultValue: "one-time",
+          options: [
+            { label: "One-time purchase", value: "one-time" },
+            { label: "Setup fee", value: "setup" },
+            { label: "Manual adjustment", value: "manual" },
+          ] },
+      ],
+    });
+    if (!r) return;
+    const amount_cents = Math.round(parseFloat(r.amount || "0") * 100);
+    if (!amount_cents || amount_cents <= 0) { flash("Enter a valid amount"); return; }
+    setBusy(p.id);
+    try {
+      const c = await api.post<AdminBillingCharge>(`/admin/billing/profiles/${p.id}/charge-once`,
+        { amount_cents, description: r.description, kind: r.kind });
+      flash(c.status === "succeeded" ? `Charged ${fmtCents(c.amount_cents, c.currency)}` : `Charge ${c.status}: ${c.error || ""}`);
+      await load();
+      if (detail?.id === p.id) await openDetail(p.id);
+    } catch (e: any) { flash(e.message || "Charge failed"); }
+    finally { setBusy(""); }
+  }
 
   return (
     <>
@@ -4126,7 +4635,7 @@ function BillingAdmin() {
                 <td style={{ fontWeight: 600 }}>{p.account_name || p.tenant_name}</td>
                 <td>{p.plan_name || p.plan_id || "—"}</td>
                 <td>{fmtCents(p.amount_cents, p.currency)}<span className="faint" style={{ fontSize: 11 }}>/{p.interval}</span></td>
-                <td className="faint" style={{ fontSize: 12 }}>{p.active && p.next_charge_at ? timeAgo(p.next_charge_at) : "—"}</td>
+                <td className="faint" style={{ fontSize: 12 }}>{p.active && p.next_charge_at ? billDate(p.next_charge_at) : "—"}</td>
                 <td className="faint" style={{ fontSize: 12 }}>{p.payment_method ? `${p.payment_method.brand} ••${p.payment_method.last4}` : <span className="warn">no card</span>}</td>
                 <td><Pill tone={BILLING_STATUS_TONE[p.status] || "info"} dot>{p.active ? p.status : (p.status === "inactive" ? "inactive" : "paused")}</Pill>{p.processor === "test" && <> <Pill tone="warn">TEST</Pill></>}{p.status === "past_due" && p.dunning_attempts ? <span className="faint" style={{ fontSize: 11 }}> · retry {p.dunning_attempts}/4</span> : null}</td>
                 <td className="faint" style={{ fontSize: 12 }}>{fmtCents(p.collected_cents || 0, p.currency)}</td>
@@ -4162,23 +4671,71 @@ function BillingAdmin() {
               <div className="row" style={{ gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
                 <Pill tone={BILLING_STATUS_TONE[detail.status] || "info"} dot>{detail.status}</Pill>
                 {detail.payment_method && <Pill tone="info">{detail.payment_method.brand} ••{detail.payment_method.last4} · {String(detail.payment_method.exp_month).padStart(2, "0")}/{detail.payment_method.exp_year}</Pill>}
-                {detail.current_period_end && <span className="faint" style={{ fontSize: 12 }}>Renews {fmtAbsolute(detail.current_period_end)}</span>}
+                {detail.active && detail.next_charge_at && <span className="faint" style={{ fontSize: 12 }}>Next charge {billDate(detail.next_charge_at)}</span>}
+                {detail.current_period_end && <span className="faint" style={{ fontSize: 12 }}>Renews {billDate(detail.current_period_end)}</span>}
               </div>
-              <div className="faint" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 6px" }}>Payments</div>
+
+              {detail.invoice && detail.invoice.lines.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <div className="faint" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 6px" }}>
+                    Itemized invoice · recurring {detail.invoice.interval || "month"}
+                  </div>
+                  <div style={{ border: "1px solid var(--border-soft)", borderRadius: 10, overflow: "hidden" }}>
+                    {detail.invoice.lines.map((l, i) => (
+                      <div key={i} className="spread" style={{ padding: "9px 12px", borderBottom: "1px solid var(--border-soft)" }}>
+                        <div>
+                          <div style={{ fontSize: 12.5, fontWeight: 600 }}>{l.label}</div>
+                          {l.detail && <div className="faint" style={{ fontSize: 11 }}>{l.detail}</div>}
+                        </div>
+                        <div style={{ fontWeight: 600 }}>{fmtCents(l.amount_cents, detail.invoice!.currency)}</div>
+                      </div>
+                    ))}
+                    <div className="spread" style={{ padding: "10px 12px", background: "var(--inset)" }}>
+                      <div style={{ fontWeight: 700 }}>Total per {detail.invoice.interval || "month"}</div>
+                      <div style={{ fontWeight: 700 }}>{fmtCents(detail.invoice.total_cents, detail.invoice.currency)}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="faint" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 6px" }}>Recurring payments</div>
               <table className="table">
-                <thead><tr><th>When</th><th>Amount</th><th>Kind</th><th>Attempt</th><th>Status</th><th>Detail</th></tr></thead>
+                <thead><tr><th>When</th><th>Amount</th><th>Attempt</th><th>Status</th><th>Detail</th></tr></thead>
                 <tbody>
-                  {detail.charges.map((c) => (
+                  {(detail.recurring_charges ?? detail.charges.filter((c) => c.recurring ?? c.kind === "recurring")).map((c) => (
                     <tr key={c.id}>
-                      <td className="faint" style={{ fontSize: 12 }}>{c.created_at ? fmtAbsolute(c.created_at) : "—"}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>{c.created_at ? billDate(c.created_at) : "—"}</td>
                       <td>{fmtCents(c.amount_cents, c.currency)}</td>
-                      <td className="faint" style={{ fontSize: 12 }}>{c.kind}</td>
                       <td className="faint" style={{ fontSize: 12 }}>#{c.attempt}</td>
                       <td><Pill tone={BILLING_STATUS_TONE[c.status] || "info"} dot>{c.status}</Pill></td>
                       <td className="faint" style={{ fontSize: 11.5 }}>{c.error || c.processor_charge_id || "—"}</td>
                     </tr>
                   ))}
-                  {detail.charges.length === 0 && <tr><td colSpan={6} className="muted">No charges yet.</td></tr>}
+                  {(detail.recurring_charges ?? detail.charges.filter((c) => c.recurring ?? c.kind === "recurring")).length === 0 &&
+                    <tr><td colSpan={5} className="muted">No subscription charges yet.</td></tr>}
+                </tbody>
+              </table>
+
+              <div className="spread" style={{ margin: "18px 0 6px" }}>
+                <div className="faint" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: ".06em" }}>Billing history · one-time charges</div>
+                <button className="btn ghost sm" disabled={!detail.payment_method} onClick={() => chargeOnce(detail)}>
+                  <Icon name="credit-card" size={13} /> Add one-time charge
+                </button>
+              </div>
+              <table className="table">
+                <thead><tr><th>When</th><th>Description</th><th>Type</th><th>Amount</th><th>Status</th></tr></thead>
+                <tbody>
+                  {(detail.onetime_charges ?? detail.charges.filter((c) => !(c.recurring ?? c.kind === "recurring"))).map((c) => (
+                    <tr key={c.id}>
+                      <td className="faint" style={{ fontSize: 12 }}>{c.created_at ? billDate(c.created_at) : "—"}</td>
+                      <td style={{ fontSize: 12.5 }}>{c.description || <span className="faint">—</span>}</td>
+                      <td><Pill tone="info">{CHARGE_KIND_LABEL[c.kind] || c.kind}</Pill></td>
+                      <td>{fmtCents(c.amount_cents, c.currency)}</td>
+                      <td><Pill tone={BILLING_STATUS_TONE[c.status] || "info"} dot>{c.status}</Pill></td>
+                    </tr>
+                  ))}
+                  {(detail.onetime_charges ?? detail.charges.filter((c) => !(c.recurring ?? c.kind === "recurring"))).length === 0 &&
+                    <tr><td colSpan={5} className="muted">No one-time charges. Use “Add one-time charge” for an appliance purchase or setup fee.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -4187,6 +4744,7 @@ function BillingAdmin() {
                 ? <button className="btn ghost sm" onClick={() => toggle(detail, false)}>Pause charges</button>
                 : <button className="btn primary sm" onClick={() => toggle(detail, true)}>Enable charges</button>}
               <button className="btn sm" disabled={!detail.payment_method} onClick={() => chargeNow(detail)}>Charge now</button>
+              <button className="btn sm ghost" disabled={!detail.payment_method} onClick={() => chargeOnce(detail)}>One-time charge</button>
               <button className="btn ghost sm" onClick={() => setDetail(null)}>Close</button>
             </div>
           </div>

@@ -743,8 +743,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
             errors[kind] = str(exc)
             continue
 
-        receipt = SnapshotReceipt(
-            tenant_id=collection.tenant_id,
+        receipt = SnapshotReceipt(            tenant_id=collection.tenant_id,
             vault_id=vault.id,
             collection_id=collection.id,
             snapshot_id=snapshot_id,
@@ -760,27 +759,51 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         last_receipt = receipt
         succeeded.append(kind)
 
+    from .. import queue_registry as _q
+    # A destination that just accepted the write clears any prior queued retry.
+    for kind in succeeded:
+        _q.resolve(db, tenant_id=collection.tenant_id, target=kind, collection_id=collection.id)
+
     if not succeeded:
-        # Nothing landed anywhere — surface the failure to the caller.
+        # Nothing landed anywhere — discard the snapshot writes, but the failed
+        # destinations are registered below so they're retried when they recover.
         db.rollback()
+    else:
+        for ov in new_versions:
+            db.add(ov)
+        # A new index row supersedes any prior rows for the same object: clear their
+        # is_current flag so reads filter to one current row per object instead of
+        # de-duplicating the whole index. (New rows below default is_current=True.)
+        reindexed = {r.object_id for r in index_rows}
+        if reindexed:
+            db.query(SearchDocument).filter(
+                SearchDocument.tenant_id == collection.tenant_id,
+                SearchDocument.source_type == collection.source_type,
+                SearchDocument.object_id.in_(reindexed),
+            ).update({SearchDocument.is_current: False}, synchronize_session=False)
+        for row in index_rows:
+            db.add(row)
+        db.commit()
+
+    # Register any unreachable destinations (offline appliance / unreachable
+    # storage) for automatic retry. Committed independently so the queue survives
+    # a full-failure rollback, and self-empties once the connection is restored.
+    if errors:
+        from ..models import Tenant as _Tenant
+        _tenant = db.get(_Tenant, collection.tenant_id)
+        _node_id = _tenant.node_id if _tenant else None
+        _lbl = collection.name or collection.source_type
+        for kind, msg in errors.items():
+            _q.enqueue(db, tenant_id=collection.tenant_id, target=kind, error=msg,
+                       collection_id=collection.id, snapshot_id=snapshot_id, node_id=_node_id,
+                       label=f"{_lbl} → {_q.target_label(kind)}")
+        db.commit()
+
+    if not succeeded:
+        # Nothing landed anywhere — surface the failure to the caller (the retries
+        # are already queued above).
         raise RuntimeError("backup failed for all destinations: "
                            + "; ".join(f"{k}: {v}" for k, v in errors.items()))
-
-    for ov in new_versions:
-        db.add(ov)
-    # A new index row supersedes any prior rows for the same object: clear their
-    # is_current flag so reads filter to one current row per object instead of
-    # de-duplicating the whole index. (New rows below default is_current=True.)
-    reindexed = {r.object_id for r in index_rows}
-    if reindexed:
-        db.query(SearchDocument).filter(
-            SearchDocument.tenant_id == collection.tenant_id,
-            SearchDocument.source_type == collection.source_type,
-            SearchDocument.object_id.in_(reindexed),
-        ).update({SearchDocument.is_current: False}, synchronize_session=False)
-    for row in index_rows:
-        db.add(row)
-    db.commit()
 
     audit.record(
         db, actor=actor, action="backup.completed",

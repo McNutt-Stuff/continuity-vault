@@ -376,6 +376,7 @@ class Agent:
             # command will fail signature verification. Re-pin over this same
             # authenticated TLS channel so a legitimate key rotation self-heals.
             cp_key = data.get("control_plane_key_id")
+            self._cp_key = cp_key or getattr(self, "_cp_key", None)
             local_key = (self.cloud_bundle or {}).get("keyId")
             if cp_key and local_key and cp_key != local_key:
                 self.log.warning("control-plane key drift: cloud=%s pinned=%s — re-pinning",
@@ -386,9 +387,12 @@ class Agent:
         self.log.debug("heartbeat ok (state=%s, isolation=%s)",
                        self.sm.state.value, self.sm.isolation_state)
 
-    async def _retrust_control_plane(self, client: httpx.AsyncClient, expected_key: str) -> None:
+    async def _retrust_control_plane(self, client: httpx.AsyncClient, expected_key: str | None = None) -> None:
         """Re-pin the cloud's current command-signing bundle after a key rotation,
-        over the appliance's authenticated token channel, and persist it."""
+        over the appliance's authenticated token channel, and persist it. When
+        ``expected_key`` is given the returned bundle must match it; otherwise
+        whatever the signer currently advertises is adopted (used to self-heal a
+        rejected command whose signature no longer matches the pinned key)."""
         try:
             r = await client.get(f"{self._base()}/appliance/control-plane-bundle",
                                  headers=self._headers())
@@ -396,13 +400,14 @@ class Agent:
                 self.log.warning("re-trust failed: %s", r.status_code)
                 return
             bundle = r.json().get("bundle")
-            if not bundle or bundle.get("keyId") != expected_key:
+            if not bundle or (expected_key and bundle.get("keyId") != expected_key):
                 self.log.warning("re-trust bundle mismatch (got %s want %s)",
                                  (bundle or {}).get("keyId"), expected_key)
                 return
             self.cloud_bundle = bundle
+            self._cp_key = bundle.get("keyId")
             self._persist_cloud_bundle()
-            self.log.info("re-pinned control-plane key %s", expected_key)
+            self.log.info("re-pinned control-plane key %s", bundle.get("keyId"))
         except Exception as exc:
             self.log.warning("re-trust error: %s", exc)
 
@@ -513,6 +518,13 @@ class Agent:
         cmd_id = payload["commandId"]
         ctype = payload["commandType"]
         accepted = self._verify_command(command)
+        if not accepted:
+            # A rejection is most often control-plane signing-key drift (the node
+            # that now serves this appliance signs with its own key). Re-pin the
+            # current bundle over the authenticated channel and re-verify once so
+            # a legitimate rotation self-heals instead of rejecting forever.
+            await self._retrust_control_plane(client, None)
+            accepted = self._verify_command(command)
         self.log.info("command %s (%s): %s", ctype, cmd_id[:8],
                       "accepted" if accepted else "REJECTED")
         result: dict = {}
