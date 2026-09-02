@@ -253,6 +253,13 @@ def _apply_additive_migrations() -> None:
         "ON snapshot_receipts(tenant_id, vault_id)",
         "ALTER TABLE appliance_storages ADD COLUMN used_bytes INTEGER DEFAULT 0",
         "ALTER TABLE appliance_storages ADD COLUMN health JSON",
+        # External / mirror storage: lifecycle state, stable device identity, and
+        # 1:1 mirror linkage so reconnected drives are recognized and mirrors shadow
+        # their source store.
+        "ALTER TABLE appliance_storages ADD COLUMN state VARCHAR DEFAULT 'ready'",
+        "ALTER TABLE appliance_storages ADD COLUMN device_serial VARCHAR DEFAULT ''",
+        "ALTER TABLE appliance_storages ADD COLUMN mirror_of_id VARCHAR",
+        "ALTER TABLE appliance_storages ADD COLUMN last_seen_at TIMESTAMP",
         "ALTER TABLE nodes ADD COLUMN version_updated_at TIMESTAMP",
         "ALTER TABLE appliances ADD COLUMN version_updated_at TIMESTAMP",
         "ALTER TABLE desktop_agents ADD COLUMN version_updated_at TIMESTAMP",

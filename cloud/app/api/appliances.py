@@ -34,6 +34,7 @@ from ..models import (
     ApplianceAssignment,
     ApplianceCommand,
     ApplianceStorage,
+    AuditEvent,
     LinkingCode,
     PendingAppliance,
     SnapshotReceipt,
@@ -453,6 +454,11 @@ def send_command(appliance_id: str, body: CommandRequest,
 
 def _appliance_view(a: Appliance) -> dict:
     tel = a.telemetry or {}
+    # The vault's actual volume kind (dedicated /arkive RAID vs. built-in system
+    # disk on VMs). Used to keep the appliance-wide capacity fallback attached to
+    # the right row, and to hide the built-in disk on hardware.
+    is_hardware = (tel.get("model_kind") == "hardware")
+    reported_kind = tel.get("storage_kind")
     from ..db import SessionLocal  # local import to avoid a cycle at module load
     stores = []
     db = SessionLocal()
@@ -460,26 +466,55 @@ def _appliance_view(a: Appliance) -> dict:
         for s in (db.query(ApplianceStorage)
                   .filter(ApplianceStorage.appliance_id == a.id)
                   .order_by(ApplianceStorage.kind.desc(), ApplianceStorage.created_at.asc()).all()):
+            # On a hardware appliance the built-in (system) disk is NOT a backup
+            # volume — it's the OS disk, surfaced separately as os_storage. Only VMs
+            # store backups on it, so hide a stale/leftover built-in row on hardware.
+            if s.kind == "builtin" and is_hardware:
+                continue
             cap = s.capacity_bytes or 0
             used = s.used_bytes or 0
             health = s.health or {}
-            primary = s.kind in ("builtin", "dedicated")
-            # Fallback: if the storage record hasn't been synced from a heartbeat
-            # yet, show the appliance's reported capacity for the primary volume.
-            if primary and not cap:
+            primary_row = s.kind in ("builtin", "dedicated")
+            # Only THE vault's volume (matched by the reported storage_kind) borrows
+            # the appliance-wide capacity as a fallback, so a stale/duplicate primary
+            # row can't inherit the dedicated RAID's (all-drives) total. Older agents
+            # don't report storage_kind — fall back to the legacy primary-row match.
+            is_vault_volume = primary_row and (not reported_kind or s.kind == reported_kind)
+            if is_vault_volume and not cap:
                 cap = int(tel.get("capacity_total_bytes") or 0)
                 used = int(tel.get("capacity_used_bytes") or 0)
                 if not health:
                     health = {"drive_health": tel.get("drive_health", "healthy"),
                               "temperature_c": tel.get("temperature_c")}
             stores.append({"id": s.id, "name": s.name, "kind": s.kind,
+                           "state": s.state or "ready",
+                           "mirror_of_id": s.mirror_of_id,
+                           "connected": (s.state or "ready") not in ("disconnected", "provisioning"),
+                           "device_serial": s.device_serial or "",
                            "capacity_bytes": cap, "used_bytes": used,
                            "free_bytes": max(cap - used, 0),
-                           "path": tel.get("data_path") if primary else None,
-                           "mount": tel.get("data_mount") if primary else None,
+                           "path": tel.get("data_path") if is_vault_volume else None,
+                           "mount": tel.get("data_mount") if is_vault_volume else None,
                            "health": health})
     finally:
         db.close()
+    # Removable drives the appliance detected that aren't yet set up as Arkive
+    # storage — surfaced so the user can start the (destructive) setup flow. Drives
+    # already adopted (is_arkive with a known store) are filtered out.
+    known_serials = {s.get("device_serial") for s in stores if s.get("device_serial")}
+    detected = []
+    for dev in (tel.get("external_devices") or []):
+        if dev.get("serial") and dev.get("serial") in known_serials:
+            continue
+        detected.append({
+            "device": dev.get("device"), "serial": dev.get("serial") or "",
+            "model": dev.get("model") or "", "vendor": dev.get("vendor") or "",
+            "size_bytes": int(dev.get("size_bytes") or 0),
+            "transport": dev.get("transport") or "",
+            "has_filesystem": bool(dev.get("has_filesystem")),
+            "fstype": dev.get("fstype") or "", "label": dev.get("label") or "",
+            "is_arkive": bool(dev.get("is_arkive")),
+        })
     return {
         "id": a.id,
         "serial": a.serial,
@@ -499,6 +534,7 @@ def _appliance_view(a: Appliance) -> dict:
         "last_attestation_at": a.last_attestation_at.isoformat() if a.last_attestation_at else None,
         "telemetry": tel,
         "stores": stores,
+        "detected_storage": detected,
     }
 
 
@@ -520,7 +556,12 @@ def _ensure_builtin_store(db: Session, a: Appliance) -> ApplianceStorage:
 
 def _sync_storage_telemetry(db: Session, a: Appliance, telemetry: dict) -> None:
     """Reflect the appliance's reported per-volume capacity + health onto its
-    ApplianceStorage rows so each storage element shows its own usage/health."""
+    ApplianceStorage rows so each storage element shows its own usage/health.
+
+    Primary-volume rows (built-in/dedicated) carry no store_id; external and mirror
+    rows are keyed by their stable id (== the ApplianceStorage id written to the
+    drive's marker at setup). Arkive-managed drives not present this heartbeat are
+    flagged disconnected so the UI shows their status."""
     reported = telemetry.get("storages")
     builtin = _ensure_builtin_store(db, a)
     if not reported:
@@ -531,16 +572,47 @@ def _sync_storage_telemetry(db: Session, a: Appliance, telemetry: dict) -> None:
                           "temperature_c": telemetry.get("temperature_c")}
         db.commit()
         return
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    seen_external: set[str] = set()
     existing = {s.name: s for s in (db.query(ApplianceStorage)
                                     .filter(ApplianceStorage.appliance_id == a.id).all())}
     for rep in reported:
-        name = rep.get("name") or "Storage"
+        sid = rep.get("store_id")
         kind = rep.get("kind", "external")
+        if sid:
+            # External / mirror store keyed by its stable id (created at setup).
+            s = db.get(ApplianceStorage, sid)
+            if not s:
+                # Adopt a store the appliance set up locally (e.g. via cvtool) that
+                # the cloud hasn't seen yet — key the row by the reported store id.
+                if kind not in ("external", "mirror"):
+                    continue
+                s = ApplianceStorage(id=sid, tenant_id=a.tenant_id, appliance_id=a.id,
+                                     name=rep.get("name") or "External Storage", kind=kind)
+                db.add(s)
+            elif s.appliance_id != a.id:
+                continue
+            seen_external.add(sid)
+            connected = bool(rep.get("connected", True))
+            s.capacity_bytes = int(rep.get("capacity_bytes") or 0)
+            s.used_bytes = int(rep.get("used_bytes") or 0)
+            s.health = rep.get("health") or {}
+            if rep.get("device_serial"):
+                s.device_serial = rep.get("device_serial")
+            if rep.get("mirror_of_id") is not None:
+                s.mirror_of_id = rep.get("mirror_of_id")
+            # Leave a provisioning store alone until the drive reports it's ready.
+            if connected:
+                s.state = "ready"
+                s.last_seen_at = now
+            elif s.state != "provisioning":
+                s.state = "disconnected"
+            continue
+        # Primary volume (no store_id): repurpose the single built-in/dedicated row
+        # so existing store:<id> mappings keep resolving to the same object.
+        name = rep.get("name") or "Storage"
         s = existing.get(name)
         if not s and kind in ("builtin", "dedicated"):
-            # Repurpose the single primary store row (built-in → dedicated) when a
-            # dedicated Arkive volume is detected, so existing store:<id> mappings
-            # keep resolving to the same storage object.
             s = builtin
             s.name = name
             s.kind = kind
@@ -551,7 +623,48 @@ def _sync_storage_telemetry(db: Session, a: Appliance, telemetry: dict) -> None:
         s.capacity_bytes = int(rep.get("capacity_bytes") or 0)
         s.used_bytes = int(rep.get("used_bytes") or 0)
         s.health = rep.get("health") or {}
+        s.state = "ready"
+    # Arkive-managed external/mirror stores not reported this heartbeat are offline.
+    for s in (db.query(ApplianceStorage)
+              .filter(ApplianceStorage.appliance_id == a.id,
+                      ApplianceStorage.kind.in_(["external", "mirror"])).all()):
+        if s.id not in seen_external and s.state != "provisioning":
+            s.state = "disconnected"
+            h = dict(s.health or {})
+            h["drive_health"] = "disconnected"
+            s.health = h
     db.commit()
+
+
+def _notify_detected_storage(db: Session, a: Appliance, telemetry: dict) -> None:
+    """Raise a one-time operator alert when a brand-new removable drive appears on
+    an appliance (surfaced on the Overview alerts feed + the Appliances page). Own
+    (already-adopted) drives and drives we've already flagged are skipped."""
+    devices = telemetry.get("external_devices") or []
+    if not devices:
+        return
+    own_serials = {ser for (ser,) in
+                   db.query(ApplianceStorage.device_serial)
+                   .filter(ApplianceStorage.appliance_id == a.id).all() if ser}
+    # Serials we already alerted on (dedupe across heartbeats).
+    recent = (db.query(AuditEvent)
+              .filter(AuditEvent.tenant_id == a.tenant_id,
+                      AuditEvent.action == "appliance.storage_detected",
+                      AuditEvent.resource == a.id)
+              .order_by(AuditEvent.created_at.desc()).limit(50).all())
+    alerted = {(e.detail or {}).get("serial") for e in recent}
+    for dev in devices:
+        serial = dev.get("serial")
+        if not serial or serial in own_serials or serial in alerted:
+            continue
+        label = (dev.get("model") or dev.get("vendor") or "External drive").strip()
+        audit.record(db, actor="system", action="appliance.storage_detected",
+                     tenant_id=a.tenant_id, resource=a.id, category="storage",
+                     severity="warning",
+                     detail={"serial": serial, "device": dev.get("device"),
+                             "model": label, "size_bytes": dev.get("size_bytes"),
+                             "appliance_name": a.name, "appliance_id": a.id,
+                             "is_arkive": bool(dev.get("is_arkive"))})
 
 
 class RenameApplianceRequest(BaseModel):
@@ -603,6 +716,104 @@ def add_storage(appliance_id: str, body: StorageRequest,
     return {"id": s.id, "name": s.name, "kind": s.kind}
 
 
+class StorageSetupRequest(BaseModel):
+    serial: str
+    device: str = ""            # advisory; the agent re-resolves by serial
+    name: str
+    mirror_of_id: str | None = None   # when set, this drive mirrors that store (1:1)
+    confirm: bool = False       # must be true — formatting is destructive
+
+
+@fleet_router.post("/{appliance_id}/storage/setup")
+def setup_storage(appliance_id: str, body: StorageSetupRequest,
+                  principal: security.Principal = Depends(security.get_principal),
+                  tenant: Tenant = Depends(security.get_tenant),
+                  db: Session = Depends(get_db)):
+    """Adopt a detected removable drive as Arkive storage. Creates the store row and
+    dispatches a signed SETUP_STORAGE command that (destructively) partitions,
+    formats and mounts the drive on the appliance. Guarded: the drive must be a
+    currently-detected removable device and the caller must confirm."""
+    a = db.get(Appliance, appliance_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "appliance not found")
+    _require_can_manage_appliance(principal, tenant, appliance_id, db)
+    if not body.confirm:
+        raise HTTPException(400, "formatting must be explicitly confirmed")
+    if not body.serial:
+        raise HTTPException(400, "a drive serial is required")
+    # Safety: only adopt a drive the appliance actually reported as a removable
+    # candidate this session (never the system or dedicated disk).
+    candidates = {d.get("serial"): d for d in (a.telemetry or {}).get("external_devices", [])
+                  if d.get("serial")}
+    dev = candidates.get(body.serial)
+    if not dev:
+        raise HTTPException(409, "that drive is no longer detected on the appliance")
+    # A mirror shadows exactly one existing store (its source must belong here).
+    kind = "external"
+    if body.mirror_of_id:
+        src = db.get(ApplianceStorage, body.mirror_of_id)
+        if not src or src.appliance_id != a.id:
+            raise HTTPException(404, "mirror source store not found")
+        if src.kind == "mirror":
+            raise HTTPException(400, "a mirror cannot mirror another mirror")
+        kind = "mirror"
+    s = ApplianceStorage(tenant_id=tenant.id, appliance_id=a.id,
+                         name=body.name.strip() or "External Storage",
+                         kind=kind, state="provisioning",
+                         device_serial=body.serial, mirror_of_id=body.mirror_of_id)
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+    fleet.issue_command(db, a, "SETUP_STORAGE", principal.user_id, {
+        "storeId": s.id, "serial": body.serial, "device": dev.get("device") or body.device,
+        "name": s.name, "kind": kind, "mirrorOfId": body.mirror_of_id})
+    audit.record(db, actor=principal.user_id, action="appliance.storage_setup",
+                 tenant_id=tenant.id, resource=a.id, severity="notice",
+                 detail={"storage": s.name, "serial": body.serial, "mirror": bool(body.mirror_of_id)})
+    return {"id": s.id, "name": s.name, "kind": s.kind, "state": s.state}
+
+
+class MirrorRequest(BaseModel):
+    mirror_of_id: str | None = None   # null clears the mirror role
+
+
+@fleet_router.put("/{appliance_id}/storage/{storage_id}/mirror")
+def configure_mirror(appliance_id: str, storage_id: str, body: MirrorRequest,
+                     principal: security.Principal = Depends(security.get_principal),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    """Turn an external store into a 1:1 mirror of another store (or clear it).
+    Non-destructive: only rewrites the drive's marker + the appliance's mirror
+    routing via a signed RECONFIGURE_STORAGE command."""
+    a = db.get(Appliance, appliance_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "appliance not found")
+    s = db.get(ApplianceStorage, storage_id)
+    if not s or s.tenant_id != tenant.id or s.appliance_id != appliance_id:
+        raise HTTPException(404, "storage not found")
+    _require_can_manage_appliance(principal, tenant, appliance_id, db)
+    if s.kind in ("builtin", "dedicated"):
+        raise HTTPException(400, "the primary volume cannot be a mirror")
+    if body.mirror_of_id:
+        src = db.get(ApplianceStorage, body.mirror_of_id)
+        if not src or src.appliance_id != a.id:
+            raise HTTPException(404, "mirror source store not found")
+        if src.id == s.id or src.kind == "mirror":
+            raise HTTPException(400, "invalid mirror source")
+        s.mirror_of_id = src.id
+        s.kind = "mirror"
+    else:
+        s.mirror_of_id = None
+        s.kind = "external"
+    db.commit()
+    fleet.issue_command(db, a, "RECONFIGURE_STORAGE", principal.user_id, {
+        "storeId": s.id, "kind": s.kind, "mirrorOfId": s.mirror_of_id})
+    audit.record(db, actor=principal.user_id, action="appliance.storage_mirror",
+                 tenant_id=tenant.id, resource=a.id,
+                 detail={"storage": s.name, "mirror_of": s.mirror_of_id})
+    return {"id": s.id, "name": s.name, "kind": s.kind, "mirror_of_id": s.mirror_of_id}
+
+
 @fleet_router.put("/{appliance_id}/storage/{storage_id}")
 def rename_storage(appliance_id: str, storage_id: str, body: StorageRequest,
                    principal: security.Principal = Depends(security.get_principal),
@@ -628,8 +839,18 @@ def delete_storage(appliance_id: str, storage_id: str,
     if not s or s.tenant_id != tenant.id or s.appliance_id != appliance_id:
         raise HTTPException(404, "storage not found")
     _require_can_manage_appliance(principal, tenant, appliance_id, db)
-    if s.kind == "builtin":
-        raise HTTPException(400, "the built-in storage cannot be removed")
+    if s.kind in ("builtin", "dedicated"):
+        raise HTTPException(400, "the primary volume cannot be removed")
+    # Any mirrors shadowing this store lose their source — revert them to plain
+    # external stores so they stop being treated as mirrors.
+    for m in (db.query(ApplianceStorage)
+              .filter(ApplianceStorage.mirror_of_id == s.id).all()):
+        m.mirror_of_id = None
+        m.kind = "external"
+    a = db.get(Appliance, appliance_id)
+    # Tell the appliance to unmount + deregister the drive (data is left intact).
+    if a and s.kind in ("external", "mirror"):
+        fleet.issue_command(db, a, "FORGET_STORAGE", principal.user_id, {"storeId": s.id})
     db.delete(s)
     db.commit()
     audit.record(db, actor=principal.user_id, action="appliance.storage_removed",
@@ -995,6 +1216,7 @@ def heartbeat(body: HeartbeatRequest,
     # Storage telemetry is best-effort — never let it reject the heartbeat.
     try:
         _sync_storage_telemetry(db, appliance, body.telemetry or {})
+        _notify_detected_storage(db, appliance, body.telemetry or {})
     except Exception:
         db.rollback()
         logger.exception("storage telemetry sync failed for appliance %s", appliance.id)

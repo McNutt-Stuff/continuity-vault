@@ -39,6 +39,12 @@ NOTIFICATION_TYPES = [
     {"key": "source_problem", "label": "Source problem alerts", "icon": "alert",
      "default": True, "scope": "user",
      "desc": "Get notified when one of your connected sources needs attention."},
+    {"key": "appliance_problem", "label": "Appliance health alerts", "icon": "server",
+     "default": True, "scope": "user",
+     "desc": "Get notified when an appliance goes offline, a drive or storage fails, capacity runs low, the network is slow, or an intrusion is detected."},
+    {"key": "storage_problem", "label": "Storage destination alerts", "icon": "database",
+     "default": True, "scope": "user",
+     "desc": "Get notified when one of your cloud storage destinations can't be reached, written, or read for recovery."},
     {"key": "plan_change", "label": "Plan & billing changes", "icon": "credit-card",
      "default": True, "scope": "user",
      "desc": "A confirmation whenever your plan, storage or appliances change."},
@@ -119,6 +125,32 @@ def source_repeat_hours(db) -> int:
         return max(1, int(v))
     except (TypeError, ValueError):
         return 24
+
+
+def _int_setting(db, key: str, default: int) -> int:
+    from . import node_config
+    v = node_config.get(db, key)
+    if v is None:
+        v = _setting(db, key, str(default))
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def appliance_alert_minutes(db) -> int:
+    """How long an appliance may miss heartbeats before it's flagged offline."""
+    return max(5, _int_setting(db, "notif.appliance_offline_minutes", 30))
+
+
+def slow_latency_ms(db) -> int:
+    """Cloud round-trip latency (ms) above which an appliance's link is 'slow'."""
+    return max(250, _int_setting(db, "notif.slow_latency_ms", 1500))
+
+
+def breach_attempt_threshold(db) -> int:
+    """Blocked LAN intrusion/auth attempts in the window that warrant an alert."""
+    return max(1, _int_setting(db, "notif.breach_attempts", 20))
 
 
 def enabled_insights(db) -> list[str]:
@@ -349,6 +381,146 @@ def _source_issues(db, user: User) -> list[dict]:
                     "fails": fails,
                     "reauth": _likely_reauth(msg)})
 
+    # Reachability: an enabled integration that isn't erroring but has stopped
+    # producing fresh data — its LAN controller/endpoint is likely unreachable.
+    flagged = {i["id"] for i in out if i.get("kind") == "integration"}
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    healthy = (db.query(IntegrationInstance)
+               .filter(IntegrationInstance.tenant_id == user.tenant_id,
+                       IntegrationInstance.enabled.is_(True),
+                       or_(IntegrationInstance.owner_user_id == user.id,
+                           IntegrationInstance.owner_user_id.is_(None))).all())
+    for inst in healthy:
+        if inst.id in flagged or (inst.provision_state or "idle") not in ("idle", "done"):
+            continue
+        interval = int(inst.poll_interval_minutes or 60)
+        stale_after = timedelta(minutes=max(60, interval * 3))
+        last = inst.last_success_at or inst.last_run_at
+        if last is not None and last.tzinfo is not None:
+            last = last.replace(tzinfo=None)
+        if last is None:
+            created = inst.created_at
+            if created is not None and created.tzinfo is not None:
+                created = created.replace(tzinfo=None)
+            if not created or (now - created) < stale_after:
+                continue  # give a brand-new integration time to first-run
+            msg = "No data collected yet — the integration may be unreachable or misconfigured."
+        elif (now - last) > stale_after:
+            mins = int((now - last).total_seconds() // 60)
+            msg = f"No fresh data for {mins} min — the integration endpoint may be unreachable."
+        else:
+            continue
+        out.append({"id": inst.id, "kind": "integration",
+                    "name": inst.label or _source_name(inst.integration_type),
+                    "source_type": inst.integration_type,
+                    "error": msg, "at": last or inst.updated_at,
+                    "fails": 0, "reauth": False})
+
+    out.sort(key=lambda i: i.get("at") or datetime.min.replace(tzinfo=None), reverse=True)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Appliance + storage-destination health                                      #
+# --------------------------------------------------------------------------- #
+
+def _is_org_admin_user(db, user: User) -> bool:
+    return (user.role in ("owner", "security-admin")
+            or bool(getattr(user, "is_platform_admin", False)))
+
+
+def _visible_appliances(db, user: User):
+    """Appliances this user is responsible for: everything in the tenant for org
+    admins and shared/personal owners; only assigned units for a plain member."""
+    from .models import Appliance, ApplianceAssignment
+    tenant = db.get(Tenant, user.tenant_id)
+    is_shared = bool(tenant and (tenant.tenant_type or "dedicated") == "shared")
+    q = db.query(Appliance).filter(Appliance.tenant_id == user.tenant_id)
+    if is_shared or _is_org_admin_user(db, user):
+        return q.all()
+    ids = [aid for (aid,) in db.query(ApplianceAssignment.appliance_id)
+           .filter(ApplianceAssignment.user_id == user.id).all()]
+    return q.filter(Appliance.id.in_(ids or ["-"])).all()
+
+
+def appliance_problem_list(db, a) -> tuple[list[str], str]:
+    """Health problems for one appliance as (messages, severity). Central so the
+    audit sweep and the per-user notification agree on what 'a problem' is."""
+    from .models import ApplianceStorage
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    probs: list[str] = []
+    sev = "warning"
+    hb = a.last_heartbeat_at
+    if hb is not None and hb.tzinfo is not None:
+        hb = hb.replace(tzinfo=None)
+    offline_after = timedelta(minutes=appliance_alert_minutes(db))
+    if hb is None or (now - hb) > offline_after:
+        mins = int((now - hb).total_seconds() // 60) if hb else None
+        probs.append(f"Offline for {mins} min" if mins else "Offline — no heartbeat received")
+    if not a.attestation_ok:
+        probs.append("Attestation failed"); sev = "critical"
+    if a.tamper_state and a.tamper_state != "normal":
+        probs.append(f"Tamper detected ({a.tamper_state})"); sev = "critical"
+    if a.state == "QUARANTINED":
+        probs.append("Quarantined"); sev = "critical"
+    tel = a.telemetry or {}
+    for s in db.query(ApplianceStorage).filter(ApplianceStorage.appliance_id == a.id).all():
+        cap = s.capacity_bytes or 0
+        used = s.used_bytes or 0
+        if cap and used / cap >= 0.9:
+            probs.append(f"{s.name} nearly full ({int(used / cap * 100)}%)")
+        h = s.health or {}
+        dh = h.get("drive_health")
+        if dh and dh not in ("healthy", "disconnected"):
+            probs.append(f"{s.name}: drive {dh}"); sev = "critical"
+        if (s.state == "disconnected") and s.kind in ("external", "mirror"):
+            probs.append(f"{s.name} disconnected")
+        smart = h.get("smart") or {}
+        if smart.get("enabled") and smart.get("status") not in (None, "passed"):
+            probs.append(f"{s.name}: SMART {smart.get('status')}"); sev = "critical"
+        raid = h.get("raid") or {}
+        if raid.get("enabled") and raid.get("status") not in (None, "optimal"):
+            probs.append(f"{s.name}: RAID {raid.get('status')}"); sev = "critical"
+    lat = tel.get("cloud_latency_ms")
+    if isinstance(lat, (int, float)) and lat >= slow_latency_ms(db):
+        probs.append(f"Slow network link ({int(lat)} ms)")
+    secd = tel.get("security") or {}
+    breaches = secd.get("failed_auth") or secd.get("breach_attempts") or 0
+    if isinstance(breaches, (int, float)) and breaches >= breach_attempt_threshold(db):
+        probs.append(f"{int(breaches)} LAN intrusion attempt(s) blocked"); sev = "critical"
+    return probs, sev
+
+
+def _appliance_issues(db, user: User) -> list[dict]:
+    out = []
+    for a in _visible_appliances(db, user):
+        probs, sev = appliance_problem_list(db, a)
+        if probs:
+            out.append({"id": a.id, "kind": "appliance", "name": a.name,
+                        "error": "; ".join(probs[:4]), "at": a.last_heartbeat_at,
+                        "severity": sev})
+    out.sort(key=lambda i: i.get("at") or datetime.min.replace(tzinfo=None), reverse=True)
+    return out
+
+
+def _storage_issues(db, user: User) -> list[dict]:
+    """Bring-your-own-storage destinations that failed their health probe
+    (unreachable / not writable / not readable for recovery)."""
+    from .models import CustomerStorage
+    tenant = db.get(Tenant, user.tenant_id)
+    is_shared = bool(tenant and (tenant.tenant_type or "dedicated") == "shared")
+    q = (db.query(CustomerStorage)
+         .filter(CustomerStorage.tenant_id == user.tenant_id,
+                 CustomerStorage.enabled == True))  # noqa: E712
+    if is_shared or not _is_org_admin_user(db, user):
+        q = q.filter(CustomerStorage.owner_user_id == user.id)
+    out = []
+    for cs in q.all():
+        if cs.last_test_ok is False or (cs.status or "") == "error":
+            out.append({"id": cs.id, "kind": "storage", "name": cs.name,
+                        "provider": cs.provider,
+                        "error": (cs.last_test_error or "Health check failed").splitlines()[0][:200],
+                        "at": cs.last_test_at})
     out.sort(key=lambda i: i.get("at") or datetime.min.replace(tzinfo=None), reverse=True)
     return out
 
@@ -558,6 +730,57 @@ def build_source_problem(db, user: User, issues: list[dict] | None = None) -> di
     }
 
 
+def build_appliance_problem(db, user: User, issues: list[dict] | None = None) -> dict | None:
+    issues = issues if issues is not None else _appliance_issues(db, user)
+    if not issues:
+        return None
+    n = len(issues)
+    critical = any(i.get("severity") == "critical" for i in issues)
+    parts: list[str] = []
+    lead = ("One of your appliances needs attention." if n == 1
+            else f"<b>{n} appliances</b> need attention.")
+    parts.append(f'<p style="margin:0 0 12px;">{lead} Your protected data stays safe — '
+                 f'address these so protection and monitoring continue uninterrupted.</p>')
+    parts.append(_rows([{"icon": "server", "name": i["name"], "detail": i["error"]}
+                        for i in issues]))
+    if critical:
+        parts.append(f'<p style="margin:12px 0 0;font-size:13.5px;color:#8a5a1a;">'
+                     f'{_ic("warn")} One or more issues are critical (drive/RAID failure, tamper, '
+                     f'or intrusion) — please act now.</p>')
+    return {
+        "subject": (f'Appliance alert: “{issues[0]["name"]}” needs attention'
+                    if n == 1 else f"Appliance alert: {n} appliances need attention"),
+        "title": "An appliance needs your attention" if n == 1 else f"{n} appliances need attention",
+        "body_html": "".join(parts),
+        "text": "; ".join(f'{i["name"]}: {i["error"]}' for i in issues),
+        "cta": {"label": "Open Appliances", "url": f"{_portal_url()}/appliances"},
+        "preheader": f"{n} appliance(s) need attention",
+    }
+
+
+def build_storage_problem(db, user: User, issues: list[dict] | None = None) -> dict | None:
+    issues = issues if issues is not None else _storage_issues(db, user)
+    if not issues:
+        return None
+    n = len(issues)
+    parts: list[str] = []
+    lead = ("One of your storage destinations can't be reached." if n == 1
+            else f"<b>{n} storage destinations</b> can't be reached.")
+    parts.append(f'<p style="margin:0 0 12px;">{lead} New backups may not be landing there, and '
+                 f'recovery from it may fail. Check the destination\'s credentials and access.</p>')
+    parts.append(_rows([{"icon": "database", "name": i["name"], "detail": i["error"]}
+                        for i in issues]))
+    return {
+        "subject": (f'Storage alert: “{issues[0]["name"]}” is unreachable'
+                    if n == 1 else f"Storage alert: {n} destinations unreachable"),
+        "title": "A storage destination needs attention" if n == 1 else f"{n} storage destinations need attention",
+        "body_html": "".join(parts),
+        "text": "; ".join(f'{i["name"]}: {i["error"]}' for i in issues),
+        "cta": {"label": "Open Cloud Storage", "url": f"{_portal_url()}/cloud-storage"},
+        "preheader": f"{n} storage destination(s) need attention",
+    }
+
+
 def build_plan_change(db, user: User, change: dict) -> dict:
     """``change`` = {summary:[str], line_items:[{label,amount}], total_label, total,
     effective, plan_name}."""
@@ -673,6 +896,10 @@ def _build(db, user: User, key: str, ctx: dict) -> dict | None:
         return build_daily_summary(db, user, force=bool(ctx.get("force") or ctx.get("build_force")))
     if key == "source_problem":
         return build_source_problem(db, user, ctx.get("issues"))
+    if key == "appliance_problem":
+        return build_appliance_problem(db, user, ctx.get("issues"))
+    if key == "storage_problem":
+        return build_storage_problem(db, user, ctx.get("issues"))
     if key == "plan_change":
         return build_plan_change(db, user, ctx.get("change") or {})
     if key == "weekly_org":
@@ -692,6 +919,15 @@ def send_test(db, user: User, key: str) -> dict:
         issues = _source_issues(db, user)
         ctx["issues"] = issues or [{"id": "sample", "name": "Gmail (sample)",
                                     "error": "Authorization expired — please re-connect.", "at": None}]
+    if key == "appliance_problem":
+        issues = _appliance_issues(db, user)
+        ctx["issues"] = issues or [{"id": "sample", "name": "Home Appliance (sample)", "kind": "appliance",
+                                    "error": "Offline for 45 min; Dedicated Storage nearly full (92%)",
+                                    "at": None, "severity": "warning"}]
+    if key == "storage_problem":
+        issues = _storage_issues(db, user)
+        ctx["issues"] = issues or [{"id": "sample", "name": "My S3 bucket (sample)", "kind": "storage",
+                                    "error": "write failed: Access Denied — check the write credential.", "at": None}]
     built = _build(db, user, key, ctx)
     if built is None and key == "daily_summary":
         built = build_daily_summary(db, user, force=True)

@@ -96,6 +96,10 @@ def start_scheduler() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("customer storage health test failed")
             try:
+                _check_appliance_health()
+            except Exception:  # noqa: BLE001
+                logger.exception("appliance health check failed")
+            try:
                 _run_notifications()
             except Exception:  # noqa: BLE001
                 logger.exception("notification sweep failed")
@@ -154,27 +158,79 @@ _applied_system_tz: str | None = None
 
 def _test_customer_storages() -> None:
     """Periodically round-trip a probe against each enabled customer storage so
-    the Cloud Storage page reflects fresh health (at most every 30 minutes)."""
+    the Cloud Storage page reflects fresh health (at most every 30 minutes).
+
+    A destination that newly fails its accessible/writable/readable probe is
+    written to the audit ledger (so it appears in the log/alerts views); the
+    per-user email alert is sent by the notification sweep from the same state."""
     global _last_storage_test
     now = datetime.utcnow()
     if _last_storage_test and (now - _last_storage_test) < timedelta(minutes=30):
         return
     _last_storage_test = now
-    from .. import customer_storage as cs_mod
+    from .. import audit, customer_storage as cs_mod
     from ..models import CustomerStorage
     with SessionLocal() as db:
         for cs in (db.query(CustomerStorage)
                    .filter(CustomerStorage.enabled == True).all()):  # noqa: E712
             try:
+                was_ok = cs.last_test_ok is not False  # True/None -> treat as previously ok
                 ok, err = cs_mod.test_storage(db, cs)
                 cs.last_test_at = now
                 cs.last_test_ok = ok
                 cs.last_test_error = err or None
                 cs.status = "healthy" if ok else "error"
                 db.commit()
+                if not ok and was_ok:
+                    audit.record(db, actor="system", action="storage.health_failed",
+                                 tenant_id=cs.tenant_id, resource=cs.id, category="storage",
+                                 severity="warning",
+                                 detail={"name": cs.name, "provider": cs.provider,
+                                         "error": (err or "health check failed")[:240]})
             except Exception:  # noqa: BLE001
                 logger.exception("storage health test failed for %s", cs.id)
                 db.rollback()
+
+
+_last_appliance_health: datetime | None = None
+
+
+def _recent_audit_exists(db, tenant_id: str, action: str, resource: str, hours: int) -> bool:
+    from ..models import AuditEvent
+    since = datetime.utcnow() - timedelta(hours=hours)
+    return db.query(AuditEvent.id).filter(
+        AuditEvent.tenant_id == tenant_id, AuditEvent.action == action,
+        AuditEvent.resource == resource, AuditEvent.created_at >= since).first() is not None
+
+
+def _check_appliance_health() -> None:
+    """Sweep appliances for health problems (offline too long, drive/RAID/SMART
+    failure, capacity limits, slow link, LAN intrusion attempts) and write a
+    deduped audit event per unit so issues show in the log/alerts views. Runs at
+    most every ~10 minutes; the email alert is sent by the notification sweep."""
+    global _last_appliance_health
+    now = datetime.utcnow()
+    if _last_appliance_health and (now - _last_appliance_health) < timedelta(minutes=10):
+        return
+    _last_appliance_health = now
+    from .. import audit, notifications as notif
+    from ..models import Appliance
+    repeat_h = 6  # re-log the same appliance's problem at most every 6 hours
+    with SessionLocal() as db:
+        for a in db.query(Appliance).all():
+            try:
+                probs, sev = notif.appliance_problem_list(db, a)
+                if not probs:
+                    continue
+                if _recent_audit_exists(db, a.tenant_id, "appliance.health_problem", a.id, repeat_h):
+                    continue
+                audit.record(db, actor="system", action="appliance.health_problem",
+                             tenant_id=a.tenant_id, resource=a.id, category="appliance",
+                             severity="critical" if sev == "critical" else "warning",
+                             detail={"name": a.name, "problems": probs[:6]})
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("appliance health check failed for %s", a.id)
 
 
 def _purge_cloud_unsubscribed() -> None:
@@ -393,6 +449,16 @@ def _run_notifications() -> None:
             except Exception:  # noqa: BLE001
                 db.rollback()
                 logger.exception("source-problem notify failed for %s", u.id)
+            try:
+                _notify_appliance_problems(db, notif, u, now)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("appliance-problem notify failed for %s", u.id)
+            try:
+                _notify_storage_problems(db, notif, u, now)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("storage-problem notify failed for %s", u.id)
         # Weekly org roll-up (Mondays in the node's timezone), to org admins.
         if local.weekday() == 0:
             try:
@@ -412,6 +478,26 @@ def _notify_source_problems(db, notif, user, now: datetime) -> None:
     bucket = int(now.timestamp() // (repeat_h * 3600))
     notif.send_notification(db, user, "source_problem",
                             dedupe_key=f"srcprob:{bucket}", issues=issues)
+
+
+def _notify_appliance_problems(db, notif, user, now: datetime) -> None:
+    issues = notif._appliance_issues(db, user)
+    if not issues:
+        return
+    repeat_h = notif.source_repeat_hours(db)
+    bucket = int(now.timestamp() // (repeat_h * 3600))
+    notif.send_notification(db, user, "appliance_problem",
+                            dedupe_key=f"applprob:{bucket}", issues=issues)
+
+
+def _notify_storage_problems(db, notif, user, now: datetime) -> None:
+    issues = notif._storage_issues(db, user)
+    if not issues:
+        return
+    repeat_h = notif.source_repeat_hours(db)
+    bucket = int(now.timestamp() // (repeat_h * 3600))
+    notif.send_notification(db, user, "storage_problem",
+                            dedupe_key=f"stgprob:{bucket}", issues=issues)
 
 
 def _run_weekly_org(db, notif, assigned: set[str], now: datetime) -> None:

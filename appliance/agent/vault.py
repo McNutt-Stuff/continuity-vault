@@ -31,6 +31,14 @@ class VaultStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self._protected = self.root / "protected"
         self._sm = sm
+        # Mirror volumes (external drives configured to shadow this primary vault).
+        # Every committed snapshot is duplicated to each mirror, and recovery reads
+        # fall back to a mirror when the primary copy is missing/unreadable.
+        self._mirror_roots: list[Path] = []
+
+    def set_mirror_roots(self, roots: list[str]) -> None:
+        """Replace the set of mirror vault roots (paths ending in '/vault')."""
+        self._mirror_roots = [Path(r) / "protected" for r in roots if r]
 
     def _require_open(self) -> None:
         if not self._sm.storage_accessible:
@@ -46,7 +54,20 @@ class VaultStore:
         committed is left untouched (rewriting a 0o444 file would raise). This lets
         a redelivered ingest command re-run safely instead of failing."""
         self._require_open()
-        snap_dir = self._protected / snapshot_id
+        snap_dir = self._write_into(self._protected, snapshot_id, objects, manifest)
+        # Duplicate the sealed snapshot onto each mirror volume (best-effort: a
+        # mirror write failure must never fail the primary backup — it's surfaced
+        # via the mirror store's health instead).
+        for mroot in self._mirror_roots:
+            try:
+                self._write_into(mroot, snapshot_id, objects, manifest)
+            except Exception:
+                pass
+        return snap_dir
+
+    def _write_into(self, protected: Path, snapshot_id: str, objects: list[dict],
+                    manifest: dict) -> Path:
+        snap_dir = protected / snapshot_id
         snap_dir.mkdir(parents=True, exist_ok=True)
         for obj in objects:
             p = snap_dir / obj["objectId"]
@@ -66,10 +87,25 @@ class VaultStore:
 
     def read_object(self, snapshot_id: str, object_id: str) -> dict:
         self._require_open()
-        return json.loads((self._protected / snapshot_id / object_id).read_text())
+        primary = self._protected / snapshot_id / object_id
+        try:
+            return json.loads(primary.read_text())
+        except Exception:
+            # Recovery fallback: read the object from a mirror volume when the
+            # primary copy is missing or unreadable (drive fault / bit rot).
+            for mroot in self._mirror_roots:
+                try:
+                    return json.loads((mroot / snapshot_id / object_id).read_text())
+                except Exception:
+                    continue
+            raise
 
     def snapshot_exists(self, snapshot_id: str) -> bool:
-        return (self._protected / snapshot_id / "manifest.json").exists()
+        if (self._protected / snapshot_id / "manifest.json").exists():
+            return True
+        # A snapshot present only on a mirror is still recoverable.
+        return any((m / snapshot_id / "manifest.json").exists()
+                   for m in self._mirror_roots)
 
     def capacity(self) -> dict:
         used = sum(f.stat().st_size for f in self._protected.rglob("*")

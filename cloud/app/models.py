@@ -284,10 +284,21 @@ class ApplianceStorage(Base):
     tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
     appliance_id = Column(String, ForeignKey("appliances.id"), nullable=False, index=True)
     name = Column(String, default="Built-In Storage")
-    kind = Column(String, default="builtin")  # builtin | external
+    kind = Column(String, default="builtin")  # builtin | dedicated | external | mirror
+    # Lifecycle: ready (set up + usable) | provisioning (format/mount in flight) |
+    # disconnected (ours, but the device isn't currently present) | error.
+    state = Column(String, default="ready")
     capacity_bytes = Column(BigInteger, default=0)
     used_bytes = Column(BigInteger, default=0)
     health = Column(JSON, default=dict)  # drive_health, smart, raid, temperature_c
+    # Stable identity of an external device (disk serial / WWN) so a reconnected
+    # drive is recognized as the same store even if its /dev name changes.
+    device_serial = Column(String, default="")
+    # When this store mirrors another (1:1), the id of the source store it shadows.
+    # A mirror is written on every backup to its source and read on recovery
+    # fallback; it is never directly selectable as a destination.
+    mirror_of_id = Column(String, ForeignKey("appliance_storages.id"), nullable=True)
+    last_seen_at = Column(DateTime, nullable=True)  # last heartbeat the device was present
     created_at = Column(DateTime, default=_now)
 
 

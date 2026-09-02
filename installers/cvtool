@@ -150,6 +150,63 @@ cmd_relink() {
   if [ -n "${1:-}" ]; then sleep 2; cmd_link "$1"; fi
 }
 
+# --- external storage (USB / removable) ------------------------------------
+# Invokes the appliance's storage CLI in the agent venv (same env the service
+# uses), then restarts the agent so it mounts/mirrors the change and reports it
+# to the cloud on the next heartbeat.
+_storage_py() {
+  local py="$INSTALL_DIR/.venv/bin/python"
+  [ -x "$py" ] || py="python3"
+  ( cd "$INSTALL_DIR/appliance" && "$py" -m agent.storage_cli "$@" )
+}
+
+# Tell the running agent to adopt a storage change in place: SIGHUP makes it
+# re-read its registry and pick up the (root-mounted) drive without a restart.
+# An older agent that doesn't handle SIGHUP is restarted by systemd (Restart=
+# always) to the same effect; if the signal can't be delivered we restart.
+_agent_reload() {
+  systemctl kill -s HUP cv-appliance-agent.service 2>/dev/null \
+    || systemctl reload cv-appliance-agent.service 2>/dev/null \
+    || systemctl restart cv-appliance-agent.service
+}
+
+cmd_storage() {
+  local sub="${1:-list}"; shift 2>/dev/null || true
+  case "$sub" in
+    ""|list|ls) _storage_py list "$@" ;;
+    setup)
+      local serial="${1:-}"; shift 2>/dev/null || true
+      local name="" mirror=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --name) name="${2:-}"; shift 2 ;;
+          --mirror) mirror="${2:-}"; shift 2 ;;
+          *) echo "cvtool storage: unknown option '$1'" >&2; return 1 ;;
+        esac
+      done
+      [ -z "$serial" ] && { echo "usage: cvtool storage setup <SERIAL> --name <NAME> [--mirror <STORE_ID>]"; echo; _storage_py list; return 1; }
+      [ -z "$name" ] && { echo "a --name is required" >&2; return 1; }
+      echo "This will PARTITION and FORMAT the drive with serial $serial — all data on it will be ERASED."
+      printf "Type SETUP to confirm: "; read -r ans
+      [ "$ans" = "SETUP" ] || { echo "Aborted."; return 1; }
+      local args=(setup "$serial" --name "$name")
+      [ -n "$mirror" ] && args+=(--mirror "$mirror")
+      if _storage_py "${args[@]}"; then
+        echo "Drive formatted and mounted — notifying the agent…"
+        _agent_reload
+        echo "Storage is ready. Run 'cvtool storage' to confirm, or check the portal Appliances → Storage."
+      fi ;;
+    forget|remove)
+      local sid="${1:-}"
+      [ -z "$sid" ] && { echo "usage: cvtool storage forget <STORE_ID>"; echo; _storage_py list; return 1; }
+      if _storage_py forget "$sid"; then
+        _agent_reload
+        echo "Storage forgotten (data on the drive was kept); the agent has been notified."
+      fi ;;
+    *) echo "usage: cvtool storage [list | setup <SERIAL> --name <NAME> [--mirror <STORE_ID>] | forget <STORE_ID>]" >&2; return 1 ;;
+  esac
+}
+
 cmd_help() {
   cat <<'EOF'
 cvtool — Arkive appliance troubleshooting CLI
@@ -165,9 +222,14 @@ Commands:
   link [CODE]          Link to an account with a portal linking code; no CODE shows the pairing code
   unlink               Forget the cloud link (keeps serial/keys); re-registers for pairing
   re-link [CODE]       Unlink, then link again (optionally with a new CODE)
+  storage              List configured + detected drives
+  storage setup <SN> --name <NAME> [--mirror <STORE_ID>]
+                       Format + adopt a detected USB/external drive (DESTRUCTIVE)
+  storage forget <STORE_ID>
+                       Unmount + deregister a drive (data on the drive is kept)
   help                 Show this reference
 
-Privileged commands (update/restart/link/unlink/re-link) auto-elevate with sudo,
+Privileged commands (update/restart/link/unlink/re-link/storage) auto-elevate with sudo,
 so they also work from the reverse-tunnel shell.
 EOF
 }
@@ -180,7 +242,7 @@ main() {
   esac
   # Auto-elevate the system-changing commands.
   case "$cmd" in
-    update|restart|link|unlink|re-link|relink)
+    update|restart|link|unlink|re-link|relink|storage)
       if [ "$(id -u)" -ne 0 ]; then
         if sudo -n true 2>/dev/null; then exec sudo -n "$SELF" "$cmd" "$@"; fi
         echo "cvtool: '$cmd' requires root. Try: sudo cvtool $cmd $*" >&2; exit 1
@@ -194,6 +256,7 @@ main() {
     link) cmd_link "$@" ;;
     unlink) cmd_unlink "$@" ;;
     re-link|relink) cmd_relink "$@" ;;
+    storage) cmd_storage "$@" ;;
     *) echo "cvtool: unknown command '$cmd'"; echo; cmd_help; exit 1 ;;
   esac
 }

@@ -36,7 +36,7 @@ from .config import get_settings
 from .identity import ApplianceIdentity, build_attestation
 from .state_machine import StateMachine, State
 from .vault import VaultStore
-from . import agent_log, sysinfo
+from . import agent_log, storage_ops, sysinfo
 
 settings = get_settings()
 app = FastAPI(title="Arkive Appliance Agent", version="1.0.0")
@@ -189,12 +189,22 @@ def _resolve_storage() -> tuple[Path, str, str]:
 
 STORAGE_ROOT, STORAGE_KIND, STORAGE_NAME = _resolve_storage()
 
+# External (USB) storage: where Arkive mounts set-up drives and the local registry
+# that remembers them (by serial) so a reconnected drive is re-mounted on boot.
+EXT_BASE = DATA / "ext"
+EXT_REGISTRY = DATA / "ext_stores.json"
+
 
 class Agent:
     def __init__(self) -> None:
         self.identity = ApplianceIdentity(settings.data_dir)
         self.sm = StateMachine(State.PROVISIONING)
         self.vault = VaultStore(str(STORAGE_ROOT / "vault"), self.sm)
+        # External-storage registry + live mountpoints, then mount whatever is
+        # present and point the vault at any mirror volumes.
+        self._ext_stores: list[dict] = self._load_ext_registry()
+        self._ext_mounts: dict[str, str] = {}
+        self._mount_ext_stores()
         self.appliance_id: Optional[str] = None
         self.tenant_id: Optional[str] = None
         self.agent_token: Optional[str] = None
@@ -488,6 +498,160 @@ class Agent:
         except Exception as exc:
             self.log.warning("could not persist re-pinned bundle: %s", exc)
 
+    # -- external storage (USB / removable) ---------------------------
+
+    def _load_ext_registry(self) -> list[dict]:
+        try:
+            return json.loads(EXT_REGISTRY.read_text()) or []
+        except Exception:
+            return []
+
+    def _save_ext_registry(self) -> None:
+        try:
+            EXT_REGISTRY.write_text(json.dumps(self._ext_stores))
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("could not persist external-storage registry: %s", exc)
+
+    def _mount_ext_stores(self) -> None:
+        """Mount every already-set-up external drive that's currently present, then
+        point the vault at any mirror volumes so writes/recoveries duplicate."""
+        self._ext_mounts = {}
+        for e in self._ext_stores:
+            try:
+                res = storage_ops.mount_known(
+                    serial=e.get("serial", ""), store_id=e["store_id"],
+                    name=e.get("name", "External Storage"), mount_base=str(EXT_BASE),
+                    mirror_of_id=e.get("mirror_of_id"), kind=e.get("kind", "external"))
+                if res:
+                    self._ext_mounts[e["store_id"]] = res["mountpoint"]
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("could not mount external store %s: %s",
+                                 e.get("name"), exc)
+        self._apply_mirror_roots()
+
+    def _apply_mirror_roots(self) -> None:
+        roots = [os.path.join(self._ext_mounts[e["store_id"]], "vault")
+                 for e in self._ext_stores
+                 if e.get("kind") == "mirror" and e["store_id"] in self._ext_mounts]
+        try:
+            self.vault.set_mirror_roots(roots)
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("could not apply mirror roots: %s", exc)
+
+    def _reload_ext_storage(self) -> None:
+        """Re-read the external-storage registry and (re)mount known drives, then
+        re-apply mirror routing. Triggered by SIGHUP so a drive that cvtool set up
+        (as root, outside the sandbox) becomes usable without a full restart."""
+        self._ext_stores = self._load_ext_registry()
+        self._mount_ext_stores()
+        self.log.info("external storage reloaded — %d store(s), %d mounted",
+                      len(self._ext_stores), len(self._ext_mounts))
+
+    def _excluded_disks(self) -> set:
+        return {sysinfo.system_disk_device(),
+                sysinfo.dedicated_disk_device(settings.dedicated_path)}
+
+    def _external_storage_telemetry(self) -> tuple[list[dict], list[dict]]:
+        """(ext_store_rows, detected_devices) for the heartbeat.
+
+        ext_store_rows are Arkive-managed stores (ours) with per-store capacity +
+        health and a connected flag; detected_devices are raw removable candidates
+        the cloud surfaces for setup."""
+        detected = sysinfo.detect_external_storage(self._excluded_disks())
+        rows: list[dict] = []
+        for e in self._ext_stores:
+            sid = e["store_id"]
+            mount = self._ext_mounts.get(sid)
+            connected = bool(mount) and os.path.ismount(mount)
+            cap = used = 0
+            if connected:
+                try:
+                    st = os.statvfs(mount)
+                    cap = st.f_blocks * st.f_frsize
+                    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+                except Exception:
+                    pass
+            rows.append({
+                "name": e.get("name", "External Storage"),
+                "kind": e.get("kind", "external"),
+                "store_id": sid,
+                "device_serial": e.get("serial", ""),
+                "mirror_of_id": e.get("mirror_of_id"),
+                "capacity_bytes": cap,
+                "used_bytes": used,
+                "free_bytes": max(cap - used, 0),
+                "connected": connected,
+                "state": "ready" if connected else "disconnected",
+                "health": {"drive_health": "healthy" if connected else "disconnected",
+                           "device": mount or "", "serial": e.get("serial", ""),
+                           "mirror_of": e.get("mirror_of_id")},
+            })
+        return rows, detected
+
+    def _setup_external_storage(self, params: dict) -> dict:
+        """Handle a cloud-signed SETUP_STORAGE command: format + mount + register a
+        new external drive. DESTRUCTIVE but guarded (serial-matched, external-only)."""
+        store_id = params.get("storeId")
+        serial = params.get("serial") or ""
+        if not store_id:
+            return {"error": "missing storeId"}
+        res = storage_ops.setup_device(
+            device=params.get("device", ""), serial=serial, store_id=store_id,
+            name=params.get("name", "External Storage"), mount_base=str(EXT_BASE),
+            dedicated_path=settings.dedicated_path,
+            mirror_of_id=params.get("mirrorOfId"),
+            kind=params.get("kind", "external"))
+        # Persist to the registry (replace any prior entry for this store/serial).
+        self._ext_stores = [e for e in self._ext_stores
+                            if e.get("store_id") != store_id and e.get("serial") != serial]
+        self._ext_stores.append({
+            "store_id": store_id, "serial": serial, "name": res["name"],
+            "kind": res["kind"], "mirror_of_id": res.get("mirror_of_id")})
+        self._save_ext_registry()
+        self._ext_mounts[store_id] = res["mountpoint"]
+        self._apply_mirror_roots()
+        self.log.info("external storage set up: %s (%s) at %s",
+                      res["name"], serial, res["mountpoint"])
+        return {"store_id": store_id, "ready": True,
+                "capacity_bytes": res["capacity_bytes"], "used_bytes": res["used_bytes"]}
+
+    def _forget_external_storage(self, params: dict) -> dict:
+        """Unmount + deregister an external store (data on the drive is left intact)."""
+        store_id = params.get("storeId")
+        mount = self._ext_mounts.pop(store_id, None)
+        if mount:
+            storage_ops.unmount(mount)
+        self._ext_stores = [e for e in self._ext_stores if e.get("store_id") != store_id]
+        self._save_ext_registry()
+        self._apply_mirror_roots()
+        self.log.info("external storage forgotten: %s", store_id)
+        return {"store_id": store_id, "forgotten": True}
+
+    def _reconfigure_external_storage(self, params: dict) -> dict:
+        """Toggle a store's mirror role without touching data: update the registry,
+        rewrite the on-disk marker, and re-apply mirror routing."""
+        store_id = params.get("storeId")
+        entry = next((e for e in self._ext_stores if e.get("store_id") == store_id), None)
+        if not entry:
+            return {"error": "unknown store"}
+        entry["kind"] = params.get("kind", entry.get("kind", "external"))
+        entry["mirror_of_id"] = params.get("mirrorOfId")
+        self._save_ext_registry()
+        mount = self._ext_mounts.get(store_id)
+        if mount and os.path.ismount(mount):
+            try:
+                with open(os.path.join(mount, storage_ops.MARKER), "w") as f:
+                    json.dump({"store_id": store_id, "name": entry.get("name"),
+                               "kind": entry["kind"], "mirror_of_id": entry["mirror_of_id"],
+                               "serial": entry.get("serial"), "written_at": int(time.time())}, f)
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("could not rewrite marker for %s: %s", store_id, exc)
+        self._apply_mirror_roots()
+        self.log.info("external storage reconfigured: %s kind=%s mirror_of=%s",
+                      store_id, entry["kind"], entry["mirror_of_id"])
+        return {"store_id": store_id, "kind": entry["kind"],
+                "mirror_of_id": entry["mirror_of_id"]}
+
     def _telemetry(self) -> dict:
         cap = self.vault.capacity()
         plat = sysinfo.detect_platform()
@@ -502,6 +666,8 @@ class Agent:
                     else cap.get("used_bytes", 0))
         pq = sysinfo.pq_available()
         net = sysinfo.net_io()
+        # External (USB) storage: Arkive-managed store rows + raw detected devices.
+        ext_rows, detected_devices = self._external_storage_telemetry()
         return {
             # System
             "hostname": sysd["hostname"],
@@ -544,9 +710,14 @@ class Agent:
             "data_mount": sysinfo.mount_device(str(STORAGE_ROOT)),
             "storage_kind": STORAGE_KIND,
             # Per-storage capacity + health (mapped onto the cloud storage objects).
-            "storages": sysinfo.storage_report(
+            # The primary vault volume, plus every Arkive-managed external/mirror
+            # store, and the raw removable devices detected for possible setup.
+            "storages": (sysinfo.storage_report(
                 str(STORAGE_ROOT), STORAGE_NAME, STORAGE_KIND,
-                raw_total, vol_used),
+                raw_total, vol_used) + ext_rows),
+            "external_devices": detected_devices,
+            # LAN intrusion signal (recent failed inbound auth attempts).
+            "security": sysinfo.lan_security(),
             # Encryption
             "quantum_safe": bool(pq),
             "content_alg": "AES-256-GCM",
@@ -625,6 +796,12 @@ class Agent:
                     result = {"applied": True}
                 elif ctype == "REQUEST_VERIFICATION":
                     result = {"integrity": "verified"}
+                elif ctype == "SETUP_STORAGE":
+                    result = self._setup_external_storage(payload["parameters"])
+                elif ctype == "FORGET_STORAGE":
+                    result = self._forget_external_storage(payload["parameters"])
+                elif ctype == "RECONFIGURE_STORAGE":
+                    result = self._reconfigure_external_storage(payload["parameters"])
                 else:
                     result = {"note": f"acknowledged {ctype}"}
             except Exception as exc:
@@ -872,6 +1049,14 @@ _INTEG_WORKER = None
 async def startup() -> None:
     agent.log.info("appliance agent starting (v%s, model=%s)",
                    settings.software_version, settings.model)
+    # SIGHUP → reload external storage in place (cvtool signals us after it sets
+    # up a drive, so it becomes usable without restarting the agent).
+    try:
+        import signal
+        asyncio.get_running_loop().add_signal_handler(
+            signal.SIGHUP, agent._reload_ext_storage)
+    except Exception as exc:  # noqa: BLE001 — not fatal; restart still works
+        agent.log.debug("could not install SIGHUP handler: %s", exc)
     if not agent.activated and settings.linking_code:
         try:
             await agent.activate(settings.linking_code)

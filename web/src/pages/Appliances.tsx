@@ -6,7 +6,7 @@ import { Icon } from "../components/Icon";
 import { Menu } from "../components/Menu";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { SourceIcon } from "../components/SourceIcon";
-import { confirmDialog, notify, promptDialog } from "../components/dialog";
+import { confirmDialog, formDialog, notify, promptDialog } from "../components/dialog";
 import { VersionPill, ProductionVersion } from "../components/VersionBadge";
 import { ApplianceStatePill } from "./Dashboard";
 import { useAuth } from "../auth";
@@ -15,17 +15,25 @@ interface StoreHealth {
   drive_health?: string; temperature_c?: number; power?: string;
   smart?: { enabled: boolean; status?: string };
   raid?: { enabled: boolean; status?: string };
+  mirror_of?: string | null;
 }
 interface Store {
   id: string; name: string; kind: string;
+  state?: string; connected?: boolean; mirror_of_id?: string | null; device_serial?: string;
   capacity_bytes: number; used_bytes: number; free_bytes: number;
   path?: string | null; mount?: string | null; health: StoreHealth;
 }
+interface DetectedDevice {
+  device: string; serial: string; model: string; vendor: string;
+  size_bytes: number; transport: string; has_filesystem: boolean;
+  fstype: string; label: string; is_arkive: boolean;
+}
 const STORE_KIND_LABEL: Record<string, string> = {
-  builtin: "Built-in storage", dedicated: "Dedicated storage", external: "External storage",
+  builtin: "Built-in storage", dedicated: "Dedicated storage",
+  external: "External storage", mirror: "Mirror storage",
 };
 const STORE_KIND_SHORT: Record<string, string> = {
-  builtin: "Built-in", dedicated: "Dedicated", external: "External",
+  builtin: "Built-in", dedicated: "Dedicated", external: "External", mirror: "Mirror",
 };
 interface StoredItem {
   snapshot_id: string; source: string; storage: string; path?: string;
@@ -55,6 +63,7 @@ interface Appliance {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   telemetry: any; stores?: Store[]; stored_data?: StoredData; recent_commands?: Command[];
   integrations?: ApplianceIntegration[];
+  detected_storage?: DetectedDevice[];
   can_manage?: boolean; view_only?: boolean;
 }
 
@@ -399,11 +408,57 @@ function ApplianceDetail({ a, onCommand, onRemove, reload, onBack, prodVersion }
     try { await api.put(`/appliances/${a.id}`, { name: name.trim() }); await reload(); }
     catch (e) { await notify({ title: "Couldn't rename", message: (e as ApiError).message, tone: "danger" }); }
   }
-  async function addStorage() {
-    const name = await promptDialog({ title: "Add storage", label: "Storage name", placeholder: "External Storage 1", confirmLabel: "Add" });
-    if (name == null || !name.trim()) return;
-    try { await api.post(`/appliances/${a.id}/storage`, { name: name.trim(), kind: "external" }); await reload(); }
-    catch (e) { await notify({ title: "Couldn't add storage", message: (e as ApiError).message, tone: "danger" }); }
+  async function setupStorage(dev: DetectedDevice) {
+    const label = dev.model || dev.vendor || "External drive";
+    const mirrorable = (a.stores ?? []).filter((s) => s.kind !== "mirror");
+    const warn = dev.has_filesystem
+      ? `\n\n⚠ This drive already contains a filesystem${dev.label ? ` (“${dev.label}”)` : ""}. Setting it up will ERASE everything on it.`
+      : "";
+    const r = await formDialog({
+      title: `Set up ${label}`,
+      message: `${bytes(dev.size_bytes)} · ${dev.transport || "removable"}${dev.serial ? ` · SN ${dev.serial}` : ""}`
+        + `\n\nThis will partition and format the drive as Arkive storage.${warn}`,
+      confirmLabel: "Set up drive",
+      fields: [
+        { name: "name", label: "Storage name", defaultValue: label, required: true },
+        { name: "mirror_of_id", label: "Role", defaultValue: "",
+          options: [{ label: "Independent storage destination", value: "" },
+            ...mirrorable.map((s) => ({ label: `Mirror of ${s.name}`, value: s.id }))],
+          hint: "A mirror automatically duplicates its source on every backup and is used for recovery if the source fails. Mirrors aren't separately selectable as a destination." },
+        { name: "confirm", label: 'Type SETUP to confirm formatting', placeholder: "SETUP", required: true },
+      ],
+    });
+    if (!r) return;
+    if ((r.confirm || "").trim().toUpperCase() !== "SETUP") {
+      await notify({ title: "Setup cancelled", message: "Confirmation text didn't match.", tone: "warn" });
+      return;
+    }
+    try {
+      await api.post(`/appliances/${a.id}/storage/setup`, {
+        serial: dev.serial, device: dev.device, name: (r.name || label).trim(),
+        mirror_of_id: r.mirror_of_id || null, confirm: true });
+      await notify({ title: "Setting up drive", message: "Formatting and mounting — this can take a moment.", tone: "info" });
+      await reload();
+    } catch (e) { await notify({ title: "Couldn't set up storage", message: (e as ApiError).message, tone: "danger" }); }
+  }
+  // Turn an external store into a mirror of another store, or stop mirroring.
+  async function configureMirror(s: Store) {
+    const sources = (a.stores ?? []).filter((x) => x.kind !== "mirror" && x.id !== s.id);
+    const r = await formDialog({
+      title: `Mirror settings — ${s.name}`,
+      confirmLabel: "Save",
+      fields: [
+        { name: "mirror_of_id", label: "Mirror of", defaultValue: s.mirror_of_id || "",
+          options: [{ label: "Not a mirror (independent storage)", value: "" },
+            ...sources.map((x) => ({ label: x.name, value: x.id }))],
+          hint: "When set, this drive shadows the selected store on every backup and recovery." },
+      ],
+    });
+    if (!r) return;
+    try {
+      await api.put(`/appliances/${a.id}/storage/${s.id}/mirror`, { mirror_of_id: r.mirror_of_id || null });
+      await reload();
+    } catch (e) { await notify({ title: "Couldn't update mirror", message: (e as ApiError).message, tone: "danger" }); }
   }
   async function renameStorage(s: Store) {
     const name = await promptDialog({ title: "Rename storage", label: "Storage name", defaultValue: s.name, confirmLabel: "Save" });
@@ -556,7 +611,7 @@ function ApplianceDetail({ a, onCommand, onRemove, reload, onBack, prodVersion }
       </div>
 
       {tab === "storage" && (
-        <StorageCard a={a} canManage={canManage} onAdd={addStorage} onRename={renameStorage} onDelete={deleteStorage} onAdvanced={setKv} />
+        <StorageCard a={a} canManage={canManage} onRename={renameStorage} onDelete={deleteStorage} onAdvanced={setKv} onSetup={setupStorage} onMirror={configureMirror} />
       )}
 
       {tab === "data" && <StoredDataCard a={a} />}
@@ -638,31 +693,64 @@ function fmtUptime(s: number): string {
   return `${m}m`;
 }
 
-function StorageCard({ a, canManage, onAdd, onRename, onDelete, onAdvanced }: {
-  a: Appliance; canManage: boolean; onAdd: () => void; onRename: (s: Store) => void; onDelete: (s: Store) => void;
+function StorageCard({ a, canManage, onRename, onDelete, onAdvanced, onSetup, onMirror }: {
+  a: Appliance; canManage: boolean; onRename: (s: Store) => void; onDelete: (s: Store) => void;
   onAdvanced: (m: { title: string; rows: [string, string][] }) => void;
+  onSetup: (d: DetectedDevice) => void; onMirror: (s: Store) => void;
 }) {
   const stores = a.stores ?? [];
-  const totalCap = stores.reduce((n, s) => n + (s.capacity_bytes || 0), 0);
-  const totalUsed = stores.reduce((n, s) => n + (s.used_bytes || 0), 0);
+  const detected = a.detected_storage ?? [];
+  const storeName = (id?: string | null) => stores.find((s) => s.id === id)?.name || "another store";
+  // Only ready, non-mirror volumes count toward the capacity roll-up.
+  const counted = stores.filter((s) => s.kind !== "mirror" && s.connected !== false);
+  const totalCap = counted.reduce((n, s) => n + (s.capacity_bytes || 0), 0);
+  const totalUsed = counted.reduce((n, s) => n + (s.used_bytes || 0), 0);
   const pct = totalCap ? Math.min(100, (totalUsed / totalCap) * 100) : 0;
   const barTone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : undefined;
   return (
     <Card style={{ marginBottom: 16 }}>
       <div className="spread" style={{ marginBottom: 12 }}>
         <h3 style={{ margin: 0 }}>Storage</h3>
-        {canManage && <button className="btn sm" onClick={onAdd}><Icon name="database" size={13} /> Add storage</button>}
       </div>
+      {canManage && detected.length > 0 && (
+        <div className="card" style={{ background: "var(--inset)", border: "1px solid var(--border-soft)", marginBottom: 14 }}>
+          <div className="row" style={{ gap: 8, marginBottom: 8, alignItems: "center" }}>
+            <Icon name="database" size={15} />
+            <div style={{ fontWeight: 650 }}>New storage detected</div>
+            <Pill tone="warn">{detected.length}</Pill>
+          </div>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
+            External {detected.length === 1 ? "drive" : "drives"} connected to this appliance. Set one up to add it as
+            Arkive storage or a mirror. Setup erases the drive.
+          </div>
+          <div className="stack" style={{ gap: 8 }}>
+            {detected.map((d) => (
+              <div key={d.serial || d.device} className="result-row" style={{ background: "var(--bg-elev)", borderRadius: 10 }}>
+                <div className="result-icon" style={{ background: "var(--inset)", width: 32, height: 32 }}><Icon name="database" size={15} /></div>
+                <div className="flex1">
+                  <div style={{ fontWeight: 600 }}>{d.model || d.vendor || "External drive"}</div>
+                  <div className="faint" style={{ fontSize: 11.5 }}>
+                    {bytes(d.size_bytes)} · {d.transport || "removable"}
+                    {d.has_filesystem ? ` · has data${d.label ? ` (${d.label})` : ""}` : " · blank"}
+                    {d.is_arkive ? " · Arkive-formatted" : ""}
+                  </div>
+                </div>
+                <button className="btn primary sm" onClick={() => onSetup(d)}><Icon name="database" size={13} /> Set up</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {totalCap > 0 && (
         <div style={{ marginBottom: 14 }}>
           <div className="spread faint" style={{ fontSize: 12, marginBottom: 6 }}>
-            <span>{bytes(totalUsed)} used of {bytes(totalCap)} across {stores.length} volume{stores.length === 1 ? "" : "s"}</span>
+            <span>{bytes(totalUsed)} used of {bytes(totalCap)} across {counted.length} volume{counted.length === 1 ? "" : "s"}</span>
             <span>{bytes(Math.max(totalCap - totalUsed, 0))} free · {Math.round(pct)}%</span>
           </div>
           <div className="progress"><span style={{ width: `${pct}%`, background: barTone }} /></div>
         </div>
       )}
-      {stores.map((s) => <StorageItem key={s.id} s={s} canManage={canManage} onRename={onRename} onDelete={onDelete} onAdvanced={onAdvanced} />)}
+      {stores.map((s) => <StorageItem key={s.id} s={s} canManage={canManage} onRename={onRename} onDelete={onDelete} onAdvanced={onAdvanced} onMirror={onMirror} mirrorSourceName={storeName} />)}
       {stores.length === 0 && <div className="muted">No storage volumes reported yet.</div>}
     </Card>
   );
@@ -791,28 +879,38 @@ function NetworkCard({ a }: { a: Appliance }) {
   );
 }
 
-function StorageItem({ s, canManage, onRename, onDelete, onAdvanced }:
+function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, mirrorSourceName }:
   { s: Store; canManage: boolean; onRename: (s: Store) => void; onDelete: (s: Store) => void;
-    onAdvanced: (m: { title: string; rows: [string, string][] }) => void }) {
+    onAdvanced: (m: { title: string; rows: [string, string][] }) => void;
+    onMirror: (s: Store) => void; mirrorSourceName: (id?: string | null) => string }) {
   const pct = s.capacity_bytes ? Math.min(100, (s.used_bytes / s.capacity_bytes) * 100) : 0;
   const h = s.health || {};
   const kindLabel = STORE_KIND_LABEL[s.kind] || "External storage";
   const kindShort = STORE_KIND_SHORT[s.kind] || "External";
+  const isExternal = s.kind === "external" || s.kind === "mirror";
+  const isMirror = s.kind === "mirror";
+  const disconnected = s.connected === false || s.state === "disconnected";
+  const provisioning = s.state === "provisioning";
   const barTone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : undefined;
   const chips: { label: string; value: string; tone: "ok" | "warn" | "danger" | "info" }[] = [];
-  if (h.drive_health) chips.push({ label: "Drive", value: h.drive_health, tone: h.drive_health === "healthy" ? "ok" : "danger" });
-  if (h.smart?.enabled) chips.push({ label: "SMART", value: h.smart.status ?? "—", tone: h.smart.status === "passed" ? "ok" : "danger" });
-  if (h.raid?.enabled) chips.push({ label: "RAID", value: h.raid.status ?? "—", tone: h.raid.status === "optimal" ? "ok" : "danger" });
-  if (h.temperature_c != null) chips.push({ label: "Temp", value: `${h.temperature_c}°C`, tone: h.temperature_c >= 60 ? "warn" : "info" });
-  if (h.power) chips.push({ label: "Power", value: h.power, tone: h.power === "ok" ? "ok" : "danger" });
+  if (!disconnected && !provisioning) {
+    if (h.drive_health) chips.push({ label: "Drive", value: h.drive_health, tone: h.drive_health === "healthy" ? "ok" : "danger" });
+    if (h.smart?.enabled) chips.push({ label: "SMART", value: h.smart.status ?? "—", tone: h.smart.status === "passed" ? "ok" : "danger" });
+    if (h.raid?.enabled) chips.push({ label: "RAID", value: h.raid.status ?? "—", tone: h.raid.status === "optimal" ? "ok" : "danger" });
+    if (h.temperature_c != null) chips.push({ label: "Temp", value: `${h.temperature_c}°C`, tone: h.temperature_c >= 60 ? "warn" : "info" });
+    if (h.power) chips.push({ label: "Power", value: h.power, tone: h.power === "ok" ? "ok" : "danger" });
+  }
 
   function showAdvanced() {
     const rows: [string, string][] = [
       ["Name", s.name],
       ["Type", kindLabel],
       ["Storage ID", `store:${s.id}`],
+      ["State", provisioning ? "Setting up" : disconnected ? "Disconnected" : "Ready"],
+      ...(isMirror ? [["Mirrors", mirrorSourceName(s.mirror_of_id)] as [string, string]] : []),
       ["Data path", s.path || "—"],
-      ["Mount / device", s.mount || "—"],
+      ["Mount / device", s.mount || (h.device ?? "—")],
+      ["Device serial", s.device_serial || "—"],
       ["Capacity", s.capacity_bytes ? bytes(s.capacity_bytes) : "—"],
       ["Used", bytes(s.used_bytes)],
       ["Free", bytes(s.free_bytes)],
@@ -827,33 +925,52 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced }:
   }
 
   return (
-    <div className="store-item">
+    <div className="store-item" style={{ opacity: disconnected ? 0.72 : 1 }}>
       <div className="spread">
         <div className="row" style={{ gap: 10 }}>
-          <div className="result-icon" style={{ background: "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 32, height: 32 }}>
-            <Icon name="database" size={15} />
+          <div className="result-icon" style={{ background: isMirror ? "linear-gradient(135deg,#8a63ff,#4f7cff)" : "linear-gradient(135deg,#4f7cff,#35d0a5)", width: 32, height: 32 }}>
+            <Icon name={isMirror ? "repeat" : "database"} size={15} />
           </div>
           <div>
-            <div style={{ fontWeight: 600 }}>{s.name}</div>
+            <div className="row" style={{ gap: 6, alignItems: "center" }}>
+              <span style={{ fontWeight: 600 }}>{s.name}</span>
+              {isMirror && <Pill tone="info">Mirror</Pill>}
+            </div>
             <div className="faint" style={{ fontSize: 11.5 }}>
-              {kindLabel}
+              {kindLabel}{isMirror ? ` · mirrors ${mirrorSourceName(s.mirror_of_id)}` : ""}
             </div>
           </div>
         </div>
-        <div className="row" style={{ gap: 6 }}>
-          <Pill tone={s.kind === "builtin" ? "info" : "ok"}>{kindShort}</Pill>
+        <div className="row" style={{ gap: 6, alignItems: "center" }}>
+          {provisioning ? <Pill tone="warn" dot>Setting up</Pill>
+            : disconnected ? <Pill tone="danger" dot>Disconnected</Pill>
+            : <Pill tone="ok" dot>Connected</Pill>}
+          <Pill tone={s.kind === "builtin" ? "info" : isMirror ? "info" : "ok"}>{kindShort}</Pill>
           <button className="btn sm ghost" onClick={showAdvanced} title="Advanced details">
             <Icon name="gear" size={13} />
           </button>
           {canManage && <button className="btn sm ghost" onClick={() => onRename(s)}>Rename</button>}
-          {canManage && s.kind === "external" && <button className="btn sm ghost" onClick={() => onDelete(s)}>Remove</button>}
+          {canManage && isExternal && <button className="btn sm ghost" onClick={() => onMirror(s)} title="Mirror settings">{isMirror ? "Mirror…" : "Make mirror"}</button>}
+          {canManage && isExternal && <button className="btn sm ghost" onClick={() => onDelete(s)}>Remove</button>}
         </div>
       </div>
-      <div className="spread faint" style={{ fontSize: 12, margin: "10px 0 4px" }}>
-        <span>{s.capacity_bytes ? `${bytes(s.used_bytes)} of ${bytes(s.capacity_bytes)}` : "Capacity not yet reported"}</span>
-        {s.capacity_bytes > 0 && <span>{bytes(s.free_bytes)} free · {Math.round(pct)}%</span>}
-      </div>
-      <div className="progress"><span style={{ width: `${pct}%`, background: barTone }} /></div>
+      {disconnected ? (
+        <div className="faint" style={{ fontSize: 12, margin: "10px 0 2px" }}>
+          Drive not currently connected. Reconnect it to this appliance to resume{isMirror ? " mirroring" : " use"}.
+        </div>
+      ) : provisioning ? (
+        <div className="faint" style={{ fontSize: 12, margin: "10px 0 2px" }}>
+          Partitioning and formatting the drive… this volume will be ready shortly.
+        </div>
+      ) : (
+        <>
+          <div className="spread faint" style={{ fontSize: 12, margin: "10px 0 4px" }}>
+            <span>{s.capacity_bytes ? `${bytes(s.used_bytes)} of ${bytes(s.capacity_bytes)}` : "Capacity not yet reported"}</span>
+            {s.capacity_bytes > 0 && <span>{bytes(s.free_bytes)} free · {Math.round(pct)}%</span>}
+          </div>
+          <div className="progress"><span style={{ width: `${pct}%`, background: barTone }} /></div>
+        </>
+      )}
       {chips.length > 0 && (
         <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
           {chips.map((c) => (

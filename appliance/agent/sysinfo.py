@@ -15,6 +15,8 @@ import subprocess
 import time
 from typing import Optional
 
+import json
+
 _BOOT = time.time()
 
 
@@ -293,3 +295,159 @@ def pq_available() -> Optional[bool]:
         return get_provider().pq_available
     except Exception:
         return None
+
+
+def lan_security() -> dict:
+    """Best-effort count of recent failed inbound auth attempts (LAN intrusion
+    signal). Reads the systemd journal, falling back to auth.log. Never raises —
+    returns zero counts when the source is unavailable so telemetry stays clean."""
+    window_min = 60
+    failed = 0
+    out = _run(["journalctl", "-q", "--since", f"-{window_min} min",
+                "-u", "ssh", "-u", "sshd", "--no-pager"], timeout=4)
+    if not out:
+        # Fall back to the classic auth log (Debian/Ubuntu).
+        raw = _read("/var/log/auth.log")
+        out = raw[-200000:] if raw else ""
+    for line in out.splitlines():
+        low = line.lower()
+        if ("failed password" in low or "invalid user" in low
+                or "authentication failure" in low or "connection closed by authenticating" in low):
+            failed += 1
+    return {"failed_auth": failed, "window_min": window_min}
+
+
+# --------------------------------------------------------------------------- #
+# External / removable block-device detection (read-only)                     #
+# --------------------------------------------------------------------------- #
+# The label written to Arkive-managed external volumes and the marker file that
+# proves a drive is "ours" (carries the store id so a moved drive is recognised).
+ARKIVE_LABEL = "ARKIVE"
+ARKIVE_MARKER = ".arkive-store.json"
+
+
+def lsblk_disks() -> list[dict]:
+    """Parse ``lsblk -J`` into a list of whole-disk dicts (with partition children).
+
+    Best-effort: returns [] when lsblk is unavailable so callers degrade to "no
+    external storage detected" rather than failing a heartbeat."""
+    out = _run(["lsblk", "-b", "-J", "-o",
+                "NAME,PATH,TYPE,SIZE,MOUNTPOINT,FSTYPE,LABEL,SERIAL,MODEL,TRAN,HOTPLUG,RM,VENDOR"])
+    if not out:
+        return []
+    try:
+        return json.loads(out).get("blockdevices", []) or []
+    except Exception:
+        return []
+
+
+def _pkname(dev: str) -> str:
+    """Parent whole-disk name for a partition (e.g. sda3 -> sda), via lsblk."""
+    out = _run(["lsblk", "-ndo", "PKNAME", dev])
+    return out.strip().splitlines()[0].strip() if out else ""
+
+
+def system_disk_device() -> str:
+    """The whole disk backing '/' (e.g. /dev/sda) — never a candidate for setup."""
+    src = mount_device("/")
+    if not src.startswith("/dev/"):
+        return ""
+    pk = _pkname(src)
+    if pk:
+        return f"/dev/{pk}"
+    base = src.rsplit("/", 1)[-1]
+    return f"/dev/{re.sub(r'p?[0-9]+$', '', base)}"
+
+
+def dedicated_disk_device(dedicated_path: str) -> str:
+    """The whole disk backing the dedicated volume (e.g. /arkive), if mounted."""
+    if not (os.path.isdir(dedicated_path) and os.path.ismount(dedicated_path)):
+        return ""
+    src = mount_device(dedicated_path)
+    if not src.startswith("/dev/"):
+        return ""
+    base = src.rsplit("/", 1)[-1]
+    if base.startswith("md"):
+        return f"/dev/{base}"
+    pk = _pkname(src)
+    if pk:
+        return f"/dev/{pk}"
+    return f"/dev/{re.sub(r'p?[0-9]+$', '', base)}"
+
+
+def resolve_device_by_serial(serial: str) -> str:
+    """Re-resolve a whole-disk device path from its stable serial. Used right
+    before any destructive op so a changed /dev name can't cause us to touch the
+    wrong disk."""
+    if not serial:
+        return ""
+    for d in lsblk_disks():
+        if d.get("type") == "disk" and (d.get("serial") or "") == serial:
+            return d.get("path") or f"/dev/{d.get('name', '')}"
+    return ""
+
+
+def _first_data_partition(disk: dict) -> dict:
+    """The partition Arkive would use (first child) or the disk itself if none."""
+    kids = disk.get("children") or []
+    return kids[0] if kids else disk
+
+
+def read_marker(mountpoint: str) -> Optional[dict]:
+    """Read the Arkive store marker from a mounted volume, if present."""
+    try:
+        p = os.path.join(mountpoint, ARKIVE_MARKER)
+        if os.path.isfile(p):
+            with open(p) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+def detect_external_storage(exclude_devices: set[str]) -> list[dict]:
+    """Enumerate removable / USB whole disks that are candidates for Arkive
+    external storage. The system disk and the dedicated volume's disk are excluded
+    so they can never be offered for (destructive) setup.
+
+    Each entry reports stable identity (serial), size, the current filesystem /
+    label / mount, whether it already carries any filesystem (so the UI can warn
+    before reformatting), and — when one of its partitions is mounted — our marker
+    (proving the drive is already ours and which store it is)."""
+    exclude = {d for d in exclude_devices if d}
+    out: list[dict] = []
+    for d in lsblk_disks():
+        if d.get("type") != "disk":
+            continue
+        path = d.get("path") or f"/dev/{d.get('name', '')}"
+        if path in exclude:
+            continue
+        tran = (d.get("tran") or "").lower()
+        hotplug = str(d.get("hotplug")).lower() in ("1", "true")
+        removable = str(d.get("rm")).lower() in ("1", "true")
+        if not (tran == "usb" or hotplug or removable):
+            continue  # only external / removable media is ever a setup candidate
+        kids = d.get("children") or []
+        part = _first_data_partition(d)
+        fstype = part.get("fstype") or d.get("fstype") or ""
+        label = part.get("label") or d.get("label") or ""
+        mount = (d.get("mountpoint")
+                 or next((k.get("mountpoint") for k in kids if k.get("mountpoint")), ""))
+        has_fs = bool(fstype) or any(k.get("fstype") for k in kids)
+        marker = read_marker(mount) if mount else None
+        out.append({
+            "device": path,
+            "serial": d.get("serial") or "",
+            "model": (d.get("model") or "").strip(),
+            "vendor": (d.get("vendor") or "").strip(),
+            "size_bytes": int(d.get("size") or 0),
+            "transport": tran or ("hotplug" if hotplug else "removable"),
+            "fstype": fstype,
+            "label": label,
+            "mountpoint": mount or "",
+            "has_filesystem": has_fs,
+            "is_arkive": (label == ARKIVE_LABEL) or bool(marker),
+            "store_id": (marker or {}).get("store_id"),
+            "store_name": (marker or {}).get("name"),
+        })
+    return out

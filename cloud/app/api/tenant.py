@@ -116,6 +116,14 @@ def storage_targets(principal: security.Principal = Depends(security.get_princip
         a = appliances.get(s.appliance_id)
         if not a or not _on("appliance"):
             continue
+        # On hardware the built-in system disk isn't a backup volume (it's the OS
+        # disk); only VMs store to it. Never offer it as a destination on hardware.
+        if s.kind == "builtin" and (a.telemetry or {}).get("model_kind") == "hardware":
+            continue
+        # A mirror volume shadows another store automatically — it's not directly
+        # selectable as a destination.
+        if s.kind == "mirror" or (s.health or {}).get("mirror_of"):
+            continue
         targets.append({
             "id": f"store:{s.id}", "kind": "appliance",
             "label": f"{a.name} · {s.name}",
