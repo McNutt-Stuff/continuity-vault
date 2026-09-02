@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import platform
+import plistlib
 import queue
 import socket
 import subprocess
@@ -338,17 +339,19 @@ class Agent:
         has_marker = marker.exists()
         try:
             if desired:
-                # If we're headless with NO local override marker, restarting won't
-                # converge (it relaunches into the same headless entrypoint). Avoid
-                # a restart loop and surface an actionable diagnostic.
+                # If we're headless with NO local override marker, try to self-heal
+                # launchd's entrypoint to agent.menubar, then restart once.
                 if not has_marker and mode is False:
-                    if not self._tray_launch_mode_warned:
-                        self._tray_launch_mode_warned = True
-                        self.log.warning(
-                            "menu-bar icon requested but agent is running headless "
-                            "without a local no_tray marker; skipping restart to "
-                            "avoid a loop. Ensure launchd runs '-m agent.menubar'.")
-                    return
+                    if self._ensure_menubar_launch_mode():
+                        changed = True
+                    else:
+                        if not self._tray_launch_mode_warned:
+                            self._tray_launch_mode_warned = True
+                            self.log.warning(
+                                "menu-bar icon requested but agent is running headless "
+                                "without a local no_tray marker; restart skipped to "
+                                "avoid a loop. Ensure launchd runs '-m agent.menubar'.")
+                        return
                 if has_marker:
                     marker.unlink(missing_ok=False)
                     changed = True
@@ -364,6 +367,50 @@ class Agent:
             return
         self.log.info("menu-bar icon preference changed (show=%s) — restarting to apply", desired)
         os._exit(0)
+
+    def _ensure_menubar_launch_mode(self) -> bool:
+        """Best-effort local repair: if launchd still points at agent.main, rewrite
+        ProgramArguments to agent.menubar so show_tray_icon=True can converge.
+        Returns True only when a change was written."""
+        plist = Path.home() / "Library" / "LaunchAgents" / "com.arkive.agent.plist"
+        if not plist.exists():
+            return False
+        try:
+            data = plistlib.loads(plist.read_bytes())
+        except Exception as exc:
+            self.log.warning("could not read launchd plist for tray recovery: %s", exc)
+            return False
+
+        args = data.get("ProgramArguments")
+        if not isinstance(args, list) or not args:
+            return False
+        if "agent.menubar" in args:
+            return False
+
+        updated = False
+        for i, token in enumerate(args):
+            if token == "agent.main":
+                args[i] = "agent.menubar"
+                updated = True
+
+        if not updated:
+            for i in range(len(args) - 1):
+                if args[i] == "-m" and args[i + 1].startswith("agent."):
+                    args[i + 1] = "agent.menubar"
+                    updated = True
+                    break
+
+        if not updated:
+            return False
+
+        data["ProgramArguments"] = args
+        try:
+            plist.write_bytes(plistlib.dumps(data))
+            self.log.info("updated launchd ProgramArguments to agent.menubar in %s", plist)
+            return True
+        except Exception as exc:
+            self.log.warning("could not update launchd plist for tray recovery: %s", exc)
+            return False
 
     def _maybe_self_update(self, latest: Optional[str]) -> None:
         if not latest or latest == self.cfg.version:
