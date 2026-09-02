@@ -18,6 +18,8 @@ Key material and connector credentials are wrapped with the fleet-wide
 
 from __future__ import annotations
 
+import logging
+import secrets
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -58,11 +60,16 @@ from ..models import (
 from .site import _fleet_secret
 
 router = APIRouter(prefix="/nodes/sync", tags=["node-sync"])
+logger = logging.getLogger("cv.node-sync")
 
 
 def _require_fleet(authorization: str) -> None:
-    token = (authorization or "").replace("Bearer ", "").strip()
-    if not token or token != _fleet_secret():
+    token = ""
+    raw = (authorization or "").strip()
+    if raw.lower().startswith("bearer "):
+        token = raw.split(" ", 1)[1].strip()
+    expected = _fleet_secret() or ""
+    if not token or not expected or not secrets.compare_digest(token, expected):
         raise HTTPException(401, "invalid node credentials")
 
 
@@ -88,9 +95,16 @@ def _deser(model, data: dict) -> dict:
                 dt = datetime.fromisoformat(v)
                 v = dt.replace(tzinfo=None) if dt.tzinfo else dt
             except ValueError:
+                logger.warning("node-sync: invalid datetime for %s.%s value=%r",
+                               getattr(model, "__tablename__", model), k, v)
                 v = None
         kw[k] = v
     return kw
+
+
+def _has_pk(model, row: dict) -> bool:
+    pk = list(model.__table__.primary_key.columns)[0].name
+    return bool(row.get(pk))
 
 
 def _upsert(db: Session, model, data: dict):
@@ -212,6 +226,7 @@ class PushPayload(BaseModel):
     jobs: list[dict] = []
     agents: list[dict] = []
     appliances: list[dict] = []
+    appliance_storages: list[dict] = []
     insights: list[dict] = []
     integration_instances: list[dict] = []
     network_clients: list[dict] = []
@@ -250,7 +265,8 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     authoritative for the portal (search / recovery / billing / activity)."""
     _require_fleet(authorization)
     counts = {"receipts": 0, "documents": 0, "connector_accounts": 0,
-              "jobs": 0, "agents": 0, "appliances": 0, "insights": 0,
+              "jobs": 0, "agents": 0, "appliances": 0, "appliance_storages": 0,
+              "insights": 0,
               "integrations": 0, "network": 0, "communications": 0}
     # A node can hold data for a tenant/user that was removed on the control
     # plane; inserting it would violate a FK and abort the whole push. Skip any
@@ -263,12 +279,12 @@ def push(body: PushPayload, authorization: str = Header(default=""),
         return tid is None or tid in valid_tenants
 
     for r in body.receipts:
-        if not _known(r):
+        if not _known(r) or not _has_pk(SnapshotReceipt, r):
             continue
         _upsert(db, SnapshotReceipt, r)
         counts["receipts"] += 1
     for d in body.documents:
-        if not _known(d):
+        if not _known(d) or not _has_pk(SearchDocument, d):
             continue
         _upsert(db, SearchDocument, d)
         counts["documents"] += 1
@@ -298,7 +314,7 @@ def push(body: PushPayload, authorization: str = Header(default=""),
                  .filter(Node.name == body.node, Node.role == body.role).first()
                  or db.query(Node).filter(Node.name == body.node).first())
     for j in body.jobs:
-        if not _known(j):
+        if not _known(j) or not _has_pk(SyncJob, j):
             continue
         job = db.get(SyncJob, j.get("id"))
         if job:
@@ -312,15 +328,30 @@ def push(body: PushPayload, authorization: str = Header(default=""),
             job.node_id = push_node.id
         counts["jobs"] += 1
     for a in body.agents:
+        if not _has_pk(DesktopAgent, a):
+            continue
         ag = db.get(DesktopAgent, a.get("id"))
         if ag:
             _apply(ag, a, _AGENT_FIELDS)
             counts["agents"] += 1
     for a in body.appliances:
+        if not _has_pk(Appliance, a):
+            continue
         ap = db.get(Appliance, a.get("id"))
         if ap:
             _apply(ap, a, _APPLIANCE_FIELDS)
             counts["appliances"] += 1
+    # Per-volume storage the node's appliances reported (built-in + dedicated
+    # RAID/SMART/capacity). A node-routed appliance's storages are created on the
+    # node, so upsert (create-or-update) rather than update-only — but only for an
+    # appliance that exists here, to avoid an appliance_id FK violation.
+    valid_appliances = {i for (i,) in db.query(Appliance.id).all()}
+    for st in body.appliance_storages:
+        if (not _known(st) or not _has_pk(ApplianceStorage, st)
+                or st.get("appliance_id") not in valid_appliances):
+            continue
+        _upsert(db, ApplianceStorage, st)
+        counts["appliance_storages"] += 1
     # Digital-footprint insights the node computed for its tenants. Key on user_id
     # (not the row id, which differs between the node and any control-plane
     # pending marker) so there's exactly one report per user. Skip a row whose
@@ -343,7 +374,7 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     # the open fields (the tracking pixel always hits the CP), so never overwrite
     # them from a node push — which also preserves a stub created by an early open.
     for cm in body.communications:
-        if not _known(cm):
+        if not _known(cm) or not _has_pk(Communication, cm):
             continue
         kw = _deser(Communication, cm)
         existing = db.get(Communication, kw.get("id"))

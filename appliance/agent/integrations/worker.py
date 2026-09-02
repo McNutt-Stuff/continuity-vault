@@ -27,6 +27,29 @@ class IntegrationWorker:
         # open controller session between the login and the OTP submission.
         self._sessions: dict[str, dict] = {}
 
+    @staticmethod
+    def _is_auth_error(exc: Exception) -> bool:
+        s = str(exc).lower()
+        return any(t in s for t in (
+            "401", "403", "unauthorized", "forbidden", "invalid token",
+            "invalid credentials", "invalid_grant", "access_denied", "reauth",
+        ))
+
+    @staticmethod
+    def _is_timeout_error(exc: Exception) -> bool:
+        if isinstance(exc, TimeoutError):
+            return True
+        s = str(exc).lower()
+        return any(t in s for t in ("timeout", "timed out", "read timeout", "connect timeout"))
+
+    def _normalize_collect_error(self, exc: Exception) -> str:
+        msg = (str(exc).strip() or exc.__class__.__name__)
+        if self._is_auth_error(exc):
+            return ("Authentication failed: " + msg)[:400]
+        if self._is_timeout_error(exc):
+            return ("Connection timeout: " + msg)[:400]
+        return msg[:400]
+
     async def tick(self) -> None:
         base = self._base()
         instances = await self._pull(base)
@@ -73,7 +96,7 @@ class IntegrationWorker:
         try:
             report = runner.collect(config, creds, self.log)
         except Exception as exc:  # noqa: BLE001
-            status, error = "error", str(exc)[:400]
+            status, error = "error", self._normalize_collect_error(exc)
             self.log.warning("%s collect failed: %s", itype, exc)
         payload = {
             "integration_id": inst.get("id"),
@@ -126,9 +149,9 @@ class IntegrationWorker:
         cutoff = time.time() - 600  # sessions are only valid for a few minutes
         for iid in [k for k, v in self._sessions.items() if v.get("ts", 0) < cutoff]:
             try:
-                self._sessions.pop(iid)["session"]["client"].close()
-            except Exception:  # noqa: BLE001
-                pass
+                self._close_session_client(self._sessions.pop(iid)["session"], iid, "reap")
+            except Exception as exc:  # noqa: BLE001
+                self.log.debug("integration session reap failed (%s): %s", iid, exc)
 
     def _report_provision(self, base: str, iid: str, state: str,
                           message: str | None = None, cred_update: dict | None = None) -> None:
@@ -137,10 +160,21 @@ class IntegrationWorker:
             payload["credentials_update"] = cred_update
         try:
             with httpx.Client(timeout=60) as c:
-                c.post(f"{base}/appliance/integrations/provision/report",
-                       json=payload, headers=self._headers())
+                r = c.post(f"{base}/appliance/integrations/provision/report",
+                           json=payload, headers=self._headers())
+                if r.status_code >= 300:
+                    self.log.warning("provision report rejected for %s: %s %s",
+                                     iid, r.status_code, r.text[:200])
         except Exception as exc:  # noqa: BLE001
             self.log.warning("provision report POST failed for %s: %s", iid, exc)
+
+    def _close_session_client(self, session: dict, iid: str, context: str) -> None:
+        try:
+            client = session.get("client")
+            if client is not None:
+                client.close()
+        except Exception as exc:  # noqa: BLE001
+            self.log.debug("integration session close failed (%s, %s): %s", iid, context, exc)
 
     def _provision_one(self, base: str, p: dict) -> None:
         iid = p.get("id")
@@ -187,8 +221,7 @@ class IntegrationWorker:
                                    result.get("message") or "Enter your verification code.")
         else:
             if session:
-                try: session["client"].close()
-                except Exception: pass  # noqa: BLE001
+                self._close_session_client(session, str(iid), "begin_auth")
             self._report_provision(base, iid, "error",
                                    result.get("message") or "Could not sign in to the controller.")
 
@@ -201,8 +234,7 @@ class IntegrationWorker:
             self.log.warning("%s finalize failed: %s", itype, exc)
             cred_update = None
         finally:
-            try: session["client"].close()
-            except Exception: pass  # noqa: BLE001
+            self._close_session_client(session, str(iid), "finalize")
         if not cred_update or not (cred_update.get("api_key") or cred_update.get("cookies")):
             self._report_provision(base, iid, "error",
                                    "Signed in, but couldn't secure an API key on the controller.")

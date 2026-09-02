@@ -19,11 +19,12 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from . import emailer
-from .models import (Collection, ConnectorAccount, NotificationLog, SearchDocument,
-                     SnapshotReceipt, SystemSetting, Tenant, User, Vault)
+from .models import (Collection, ConnectorAccount, IntegrationInstance, IntegrationRun,
+                     NotificationLog, SearchDocument, SnapshotReceipt, SystemSetting,
+                     Tenant, User, Vault)
 
 logger = logging.getLogger("cv.notify")
 
@@ -283,23 +284,72 @@ def _dest_label(destination: str) -> tuple[str, str]:
     return d or "Storage", "storage"
 
 
+def _likely_reauth(msg: str) -> bool:
+    s = (msg or "").lower()
+    return any(t in s for t in ("401", "403", "unauthorized", "forbidden", "invalid token",
+                                "invalid_grant", "reauth", "expired token", "token expired"))
+
+
 def _source_issues(db, user: User) -> list[dict]:
-    """Sources belonging to the user's collections that currently have an error."""
+    """Connector and integration issues requiring user attention.
+
+    These feed the source-problem notification and daily-summary warnings so a
+    failure is surfaced to users whether it originated in a source connector or
+    an appliance integration run/provisioning flow.
+    """
     my_colls = (db.query(Collection.connector_account_id)
                 .filter(Collection.tenant_id == user.tenant_id,
                         Collection.vault_id.in_(_user_vault_ids(db, user) or ["-"])).all())
     acct_ids = {a for (a,) in my_colls if a}
-    if not acct_ids:
-        return []
     out = []
-    for a in (db.query(ConnectorAccount)
-              .filter(ConnectorAccount.id.in_(acct_ids),
-                      ConnectorAccount.last_error.isnot(None)).all()):
-        out.append({"id": a.id, "name": a.account_label or a.connector_type,
-                    "source_type": a.connector_type,
-                    "error": (a.last_error or "").splitlines()[0][:160],
-                    "at": a.last_error_at, "fails": int(a.fail_count or 0),
-                    "reauth": a.auth_status == "needs-reauth"})
+    if acct_ids:
+        for a in (db.query(ConnectorAccount)
+                  .filter(ConnectorAccount.id.in_(acct_ids),
+                          ConnectorAccount.active.is_(True),
+                          or_(ConnectorAccount.last_error.isnot(None),
+                              ConnectorAccount.auth_status == "needs-reauth")).all()):
+            msg = (a.last_error or "Authorization required — please reconnect.")
+            out.append({"id": a.id,
+                        "kind": "connector",
+                        "name": a.account_label or a.connector_type,
+                        "source_type": a.connector_type,
+                        "error": msg.splitlines()[0][:160],
+                        "at": a.last_error_at,
+                        "fails": int(a.fail_count or 0),
+                        "reauth": a.auth_status == "needs-reauth" or _likely_reauth(msg)})
+
+    iq = (db.query(IntegrationInstance)
+          .filter(IntegrationInstance.tenant_id == user.tenant_id,
+                  IntegrationInstance.enabled.is_(True),
+                  or_(IntegrationInstance.owner_user_id == user.id,
+                      IntegrationInstance.owner_user_id.is_(None)),
+                  or_(IntegrationInstance.status == "error",
+                      IntegrationInstance.last_error.isnot(None),
+                      IntegrationInstance.provision_state == "error")).all())
+    for inst in iq:
+        msg = (inst.last_error or inst.provision_message
+               or "Integration requires attention. Please reconnect or retry setup.")
+        runs = (db.query(IntegrationRun.status)
+                .filter(IntegrationRun.integration_id == inst.id)
+                .order_by(IntegrationRun.created_at.desc()).limit(12).all())
+        fails = 0
+        for (st,) in runs:
+            if st == "error":
+                fails += 1
+            else:
+                break
+        if fails == 0 and inst.status == "error":
+            fails = 1
+        out.append({"id": inst.id,
+                    "kind": "integration",
+                    "name": inst.label or _source_name(inst.integration_type),
+                    "source_type": inst.integration_type,
+                    "error": msg.splitlines()[0][:160],
+                    "at": inst.last_run_at or inst.updated_at,
+                    "fails": fails,
+                    "reauth": _likely_reauth(msg)})
+
+    out.sort(key=lambda i: i.get("at") or datetime.min.replace(tzinfo=None), reverse=True)
     return out
 
 
@@ -470,15 +520,18 @@ def build_source_problem(db, user: User, issues: list[dict] | None = None) -> di
     issues = issues if issues is not None else _source_issues(db, user)
     if not issues:
         return None
+    kinds = {str(i.get("kind") or "connector") for i in issues}
     n = len(issues)
     parts: list[str] = []
     if n == 1:
-        parts.append(f'<p style="margin:0 0 12px;">One of your connected sources needs attention. '
-                     f'Re-connect it to resume protection — your existing history is safe.</p>')
+        parts.append(f'<p style="margin:0 0 12px;">One of your connected services needs attention. '
+                     f'Fix it to resume protection and monitoring — your existing history is safe.</p>')
     else:
-        parts.append(f'<p style="margin:0 0 12px;"><b>{n} of your sources</b> need attention. '
-                     f'Re-connect them to resume protection — your existing history is safe.</p>')
-    parts.append(_rows([{"icon": "alert", "icon_url": _source_icon_url(i.get("source_type", "")),
+        parts.append(f'<p style="margin:0 0 12px;"><b>{n} connected services</b> need attention. '
+                     f'Fix them to resume protection and monitoring — your existing history is safe.</p>')
+    parts.append(_rows([{"icon": "alert",
+                         "icon_url": (_source_icon_url(i.get("source_type", ""))
+                                      if i.get("kind") == "connector" else ""),
                          "name": (f'{i["name"]} · repeatedly failing' if i.get("fails", 0) > 5 else i["name"]),
                          "detail": i["error"]} for i in issues]))
     persistent = [i for i in issues if i.get("fails", 0) > 5]
@@ -486,14 +539,22 @@ def build_source_problem(db, user: User, issues: list[dict] | None = None) -> di
         parts.append(f'<p style="margin:12px 0 0;font-size:13.5px;color:#8a5a1a;">'
                      f'{_ic("warn")} {len(persistent)} source(s) have failed more than 5 times in a row — '
                      f'please re-connect them so protection can resume.</p>')
+    cta_url = _portal_url()
+    cta_label = "Review issues"
+    if kinds == {"connector"}:
+        cta_url = f"{_portal_url()}/connectors"
+        cta_label = "Fix your sources"
+    elif kinds == {"integration"}:
+        cta_url = f"{_portal_url()}/integrations"
+        cta_label = "Fix your integrations"
     return {
         "subject": (f'Action needed: “{issues[0]["name"]}” needs attention'
-                    if n == 1 else f"Action needed: {n} sources need attention"),
-        "title": "A source needs your attention" if n == 1 else f"{n} sources need attention",
+                    if n == 1 else f"Action needed: {n} services need attention"),
+        "title": "A service needs your attention" if n == 1 else f"{n} services need attention",
         "body_html": "".join(parts),
         "text": "; ".join(f'{i["name"]}: {i["error"]}' for i in issues),
-        "cta": {"label": "Fix your sources", "url": f"{_portal_url()}/connectors"},
-        "preheader": f"{n} source(s) need attention",
+        "cta": {"label": cta_label, "url": cta_url},
+        "preheader": f"{n} service(s) need attention",
     }
 
 

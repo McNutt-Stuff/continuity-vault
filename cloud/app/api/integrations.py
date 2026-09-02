@@ -9,6 +9,7 @@ mine cross-customer analytics to decide which new sources to build.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -34,6 +35,8 @@ from ..models import (
     User,
 )
 from .appliances import _agent_appliance
+
+logger = logging.getLogger("cv.integrations")
 
 router = APIRouter(prefix="/integrations", tags=["integrations"],
                    dependencies=[Depends(security.require_feature("integrations_enabled"))])
@@ -685,9 +688,35 @@ def appliance_report(body: IntegrationReport,
     if not inst or inst.appliance_id != appliance.id:
         raise HTTPException(404, "integration not found for this appliance")
     tid = inst.tenant_id
-    _ingest_report(db, tid, inst, body, appliance_id=appliance.id)
-    db.commit()
-    return {"ok": True}
+    try:
+        _ingest_report(db, tid, inst, body, appliance_id=appliance.id)
+        db.commit()
+        return {"ok": True}
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        now = _now()
+        msg = _normalize_integration_error("error", str(exc)) or str(exc)
+        inst.last_run_at = now
+        inst.status = "error"
+        inst.last_error = msg[:500]
+        inst.repoll_requested = False
+        db.add(IntegrationRun(
+            tenant_id=tid,
+            integration_id=inst.id,
+            integration_type=inst.integration_type,
+            appliance_id=appliance.id,
+            status="error",
+            started_at=now,
+            finished_at=now,
+            clients=0,
+            apps=0,
+            bytes_seen=0,
+            error=inst.last_error,
+        ))
+        db.commit()
+        logger.exception("integration report ingest failed: integration=%s appliance=%s",
+                         inst.id, appliance.id)
+        return {"ok": False, "error": inst.last_error}
 
 
 def _parse_dt(v) -> datetime | None:
@@ -700,15 +729,52 @@ def _parse_dt(v) -> datetime | None:
         return None
 
 
+def _safe_int(v, default: int = 0) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_auth_error_text(text: str) -> bool:
+    s = (text or "").lower()
+    return any(t in s for t in (
+        "401", "403", "unauthorized", "forbidden", "invalid token",
+        "invalid credentials", "access_denied", "invalid_grant", "reauth",
+        "expired token", "token expired",
+    ))
+
+
+def _is_timeout_error_text(text: str) -> bool:
+    s = (text or "").lower()
+    return any(t in s for t in ("timeout", "timed out", "read timeout", "connect timeout"))
+
+
+def _normalize_integration_error(status: str, error: str | None) -> str | None:
+    if status == "ok":
+        return None
+    msg = (error or "").strip()
+    if not msg:
+        return "Integration run failed. Please retry or reconnect this integration."
+    if _is_auth_error_text(msg):
+        return f"Authentication failed: {msg}"
+    if _is_timeout_error_text(msg):
+        return f"Connection timeout: {msg}"
+    return msg
+
+
 def _ingest_report(db: Session, tid: str, inst: IntegrationInstance,
                    body: IntegrationReport, appliance_id: str | None) -> None:
     now = _now()
+    status = (body.status or "").strip().lower()
+    status = "ok" if status == "ok" else "error"
+    err = _normalize_integration_error(status, body.error)
     inst.last_run_at = now
-    inst.status = "active" if body.status == "ok" else "error"
-    inst.last_error = body.error
+    inst.status = "active" if status == "ok" else "error"
+    inst.last_error = err
     inst.last_stats = body.stats or {}
     inst.repoll_requested = False  # a run just completed; clear any pending re-poll
-    if body.status == "ok":
+    if status == "ok":
         inst.last_success_at = now
     if body.credentials_update:
         try:
@@ -739,9 +805,9 @@ def _ingest_report(db: Session, tid: str, inst: IntegrationInstance,
         c.is_wired = bool(cd.get("is_wired"))
         c.is_guest = bool(cd.get("is_guest"))
         c.device_type = cd.get("device_type") or c.device_type
-        c.tx_bytes = int(cd.get("tx_bytes", 0) or 0)
-        c.rx_bytes = int(cd.get("rx_bytes", 0) or 0)
-        c.total_bytes = int(cd.get("total_bytes", 0) or 0) or (c.tx_bytes + c.rx_bytes)
+        c.tx_bytes = _safe_int(cd.get("tx_bytes", 0))
+        c.rx_bytes = _safe_int(cd.get("rx_bytes", 0))
+        c.total_bytes = _safe_int(cd.get("total_bytes", 0)) or (c.tx_bytes + c.rx_bytes)
         c.last_seen = _parse_dt(cd.get("last_seen")) or now
 
     # Apps — upsert by app_key; map to a connector source; preserve of_interest.
@@ -759,10 +825,10 @@ def _ingest_report(db: Session, tid: str, inst: IntegrationInstance,
         a.name = ad.get("name") or a.name or key
         a.category = ad.get("category") or a.category
         a.source_type = map_app_to_source(a.name, a.category)
-        a.tx_bytes = int(ad.get("tx_bytes", 0) or 0)
-        a.rx_bytes = int(ad.get("rx_bytes", 0) or 0)
-        a.total_bytes = int(ad.get("total_bytes", 0) or 0) or (a.tx_bytes + a.rx_bytes)
-        a.client_count = int(ad.get("client_count", 0) or 0)
+        a.tx_bytes = _safe_int(ad.get("tx_bytes", 0))
+        a.rx_bytes = _safe_int(ad.get("rx_bytes", 0))
+        a.total_bytes = _safe_int(ad.get("total_bytes", 0)) or (a.tx_bytes + a.rx_bytes)
+        a.client_count = _safe_int(ad.get("client_count", 0))
         a.last_seen = _parse_dt(ad.get("last_seen")) or now
 
     # Usage edges — upsert by (client_key, app_key).
@@ -777,17 +843,17 @@ def _ingest_report(db: Session, tid: str, inst: IntegrationInstance,
             u = NetworkUsage(tenant_id=tid, integration_id=inst.id,
                              client_key=k[0], app_key=k[1])
             db.add(u)
-        u.tx_bytes = int(ud.get("tx_bytes", 0) or 0)
-        u.rx_bytes = int(ud.get("rx_bytes", 0) or 0)
-        u.total_bytes = int(ud.get("total_bytes", 0) or 0) or (u.tx_bytes + u.rx_bytes)
+        u.tx_bytes = _safe_int(ud.get("tx_bytes", 0))
+        u.rx_bytes = _safe_int(ud.get("rx_bytes", 0))
+        u.total_bytes = _safe_int(ud.get("total_bytes", 0)) or (u.tx_bytes + u.rx_bytes)
         u.last_seen = _parse_dt(ud.get("last_seen")) or now
 
     st = body.stats or {}
     db.add(IntegrationRun(
         tenant_id=tid, integration_id=inst.id, integration_type=inst.integration_type,
-        appliance_id=appliance_id, status=inst.status, started_at=now, finished_at=now,
-        clients=int(st.get("clients", 0) or 0), apps=int(st.get("apps", 0) or 0),
-        bytes_seen=int(st.get("bytes_seen", 0) or 0), error=body.error))
+        appliance_id=appliance_id, status=status, started_at=now, finished_at=now,
+        clients=_safe_int(st.get("clients", 0)), apps=_safe_int(st.get("apps", 0)),
+        bytes_seen=_safe_int(st.get("bytes_seen", 0)), error=err))
 
 
 # --------------------------------------------------------------------------- #

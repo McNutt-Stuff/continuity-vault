@@ -192,8 +192,9 @@ class Agent:
         if not pub:
             return
         wrapped = wrap_for_recovery(self.agent_key, pub, alg)
-        httpx.post(f"{self.cfg.cloud_base_url}/agent/register-key",
-                   json={"wrapped_key": wrapped}, headers=self._headers(), timeout=30)
+        r = httpx.post(f"{self.cfg.cloud_base_url}/agent/register-key",
+                       json={"wrapped_key": wrapped}, headers=self._headers(), timeout=30)
+        r.raise_for_status()
 
     # -- telemetry ----------------------------------------------------
 
@@ -396,11 +397,16 @@ class Agent:
 
     def _post_command_result(self, ctype: str, ok: bool, detail: dict) -> None:
         try:
-            httpx.post(f"{self._base()}/agent/command-result",
-                       json={"type": ctype, "ok": ok, "detail": detail},
-                       headers=self._headers(), timeout=30)
-        except Exception:
-            pass
+            r = httpx.post(f"{self._base()}/agent/command-result",
+                           json={"type": ctype, "ok": ok, "detail": detail},
+                           headers=self._headers(), timeout=30)
+            r.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            if _is_cp_unavailable(exc):
+                self.log.warning("command result upload deferred for %s: control plane unavailable",
+                                 ctype)
+            else:
+                self.log.warning("command result upload failed for %s: %s", ctype, exc)
 
     def _report_fs_scan(self, params: dict) -> None:
         """Serve the folder tree from the cached index (fast) and, if asked,

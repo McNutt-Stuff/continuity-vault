@@ -17,6 +17,7 @@ import logging
 import os
 import threading
 import time
+from json import JSONDecodeError
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -158,9 +159,25 @@ def _post(path: str, payload: dict) -> dict | None:
         method="POST")
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.loads(resp.read().decode())
+            raw = resp.read().decode(errors="replace")
+            try:
+                data = json.loads(raw)
+            except JSONDecodeError:
+                logger.warning("replication %s returned non-JSON response", path)
+                return None
+            if not isinstance(data, dict):
+                logger.warning("replication %s returned unexpected payload type %s",
+                               path, type(data).__name__)
+                return None
+            return data
     except urllib.error.HTTPError as e:
-        logger.warning("replication %s rejected: %s", path, e.code)
+        body = ""
+        try:
+            body = e.read().decode(errors="replace")[:240]
+        except Exception:  # noqa: BLE001
+            body = ""
+        msg = f" body={body}" if body else ""
+        logger.warning("replication %s rejected: %s%s", path, e.code, msg)
     except Exception as e:  # noqa: BLE001
         logger.warning("replication %s failed to reach control plane: %s", path, e)
     return None
@@ -179,6 +196,8 @@ def _upsert(db, model, data: dict) -> None:
                 dt = datetime.fromisoformat(v)
                 v = dt.replace(tzinfo=None) if dt.tzinfo else dt
             except ValueError:
+                logger.warning("replication: invalid datetime for %s.%s value=%r",
+                               getattr(model, "__tablename__", model), k, v)
                 v = None
         kw[k] = v
     pk = list(model.__table__.primary_key.columns)[0].name
@@ -207,6 +226,11 @@ def _pull(s) -> int:
 
         def apply_one(model, row) -> bool:
             try:
+                pk = list(model.__table__.primary_key.columns)[0].name
+                if not row.get(pk):
+                    logger.warning("replication: skipped %s row with missing pk '%s'",
+                                   getattr(model, "__tablename__", model), pk)
+                    return False
                 with db.begin_nested():
                     _upsert(db, model, row)
                     db.flush()
@@ -342,6 +366,7 @@ def _push(s) -> int:
     ins_high = ins_since
     receipts, documents, accounts = [], [], []
     jobs, agents, appliances = [], [], []
+    appliance_storages = []
     insights = []
     integ_cursor = _read_state().get("integrations_cursor")
     integ_since = None
@@ -388,6 +413,11 @@ def _push(s) -> int:
             agents.append(_row(ag))
         for ap in db.query(Appliance).all():
             appliances.append(_row(ap))
+        # Per-volume capacity/health for node-routed appliances (built-in +
+        # dedicated RAID/SMART), so the portal's appliance Storage view renders
+        # the real drive-health drill-down instead of the telemetry fallback.
+        for st in db.query(ApplianceStorage).all():
+            appliance_storages.append(_row(st))
         # Digital-footprint insights refreshed since the last push (daily job or
         # an admin/user request) — report them so the portal stays authoritative.
         iq = db.query(UserInsights)
@@ -425,14 +455,16 @@ def _push(s) -> int:
             communications.append(_row(row))
             if row.created_at and (comm_high is None or row.created_at > comm_high):
                 comm_high = row.created_at
-    if not (receipts or documents or accounts or jobs or agents or appliances or insights
+    if not (receipts or documents or accounts or jobs or agents or appliances
+            or appliance_storages or insights
             or integ_instances or net_clients or net_apps or net_usage or integ_runs
             or communications):
         return 0
     res = _post("/nodes/sync/push", {
         "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
         "receipts": receipts, "documents": documents, "connector_accounts": accounts,
-        "jobs": jobs, "agents": agents, "appliances": appliances, "insights": insights,
+        "jobs": jobs, "agents": agents, "appliances": appliances,
+        "appliance_storages": appliance_storages, "insights": insights,
         "integration_instances": integ_instances, "network_clients": net_clients,
         "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
         "communications": communications,
@@ -451,9 +483,10 @@ def _push(s) -> int:
             st["communications_cursor"] = comm_high.isoformat()
             _write_state(st)
         logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d "
-                    "appliances=%d insights=%d integrations=%d network=%d",
+                    "appliances=%d storages=%d insights=%d integrations=%d network=%d",
                     len(receipts), len(documents), len(jobs), len(agents),
-                    len(appliances), len(insights), len(integ_instances),
+                    len(appliances), len(appliance_storages), len(insights),
+                    len(integ_instances),
                     len(net_clients) + len(net_apps) + len(net_usage))
         return len(receipts) + len(documents)
     return 0

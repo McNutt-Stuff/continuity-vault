@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import time
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Optional
 
@@ -138,6 +139,16 @@ def _cp_unavailable(exc: BaseException) -> bool:
     return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
                             httpx.RemoteProtocolError, httpx.PoolTimeout))
 
+
+def _json_or_raise(resp: httpx.Response, context: str) -> dict:
+    try:
+        data = resp.json()
+    except JSONDecodeError as exc:
+        raise RuntimeError(f"{context}: invalid JSON response") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{context}: unexpected payload type {type(data).__name__}")
+    return data
+
 DATA = Path(settings.data_dir)
 DATA.mkdir(parents=True, exist_ok=True)
 _REG = DATA / "registration.json"
@@ -236,7 +247,7 @@ class Agent:
             r = await client.post(f"{settings.cloud_base_url}/appliance/activate", json=payload)
         if r.status_code != 200:
             raise RuntimeError(f"activation failed: {r.status_code} {r.text}")
-        d = r.json()
+        d = _json_or_raise(r, "activation")
         self.appliance_id = d["appliance_id"]
         self.tenant_id = d["tenant_id"]
         self.agent_token = d["agent_token"]
@@ -279,7 +290,7 @@ class Agent:
             r = await client.post(f"{settings.cloud_base_url}/appliance/register", json=payload)
         if r.status_code != 200:
             raise RuntimeError(f"registration failed: {r.status_code} {r.text}")
-        d = r.json()
+        d = _json_or_raise(r, "registration")
         self.registration_id = d["registration_id"]
         self.reg_token = d["agent_token"]
         self.pairing_code = d["pairing_code"]
@@ -305,7 +316,11 @@ class Agent:
         if r.status_code != 200:
             self.log.warning("register-heartbeat rejected: %s", r.status_code)
             return False
-        d = r.json()
+        try:
+            d = _json_or_raise(r, "register-heartbeat")
+        except RuntimeError as exc:
+            self.log.warning("register-heartbeat parse failed: %s", exc)
+            return False
         if d.get("paired") and d.get("activation"):
             self._adopt_activation(d["activation"])
             return True
@@ -409,7 +424,11 @@ class Agent:
                 self.log.warning("heartbeat rejected by %s: %s — %s",
                                  base, r.status_code, r.text[:200])
                 return
-            data = r.json()
+            try:
+                data = _json_or_raise(r, "heartbeat")
+            except RuntimeError as exc:
+                self.log.warning("heartbeat parse failed: %s", exc)
+                return
             # Adopt the assigned node URL for all subsequent signaling.
             self._set_node_url(data.get("node_url") or None)
             # Cloud advertises the current bundle version; the root self-update

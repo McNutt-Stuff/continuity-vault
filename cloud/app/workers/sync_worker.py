@@ -70,6 +70,22 @@ def _is_auth_error(exc: Exception) -> bool:
     return any(t in s for t in tokens)
 
 
+def _is_timeout_error(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    s = str(exc).lower()
+    return any(t in s for t in ("timeout", "timed out", "read timeout", "connect timeout"))
+
+
+def _normalize_sync_error(exc: Exception) -> str:
+    msg = (str(exc).strip() or exc.__class__.__name__)
+    if _is_auth_error(exc):
+        return ("Authentication failed: " + msg)[:500]
+    if _is_timeout_error(exc):
+        return ("Connection timeout: " + msg)[:500]
+    return msg[:500]
+
+
 def _record_sync_success(db: Session, account: Optional[ConnectorAccount], count: int) -> None:
     """Mark a source healthy after a successful sync (clears any prior error)."""
     if account is None:
@@ -115,7 +131,7 @@ def _record_sync_error(db: Session, account: Optional[ConnectorAccount],
     the UI can offer a Reconnect button and the overview can warn."""
     if account is None:
         return
-    msg = (str(exc)[:500] or exc.__class__.__name__)
+    msg = _normalize_sync_error(exc)
     needs_auth = _is_auth_error(exc)
     # A 401 can mean the access token was invalidated (re-consent, clock skew,
     # a fresh grant on another node) while the refresh token still works — try a
@@ -285,7 +301,9 @@ def access_token_for_account(db: Session, account: ConnectorAccount) -> Optional
         return None
     try:
         creds = credstore.decrypt(account.tenant_id, account.encrypted_credentials)
-    except Exception:
+    except Exception as exc:
+        logger.warning("credentials decrypt failed for account=%s: %s",
+                       getattr(account, "id", "?"), exc)
         return None
     if (creds.get("access_token") and creds.get("expires_at", 0) < time.time()
             and creds.get("refresh_token")):
@@ -294,8 +312,11 @@ def access_token_for_account(db: Session, account: ConnectorAccount) -> Optional
             account.encrypted_credentials = credstore.encrypt(account.tenant_id, creds)
             account.auth_status = "linked"
             db.commit()
-        except Exception:
+        except Exception as exc:
             account.auth_status = "needs-reauth"
+            account.last_error = _normalize_sync_error(exc)
+            account.last_error_at = datetime.now(timezone.utc)
+            account.fail_count = int(account.fail_count or 0) + 1
             db.commit()
     return creds.get("access_token")
 
@@ -833,7 +854,9 @@ def _account_config(db: Session, collection: Collection,
         return {}
     try:
         creds = credstore.decrypt(collection.tenant_id, account.encrypted_credentials)
-    except Exception:
+    except Exception as exc:
+        logger.warning("credentials decrypt failed during sync: source=%s account=%s error=%s",
+                       collection.source_type, getattr(account, "account_label", "?"), exc)
         return {}
     # Credential access is security-relevant — record it in the audit ledger.
     audit.record(db, actor="sync-worker", action="connector.credentials_accessed",
@@ -849,7 +872,10 @@ def _account_config(db: Session, collection: Collection,
                     collection.tenant_id, creds)
                 account.auth_status = "linked"
                 db.commit()
-            except Exception:
+            except Exception as exc:
                 account.auth_status = "needs-reauth"
+                account.last_error = _normalize_sync_error(exc)
+                account.last_error_at = datetime.now(timezone.utc)
+                account.fail_count = int(account.fail_count or 0) + 1
                 db.commit()
     return creds
