@@ -96,6 +96,14 @@ async function editUserDialog(u: any, isShared: boolean): Promise<boolean> {
       ];
   fields.push({ name: "status", label: "Status", defaultValue: u.status,
     options: ["active", "suspended"].map((v) => ({ label: v, value: v })) });
+  // Platform admin is a special per-user capability, NOT an org role: it grants
+  // access to the cross-tenant backend admin console.
+  fields.push({ name: "is_platform_admin", label: "Platform administrator",
+    defaultValue: u.is_platform_admin ? "true" : "false",
+    options: [{ label: "No", value: "false" },
+      { label: "Yes — full backend admin console", value: "true" }],
+    section: "Platform access",
+    hint: "Grants cross-tenant access to the backend admin console. A special capability, separate from the organization role." });
   fields.push({ name: "notification_emails", label: "Additional notification emails",
     type: "textarea", defaultValue: (u.notification_emails || []).join(", "),
     hint: "Extra addresses that also receive this account's email notifications (comma-separated). Never used for login." });
@@ -107,6 +115,7 @@ async function editUserDialog(u: any, isShared: boolean): Promise<boolean> {
   // Parse the comma/space/semicolon-separated list into the array the API expects.
   r.notification_emails = String(r.notification_emails ?? "")
     .split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean) as any;
+  r.is_platform_admin = (r.is_platform_admin === "true") as any;
   await api.put(`/admin/users/${u.id}`, r);
   if (Object.keys(flags).length) {
     await api.put(`/admin/users/${u.id}/flags`, { feature_flags: flags });
