@@ -111,14 +111,20 @@ def storage_targets(principal: security.Principal = Depends(security.get_princip
                   .filter(Appliance.tenant_id == tenant.id).all()}
     stores = (db.query(ApplianceStorage)
               .filter(ApplianceStorage.tenant_id == tenant.id).all())
+    # Appliances that have dedicated storage — their built-in (system) disk is not
+    # a customer-usable destination (dedicated is the only one).
+    dedicated_appliances = {s.appliance_id for s in stores if s.kind == "dedicated"}
     for s in sorted(stores, key=lambda s: (appliances.get(s.appliance_id).name
                                            if appliances.get(s.appliance_id) else "", s.name)):
         a = appliances.get(s.appliance_id)
         if not a or not _on("appliance"):
             continue
-        # On hardware the built-in system disk isn't a backup volume (it's the OS
-        # disk); only VMs store to it. Never offer it as a destination on hardware.
-        if s.kind == "builtin" and (a.telemetry or {}).get("model_kind") == "hardware":
+        # On hardware — or any appliance with dedicated storage — the built-in
+        # system disk isn't a backup volume; only VMs store to it. Never offer it.
+        if s.kind == "builtin" and (
+                (a.telemetry or {}).get("model_kind") == "hardware"
+                or (a.telemetry or {}).get("storage_kind") == "dedicated"
+                or a.id in dedicated_appliances):
             continue
         # A mirror volume shadows another store automatically — it's not directly
         # selectable as a destination.

@@ -15,7 +15,7 @@ interface StoreHealth {
   drive_health?: string; temperature_c?: number; power?: string;
   smart?: { enabled: boolean; status?: string };
   raid?: { enabled: boolean; status?: string };
-  mirror_of?: string | null;
+  device?: string; mirror_of?: string | null;
 }
 interface Store {
   id: string; name: string; kind: string;
@@ -752,7 +752,27 @@ function StorageCard({ a, canManage, onRename, onDelete, onAdvanced, onSetup, on
       )}
       {stores.map((s) => <StorageItem key={s.id} s={s} canManage={canManage} onRename={onRename} onDelete={onDelete} onAdvanced={onAdvanced} onMirror={onMirror} mirrorSourceName={storeName} />)}
       {stores.length === 0 && <div className="muted">No storage volumes reported yet.</div>}
+      {a.telemetry?.os_storage && <SystemDiskRow os={a.telemetry.os_storage} />}
     </Card>
+  );
+}
+
+// The appliance's OS / system disk — shown for reference only (it's never a
+// backup destination; dedicated/external volumes hold protected data).
+function SystemDiskRow({ os }: { os: { used_bytes?: number; total_bytes?: number; free_bytes?: number; pct?: number; filesystem?: string; device?: string } }) {
+  const pct = Math.min(100, Number(os.pct) || 0);
+  const tone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : "#8a63ff";
+  return (
+    <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
+      <div className="spread" style={{ fontSize: 12.5 }}>
+        <span style={{ fontWeight: 600 }}>OS / system disk <span className="faint" style={{ fontWeight: 400, fontSize: 11 }}>· not a backup volume</span></span>
+        <span className="faint">{bytes(os.used_bytes || 0)} / {bytes(os.total_bytes || 0)}</span>
+      </div>
+      <div className="progress" style={{ marginTop: 4 }}><span style={{ width: `${pct}%`, background: tone }} /></div>
+      <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+        {(os.filesystem || "—")} · {(os.device || "—")} · {bytes(os.free_bytes || 0)} free
+      </div>
+    </div>
   );
 }
 

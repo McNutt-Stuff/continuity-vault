@@ -463,13 +463,18 @@ def _appliance_view(a: Appliance) -> dict:
     stores = []
     db = SessionLocal()
     try:
-        for s in (db.query(ApplianceStorage)
-                  .filter(ApplianceStorage.appliance_id == a.id)
-                  .order_by(ApplianceStorage.kind.desc(), ApplianceStorage.created_at.asc()).all()):
-            # On a hardware appliance the built-in (system) disk is NOT a backup
-            # volume — it's the OS disk, surfaced separately as os_storage. Only VMs
-            # store backups on it, so hide a stale/leftover built-in row on hardware.
-            if s.kind == "builtin" and is_hardware:
+        rows = (db.query(ApplianceStorage)
+                .filter(ApplianceStorage.appliance_id == a.id)
+                .order_by(ApplianceStorage.kind.desc(), ApplianceStorage.created_at.asc()).all())
+        # Built-in (system disk) is only a real backup volume on VMs with no
+        # dedicated storage. Hide it whenever this appliance has dedicated storage
+        # (a dedicated store row, or the agent reports its vault on one) or is
+        # hardware — dedicated is the only customer-usable volume there. The system
+        # disk's own stats are retained separately via telemetry.os_storage.
+        has_dedicated = any(s.kind == "dedicated" for s in rows)
+        hide_builtin = is_hardware or has_dedicated or (reported_kind == "dedicated")
+        for s in rows:
+            if s.kind == "builtin" and hide_builtin:
                 continue
             cap = s.capacity_bytes or 0
             used = s.used_bytes or 0
