@@ -126,6 +126,9 @@ class Agent:
         # Serialize persistence of the per-source schedule state so parallel
         # collectors don't clobber the file mid-write.
         self._collect_state_lock = threading.Lock()
+        # Guard against repeated tray-preference restart attempts when the agent
+        # was launched headless by an external command (no local marker to flip).
+        self._tray_launch_mode_warned = False
 
     @property
     def agent_key(self) -> bytes:
@@ -331,13 +334,34 @@ class Agent:
         if desired and not getattr(self, "_tray_available", False):
             return  # can't show a tray without rumps — never loop-restart
         marker = self.cfg.data_dir / "no_tray"
+        changed = False
+        has_marker = marker.exists()
         try:
             if desired:
-                marker.unlink(missing_ok=True)
+                # If we're headless with NO local override marker, restarting won't
+                # converge (it relaunches into the same headless entrypoint). Avoid
+                # a restart loop and surface an actionable diagnostic.
+                if not has_marker and mode is False:
+                    if not self._tray_launch_mode_warned:
+                        self._tray_launch_mode_warned = True
+                        self.log.warning(
+                            "menu-bar icon requested but agent is running headless "
+                            "without a local no_tray marker; skipping restart to "
+                            "avoid a loop. Ensure launchd runs '-m agent.menubar'.")
+                    return
+                if has_marker:
+                    marker.unlink(missing_ok=False)
+                    changed = True
             else:
-                marker.write_text("1")
-        except Exception:
-            pass
+                if not has_marker:
+                    marker.write_text("1")
+                    changed = True
+        except Exception as exc:
+            self.log.warning("menu-bar preference update failed (show=%s): %s",
+                             desired, exc)
+            return
+        if not changed:
+            return
         self.log.info("menu-bar icon preference changed (show=%s) — restarting to apply", desired)
         os._exit(0)
 
