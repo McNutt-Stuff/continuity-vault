@@ -654,6 +654,10 @@ def create_tenant(body: TenantCreate,
     provision_vault(db, tenant=tenant, owner_user_id=(owner.id if owner else None),
                     name="Primary Vault", key_ownership_model=body.key_ownership_model)
     db.commit()
+    # Welcome the newly created owner with a sign-in code (mirrors add-user).
+    if owner is not None:
+        db.refresh(owner)
+        _send_welcome_email(db, owner, tenant)
     audit.record(db, actor=principal.user_id, action="admin.tenant_created",
                  tenant_id=tenant.id, category="admin", severity="notice",
                  detail={"name": tenant.name, "plan": tenant.plan})
