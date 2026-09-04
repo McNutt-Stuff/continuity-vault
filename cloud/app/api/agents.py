@@ -335,7 +335,10 @@ def bootstrap():
         raise HTTPException(404, "bootstrap unavailable")
 
 
-_EXCLUDE = (".venv", "__pycache__", "node_modules", ".git", ".pyc")
+# Exclude the hxprobe Rust build tree (hundreds of MB of intermediates) but keep
+# desktop-agent/agent/hxprobe/bin/hxprobe (the prebuilt parser we ship) + its src.
+_EXCLUDE = (".venv", "__pycache__", "node_modules", ".git", ".pyc",
+            "hxprobe/target", "hxprobe/.fingerprint")
 
 _bundle_version_cache: str | None = None
 

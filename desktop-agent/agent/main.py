@@ -97,6 +97,10 @@ class Agent:
         self._node_url: Optional[str] = (self.reg or {}).get("node_url")
         self._last_update_attempt = 0.0
         self._last_telemetry: dict = {}
+        # Per-collector advisory notices surfaced to the cloud on heartbeat (e.g.
+        # New Outlook is captured via the experimental HxStore decoder). Keyed by
+        # source_type; shown on the source in the portal.
+        self._collector_notices: dict = {}
         self._agent_key: Optional[bytes] = None
         # Cached filesystem folder index (rebuilt in the background so the portal
         # can navigate the tree instantly instead of scanning per-folder).
@@ -217,6 +221,7 @@ class Agent:
             "op_available": onepassword.available(),
             "op_auth": onepassword.auth_state(self.cfg.op_service_account_token),
             "collectors": self._collectors(),
+            "collector_notices": self._collector_notices,
             "version": self.cfg.version,
             "cloud_url": self.cfg.cloud_base_url,
             "last_collection_at": (self.reg or {}).get("last_collection_at"),
@@ -864,6 +869,17 @@ class Agent:
         self.log.info("outlook_local: reading local profiles…")
         objects, new_state = outlook_local.collect(params.get("file_config") or {}, state)
         self.log.info("outlook_local: collected %d object(s); encrypting + pushing…", len(objects))
+        # Surface the capture mode (legacy vs experimental HxStore) to the cloud so
+        # the source can show a notice. Reported on the next heartbeat.
+        capture = (new_state or {}).get("capture") or {}
+        if capture.get("mode") == "experimental-hxstore":
+            self._collector_notices["outlook_local"] = {
+                "level": "experimental",
+                "mode": capture.get("mode"),
+                "message": capture.get("notice") or "New Outlook captured via experimental decoder.",
+            }
+        else:
+            self._collector_notices.pop("outlook_local", None)
         total = self._push_objects("outlook_local", objects, destinations) if objects else 0
         if total == len(objects):
             self._save_json_state(self._outlook_state_file, new_state)

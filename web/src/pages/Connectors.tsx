@@ -49,6 +49,7 @@ interface Vault { id: string; name: string; }
 interface Agent {
   id: string; name: string; hostname: string; collectors: string[];
   enabled_collectors?: string[]; state?: string; last_heartbeat_at?: string | null;
+  telemetry?: { collector_notices?: Record<string, { level?: string; message?: string }> };
 }
 // Agent-collected sources are Collections bound to a desktop agent (is_agent).
 interface AgentSource {
@@ -677,6 +678,7 @@ export default function Connectors() {
               const ag = agents.find((a) => a.id === s.agent_id);
               const online = agentOnline(ag);
               const collectorOff = !!ag && !(ag.enabled_collectors || []).includes(s.source_type);
+              const notice = ag?.telemetry?.collector_notices?.[s.source_type];
               const host = s.agent_label || ag?.hostname || ag?.name || "agent";
               return (
                 <div key={s.id} className="result-row" style={collectorOff ? { borderLeft: "3px solid var(--warn)" } : undefined}>
@@ -699,6 +701,11 @@ export default function Connectors() {
                     {collectorOff && (
                       <div style={{ fontSize: 12, color: "var(--warn)", marginTop: 3, display: "flex", gap: 6, alignItems: "center" }}>
                         <Icon name="alert" size={11} /> Collector turned off — enable it under <a href="/agents">Agents</a>
+                      </div>
+                    )}
+                    {notice?.message && (
+                      <div style={{ fontSize: 12, color: "var(--warn)", marginTop: 3, display: "flex", gap: 6, alignItems: "flex-start" }}>
+                        <Icon name="alert" size={11} /> <span>{notice.message}</span>
                       </div>
                     )}
                   </div>

@@ -27,6 +27,24 @@ chmod +x "$HOME_DIR"/desktop-agent/*.sh 2>/dev/null || true
 "$PY" -m pip install -q --upgrade httpx rumps || true
 "$PY" -m pip install -q -e "$HOME_DIR/shared" || true
 
+# Make the bundled hxprobe (New Outlook / HxStore decoder) executable. If the
+# prebuilt binary doesn't run on this machine's architecture (e.g. an Intel Mac
+# receiving an arm64 bundle) and cargo is available, build it from the shipped
+# source so New Outlook can still be decoded. The collector also builds on demand.
+HXDIR="$HOME_DIR/desktop-agent/agent/hxprobe"
+HXBIN="$HXDIR/bin/hxprobe"
+if [ -f "$HXBIN" ]; then
+  chmod +x "$HXBIN" 2>/dev/null || true
+  if ! "$HXBIN" >/dev/null 2>&1; then
+    if command -v cargo >/dev/null 2>&1 && [ -f "$HXDIR/Cargo.toml" ]; then
+      echo "==> bundled hxprobe not runnable here — building from source"
+      ( cd "$HXDIR" && cargo build --release ) && \
+        cp -f "$HXDIR/target/release/hxprobe" "$HXBIN" && chmod +x "$HXBIN" || \
+        echo "==> hxprobe build failed (New Outlook decode unavailable)"
+    fi
+  fi
+fi
+
 if [ -f "$HOME_DIR/desktop-agent/VERSION" ]; then
   echo "==> updated to version $(cat "$HOME_DIR/desktop-agent/VERSION")"
 fi

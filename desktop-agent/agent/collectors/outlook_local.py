@@ -1,29 +1,42 @@
 """
 Local Microsoft Outlook collector (macOS).
 
-Reads the on-device Outlook profile (``Outlook.sqlite`` plus the per-message
-``.olk15MsgSource`` MIME files) and emits emails, their attachments, contacts,
-calendar events and notes — everything Outlook stores locally, so it's backed up
-even for accounts that aren't reachable in the cloud.
+Backs up everything Outlook stores on the device so mail is protected even for
+accounts that aren't reachable in the cloud. Two on-disk formats are handled:
 
-Outlook's schema differs across versions, so the reader is deliberately
-defensive: it introspects the table/column names and maps them heuristically,
-degrading to "nothing collected" rather than failing if the layout is unfamiliar.
+  * **Legacy Outlook for Mac** — an ``Outlook.sqlite`` profile plus per-message
+    ``.olk15MsgSource`` RFC-822 files. Read directly (schema-tolerant).
 
-For each email we attach the raw RFC-822 source (``.olk15MsgSource``) when it can
-be located — that gives full, searchable content and lets the unified-search
-email viewer render headers, body and attachments.
+  * **New Outlook for Mac** — the opaque ``HxStore.hxd`` cache (the classic Mail
+    table is empty). We decode it with the bundled ``hxprobe`` parser (an
+    MIT-licensed reverse-engineering of the store) into a throwaway SQLite DB and
+    emit the recovered emails, contacts and calendar events. Because HxStore is
+    an undocumented cache, this path is flagged **experimental** so the cloud can
+    surface a notice on the source (``capture.mode == "experimental-hxstore"``).
+
+For every email we also emit its attachments as their own file objects (bytes +
+kind), linked back to the message via ``meta.message_object_id`` so unified
+search can categorise them as files while still tying them to the email.
+
+Collection is incremental: a per-object content signature is persisted so a run
+only pushes new or changed items. The first run captures the whole store
+(backfill); later runs sync only the deltas.
 """
 
 from __future__ import annotations
 
 import base64
-import gzip
+import hashlib
 import html
+import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -34,7 +47,36 @@ _GROUP = Path.home() / "Library" / "Group Containers" / "UBF8T346G9.Office" / "O
 _APPLE_EPOCH = 978307200  # Mac absolute time base (2001-01-01) in Unix seconds
 _MAX_ROWS = 20000         # per record type, safety cap
 _MAX_MIME_BYTES = 100 * 1024 * 1024
+_STATE_VERSION = 3
 
+# New Outlook (HxStore) discovery roots.
+_HXSTORE_ROOTS = (
+    Path.home() / "Library" / "Group Containers" / "UBF8T346G9.Office" / "Outlook",
+    Path.home() / "Library" / "Containers" / "com.microsoft.Outlook",
+)
+_HXSTORE_MAGIC = b"Nostromo"
+
+_IMG = {"jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "tiff", "bmp"}
+_VID = {"mp4", "mov", "avi", "mkv", "webm", "m4v", "3gp"}
+_AUD = {"mp3", "wav", "aac", "flac", "m4a", "caf", "amr"}
+
+
+def _kind_for(name: str) -> str:
+    ext = Path(name or "").suffix.lstrip(".").lower()
+    if ext in _IMG:
+        return "image"
+    if ext in _VID:
+        return "video"
+    if ext in _AUD:
+        return "audio"
+    if ext == "pdf":
+        return "pdf"
+    return "file"
+
+
+# --------------------------------------------------------------------------- #
+# Discovery                                                                    #
+# --------------------------------------------------------------------------- #
 
 def _profiles() -> List[Path]:
     base = _GROUP / "Outlook 15 Profiles"
@@ -43,13 +85,420 @@ def _profiles() -> List[Path]:
     return [p / "Data" for p in base.iterdir() if (p / "Data" / "Outlook.sqlite").exists()]
 
 
-def available() -> bool:
-    return bool(_profiles())
+def _discover_hxstores() -> List[Path]:
+    """Every readable New-Outlook ``HxStore.hxd`` for the current user, newest
+    first. Verifies the ``Nostromo`` magic so we never hand hxprobe a stray file."""
+    seen: set = set()
+    stores: List[Path] = []
+    for root in _HXSTORE_ROOTS:
+        if not root.exists():
+            continue
+        try:
+            candidates = list(root.rglob("HxStore.hxd"))
+        except (OSError, PermissionError):
+            continue
+        for path in candidates:
+            try:
+                st = path.stat()
+                ident = (st.st_dev, st.st_ino)
+                if not path.is_file() or st.st_size <= 8 or ident in seen:
+                    continue
+                with path.open("rb") as fh:
+                    if fh.read(8) != _HXSTORE_MAGIC:
+                        continue
+                seen.add(ident)
+                stores.append(path.resolve())
+            except (OSError, PermissionError):
+                continue
+    return sorted(stores, key=lambda p: p.stat().st_mtime, reverse=True)
 
+
+def available() -> bool:
+    """True when there's anything to collect — a legacy profile OR a New Outlook
+    HxStore (checked cheaply without decoding)."""
+    if _profiles():
+        return True
+    for root in _HXSTORE_ROOTS:
+        try:
+            if root.exists() and next(root.rglob("HxStore.hxd"), None) is not None:
+                return True
+        except (OSError, PermissionError):
+            continue
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# hxprobe (New Outlook / HxStore) integration                                 #
+# --------------------------------------------------------------------------- #
+
+def _hxprobe_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "hxprobe"
+
+
+def locate_hxprobe() -> Optional[Path]:
+    """Find a runnable ``hxprobe`` executable. Prefers the prebuilt binary shipped
+    in the agent bundle, then a locally-built one, then ``PATH``."""
+    hp = _hxprobe_dir()
+    candidates = [
+        hp / "bin" / "hxprobe",
+        hp / "target" / "release" / "hxprobe",
+    ]
+    which = shutil.which("hxprobe")
+    if which:
+        candidates.append(Path(which))
+    for c in candidates:
+        try:
+            if c.is_file() and os.access(c, os.X_OK):
+                return c.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def _build_hxprobe() -> Optional[Path]:
+    """Best-effort build of hxprobe from the bundled Rust source when no prebuilt
+    binary matches this machine (e.g. an Intel Mac + an arm64 bundle). Requires
+    cargo; returns None (and logs) when it isn't available."""
+    if not shutil.which("cargo"):
+        return None
+    hp = _hxprobe_dir()
+    if not (hp / "Cargo.toml").exists():
+        return None
+    log.info("outlook_local: building hxprobe from source (%s)…", hp)
+    try:
+        subprocess.run(["cargo", "build", "--release"], cwd=str(hp),
+                       check=True, capture_output=True, text=True, timeout=1800)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("outlook_local: hxprobe build failed: %s", exc)
+        return None
+    built = hp / "target" / "release" / "hxprobe"
+    return built.resolve() if built.exists() else None
+
+
+def _hxprobe_runnable(hxprobe: Path) -> bool:
+    """Verify the binary actually runs on this architecture (a bundled arm64
+    binary won't exec on Intel) before we rely on it."""
+    try:
+        subprocess.run([str(hxprobe)], capture_output=True, timeout=30)
+        return True
+    except OSError:
+        return False
+    except subprocess.SubprocessError:
+        return True  # ran but exited non-zero (e.g. usage) — still runnable
+
+
+def _stable_snapshot(src: Path, dst: Path, retries: int = 5, stability_ms: int = 250) -> bool:
+    """Copy a live HxStore only when its size/mtime stay stable across the copy,
+    so an open Outlook doesn't hand us a torn file. Returns True on success."""
+    delay = max(0, stability_ms) / 1000.0
+    for _ in range(max(1, retries)):
+        try:
+            before = src.stat()
+            if delay:
+                time.sleep(delay)
+            settled = src.stat()
+            if (before.st_size, before.st_mtime_ns) != (settled.st_size, settled.st_mtime_ns):
+                continue
+            shutil.copyfile(src, dst)
+            after = src.stat()
+            if (settled.st_size, settled.st_mtime_ns) == (after.st_size, after.st_mtime_ns):
+                return True
+            try:
+                dst.unlink()
+            except OSError:
+                pass
+        except OSError as exc:
+            log.debug("outlook_local: snapshot attempt failed: %s", exc)
+        if delay:
+            time.sleep(delay)
+    return False
+
+
+def _hx_choose(cols: List[str], *cands: str) -> Optional[str]:
+    low = {c.lower(): c for c in cols}
+    for cand in cands:
+        if cand.lower() in low:
+            return low[cand.lower()]
+    for cand in cands:
+        for c in cols:
+            if cand.lower() in c.lower():
+                return c
+    return None
+
+
+def _hx_unix(v) -> Optional[float]:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
+
+
+def _iso_from_unix(v) -> Optional[str]:
+    f = _hx_unix(v)
+    if f is None:
+        return None
+    try:
+        return datetime.fromtimestamp(f, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _attachment_key(name: str) -> str:
+    """Filename with Outlook's local ``[12345]`` record id stripped, lowercased."""
+    base = name.replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+    return re.sub(r"\[\d+\](?=\.[^.]+$|$)", "", base)
+
+
+def _index_disk_attachments(store: Path) -> Tuple[dict, dict, dict, List[Path]]:
+    """Index every file under the profile's ``Files/**/Attachments`` so message
+    attachment candidates can be resolved to real bytes on disk."""
+    exact: Dict[str, List[Path]] = {}
+    normalized: Dict[str, List[Path]] = {}
+    by_record: Dict[int, List[Path]] = {}
+    disk: List[Path] = []
+    files_root = store.parent / "Files"
+    if not files_root.is_dir():
+        return exact, normalized, by_record, disk
+    try:
+        for p in files_root.rglob("*"):
+            if not p.is_file() or "Attachments" not in p.parts:
+                continue
+            disk.append(p)
+            exact.setdefault(p.name.lower(), []).append(p)
+            normalized.setdefault(_attachment_key(p.name), []).append(p)
+            m = re.search(r"\[(\d+)\](?=\.[^.]+$|$)", p.name)
+            if m:
+                by_record.setdefault(int(m.group(1)), []).append(p)
+    except (OSError, PermissionError):
+        pass
+    return exact, normalized, by_record, disk
+
+
+def _resolve_attachment(candidate: str, att_ids: List[int],
+                        exact: dict, normalized: dict, by_record: dict) -> Optional[Path]:
+    basename = candidate.replace("\\", "/").rsplit("/", 1)[-1]
+    matches = exact.get(basename.lower(), [])
+    if len(matches) != 1:
+        matches = normalized.get(_attachment_key(basename), [])
+    if len(matches) != 1 and att_ids:
+        id_matches = {p for rid in att_ids for p in by_record.get(rid, [])}
+        name_matches = set(normalized.get(_attachment_key(basename), []))
+        matches = sorted(id_matches & name_matches)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _decode_json_list(raw) -> list:
+    if not isinstance(raw, str):
+        return []
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _emit_attachment(path: Path, message_oid: str, subject: str, frm: str,
+                     to: str, when: Optional[str], out: List[dict],
+                     sigs: Dict[str, str], old_sigs: Dict[str, str],
+                     emitted: set) -> Optional[dict]:
+    """Emit an email attachment as its own file object (bytes), linked to the
+    email via ``meta.message_object_id``. Returns a lightweight ref for the email
+    or None when the file can't be read. Deltas skip unchanged files by size+mtime
+    without reading the bytes."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if st.st_size > _MAX_MIME_BYTES:
+        return None
+    oid = f"outlook_local:att:{hashlib.sha256(str(path).encode()).hexdigest()[:16]}"
+    fname = path.name
+    kind = _kind_for(fname)
+    ref = {"object_id": oid, "filename": fname, "kind": kind, "size": st.st_size}
+    if oid in emitted:
+        return ref
+    emitted.add(oid)
+    signature = f"att:{st.st_size}:{st.st_mtime_ns}"
+    sigs[oid] = signature
+    if old_sigs.get(oid) == signature:
+        return ref  # unchanged since last run — linked, but bytes already backed up
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return ref
+    out.append(_obj(
+        oid, kind, fname, raw,
+        f"Attachment · {fname}" + (f" · from {frm}" if frm else ""),
+        {"kind": kind, "filename": fname, "is_attachment": True,
+         "message_object_id": message_oid, "subject": subject,
+         "from": frm, "to": to, "date": when, "content_backed_up": True,
+         "source": "new-outlook", "capture": "experimental-hxstore",
+         "modified": when},
+        ["Outlook", "Attachment"]))
+    return ref
+
+
+def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
+                     want, sigs: Dict[str, str], old_sigs: Dict[str, str],
+                     tmpdir: Path) -> dict:
+    """Decode one HxStore via hxprobe and append new/changed objects to ``out``.
+    Populates ``sigs`` with the current per-object signatures for delta state."""
+    counts = {"mail": 0, "contacts": 0, "calendar": 0, "attachments": 0}
+    snapshot = tmpdir / (store.parent.name + "-HxStore.snapshot.hxd")
+    parsed = tmpdir / (store.parent.name + "-hxstore.sqlite")
+    if not _stable_snapshot(store, snapshot):
+        log.warning("outlook_local: could not obtain a stable snapshot of %s", store)
+        return counts
+    try:
+        res = subprocess.run([str(hxprobe), "db", str(snapshot), str(parsed)],
+                             capture_output=True, text=True, timeout=1800)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("outlook_local: hxprobe failed on %s: %s", store, exc)
+        return counts
+    if res.returncode != 0 or not parsed.exists():
+        log.warning("outlook_local: hxprobe could not parse %s: %s", store,
+                    (res.stderr or "").strip()[:400])
+        return counts
+
+    exact, normalized, by_record, _disk = _index_disk_attachments(store)
+    emitted_att: set = set()
+    run_seen: set = set()  # object ids emitted this run (HxStore holds duplicate fragments)
+
+    def _emit_if_changed(obj: dict, signature: str) -> bool:
+        oid = obj["object_id"]
+        if oid in run_seen:
+            return False  # same logical item already captured this run (dup fragment)
+        run_seen.add(oid)
+        sigs[oid] = signature
+        if old_sigs.get(oid) == signature:
+            return False
+        out.append(obj)
+        return True
+
+    con = sqlite3.connect(str(parsed))
+    con.row_factory = sqlite3.Row
+    try:
+        tables = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+
+        # -- Emails + their attachments ------------------------------------ #
+        if want("mail") and "messages" in tables:
+            mcols = [r[1] for r in con.execute("PRAGMA table_info(messages)")]
+
+            def mget(row, *names):
+                col = _hx_choose(mcols, *names)
+                return row[col] if col else None
+
+            order = "ORDER BY sent_unix DESC" if "sent_unix" in mcols else ""
+            for row in con.execute(f"SELECT rowid AS _rid, * FROM messages {order} LIMIT {_MAX_ROWS}"):
+                mid = mget(row, "message_id")
+                block = mget(row, "block") or row["_rid"]
+                key = re.sub(r"[^A-Za-z0-9._@+-]", "_", str(mid)) if mid else f"blk{block}"
+                oid = f"outlook_local:mail:hx:{key}"
+                subject = (mget(row, "subject") or "(no subject)").strip() or "(no subject)"
+                sender = mget(row, "sender") or ""
+                sender_name = mget(row, "sender_name") or ""
+                recipients = mget(row, "recipients") or ""
+                when = _iso_from_unix(mget(row, "sent_unix"))
+                date_text = mget(row, "sent_utc") or ""
+                body = mget(row, "body") or ""
+                html_body = mget(row, "html") or ""
+                frm = (f"{sender_name} <{sender}>".strip() if sender_name and sender
+                       else (sender or sender_name))
+
+                att_candidates = _decode_json_list(mget(row, "attachment_names_json"))
+                att_ids = [int(x) for x in _decode_json_list(mget(row, "attachment_ids_json"))
+                           if str(x).isdigit()]
+
+                att_refs: List[dict] = []
+                for cand in att_candidates:
+                    path = _resolve_attachment(cand, att_ids, exact, normalized, by_record)
+                    if not path:
+                        continue
+                    ref = _emit_attachment(path, oid, subject, frm, recipients, when,
+                                           out, sigs, old_sigs, emitted_att)
+                    if ref:
+                        att_refs.append(ref)
+
+                display_body = html_body or (
+                    "<pre>" + html.escape(body) + "</pre>" if body else "")
+                content = _wrap_html_email(subject, frm, recipients, when, date_text,
+                                           display_body)
+                signature = hashlib.sha256(content).hexdigest()
+                obj = _obj(
+                    oid, "email", subject, content,
+                    (f"{frm} · " if frm else "") + (body[:180] or subject),
+                    {"kind": "email", "from": frm, "to": recipients, "date": when,
+                     "date_text": date_text, "message_id": mid or "",
+                     "has_mime": True, "content_backed_up": True,
+                     "source": "new-outlook", "capture": "experimental-hxstore",
+                     "body_kind": mget(row, "body_kind") or "",
+                     "has_attachments": bool(att_refs),
+                     "attachments": att_refs, "modified": when},
+                    ["Outlook", "Mail"])
+                if _emit_if_changed(obj, signature):
+                    counts["mail"] += 1
+
+        # -- Contacts ------------------------------------------------------- #
+        if want("contacts") and "contacts" in tables:
+            ccols = [r[1] for r in con.execute("PRAGMA table_info(contacts)")]
+            for row in con.execute(f"SELECT rowid AS _rid, * FROM contacts LIMIT {_MAX_ROWS}"):
+                block = row["block"] if "block" in ccols else row["_rid"]
+                oid = f"outlook_local:contact:hx:{block}"
+                name = (row["display_name"] if "display_name" in ccols else None) or "(contact)"
+                emails = (row["email_addresses"] if "email_addresses" in ccols else "") or ""
+                phones = (row["phone_numbers"] if "phone_numbers" in ccols else "") or ""
+                when = _iso_from_unix(row["modified_unix"] if "modified_unix" in ccols else None)
+                rec = {"name": name, "email": emails, "phone": phones}
+                content = _json(rec)
+                signature = hashlib.sha256(content).hexdigest()
+                obj = _obj(
+                    oid, "contact", name, content,
+                    " · ".join(x for x in (emails, phones) if x),
+                    {"kind": "contact", "email": emails, "phone": phones,
+                     "source": "new-outlook", "capture": "experimental-hxstore",
+                     "modified": when}, ["Outlook", "Contacts"])
+                if _emit_if_changed(obj, signature):
+                    counts["contacts"] += 1
+
+        # -- Calendar ------------------------------------------------------- #
+        if want("calendar") and "calendar_events" in tables:
+            ecols = [r[1] for r in con.execute("PRAGMA table_info(calendar_events)")]
+            for row in con.execute(f"SELECT rowid AS _rid, * FROM calendar_events LIMIT {_MAX_ROWS}"):
+                block = row["block"] if "block" in ecols else row["_rid"]
+                oid = f"outlook_local:event:hx:{block}"
+                title = (row["title"] if "title" in ecols else None) or "(event)"
+                start = _iso_from_unix(row["start_unix"] if "start_unix" in ecols else None)
+                end = _iso_from_unix(row["end_unix"] if "end_unix" in ecols else None)
+                organizer = (row["organizer"] if "organizer" in ecols else "") or ""
+                attendees = (row["attendees"] if "attendees" in ecols else "") or ""
+                body = (row["body"] if "body" in ecols else "") or ""
+                rec = {"title": title, "start": start, "end": end,
+                       "organizer": organizer, "attendees": attendees, "body": body}
+                content = _json(rec)
+                signature = hashlib.sha256(content).hexdigest()
+                obj = _obj(
+                    oid, "event", title, content,
+                    f"{start or ''} · {organizer}".strip(" ·"),
+                    {"kind": "event", "start": start, "end": end,
+                     "organizer": organizer, "source": "new-outlook",
+                     "capture": "experimental-hxstore", "modified": start},
+                    ["Outlook", "Calendar"])
+                if _emit_if_changed(obj, signature):
+                    counts["calendar"] += 1
+
+        counts["attachments"] = len(emitted_att)
+    finally:
+        con.close()
+    return counts
+
+
+# --------------------------------------------------------------------------- #
+# Shared helpers                                                               #
+# --------------------------------------------------------------------------- #
 
 def _copy_ro(src: Path) -> str:
-    import shutil
-    import tempfile
     fd, tmp = tempfile.mkstemp(prefix="arkive-olk-", suffix=".sqlite")
     os.close(fd)
     shutil.copy2(src, tmp)
@@ -78,7 +527,6 @@ def _iso(ts) -> Optional[str]:
         v = float(ts)
     except (TypeError, ValueError):
         return None
-    # Outlook stores Mac absolute time (seconds since 2001); some builds use ms.
     if v > 1e12:
         v /= 1000.0
     unix = v + _APPLE_EPOCH if v < 1e9 else v
@@ -96,7 +544,6 @@ def _cols(con: sqlite3.Connection, table: str) -> List[str]:
 
 
 def _first(row: sqlite3.Row, cols: List[str], *needles: str) -> Optional[str]:
-    """Value of the first column whose name contains any needle (case-insensitive)."""
     low = {c.lower(): c for c in cols}
     for needle in needles:
         for lc, orig in low.items():
@@ -116,14 +563,12 @@ def _tables(con: sqlite3.Connection) -> List[str]:
 
 
 def _mime_index(data_dir: Path) -> Dict[str, Path]:
-    """Map an Outlook record id -> its .olk15MsgSource path (raw RFC-822)."""
     idx: Dict[str, Path] = {}
     msgs = data_dir / "Messages"
     if not msgs.exists():
         return idx
     try:
         for p in msgs.rglob("*.olk15MsgSource"):
-            # Filenames look like Message_<recordId>.olk15MsgSource
             stem = p.stem
             rid = stem.split("_")[-1] if "_" in stem else stem
             idx[rid] = p
@@ -152,12 +597,11 @@ def _obj(object_id: str, kind: str, title: str, content: bytes, preview: str,
 
 
 def _json(obj) -> bytes:
-    import json
     return json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
 
 
 # --------------------------------------------------------------------------- #
-# Per-record-type extractors (heuristic, schema-tolerant)                      #
+# Legacy Outlook.sqlite extractors (heuristic, schema-tolerant)               #
 # --------------------------------------------------------------------------- #
 
 def _collect_mail(con, cols, table, mime_idx, out, seen):
@@ -235,60 +679,8 @@ def _collect_notes(con, cols, table, out, seen):
 
 
 # --------------------------------------------------------------------------- #
-# New Outlook for Mac (EFM store)                                              #
+# Email envelope wrapper (shared by legacy + New Outlook)                      #
 # --------------------------------------------------------------------------- #
-# "New Outlook" leaves the legacy Mail table empty and instead stores each
-# message body as gzipped HTML under Files/S0/<n>/EFMData/<id>.dat. The envelope
-# (From/To/Subject/Sent) is rendered inside that HTML as a header block, so we
-# parse it back out; the raw block store that would hold it structurally is
-# opaque. We back up the body + recovered headers as a viewable email.
-
-_TAG_RE = re.compile(r"<[^>]+>")
-_WS_RE = re.compile(r"\s+")
-_HDR_RE = {
-    "from": re.compile(r"<b>\s*From:\s*</b>\s*(.*?)\s*<", re.I | re.S),
-    "to": re.compile(r"<b>\s*To:\s*</b>\s*(.*?)\s*<", re.I | re.S),
-    "subject": re.compile(r"<b>\s*Subject:\s*</b>\s*(.*?)\s*<", re.I | re.S),
-    "date": re.compile(r"<b>\s*(?:Sent|Date):\s*</b>\s*(.*?)\s*<", re.I | re.S),
-}
-_DATE_FORMATS = (
-    "%A, %d %B %Y at %H:%M", "%A, %B %d, %Y at %H:%M",
-    "%A, %d %B %Y %H:%M:%S", "%A, %B %d, %Y %H:%M:%S",
-    "%A, %d %B %Y %H:%M", "%A, %B %d, %Y %H:%M",
-    "%A, %B %d, %Y %I:%M %p", "%A, %d %B %Y %I:%M %p",
-)
-
-
-def _html_to_text(html_str: str) -> str:
-    text = html.unescape(_TAG_RE.sub(" ", html_str))
-    return _WS_RE.sub(" ", text).strip()
-
-
-def _hdr(html_str: str, key: str) -> str:
-    m = _HDR_RE[key].search(html_str)
-    if not m:
-        return ""
-    return _WS_RE.sub(" ", html.unescape(_TAG_RE.sub(" ", m.group(1)))).strip()
-
-
-def _parse_hdr_date(s: str) -> Optional[str]:
-    s = (s or "").strip()
-    if not s:
-        return None
-    for fmt in _DATE_FORMATS:
-        try:
-            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc).isoformat()
-        except ValueError:
-            continue
-    return None
-
-
-def _iso_mtime(p: Path) -> Optional[str]:
-    try:
-        return datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).isoformat()
-    except OSError:
-        return None
-
 
 def _wrap_html_email(subject: str, frm: str, to: str, when: Optional[str],
                      date_text: str, html_body: str) -> bytes:
@@ -301,96 +693,52 @@ def _wrap_html_email(subject: str, frm: str, to: str, when: Optional[str],
     if date_text or when:
         hdr.append(f"Date: {date_text or when}")
     hdr += ["MIME-Version: 1.0", "Content-Type: text/html; charset=utf-8"]
-    return ("\r\n".join(hdr) + "\r\n\r\n" + html_body).encode("utf-8", "replace")
+    return ("\r\n".join(hdr) + "\r\n\r\n" + (html_body or "")).encode("utf-8", "replace")
 
 
-def _efm_dirs(profile_root: Path) -> List[Path]:
-    files = profile_root / "Files"
-    if not files.exists():
-        return []
-    return [d for d in files.rglob("EFMData") if d.is_dir()]
-
-
-def _collect_new_outlook(profile_root: Path, out: List[dict], seen: set) -> Tuple[int, int]:
-    """Returns (messages, with_headers)."""
-    n = with_hdr = 0
-    for efm in _efm_dirs(profile_root):
-        for p in sorted(efm.glob("*.dat")):
-            oid = f"outlook_local:mail:efm:{p.stem}"
-            if oid in seen:
-                continue
-            try:
-                if p.stat().st_size > _MAX_MIME_BYTES:
-                    continue
-                body = gzip.decompress(p.read_bytes()).decode("utf-8", "replace")
-            except (OSError, EOFError, gzip.BadGzipFile):
-                continue
-            text = _html_to_text(body)
-            if not text:
-                continue
-            seen.add(oid)
-            subject = _hdr(body, "subject")
-            frm = _hdr(body, "from")
-            to = _hdr(body, "to")
-            date_text = _hdr(body, "date")
-            when = _parse_hdr_date(date_text) or _iso_mtime(p)
-            if subject or frm:
-                with_hdr += 1
-            title = subject or (text[:80].strip() or "Outlook message")
-            preview = (f"{frm} · " if frm else "") + text[:180]
-            out.append(_obj(
-                oid, "email", title,
-                _wrap_html_email(title, frm, to, when, date_text, body), preview,
-                {"kind": "email", "from": frm, "to": to, "date": when,
-                 "date_text": date_text, "folder": "", "has_mime": True,
-                 "content_backed_up": True, "source": "new-outlook",
-                 "meta_source": "header" if subject else "body", "modified": when},
-                ["Outlook", "Mail"]))
-            n += 1
-            if n >= _MAX_ROWS:
-                return n, with_hdr
-    return n, with_hdr
-
+# --------------------------------------------------------------------------- #
+# Entry point                                                                 #
+# --------------------------------------------------------------------------- #
 
 def collect(config: Optional[dict] = None,
             state: Optional[dict] = None) -> Tuple[List[dict], dict]:
-    """Collect Outlook mail/contacts/calendar/notes from every local profile.
-    Dedup + versioning are handled server-side by the content hash, so a full
-    read each run is safe (state is reserved for future incremental support)."""
+    """Collect Outlook mail/contacts/calendar (+ attachments) from every local
+    profile and New-Outlook HxStore. Incremental: only new/changed objects are
+    returned; ``state`` carries the per-object signatures so a run pushes just the
+    deltas (first run = full backfill). The returned state also records the
+    capture mode so the cloud can flag the experimental HxStore path on the
+    source."""
     config = config or {}
+    state = state or {}
     inc = config.get("includeCategories") or []  # optional Data Map filter
 
     def _want(cat: str) -> bool:
         return (not inc) or (cat in inc)
 
+    old_sigs: Dict[str, str] = (state.get("sigs") or {}) if state.get("v") == _STATE_VERSION else {}
+    sigs: Dict[str, str] = {}
     out: List[dict] = []
     seen: set = set()
+    capture_mode = "legacy"
+    hxstore_count = 0
+
+    # -- Legacy profiles ---------------------------------------------------- #
     profiles = _profiles()
-    log.info("outlook_local: scanning %d local profile(s) [filter=%s]",
+    log.info("outlook_local: scanning %d legacy profile(s) [filter=%s]",
              len(profiles), inc or "all")
     for data_dir in profiles:
         db = data_dir / "Outlook.sqlite"
         tmp = _copy_ro(db)
-        log.info("outlook_local: reading profile %s", data_dir)
         counts = {"mail": 0, "contacts": 0, "calendar": 0, "notes": 0}
         try:
             con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
             con.row_factory = sqlite3.Row
             mime_idx = _mime_index(data_dir) if _want("mail") else {}
-            log.info("outlook_local: %d table(s); %d .olk15MsgSource file(s) indexed",
-                     len(_tables(con)), len(mime_idx))
-            inventory: List[str] = []
             for table in _tables(con):
                 cols = _cols(con, table)
                 if not cols:
                     continue
                 t = table.lower()
-                try:
-                    nrows = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-                except sqlite3.Error:
-                    nrows = -1
-                if nrows:
-                    inventory.append(f"{table}({nrows})")
                 before = len(out)
                 cat = None
                 try:
@@ -409,34 +757,62 @@ def collect(config: Optional[dict] = None,
                         _collect_notes(con, cols, table, out, seen)
                 except sqlite3.Error as exc:
                     log.debug("outlook_local: table %s skipped: %s", table, exc)
-                emitted = len(out) - before
                 if cat:
-                    counts[cat] += emitted
-                    log.info("outlook_local: table %-30s → %-8s rows=%s emitted=%d",
-                             table, cat, nrows, emitted)
-            # One compact line lists every non-empty table so an unfamiliar schema
-            # (why a category came back empty) is diagnosable without verbose mode.
-            log.info("outlook_local: table inventory: %s", ", ".join(inventory) or "(none)")
+                    counts[cat] += len(out) - before
             con.close()
-            # New Outlook fallback: the legacy Mail table is empty, so pull the
-            # readable message bodies (and headers parsed from them) from EFM.
-            if _want("mail") and counts["mail"] == 0:
-                efm, with_hdr = _collect_new_outlook(data_dir.parent, out, seen)
-                counts["mail"] += efm
-                if efm:
-                    log.warning("outlook_local: legacy Mail table empty (New Outlook) — "
-                                "recovered %d message(s) from EFM, %d with Subject/Sender/Date "
-                                "parsed from the message header. Some are thread-derived; "
-                                "switch Outlook to Legacy for authoritative envelopes.",
-                                efm, with_hdr)
-                else:
-                    log.info("outlook_local: no EFM message bodies found either")
         except Exception as exc:  # noqa: BLE001
             log.warning("outlook_local: profile %s unreadable: %s", data_dir, exc)
         finally:
             _rm(tmp)
-        log.info("outlook_local: profile summary — mail=%d contacts=%d calendar=%d notes=%d",
+        log.info("outlook_local: legacy profile — mail=%d contacts=%d calendar=%d notes=%d",
                  counts["mail"], counts["contacts"], counts["calendar"], counts["notes"])
 
-    log.info("outlook_local: collected %d object(s)", len(out))
-    return out, (state or {})
+    # Track legacy object ids in the signature map so state stays authoritative
+    # (their content hash is computed by the agent; the marker just records them).
+    for o in out:
+        sigs.setdefault(o["object_id"], "legacy")
+
+    # -- New Outlook (HxStore) --------------------------------------------- #
+    stores = _discover_hxstores()
+    if stores:
+        hxprobe = locate_hxprobe()
+        if hxprobe and not _hxprobe_runnable(hxprobe):
+            log.info("outlook_local: bundled hxprobe not runnable here — trying to build")
+            hxprobe = _build_hxprobe() or hxprobe
+        if not hxprobe:
+            hxprobe = _build_hxprobe()
+        if not hxprobe:
+            log.warning("outlook_local: %d New Outlook store(s) found but hxprobe is "
+                        "unavailable (no prebuilt binary and cargo missing) — skipping",
+                        len(stores))
+        else:
+            log.info("outlook_local: decoding %d New Outlook store(s) via %s",
+                     len(stores), hxprobe)
+            with tempfile.TemporaryDirectory(prefix="arkive-hxstore-") as td:
+                tmpdir = Path(td)
+                for store in stores:
+                    counts = _collect_hxstore(store, hxprobe, out, _want, sigs,
+                                              old_sigs, tmpdir)
+                    capture_mode = "experimental-hxstore"
+                    hxstore_count += 1
+                    log.info("outlook_local: HxStore %s — mail=%d contacts=%d "
+                             "calendar=%d attachments=%d", store.parent.name,
+                             counts["mail"], counts["contacts"], counts["calendar"],
+                             counts["attachments"])
+
+    new_state = {
+        "v": _STATE_VERSION,
+        "sigs": sigs,
+        "capture": {
+            "mode": capture_mode,
+            "hxstore_count": hxstore_count,
+            "notice": (
+                "New Outlook detected. Its mail is stored in an undocumented local "
+                "cache (HxStore); Arkive backs it up using an experimental decoder, "
+                "so some messages may be preview-only or missing envelope details."
+            ) if capture_mode == "experimental-hxstore" else "",
+        },
+    }
+    log.info("outlook_local: %d new/changed object(s) to push (capture=%s, %d HxStore)",
+             len(out), capture_mode, hxstore_count)
+    return out, new_state

@@ -1,0 +1,4 @@
+# Rust build tree — do not commit (hundreds of MB of intermediates).
+# The prebuilt parser we ship lives in bin/hxprobe and IS tracked.
+/target/
+.fingerprint/
