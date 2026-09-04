@@ -85,10 +85,22 @@ def _local_user() -> str:
         return os.environ.get("USER", "")
 
 
+def _console_user() -> str:
+    """The currently logged-in GUI (Aqua) user, so we can tell an operator which
+    account the agent SHOULD run as when it's been mis-installed as root."""
+    try:
+        import pwd
+        st = os.stat("/dev/console")
+        return pwd.getpwuid(st.st_uid).pw_name
+    except Exception:
+        return ""
+
+
 class Agent:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.log = agent_log.setup_logging(cfg.log_file)
+        self._log_environment()
         self.reg = self._load_registration()
         self._last_collect = 0.0
         self._last_heartbeat = 0.0
@@ -142,6 +154,28 @@ class Agent:
         return self._agent_key
 
     # -- registration -------------------------------------------------
+
+    def _log_environment(self) -> None:
+        """Log the effective user/home/data paths on startup so 'no logs' / 'no
+        data found' issues are self-diagnosing. Warns loudly when run as root,
+        which points HOME at /var/root — the agent then can't see the logged-in
+        user's Outlook/iMessage data and can't draw a menu-bar icon."""
+        user = _local_user()
+        home = str(Path.home())
+        self.log.info("agent starting — user=%s home=%s data_dir=%s log=%s cloud=%s",
+                      user, home, self.cfg.data_dir, self.cfg.log_file,
+                      self.cfg.cloud_base_url)
+        try:
+            is_root = os.geteuid() == 0
+        except AttributeError:
+            is_root = False
+        if is_root:
+            console = _console_user() or "<your macOS account>"
+            self.log.warning(
+                "agent is running as ROOT — HOME=%s. It cannot see the logged-in "
+                "user's Outlook/iMessage data (those live under /Users/%s/Library) "
+                "and cannot show a menu-bar icon. Reinstall/run the agent as the "
+                "logged-in user (do NOT use sudo).", home, console)
 
     def _load_registration(self) -> Optional[dict]:
         if self.cfg.registration_file.exists():
@@ -862,9 +896,13 @@ class Agent:
         destinations = self.reg.get("config", {}).get("destinations", ["cv-cloud"])
         self.log.info("outlook_local: starting collection → destinations=%s", destinations)
         if not outlook_local.available():
-            self.log.warning("outlook_local: no Outlook profile found under %s — nothing "
-                             "to collect", outlook_local._GROUP)
-            return {"objects": 0, "results": [{"collector": "outlook_local", "skipped": "no Outlook profile"}]}
+            self.log.warning(
+                "outlook_local: no Outlook data found for user %s (home %s). Checked "
+                "legacy profiles under %s and New Outlook HxStore under %s. If your mail "
+                "is elsewhere, the agent is likely running as the wrong user (e.g. root).",
+                _local_user(), Path.home(), outlook_local._GROUP,
+                " , ".join(str(r) for r in outlook_local._HXSTORE_ROOTS))
+            return {"objects": 0, "results": [{"collector": "outlook_local", "skipped": "no Outlook data"}]}
         state = self._load_json_state(self._outlook_state_file)
         self.log.info("outlook_local: reading local profiles…")
         objects, new_state = outlook_local.collect(params.get("file_config") or {}, state)
