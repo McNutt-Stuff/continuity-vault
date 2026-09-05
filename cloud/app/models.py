@@ -1386,3 +1386,31 @@ class IntegrationRun(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class NetworkSample(Base):
+    """Daily time-series rollup of network usage for trends + drilldowns over time.
+
+    One row per (integration, UTC day, dimension, key). ``dim`` is 'total' (the
+    whole integration), 'app' (per app_key), or 'client' (per client_key). The
+    value is the trailing-24h traffic snapshot the collector reported, taken as the
+    latest report of that day — a consistent daily datapoint for trend analysis.
+    Display fields are denormalized so historical rows render even if the source
+    client/app row later changes. Pruned to 90 days."""
+
+    __tablename__ = "network_samples"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    integration_id = Column(String, index=True)
+    day = Column(DateTime, index=True)          # midnight UTC of the bucket
+    dim = Column(String, index=True)            # total | app | client
+    key = Column(String, default="", index=True)  # app_key / client_key ('' for total)
+    name = Column(String, default="")
+    category = Column(String, default="")
+    source_type = Column(String, default="")
+    device_type = Column(String, default="")
+    total_bytes = Column(BigInteger, default=0)
+    tx_bytes = Column(BigInteger, default=0)
+    rx_bytes = Column(BigInteger, default=0)
+    count = Column(Integer, default=0)          # client_count (app) / app_count (client) / clients (total)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+

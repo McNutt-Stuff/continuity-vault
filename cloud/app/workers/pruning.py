@@ -25,6 +25,7 @@ R_INTEGRATION_RUNS = 30  # one row per integration poll
 R_BACKUP_RUNS = 180      # infra-backup catalog
 R_PENDING_ACTIONS = 30   # resolved reminders
 R_NETWORK_USAGE = 60     # stale device×app usage edges
+R_NETWORK_SAMPLES = 90   # daily network trend rollups
 R_NODE_METRICS = 90      # telemetry time-series (also pruned by telemetry.py)
 
 
@@ -38,8 +39,8 @@ def prune_all(db) -> dict:
     """Prune every bounded-retention table. Each table is committed independently
     so one failure can't abort the rest. Returns per-table row counts. A session
     advisory lock ensures only one prune runs at a time (skips if already running)."""
-    from ..models import (ApplianceCommand, BackupRun, IntegrationRun, NetworkUsage,
-                          NodeMetric, PendingAction, SyncJob)
+    from ..models import (ApplianceCommand, BackupRun, IntegrationRun, NetworkSample,
+                          NetworkUsage, NodeMetric, PendingAction, SyncJob)
     from .. import node_config
     now = datetime.utcnow()
     counts: dict = {}
@@ -99,6 +100,10 @@ def prune_all(db) -> dict:
     _do("network_usage_deleted", lambda: db.query(NetworkUsage).filter(
         NetworkUsage.last_seen.isnot(None),
         NetworkUsage.last_seen < now - timedelta(days=R_NETWORK_USAGE)).delete(
+            synchronize_session=False))
+
+    _do("network_samples_deleted", lambda: db.query(NetworkSample).filter(
+        NetworkSample.day < now - timedelta(days=R_NETWORK_SAMPLES)).delete(
             synchronize_session=False))
 
     _do("node_metrics_deleted", lambda: db.query(NodeMetric).filter(

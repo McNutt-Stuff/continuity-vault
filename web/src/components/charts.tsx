@@ -50,8 +50,9 @@ export function Sparkline({ data, color = "#4f7cff", width = 120, height = 32, m
 
 export interface AreaSeries { name: string; color: string; data: number[]; }
 
-export function AreaChart({ series, labels, height = 220, unit = "%", max }: {
+export function AreaChart({ series, labels, height = 220, unit = "%", max, fmt }: {
   series: AreaSeries[]; labels?: string[]; height?: number; unit?: string; max?: number;
+  fmt?: (v: number) => string;
 }) {
   const gid = useId().replace(/:/g, "");
   const W = 900, H = height, padL = 44, padB = 22, padT = 10, padR = 8;
@@ -71,7 +72,7 @@ export function AreaChart({ series, labels, height = 220, unit = "%", max }: {
           <g key={i}>
             <line x1={padL} y1={gy} x2={W - padR} y2={gy} stroke="var(--border-soft)" strokeWidth={1} />
             <text x={padL - 6} y={gy + 3} textAnchor="end" fontSize={9} fill="var(--muted-c,#8a94a7)">
-              {Math.round(val)}{unit === "%" ? "" : ""}
+              {fmt ? fmt(val) : `${Math.round(val)}${unit === "%" ? "" : ""}`}
             </text>
           </g>
         );

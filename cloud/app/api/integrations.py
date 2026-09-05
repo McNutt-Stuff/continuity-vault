@@ -10,7 +10,7 @@ mine cross-customer analytics to decide which new sources to build.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
@@ -30,6 +30,7 @@ from ..models import (
     NetworkApp,
     NetworkClient,
     NetworkUsage,
+    NetworkSample,
     SearchDocument,
     Tenant,
     User,
@@ -450,6 +451,165 @@ def integration_usage(iid: str, app_key: str | None = None,
             "clients": sorted(rows2.values(), key=lambda x: -x["total_bytes"])}
 
 
+# --------------------------------------------------------------------------- #
+# Time-series analytics + trends (from the 90-day NetworkSample rollups)        #
+# --------------------------------------------------------------------------- #
+_TREND_WINDOWS = {"7d": 7, "14d": 14, "30d": 30, "90d": 90}
+
+
+def _window_days(window: str | None) -> int:
+    return _TREND_WINDOWS.get((window or "30d"), 30)
+
+
+def _fill_series(by_day: dict, end_day: datetime, days: int) -> list[dict]:
+    """Contiguous oldest→newest daily list, zero-filled for missing days."""
+    out = []
+    for i in range(days - 1, -1, -1):
+        d = end_day - timedelta(days=i)
+        out.append({"day": d.date().isoformat(), "bytes": int(by_day.get(d, 0))})
+    return out
+
+
+def _change_pct(curr: int, prev: int) -> float | None:
+    if not prev:
+        return None if not curr else 100.0
+    return round((curr - prev) * 100.0 / prev, 1)
+
+
+def _network_analytics(db: Session, tenant_id: str, iids: list[str],
+                       window: str = "30d", top: int = 8) -> dict:
+    """Trends + top-mover analytics over the 90-day NetworkSample rollups.
+    Ranks apps/clients by traffic in the window with per-entity daily series and
+    a change vs the immediately-preceding window of equal length."""
+    days = _window_days(window)
+    end_day = _day_bucket(_now())
+    cur_since = end_day - timedelta(days=days - 1)
+    prev_since = cur_since - timedelta(days=days)
+    if not iids:
+        return {"window": window, "days": days, "series": _fill_series({}, end_day, days),
+                "top_apps": [], "top_clients": [], "summary": {}}
+    rows = (db.query(NetworkSample)
+            .filter(NetworkSample.tenant_id == tenant_id,
+                    NetworkSample.integration_id.in_(iids),
+                    NetworkSample.day >= prev_since)
+            .all())
+
+    total_by_day: dict = {}
+    # dim -> key -> {"name","category","source_type","device_type","cur","prev","by_day"}
+    apps: dict = {}
+    clients: dict = {}
+    cur_apps: set = set()
+    cur_clients: set = set()
+    for s in rows:
+        in_cur = s.day >= cur_since
+        b = int(s.total_bytes or 0)
+        if s.dim == "total":
+            if in_cur:
+                total_by_day[s.day] = total_by_day.get(s.day, 0) + b
+            continue
+        bucket = apps if s.dim == "app" else clients if s.dim == "client" else None
+        if bucket is None:
+            continue
+        e = bucket.setdefault(s.key, {"key": s.key, "name": s.name or s.key,
+                                      "category": s.category or "", "source_type": s.source_type or "",
+                                      "device_type": s.device_type or "", "cur": 0, "prev": 0, "by_day": {}})
+        if s.name:
+            e["name"] = s.name
+        if in_cur:
+            e["cur"] += b
+            e["by_day"][s.day] = e["by_day"].get(s.day, 0) + b
+            if b:
+                (cur_apps if s.dim == "app" else cur_clients).add(s.key)
+        else:
+            e["prev"] += b
+
+    def _rank(bucket: dict, extra: tuple) -> list[dict]:
+        ranked = sorted(bucket.values(), key=lambda x: -x["cur"])[:top]
+        out = []
+        for e in ranked:
+            row = {"key": e["key"], "name": e["name"], "total_bytes": e["cur"],
+                   "prev_bytes": e["prev"], "change_pct": _change_pct(e["cur"], e["prev"]),
+                   "series": _fill_series(e["by_day"], end_day, days)}
+            for f in extra:
+                row[f] = e.get(f, "")
+            out.append(row)
+        return out
+
+    cur_total = sum(total_by_day.values()) or sum(a["cur"] for a in apps.values())
+    prev_total = sum(a["prev"] for a in apps.values())
+    return {
+        "window": window, "days": days,
+        "series": _fill_series(total_by_day or {d: sum(a["by_day"].get(d, 0) for a in apps.values())
+                                                for d in {s.day for s in rows if s.day >= cur_since}},
+                               end_day, days),
+        "top_apps": _rank(apps, ("category", "source_type")),
+        "top_clients": _rank(clients, ("device_type",)),
+        "summary": {
+            "total_bytes": int(cur_total), "prev_total_bytes": int(prev_total),
+            "change_pct": _change_pct(int(cur_total), int(prev_total)),
+            "active_apps": len(cur_apps), "active_clients": len(cur_clients),
+            "avg_daily_bytes": int(cur_total / days) if days else 0,
+        },
+    }
+
+
+def _entity_trend(db: Session, tenant_id: str, iids: list[str], dim: str,
+                  key: str, window: str) -> dict:
+    """Daily series for ONE app/client/total across the window (drilldown over time)."""
+    days = _window_days(window)
+    end_day = _day_bucket(_now())
+    cur_since = end_day - timedelta(days=days - 1)
+    prev_since = cur_since - timedelta(days=days)
+    rows = (db.query(NetworkSample)
+            .filter(NetworkSample.tenant_id == tenant_id,
+                    NetworkSample.integration_id.in_(iids),
+                    NetworkSample.dim == dim, NetworkSample.key == key,
+                    NetworkSample.day >= prev_since).all()) if iids else []
+    by_day: dict = {}
+    cur = prev = 0
+    name = ""
+    for s in rows:
+        b = int(s.total_bytes or 0)
+        if s.name:
+            name = s.name
+        if s.day >= cur_since:
+            by_day[s.day] = by_day.get(s.day, 0) + b
+            cur += b
+        else:
+            prev += b
+    return {"dim": dim, "key": key, "name": name, "window": window, "days": days,
+            "total_bytes": int(cur), "prev_bytes": int(prev),
+            "change_pct": _change_pct(int(cur), int(prev)),
+            "series": _fill_series(by_day, end_day, days)}
+
+
+@router.get("/{iid}/analytics")
+def integration_analytics(iid: str, window: str = "30d",
+                          principal: security.Principal = Depends(security.get_principal),
+                          db: Session = Depends(get_db)):
+    """Trends + top movers for ONE integration over the chosen window."""
+    inst = _owned_instance(db, principal, iid)
+    return _network_analytics(db, principal.tenant_id, [inst.id], window)
+
+
+@router.get("/analytics")
+def all_integration_analytics(window: str = "30d",
+                              principal: security.Principal = Depends(security.get_principal),
+                              db: Session = Depends(get_db)):
+    """Trends across all of the caller's integrations."""
+    return _network_analytics(db, principal.tenant_id, _user_instance_ids(db, principal), window)
+
+
+@router.get("/{iid}/trend")
+def integration_entity_trend(iid: str, dim: str, key: str = "", window: str = "30d",
+                             principal: security.Principal = Depends(security.get_principal),
+                             db: Session = Depends(get_db)):
+    """Daily series for a single app/client/total in one integration (drilldown)."""
+    inst = _owned_instance(db, principal, iid)
+    if dim not in ("total", "app", "client"):
+        raise HTTPException(400, "dim must be total, app or client")
+    return _entity_trend(db, principal.tenant_id, [inst.id], dim, key, window)
+
 
 def _drilldown(db: Session, principal, iids: list[str]) -> dict:
     if not iids:
@@ -854,6 +1014,67 @@ def _ingest_report(db: Session, tid: str, inst: IntegrationInstance,
         appliance_id=appliance_id, status=status, started_at=now, finished_at=now,
         clients=_safe_int(st.get("clients", 0)), apps=_safe_int(st.get("apps", 0)),
         bytes_seen=_safe_int(st.get("bytes_seen", 0)), error=err))
+    if status == "ok":
+        _roll_daily_samples(db, tid, inst, body, now)
+
+
+def _day_bucket(dt: datetime) -> datetime:
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _roll_daily_samples(db: Session, tid: str, inst: IntegrationInstance,
+                        body: IntegrationReport, now: datetime) -> None:
+    """Record the day's trailing-24h snapshot per app + per client + overall, so
+    trends over 90 days can be derived. Latest report of a day wins (SET, not sum)
+    — consistent with the collector's rolling-24h window. Denormalizes display
+    fields so old rows still render. Bounded: (apps + clients + 1) rows per day."""
+    day = _day_bucket(now)
+    existing = {(s.dim, s.key): s for s in db.query(NetworkSample).filter(
+        NetworkSample.tenant_id == tid, NetworkSample.integration_id == inst.id,
+        NetworkSample.day == day).all()}
+
+    def _upsert(dim: str, key: str, **fields) -> None:
+        s = existing.get((dim, key))
+        if s is None:
+            s = NetworkSample(tenant_id=tid, integration_id=inst.id, day=day,
+                              dim=dim, key=key)
+            db.add(s)
+            existing[(dim, key)] = s
+        for k, v in fields.items():
+            setattr(s, k, v)
+
+    app_total = 0
+    for ad in body.apps:
+        key = ad.get("app_key")
+        if not key:
+            continue
+        tot = _safe_int(ad.get("total_bytes", 0)) or (
+            _safe_int(ad.get("tx_bytes", 0)) + _safe_int(ad.get("rx_bytes", 0)))
+        app_total += tot
+        _upsert("app", key, name=ad.get("name") or key,
+                category=ad.get("category") or "",
+                source_type=map_app_to_source(ad.get("name") or "", ad.get("category") or "") or "",
+                total_bytes=tot, tx_bytes=_safe_int(ad.get("tx_bytes", 0)),
+                rx_bytes=_safe_int(ad.get("rx_bytes", 0)),
+                count=_safe_int(ad.get("client_count", 0)))
+
+    client_total = 0
+    for cd in body.clients:
+        key = cd.get("client_key") or cd.get("mac")
+        if not key:
+            continue
+        tot = _safe_int(cd.get("total_bytes", 0)) or (
+            _safe_int(cd.get("tx_bytes", 0)) + _safe_int(cd.get("rx_bytes", 0)))
+        client_total += tot
+        _upsert("client", key, name=cd.get("name") or cd.get("hostname") or key,
+                device_type=cd.get("device_type") or "",
+                total_bytes=tot, tx_bytes=_safe_int(cd.get("tx_bytes", 0)),
+                rx_bytes=_safe_int(cd.get("rx_bytes", 0)), count=0)
+
+    # Overall: prefer the authoritative site app-total; else the client sum.
+    _upsert("total", "", name="All traffic",
+            total_bytes=app_total or client_total,
+            count=len([c for c in body.clients if (c.get("client_key") or c.get("mac"))]))
 
 
 # --------------------------------------------------------------------------- #
@@ -984,6 +1205,7 @@ def _source_analytics(db: Session, tenant_id: str | None) -> dict:
 
 @admin_router.get("/analytics")
 def admin_analytics(scope: str = "platform", tenant_id: str | None = None,
+                    window: str = "30d",
                     principal: security.Principal = Depends(security.require_platform_admin),
                     db: Session = Depends(get_db)):
     """Cross-customer (or single-tenant) view of the apps, services, clients and
@@ -1044,4 +1266,62 @@ def admin_analytics(scope: str = "platform", tenant_id: str | None = None,
                          for k, v in sorted(device_types.items(), key=lambda kv: -kv[1])],
         # Adopted data sources (connected connectors) usage + health.
         "data_sources": _source_analytics(db, tenant_id if scope == "tenant" else None),
+        # 90-day network usage trends (traffic over time + top movers).
+        "network_trends": _admin_network_trends(
+            db, tenant_id if scope == "tenant" else None, window),
+    }
+
+
+def _admin_network_trends(db: Session, tenant_id: str | None, window: str = "30d",
+                          top: int = 10) -> dict:
+    """Fleet-wide (or single-tenant) network trends from the 90-day NetworkSample
+    rollups: total traffic over time, top apps + shadow (unprotected) services and
+    device growth, each with a change vs the preceding equal-length window."""
+    days = _window_days(window)
+    end_day = _day_bucket(_now())
+    cur_since = end_day - timedelta(days=days - 1)
+    prev_since = cur_since - timedelta(days=days)
+    q = db.query(NetworkSample).filter(NetworkSample.day >= prev_since)
+    if tenant_id:
+        q = q.filter(NetworkSample.tenant_id == tenant_id)
+    rows = q.all()
+
+    total_by_day: dict = {}
+    apps: dict = {}
+    client_days: dict = {}  # day -> set(client keys) for device-count growth
+    for s in rows:
+        in_cur = s.day >= cur_since
+        b = int(s.total_bytes or 0)
+        if s.dim == "total" and in_cur:
+            total_by_day[s.day] = total_by_day.get(s.day, 0) + b
+        elif s.dim == "app":
+            e = apps.setdefault(s.name or s.key, {
+                "name": s.name or s.key, "category": s.category or "",
+                "source_type": s.source_type or "", "cur": 0, "prev": 0, "by_day": {},
+                "tenants": set()})
+            e["tenants"].add(s.tenant_id)
+            if in_cur:
+                e["cur"] += b
+                e["by_day"][s.day] = e["by_day"].get(s.day, 0) + b
+            else:
+                e["prev"] += b
+        elif s.dim == "client" and in_cur and b:
+            client_days.setdefault(s.day, set()).add(f"{s.tenant_id}:{s.key}")
+
+    ranked = sorted(apps.values(), key=lambda x: -x["cur"])[:top]
+    top_apps = [{"name": e["name"], "category": e["category"], "source_type": e["source_type"],
+                 "has_source": bool(e["source_type"]), "tenant_count": len(e["tenants"]),
+                 "total_bytes": e["cur"], "change_pct": _change_pct(e["cur"], e["prev"]),
+                 "series": _fill_series(e["by_day"], end_day, days)} for e in ranked]
+    cur_total = sum(total_by_day.values()) or sum(e["cur"] for e in apps.values())
+    prev_total = sum(e["prev"] for e in apps.values())
+    device_series = [{"day": d.date().isoformat(), "count": len(client_days.get(d, set()))}
+                     for d in (end_day - timedelta(days=i) for i in range(days - 1, -1, -1))]
+    return {
+        "window": window, "days": days,
+        "series": _fill_series(total_by_day, end_day, days),
+        "top_apps": top_apps,
+        "device_series": device_series,
+        "summary": {"total_bytes": int(cur_total), "change_pct": _change_pct(int(cur_total), int(prev_total)),
+                    "active_devices": len(set().union(*client_days.values())) if client_days else 0},
     }

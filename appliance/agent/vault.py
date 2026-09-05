@@ -133,6 +133,47 @@ class VaultStore:
         return any((m / snapshot_id / "manifest.json").exists()
                    for m in self._mirror_roots)
 
+    def sync_mirrors(self) -> dict:
+        """Reconcile every mirror volume with the primary vault: copy any snapshot
+        files/manifests the mirror is missing (backfill for a newly-added mirror,
+        and repair for any write the live duplication missed). Idempotent — only
+        copies what's absent. Returns {mirrors, snapshots_synced, files_copied,
+        errors}. A per-file failure is counted, never fatal."""
+        result = {"mirrors": len(self._mirror_roots), "snapshots_synced": 0,
+                  "files_copied": 0, "errors": 0}
+        if not self._mirror_roots or not self._protected.exists():
+            return result
+        snap_dirs = [d for d in self._protected.iterdir() if d.is_dir()]
+        for mroot in self._mirror_roots:
+            for snap in snap_dirs:
+                touched = False
+                for src in snap.rglob("*"):
+                    if not src.is_file():
+                        continue
+                    rel = src.relative_to(self._protected)
+                    dst = mroot / rel
+                    if dst.exists() and dst.stat().st_size == src.stat().st_size:
+                        continue  # already mirrored intact
+                    try:
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        data = src.read_bytes()
+                        tmp = dst.with_suffix(dst.suffix + ".tmp")
+                        tmp.write_bytes(data)
+                        if tmp.stat().st_size != len(data):
+                            raise OSError("short mirror write")
+                        tmp.replace(dst)
+                        try:
+                            os.chmod(dst, 0o444)
+                        except OSError:
+                            pass
+                        result["files_copied"] += 1
+                        touched = True
+                    except Exception:  # noqa: BLE001 — reconcile is best-effort per file
+                        result["errors"] += 1
+                if touched:
+                    result["snapshots_synced"] += 1
+        return result
+
     def capacity(self) -> dict:
         used = sum(f.stat().st_size for f in self._protected.rglob("*")
                    if f.is_file()) if self._protected.exists() else 0

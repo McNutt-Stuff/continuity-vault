@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 import uuid
 from json import JSONDecodeError
@@ -609,6 +610,50 @@ class Agent:
             self.vault.set_mirror_roots(roots)
         except Exception as exc:  # noqa: BLE001
             self.log.warning("could not apply mirror roots: %s", exc)
+        if roots:
+            # Backfill/reconcile so a newly-added mirror gets existing data + index,
+            # off the hot path (large volumes take time). Runs on setup/mount/reload.
+            threading.Thread(target=self._sync_mirrors, args=("mirror routing changed",),
+                             daemon=True).start()
+
+    def _sync_mirrors(self, reason: str = "") -> dict:
+        """Reconcile every mirror volume with the primary vault (object data) AND
+        the encrypted search index, so mirrors hold stored sources + indexes and
+        stay in sync — including a backfill of everything that pre-dates the mirror.
+        Idempotent; safe to call repeatedly."""
+        mirror_mounts = [self._ext_mounts[e["store_id"]] for e in self._ext_stores
+                         if e.get("kind") == "mirror" and e["store_id"] in self._ext_mounts]
+        if not mirror_mounts:
+            return {"mirrors": 0}
+        res: dict = {"mirrors": len(mirror_mounts)}
+        try:
+            res.update(self.vault.sync_mirrors())
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("mirror data sync failed: %s", exc)
+            res["errors"] = res.get("errors", 0) + 1
+        # Mirror the encrypted search index too (lives beside the vault, not inside it).
+        idx_src = DATA / "search-index"
+        idx_copied = 0
+        if idx_src.is_dir():
+            for mount in mirror_mounts:
+                dst_dir = Path(mount) / "search-index"
+                try:
+                    dst_dir.mkdir(parents=True, exist_ok=True)
+                    for f in idx_src.glob("*.enc"):
+                        dst = dst_dir / f.name
+                        if dst.exists() and dst.stat().st_size == f.stat().st_size:
+                            continue
+                        data = f.read_bytes()
+                        tmp = dst.with_suffix(dst.suffix + ".tmp")
+                        tmp.write_bytes(data)
+                        tmp.replace(dst)
+                        idx_copied += 1
+                except Exception as exc:  # noqa: BLE001
+                    self.log.warning("mirror index sync to %s failed: %s", mount, exc)
+                    res["errors"] = res.get("errors", 0) + 1
+        res["index_files_copied"] = idx_copied
+        self.log.info("mirror sync (%s): %s", reason or "periodic", res)
+        return res
 
     def _reload_ext_storage(self) -> None:
         """Re-read the external-storage registry and (re)mount known drives, then
@@ -914,6 +959,9 @@ class Agent:
             try:
                 if ctype == "OPEN_INGEST_WINDOW":
                     receipt, result = self._do_ingest(payload["parameters"])
+                    if not result.get("error"):
+                        threading.Thread(target=self._sync_mirrors, args=("after ingest",),
+                                         daemon=True).start()
                 elif ctype == "OPEN_RECOVERY_WINDOW":
                     result = self._request_recovery(payload["parameters"])
                 elif ctype == "QUARANTINE":
@@ -935,6 +983,9 @@ class Agent:
                     result = self._reconfigure_external_storage(payload["parameters"])
                 elif ctype == "STAGE_INDEX":
                     result = await asyncio.to_thread(self._stage_index, payload["parameters"])
+                    if not result.get("error"):
+                        threading.Thread(target=self._sync_mirrors, args=("after index stage",),
+                                         daemon=True).start()
                 else:
                     result = {"note": f"acknowledged {ctype}"}
             except Exception as exc:

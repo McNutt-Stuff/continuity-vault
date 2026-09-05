@@ -5550,33 +5550,51 @@ function IntegrationsAdmin() {
 }
 
 // ---- Customer Analytics (cross-customer app/service intelligence) -----------
+function TrendArrow({ pct }: { pct: number | null | undefined }) {
+  if (pct == null) return <span className="faint" style={{ fontSize: 11 }}>new</span>;
+  const up = pct >= 0;
+  return (
+    <span style={{ fontSize: 11, fontWeight: 600, color: up ? "#4f7cff" : "var(--muted-c,#8a94a7)" }}>
+      {up ? "▲" : "▼"} {Math.abs(pct)}%
+    </span>
+  );
+}
+
 function CustomerAnalytics() {
   const [scope, setScope] = useState<"platform" | "tenant">("platform");
   const [tenantId, setTenantId] = useState("");
+  const [win, setWin] = useState("30d");
   const [tenants, setTenants] = useState<any[]>([]);
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   async function load() {
     setLoading(true);
-    const qs = new URLSearchParams({ scope });
+    const qs = new URLSearchParams({ scope, window: win });
     if (scope === "tenant" && tenantId) qs.set("tenant_id", tenantId);
     try { setData(await api.get<any>(`/admin/analytics?${qs.toString()}`)); } catch { /* ignore */ }
     finally { setLoading(false); }
   }
   useEffect(() => { api.get<any[]>("/admin/tenants").then(setTenants).catch(() => {}); }, []);
-  useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [scope, tenantId]);
+  useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [scope, tenantId, win]);
 
   const t = data?.totals || {};
   const maxApp = Math.max(1, ...((data?.top_apps || []).map((a: any) => a.total_bytes)));
   const ds = data?.data_sources || {};
   const dsMax = Math.max(1, ...((ds.sources || []).map((s: any) => s.protected_bytes || 0)));
+  const nt = data?.network_trends || {};
 
   return (
     <>
       <div className="spread" style={{ marginBottom: 12 }}>
         <h3 style={{ margin: 0 }}>Customer Analytics</h3>
         <div className="row" style={{ gap: 8 }}>
+          <div className="row" style={{ gap: 4 }}>
+            {["7d", "30d", "90d"].map((w) => (
+              <button key={w} className={`btn sm ${win === w ? "primary" : "ghost"}`}
+                      onClick={() => setWin(w)}>{w}</button>
+            ))}
+          </div>
           <div className="row" style={{ gap: 0, border: "1px solid var(--border-soft)", borderRadius: 8, overflow: "hidden" }}>
             <button className={`btn sm ${scope === "platform" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }}
                     onClick={() => setScope("platform")}>Platform</button>
@@ -5598,6 +5616,46 @@ function CustomerAnalytics() {
         <AdminStat icon="grid" label="Customers reporting" value={String(t.tenants || 0)} tint="#2dbe60" />
         <AdminStat icon="cloud" label="Traffic observed" value={bytes(t.bytes || 0)} tint="#f5a623" />
       </div>
+
+      <Card style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ marginBottom: 10 }}>
+          <h3 style={{ margin: 0, fontSize: 15 }}>Network usage trends</h3>
+          <span className="faint" style={{ fontSize: 12 }}>
+            {(nt.summary?.total_bytes != null) ? <>Traffic {bytes(nt.summary.total_bytes || 0)} · <TrendArrow pct={nt.summary?.change_pct} /> vs previous {nt.days || 30}d · {nt.summary?.active_devices || 0} devices</> : "Traffic over time"}
+          </span>
+        </div>
+        {(nt.series || []).every((p: any) => !p.bytes) ? (
+          <div className="muted" style={{ fontSize: 12.5 }}>{loading ? "Loading…" : "No network telemetry in this window yet."}</div>
+        ) : (
+          <>
+            <AreaChart height={190} unit="B" fmt={bytes} labels={(nt.series || []).map((p: any) => p.day.slice(5))}
+                       series={[{ name: "traffic", color: "#4f7cff", data: (nt.series || []).map((p: any) => p.bytes) }]} />
+            <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, marginTop: 14 }}>
+              <div>
+                <h4 style={{ margin: "0 0 6px", fontSize: 13 }}>Top apps & services (trend)</h4>
+                <div className="stack" style={{ gap: 2 }}>
+                  {(nt.top_apps || []).map((a: any) => (
+                    <div key={a.name} className="row" style={{ gap: 10, alignItems: "center", padding: "5px 0", borderBottom: "1px solid var(--border-soft)" }}>
+                      <div className="flex1" style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.name}</div>
+                        <div className="faint" style={{ fontSize: 11 }}>{a.category || "app"} · {bytes(a.total_bytes)} · {a.tenant_count} customer{a.tenant_count === 1 ? "" : "s"}{a.has_source ? "" : " · no connector"}</div>
+                      </div>
+                      <div style={{ width: 96, flexShrink: 0 }}><Sparkline data={(a.series || []).map((p: any) => p.bytes)} color="#c56cf0" height={26} /></div>
+                      <div style={{ width: 52, textAlign: "right", flexShrink: 0 }}><TrendArrow pct={a.change_pct} /></div>
+                    </div>
+                  ))}
+                  {(nt.top_apps || []).length === 0 && <div className="muted" style={{ fontSize: 12 }}>No apps in this window.</div>}
+                </div>
+              </div>
+              <div>
+                <h4 style={{ margin: "0 0 6px", fontSize: 13 }}>Active devices / day</h4>
+                <AreaChart height={120} unit="" labels={(nt.device_series || []).map((p: any) => p.day.slice(5))}
+                           series={[{ name: "devices", color: "#2dbe60", data: (nt.device_series || []).map((p: any) => p.count) }]} />
+              </div>
+            </div>
+          </>
+        )}
+      </Card>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
         <Card>

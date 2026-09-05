@@ -87,13 +87,17 @@ def _collect_objects(db: Session, vault_ids: list[str], tenant_id: str) -> list[
         return []
     rows = (db.query(SearchDocument.source_type, SearchDocument.doc_type,
                      SearchDocument.category, SearchDocument.size_bytes,
-                     SearchDocument.modified_at, SearchDocument.title)
+                     SearchDocument.modified_at, SearchDocument.title,
+                     SearchDocument.created_at)
             .filter(SearchDocument.tenant_id == tenant_id,
                     SearchDocument.vault_id.in_(vault_ids),
                     SearchDocument.is_current.is_(True)).all())
+    # Fall back to the ingest time when a source didn't supply an object date, so
+    # agent-collected sources (1Password, endpoint files, iMessage, local Outlook —
+    # which may leave modified_at null) still appear on the timeline + charts.
     return [_Obj(st or "", (dt or "").lower(), (cat or "").lower(),
-                 int(sz or 0), mod, title or "")
-            for st, dt, cat, sz, mod, title in rows]
+                 int(sz or 0), mod or created, title or "")
+            for st, dt, cat, sz, mod, title, created in rows]
 
 
 def _build_timeline(objs: list[_Obj]) -> dict:
@@ -135,9 +139,9 @@ def _build_timeline(objs: list[_Obj]) -> dict:
         byte_series[i] += o.size
         totals_by_source[o.source_type] += 1
 
-    # Keep the six biggest sources as their own bands; fold the rest into "Other".
+    # Keep the eight biggest sources as their own bands; fold the rest into "Other".
     ranked = sorted(totals_by_source.items(), key=lambda kv: -kv[1])
-    top = [s for s, _ in ranked[:6]]
+    top = [s for s, _ in ranked[:8]]
     series: list[dict] = []
     for s in top:
         m = _source_meta(s)

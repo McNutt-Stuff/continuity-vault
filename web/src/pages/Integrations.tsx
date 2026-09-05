@@ -4,6 +4,7 @@ import { api } from "../api";
 import { Card, Pill, bytes, Loading, groupScope } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
+import { AreaChart, Sparkline } from "../components/charts";
 import { notify, confirmDialog, promptDialog } from "../components/dialog";
 
 interface CredField { name: string; label: string; type: string; placeholder: string; required: boolean; help: string; }
@@ -232,6 +233,134 @@ function MiniStat({ icon, label, value, tint }: { icon: IconName; label: string;
   );
 }
 
+// ---- Time-series trends -------------------------------------------------- //
+interface TrendPoint { day: string; bytes: number }
+interface TrendEntity {
+  key: string; name: string; total_bytes: number; prev_bytes: number;
+  change_pct: number | null; series: TrendPoint[];
+  category?: string; source_type?: string; device_type?: string;
+}
+interface NetAnalytics {
+  window: string; days: number; series: TrendPoint[];
+  top_apps: TrendEntity[]; top_clients: TrendEntity[];
+  summary: { total_bytes: number; prev_total_bytes: number; change_pct: number | null;
+    active_apps: number; active_clients: number; avg_daily_bytes: number };
+}
+
+const TREND_WINDOWS: { value: string; label: string }[] = [
+  { value: "7d", label: "7 days" }, { value: "30d", label: "30 days" }, { value: "90d", label: "90 days" },
+];
+
+export function WindowSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="row" style={{ gap: 4 }}>
+      {TREND_WINDOWS.map((w) => (
+        <button key={w.value} className={`chip ${value === w.value ? "active" : ""}`}
+                style={{ fontSize: 12 }} onClick={() => onChange(w.value)}>{w.label}</button>
+      ))}
+    </div>
+  );
+}
+
+export function TrendPill({ pct }: { pct: number | null }) {
+  if (pct == null) return <span className="faint" style={{ fontSize: 11 }}>new</span>;
+  const up = pct >= 0;
+  return (
+    <span style={{ fontSize: 11, fontWeight: 600, color: up ? "#4f7cff" : "var(--muted-c,#8a94a7)" }}>
+      {up ? "▲" : "▼"} {Math.abs(pct)}%
+    </span>
+  );
+}
+
+function TrendList({ title, rows, kind }: { title: string; rows: TrendEntity[]; kind: "app" | "client" }) {
+  return (
+    <div>
+      <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>{title}</h3>
+      {rows.length === 0 ? <div className="muted" style={{ fontSize: 12 }}>No data in this period yet.</div> : (
+        <div className="stack" style={{ gap: 2 }}>
+          {rows.map((r) => (
+            <div key={r.key} className="row" style={{ gap: 10, alignItems: "center", padding: "6px 0",
+                  borderBottom: "1px solid var(--border-soft)" }}>
+              <div className="flex1" style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap", overflow: "hidden",
+                      textOverflow: "ellipsis" }}>{r.name}</div>
+                <div className="faint" style={{ fontSize: 11 }}>
+                  {(kind === "app" ? (r.category || "app") : (r.device_type || "device"))} · {bytes(r.total_bytes)}
+                  {kind === "app" && r.source_type ? ` · ${r.source_type}` : ""}
+                </div>
+              </div>
+              <div style={{ width: 88, flexShrink: 0 }}>
+                <Sparkline data={r.series.map((p) => p.bytes)} color="#4f7cff" height={26} />
+              </div>
+              <div style={{ width: 52, textAlign: "right", flexShrink: 0 }}><TrendPill pct={r.change_pct} /></div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TrendsPanel({ iid }: { iid: string }) {
+  const [win, setWin] = useState("30d");
+  const [d, setD] = useState<NetAnalytics | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    api.get<NetAnalytics>(`/integrations/${iid}/analytics?window=${win}`)
+      .then((r) => { if (live) setD(r); })
+      .catch(() => { /* ignore */ })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [iid, win]);
+  const labels = (d?.series || []).map((p) => p.day.slice(5));
+  return (
+    <div>
+      <div className="spread" style={{ marginBottom: 12, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div className="faint" style={{ fontSize: 12.5 }}>
+          Traffic over time — trailing-24h volume, sampled daily (kept 90 days).
+        </div>
+        <WindowSelect value={win} onChange={setWin} />
+      </div>
+      {loading && !d ? <div className="muted">Loading trends…</div>
+        : !d || d.series.every((p) => !p.bytes) ? (
+          <div className="muted" style={{ fontSize: 12.5 }}>
+            No trend data yet — trends build up as the integration collects each day.
+          </div>
+        ) : (
+        <>
+          <div className="insights-stats" style={{ marginBottom: 14 }}>
+            <div className="insights-stat">
+              <div className="insights-stat-ic" style={{ background: "#f5a62322", color: "#f5a623" }}>
+                <Icon name="cloud" size={16} />
+              </div>
+              <div className="stack" style={{ gap: 1 }}>
+                <div className="row" style={{ gap: 6, alignItems: "baseline" }}>
+                  <div style={{ fontSize: 17, fontWeight: 700 }}>{bytes(d.summary.total_bytes || 0)}</div>
+                  <TrendPill pct={d.summary.change_pct} />
+                </div>
+                <div className="faint" style={{ fontSize: 11.5 }}>Traffic this period</div>
+              </div>
+            </div>
+            <MiniStat icon="activity" label="Average per day" value={bytes(d.summary.avg_daily_bytes || 0)} tint="#4f7cff" />
+            <MiniStat icon="grid" label="Active apps" value={String(d.summary.active_apps || 0)} tint="#c56cf0" />
+            <MiniStat icon="user" label="Active devices" value={String(d.summary.active_clients || 0)} tint="#2dbe60" />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <AreaChart series={[{ name: "traffic", color: "#4f7cff", data: d.series.map((p) => p.bytes) }]}
+                       labels={labels} unit="B" fmt={bytes} height={200} />
+          </div>
+          <div className="grid grid-2" style={{ gap: 20 }}>
+            <TrendList title="Top apps & services" rows={d.top_apps} kind="app" />
+            <TrendList title="Top devices" rows={d.top_clients} kind="client" />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ShadowChip({ s, onDetail }: { s: ShadowSource; onDetail: () => void }) {
   const nav = useNavigate();
   return (
@@ -368,7 +497,7 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
   inst: Instance; spec?: Spec; plan: string; onBack: () => void; onChanged: () => void;
 }) {
   const [data, setData] = useState<DataResp | null>(null);
-  const [tab, setTab] = useState<"apps" | "clients">("apps");
+  const [tab, setTab] = useState<"trends" | "apps" | "clients">("trends");
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [repolling, setRepolling] = useState(false);
@@ -509,6 +638,9 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
 
       <Card>
         <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+          <button className={`chip ${tab === "trends" ? "active" : ""}`} onClick={() => setTab("trends")}>
+            Trends
+          </button>
           <button className={`chip ${tab === "apps" ? "active" : ""}`} onClick={() => setTab("apps")}>
             Apps & services
           </button>
@@ -516,7 +648,9 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
             Clients & devices
           </button>
         </div>
-        {tab === "apps"
+        {tab === "trends"
+          ? <TrendsPanel iid={inst.id} />
+          : tab === "apps"
           ? <AppsTable iid={inst.id} apps={data?.apps || []} onChanged={loadData} />
           : <ClientsTable iid={inst.id} plan={plan} clients={data?.clients || []} onChanged={loadData} />}
       </Card>

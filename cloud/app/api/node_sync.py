@@ -44,6 +44,7 @@ from ..models import (
     IntegrationRun,
     NetworkApp,
     NetworkClient,
+    NetworkSample,
     NetworkUsage,
     Node,
     PricingConfig,
@@ -232,6 +233,7 @@ class PushPayload(BaseModel):
     network_clients: list[dict] = []
     network_apps: list[dict] = []
     network_usage: list[dict] = []
+    network_samples: list[dict] = []
     integration_runs: list[dict] = []
     communications: list[dict] = []
     index_replicas: list[dict] = []
@@ -488,6 +490,24 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict,
         if not db.get(IntegrationRun, row.get("id")):
             db.add(IntegrationRun(**_deser(IntegrationRun, row)))
             counts["network"] += 1
+    for row in body.network_samples:
+        if not _ok(row):
+            continue
+        kw = _deser(NetworkSample, row)
+        cur = (db.query(NetworkSample)
+               .filter(NetworkSample.tenant_id == kw.get("tenant_id"),
+                       NetworkSample.integration_id == kw.get("integration_id"),
+                       NetworkSample.day == kw.get("day"),
+                       NetworkSample.dim == kw.get("dim"),
+                       NetworkSample.key == kw.get("key", "")).first())
+        if cur is None:
+            db.add(NetworkSample(**{k: v for k, v in kw.items() if k != "id"}))
+        else:
+            for f in ("name", "category", "source_type", "device_type",
+                      "total_bytes", "tx_bytes", "rx_bytes", "count"):
+                if f in kw:
+                    setattr(cur, f, kw[f])
+        counts["network"] += 1
 
 
 # --------------------------------------------------------------------------- #

@@ -40,6 +40,7 @@ from ..models import (
     IntegrationRun,
     NetworkApp,
     NetworkClient,
+    NetworkSample,
     NetworkUsage,
     Node,
     PricingConfig,
@@ -377,6 +378,7 @@ def _push(s) -> int:
             integ_since = None
     integ_high = integ_since
     integ_instances, net_clients, net_apps, net_usage, integ_runs = [], [], [], [], []
+    net_samples: list = []
     communications = []
     comm_cursor = _read_state().get("communications_cursor")
     comm_since = None
@@ -447,6 +449,15 @@ def _push(s) -> int:
             rq2 = rq2.filter(IntegrationRun.created_at > integ_since)
         for row in rq2.order_by(IntegrationRun.created_at.asc()).limit(1000).all():
             integ_runs.append(_row(row))
+        # Daily network trend rollups (updated_at advances as each day's sample is
+        # refreshed), so the portal/admin show 90-day trends for node-routed tenants.
+        sq = db.query(NetworkSample)
+        if integ_since is not None:
+            sq = sq.filter(NetworkSample.updated_at > integ_since)
+        for row in sq.order_by(NetworkSample.updated_at.asc()).limit(8000).all():
+            net_samples.append(_row(row))
+            if row.updated_at and (integ_high is None or row.updated_at > integ_high):
+                integ_high = row.updated_at
         # Outbound-email history the node's email service recorded, so the admin's
         # per-user communications log on the control plane is complete.
         cq = db.query(Communication)
@@ -464,7 +475,7 @@ def _push(s) -> int:
     if not (receipts or documents or accounts or jobs or agents or appliances
             or appliance_storages or insights
             or integ_instances or net_clients or net_apps or net_usage or integ_runs
-            or communications or index_replicas):
+            or communications or index_replicas or net_samples):
         return 0
     res = _post("/nodes/sync/push", {
         "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
@@ -473,6 +484,7 @@ def _push(s) -> int:
         "appliance_storages": appliance_storages, "insights": insights,
         "integration_instances": integ_instances, "network_clients": net_clients,
         "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
+        "network_samples": net_samples,
         "communications": communications,
         "index_replicas": index_replicas,
     })
