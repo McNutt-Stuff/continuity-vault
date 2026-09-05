@@ -427,7 +427,7 @@ def admin_appliance_detail(aid: str,
     """Full admin detail for one appliance (cross-tenant): health, storage,
     telemetry, stored data, recent commands, tenant + assigned config profile."""
     from .appliances import _appliance_view, _stored_data
-    from ..models import ApplianceCommand
+    from ..models import ApplianceCommand, ApplianceStorage
     a = db.get(Appliance, aid)
     if not a:
         raise HTTPException(404, "appliance not found")
@@ -436,6 +436,11 @@ def admin_appliance_detail(aid: str,
     view["online"] = bool(a.last_heartbeat_at and (now - a.last_heartbeat_at).total_seconds() < 90)
     t = db.get(Tenant, a.tenant_id)
     view["tenant"] = {"id": t.id, "name": t.name, "tenant_type": t.tenant_type} if t else None
+    # Search-index replica health for this appliance's stores (DR copies).
+    store_dests = {f"store:{sid}" for (sid,) in db.query(ApplianceStorage.id)
+                   .filter(ApplianceStorage.appliance_id == aid).all()}
+    view["index_replicas"] = _index_replica_views(
+        db, lambda r: r.destination in store_dests and r.tenant_id == a.tenant_id)
     try:
         view["stored_data"] = _stored_data(db, a, None)
     except Exception:  # noqa: BLE001
@@ -611,7 +616,29 @@ def _tenant_view(db: Session, t: Tenant, detail: bool = False) -> dict:
         except Exception:  # noqa: BLE001 - never fail the tenant view on pricing
             v["billing"] = None
         v["storage_usage"] = _storage_usage(db, t.id, get_pricing(db))
+        # DR replica health of this tenant's search index (cloud + byos scopes).
+        v["index_replicas"] = _index_replica_views(db, lambda r: r.tenant_id == t.id)
     return v
+
+
+def _index_replica_views(db: Session, keep) -> list[dict]:
+    """IndexReplica rows passing the `keep(row)` predicate, shaped for the admin UI."""
+    from ..models import IndexReplica, Node as _Node
+    nodes = {n.id: n.name for n in db.query(_Node).all()}
+    out = []
+    for r in db.query(IndexReplica).all():
+        if not keep(r):
+            continue
+        out.append({
+            "id": r.id, "scope": r.scope, "scope_id": r.scope_id,
+            "destination": r.destination, "destination_label": r.destination_label or r.destination,
+            "status": r.status, "object_count": r.object_count or 0, "bytes": int(r.bytes or 0),
+            "node_name": nodes.get(r.node_id) if r.node_id else "Control plane",
+            "last_replicated_at": r.last_replicated_at.isoformat() if r.last_replicated_at else None,
+            "last_verified_at": r.last_verified_at.isoformat() if r.last_verified_at else None,
+            "error": r.error or "",
+        })
+    return sorted(out, key=lambda x: x["destination_label"])
 
 
 class TenantCreate(BaseModel):
@@ -1742,8 +1769,10 @@ def _node_live(db: Session, n: Node) -> dict:
     if n.is_self:
         from .. import sysinfo
         from .node_sync import _db_stats
+        from ..workers import status as worker_status
         out = sysinfo.live(cert_host=get_settings().domain)
         out["db"] = _db_stats(db)
+        out["workers"] = worker_status.snapshot()
         return out
     if _remote_capable(n):
         try:
@@ -2905,6 +2934,43 @@ def index_replicas(db: Session = Depends(get_db)):
     rows.sort(key=lambda x: (x["tenant_name"], x["destination_label"]))
     return {"replicas": rows, "healthy": healthy, "total": total,
             "scopes": len({(r["scope"], r["scope_id"]) for r in rows})}
+
+
+@router.post("/index-replicas/{rid}/restore")
+def restore_index_replica(rid: str, db: Session = Depends(get_db)):
+    """Reconstruct a scope's search index from this replica (disaster recovery)."""
+    from ..models import IndexReplica
+    from ..workers import index_replication
+    r = db.get(IndexReplica, rid)
+    if not r:
+        raise HTTPException(404, "replica not found")
+    if r.status == "pending":
+        raise HTTPException(400, "this replica is not yet written (appliance/localized index)")
+    try:
+        result = index_replication.rebuild_from_replica(db, r)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"rebuild failed: {exc}")
+    audit.record(db, actor="admin", action="index.rebuilt_from_replica",
+                 tenant_id=r.tenant_id, resource=r.id, category="admin", severity="warning",
+                 detail=result)
+    return {"ok": True, **result}
+
+
+@router.post("/index-replicas/{rid}/verify")
+def verify_index_replica(rid: str, db: Session = Depends(get_db)):
+    """Run an on-demand integrity check of one replica."""
+    from ..models import IndexReplica, Tenant as _T
+    from ..workers import integrity
+    r = db.get(IndexReplica, rid)
+    if not r:
+        raise HTTPException(404, "replica not found")
+    t = db.get(_T, r.tenant_id)
+    if t is None:
+        raise HTTPException(404, "tenant not found")
+    integrity._verify_one(db, t, r)
+    db.commit()
+    return {"ok": True, "status": r.status, "error": r.error,
+            "last_verified_at": r.last_verified_at.isoformat() if r.last_verified_at else None}
 
 
 @router.get("/backups")

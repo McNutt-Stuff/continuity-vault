@@ -92,7 +92,6 @@ function FieldInput({ f, value, onChange, placeholder, showRequired = true }: {
 export default function CloudStorage() {
   const [list, setList] = useState<ListResp | null>(null);
   const [arkive, setArkive] = useState<ArkiveCloud | null>(null);
-  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -106,7 +105,6 @@ export default function CloudStorage() {
       ]);
       setList(l);
       setArkive(a);
-      setIndexStatus(await api.get<IndexStatus>("/index/status").catch(() => null));
     } catch { /* ignore */ }
     finally { setLoading(false); }
   }
@@ -142,8 +140,6 @@ export default function CloudStorage() {
 
       {/* Arkive Cloud — our hosted, fully-managed tier. Read-only: usage only. */}
       <ArkiveCloudRow data={arkive} onOpen={() => setArkiveDetail(true)} />
-
-      <IndexProtectionCard status={indexStatus} />
 
       {/* Bring your own storage — customer-owned buckets with full controls. */}
       <div className="spread" style={{ margin: "24px 0 12px", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
@@ -197,49 +193,50 @@ const INDEX_STATUS: Record<string, { tone: "ok" | "warn" | "info" | "danger"; la
   stale: { tone: "warn", label: "Stale" },
   error: { tone: "danger", label: "Error" },
   pending: { tone: "info", label: "Pending" },
+  verifying: { tone: "info", label: "Verifying" },
 };
 
 // The search index is what lets Arkive piece stored data back together, so we
-// replicate it (encrypted) to each storage destination for disaster recovery.
-function IndexProtectionCard({ status }: { status: IndexStatus | null }) {
-  if (!status || status.replicas.length === 0) return null;
+// replicate it (encrypted) to each destination for DR. Shown as a visually
+// distinct row inside a storage's "data stored" table.
+function IndexReplicaRow({ replica }: { replica: IndexReplica | null }) {
+  if (!replica) return null;
+  const m = INDEX_STATUS[replica.status] || INDEX_STATUS.pending;
   return (
-    <Card style={{ marginTop: 16, borderLeft: "3px solid #7a5cff" }}>
-      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 8 }}>
-        <Icon name="database" size={16} />
-        <div style={{ fontWeight: 600, fontSize: 14 }}>Search index protection</div>
-        <Pill tone={status.protected ? "ok" : "warn"} dot>
-          {status.healthy}/{status.total} replicated
-        </Pill>
-      </div>
-      <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
-        An encrypted copy of your unified-search index is kept alongside your data on each storage
-        location so it can be restored after a failure ({status.scope === "user" ? "your account's index" : "your organization's index"}).
-      </div>
-      <div className="stack" style={{ gap: 6 }}>
-        {status.replicas.map((r) => {
-          const m = INDEX_STATUS[r.status] || INDEX_STATUS.pending;
-          return (
-            <div key={r.id} className="row" style={{ gap: 10, alignItems: "center", justifyContent: "space-between",
-                 padding: "8px 10px", background: "var(--inset)", borderRadius: 8 }}>
-              <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                <Icon name={r.destination.startsWith("store:") || r.destination.startsWith("appliance") ? "server" : "cloud"} size={14} />
-                <span style={{ fontWeight: 600, fontSize: 12.5 }}>{r.destination_label}</span>
-              </div>
-              <div className="row" style={{ gap: 14, alignItems: "center", fontSize: 12 }}>
-                {r.status === "ok" && (
-                  <span className="faint">{r.object_count.toLocaleString()} items · {bytes(r.bytes)} · {fmtAgo(r.last_replicated_at)}</span>
-                )}
-                {r.status === "pending" && <span className="faint">Localized appliance index coming soon</span>}
-                {r.status === "error" && <span style={{ color: "var(--danger)" }}>{r.error || "failed"}</span>}
-                <Pill tone={m.tone} dot>{m.label}</Pill>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </Card>
+    <tr style={{ background: "color-mix(in srgb, var(--brand,#7a5cff) 8%, transparent)" }}>
+      <td>
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <Icon name="shield" size={15} />
+          <div>
+            <div style={{ fontWeight: 600 }}>Search index replica</div>
+            <div className="faint" style={{ fontSize: 11 }}>Disaster-recovery copy of your unified-search index</div>
+          </div>
+          <Pill tone={m.tone} dot>{m.label}</Pill>
+        </div>
+      </td>
+      <td className="faint">—</td>
+      <td>{replica.status === "ok" ? replica.object_count.toLocaleString() : "—"}</td>
+      <td>{replica.status === "ok" ? bytes(replica.bytes) : "—"}</td>
+      <td className="faint" style={{ fontSize: 12 }}>
+        {replica.status === "pending" ? "coming soon"
+          : replica.status === "error" ? (replica.error || "failed")
+          : fmtAgo(replica.last_replicated_at)}
+      </td>
+    </tr>
   );
+}
+
+// Fetch this destination's index-replica health (scope-aware /index/status).
+function useIndexReplica(destination: string): IndexReplica | null {
+  const [rep, setRep] = useState<IndexReplica | null>(null);
+  useEffect(() => {
+    let stop = false;
+    api.get<IndexStatus>("/index/status")
+      .then((s) => { if (!stop) setRep(s.by_destination?.[destination] ?? null); })
+      .catch(() => {});
+    return () => { stop = true; };
+  }, [destination]);
+  return rep;
 }
 
 // Arkive Cloud is our fully-managed hosted tier — a distinct full-width row, not
@@ -283,6 +280,7 @@ function ArkiveCloudRow({ data, onOpen }: { data: ArkiveCloud | null; onOpen: ()
 // Read-only drill-in for Arkive Cloud: usage + the sources stored with us. No
 // controls — Arkive manages this tier.
 function ArkiveCloudDetail({ data, onBack }: { data: ArkiveCloud; onBack: () => void }) {
+  const indexReplica = useIndexReplica("cv-cloud");
   return (
     <>
       <button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 12 }}>← Cloud Storage</button>
@@ -320,6 +318,7 @@ function ArkiveCloudDetail({ data, onBack }: { data: ArkiveCloud; onBack: () => 
           <table className="table">
             <thead><tr><th>Source</th><th>Recovery points</th><th>Items</th><th>Stored</th><th>Last backup</th></tr></thead>
             <tbody>
+              <IndexReplicaRow replica={indexReplica} />
               {data.sources.map((s) => (
                 <tr key={s.collection_id}>
                   <td>
@@ -397,6 +396,7 @@ function StorageDetail({ inst, providers, onBack, onChanged }: {
   const cur = data?.storage || inst;
   const h = health(cur);
   const spec = useMemo(() => providers.find((p) => p.provider === inst.provider), [providers, inst.provider]);
+  const indexReplica = useIndexReplica(`byos:${inst.id}`);
 
   async function loadData() {
     try { setData(await api.get<DataResp>(`/storage/${inst.id}/data`)); } catch { /* ignore */ }
@@ -501,7 +501,7 @@ function StorageDetail({ inst, providers, onBack, onChanged }: {
           <Icon name="database" size={15} />
           <h3 style={{ margin: 0, fontSize: 15 }}>Sources stored here</h3>
         </div>
-        {(data?.sources || []).length === 0 ? (
+        {(data?.sources || []).length === 0 && !indexReplica ? (
           <div className="muted" style={{ padding: 8 }}>
             No data has landed here yet. Route a source to this storage in the <a href="/mappings">Data Map</a>.
           </div>
@@ -509,6 +509,7 @@ function StorageDetail({ inst, providers, onBack, onChanged }: {
           <table className="table">
             <thead><tr><th>Source</th><th>Recovery points</th><th>Items</th><th>Stored</th><th>Last backup</th></tr></thead>
             <tbody>
+              <IndexReplicaRow replica={indexReplica} />
               {(data?.sources || []).map((s) => (
                 <tr key={s.collection_id}>
                   <td>

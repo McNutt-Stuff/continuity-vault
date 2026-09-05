@@ -45,7 +45,7 @@ _INDEX_KEY = "search-index/index.sqlite.enc"  # object key under the scope prefi
 # rebuild results locally). search_blob/meta are the heavy text/JSON fields.
 _COLS = ["id", "tenant_id", "vault_id", "collection_id", "source_type",
          "object_id", "doc_type", "category", "title", "preview", "search_blob",
-         "size_bytes", "is_current"]
+         "meta", "size_bytes", "is_current"]
 
 
 def _now() -> datetime:
@@ -227,6 +227,52 @@ def _self_node_id(db) -> Optional[str]:
     return n.id if n else None
 
 
+# Cap for staging an index over the signed command channel (large indexes stay
+# pending until a bulk appliance-transfer path exists).
+_APPLIANCE_STAGE_CAP = 24 * 1024 * 1024
+
+
+def _stage_index_to_appliance(db, scope: dict, dest: str, cipher: bytes,
+                              count: int, signature: str, node_id: Optional[str]) -> None:
+    """Deliver the encrypted index to an appliance via a signed STAGE_INDEX command
+    so it holds a DR copy (framework for future localized on-appliance search)."""
+    import base64
+    from ..models import Appliance, ApplianceStorage
+    from .. import fleet
+    sid = dest.split(":", 1)[1] if ":" in dest else None
+    store = db.get(ApplianceStorage, sid) if sid else None
+    appliance = db.get(Appliance, store.appliance_id) if store else None
+    if not appliance:
+        _upsert_replica(db, scope, dest, status="error", node_id=node_id,
+                        error="appliance for store not found")
+        return
+    if len(cipher) > _APPLIANCE_STAGE_CAP:
+        _upsert_replica(db, scope, dest, status="pending", node_id=node_id,
+                        object_count=count, bytes=len(cipher),
+                        error="index too large to stage over the command channel yet")
+        return
+    existing = (db.query(IndexReplica)
+                .filter(IndexReplica.scope == scope["scope"],
+                        IndexReplica.scope_id == scope["scope_id"],
+                        IndexReplica.destination == dest).first())
+    if existing and existing.status == "ok" and existing.signature == signature:
+        return  # unchanged since last stage
+    try:
+        fleet.issue_command(db, appliance, "STAGE_INDEX", "system", {
+            "scope": scope["scope"], "scopeId": scope["scope_id"],
+            "storeId": sid, "key": _INDEX_KEY, "objectCount": count,
+            "signature": signature,
+            "indexB64": base64.b64encode(cipher).decode()})
+        _upsert_replica(db, scope, dest, status="ok", object_count=count,
+                        bytes=len(cipher), signature=signature, key=_INDEX_KEY,
+                        node_id=node_id, last_replicated_at=_now(), error="")
+        logger.info("index staged to appliance %s scope=%s:%s (%d bytes)",
+                    appliance.id, scope["scope"], scope["scope_id"], len(cipher))
+    except Exception as exc:  # noqa: BLE001
+        _upsert_replica(db, scope, dest, status="error", node_id=node_id,
+                        error=f"stage command failed: {exc}"[:400])
+
+
 def replicate_scope(db, scope: dict, node_id: Optional[str]) -> None:
     dests = _destinations(db, scope["vault_ids"])
     if not dests:
@@ -237,10 +283,15 @@ def replicate_scope(db, scope: dict, node_id: Optional[str]) -> None:
     for dest in dests:
         destination, prefix = _resolve_object_dest(db, scope["tenant"], dest)
         if destination is None:
-            # Appliance / unsupported target — record intent as pending.
+            # Appliance destination — stage the encrypted index over the signed
+            # command channel so the box holds a DR copy (localized search later).
+            if dest.startswith("store:") or dest.startswith("appliance"):
+                if cipher is None:
+                    cipher, count = _build_index_blob(db, scope, signature)
+                _stage_index_to_appliance(db, scope, dest, cipher, count, signature, node_id)
+                continue
             _upsert_replica(db, scope, dest, status="pending", signature="",
-                            node_id=node_id,
-                            error="localized appliance index not yet supported")
+                            node_id=node_id, error="unsupported destination")
             continue
         existing = (db.query(IndexReplica)
                     .filter(IndexReplica.scope == scope["scope"],
@@ -266,6 +317,75 @@ def replicate_scope(db, scope: dict, node_id: Optional[str]) -> None:
 _last_run: Optional[datetime] = None
 
 
+def rebuild_from_replica(db, replica) -> dict:
+    """Reconstruct a scope's search index (SearchDocument rows) from a replica —
+    the disaster-recovery path when the live index is lost. Reads the encrypted
+    SQLite from the replica's destination, decrypts it, and inserts any missing
+    rows (upsert by id). Logs verbosely; returns a summary. Runs on the server
+    that owns the scope."""
+    import json as _json
+    tenant = db.get(Tenant, replica.tenant_id)
+    if tenant is None:
+        return {"error": "tenant not found"}
+    dest, prefix = _resolve_object_dest(db, tenant, replica.destination)
+    if dest is None:
+        return {"error": "destination not restorable (appliance/localized index)"}
+    logger.info("index rebuild: reading replica scope=%s:%s dest=%s",
+                replica.scope, replica.scope_id, replica.destination)
+    cipher = dest.get_object(prefix, replica.key or _INDEX_KEY)
+    raw = credstore.decrypt_bytes(f"index:{tenant.id}", cipher)
+    tmp = Path(tempfile.mkstemp(prefix="arkive-rebuild-", suffix=".sqlite")[1])
+    restored = skipped = 0
+    try:
+        tmp.write_bytes(raw)
+        con = sqlite3.connect(str(tmp))
+        con.row_factory = sqlite3.Row
+        existing = {i for (i,) in db.query(SearchDocument.id).filter(
+            SearchDocument.vault_id.in_(_scope_vault_ids(db, replica))).all()}
+        for row in con.execute("SELECT * FROM search_documents"):
+            rid = row["id"]
+            if rid in existing:
+                skipped += 1
+                continue
+            kw = {c: row[c] for c in row.keys() if c not in ("modified_at", "created_at")}
+            kw["is_current"] = str(kw.get("is_current")) in ("1", "True", "true")
+            kw["size_bytes"] = int(kw.get("size_bytes") or 0)
+            meta = kw.get("meta")
+            if isinstance(meta, str) and meta:
+                try:
+                    kw["meta"] = _json.loads(meta)
+                except ValueError:
+                    kw["meta"] = {}
+            for tcol in ("modified_at", "created_at"):
+                val = row[tcol] if tcol in row.keys() else None
+                if val:
+                    try:
+                        d = datetime.fromisoformat(val)
+                        kw[tcol] = d.replace(tzinfo=None) if d.tzinfo else d
+                    except ValueError:
+                        pass
+            db.add(SearchDocument(**kw))
+            restored += 1
+            if restored % 500 == 0:
+                db.commit()
+        con.close()
+        db.commit()
+    finally:
+        tmp.unlink(missing_ok=True)
+    logger.warning("index rebuild COMPLETE scope=%s:%s dest=%s — restored=%d skipped=%d",
+                   replica.scope, replica.scope_id, replica.destination, restored, skipped)
+    return {"restored": restored, "skipped": skipped,
+            "scope": replica.scope, "scope_id": replica.scope_id,
+            "destination": replica.destination}
+
+
+def _scope_vault_ids(db, replica) -> list[str]:
+    if replica.scope == "user":
+        return [v.id for v in db.query(Vault).filter(
+            Vault.tenant_id == replica.tenant_id, Vault.owner_user_id == replica.scope_id).all()]
+    return [v.id for v in db.query(Vault).filter(Vault.tenant_id == replica.tenant_id).all()]
+
+
 def replicate_due(force: bool = False) -> None:
     """Scheduler entry point. Interval-gated; a scope is skipped when its index
     signature is unchanged, so idle cycles are cheap."""
@@ -274,12 +394,18 @@ def replicate_due(force: bool = False) -> None:
     if not force and _last_run and (now - _last_run).total_seconds() < REPLICATE_INTERVAL_SECONDS:
         return
     _last_run = now
+    from . import status as worker_status
+    worker_status.record("index-replication", state="running", message="replicating indexes")
+    scopes_done = 0
     with SessionLocal() as db:
         node_id = _self_node_id(db)
         for scope in _scopes(db):
             try:
                 replicate_scope(db, scope, node_id)
+                scopes_done += 1
             except Exception:  # noqa: BLE001
                 db.rollback()
                 logger.exception("index replication failed for scope %s:%s",
                                  scope["scope"], scope["scope_id"])
+    worker_status.record("index-replication", state="idle",
+                         message=f"replicated {scopes_done} scope(s)", scopes=scopes_done)

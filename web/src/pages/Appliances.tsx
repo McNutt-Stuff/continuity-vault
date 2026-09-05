@@ -48,6 +48,15 @@ interface StoredData {
   recovery_points: number; objects: number; bytes: number;
   sources?: SourceSummary[]; items: StoredItem[];
 }
+interface IndexReplica {
+  id: string; destination: string; destination_label: string; status: string;
+  object_count: number; bytes: number; last_replicated_at: string | null; error: string;
+}
+const INDEX_STATUS: Record<string, { tone: "ok" | "warn" | "info" | "danger"; label: string }> = {
+  ok: { tone: "ok", label: "Protected" }, stale: { tone: "warn", label: "Stale" },
+  error: { tone: "danger", label: "Error" }, pending: { tone: "info", label: "Pending" },
+  verifying: { tone: "info", label: "Verifying" },
+};
 interface Command { type: string; status: string; sequence: number; created_at: string; }
 interface ApplianceIntegration {
   id: string; integration_type: string; label: string; enabled: boolean; status: string;
@@ -824,6 +833,13 @@ function StoredDataCard({ a }: { a: Appliance }) {
   const t = a.telemetry ?? {};
   const sd = a.stored_data;
   const sources = sd?.sources ?? [];
+  const [replicas, setReplicas] = useState<IndexReplica[]>([]);
+  useEffect(() => {
+    const ids = new Set((a.stores ?? []).map((x) => `store:${x.id}`));
+    api.get<{ replicas: IndexReplica[] }>("/index/status")
+      .then((s) => setReplicas((s.replicas || []).filter((r) => ids.has(r.destination))))
+      .catch(() => {});
+  }, [a.id, a.stores]);
   return (
     <Card style={{ marginBottom: 16 }}>
       <div className="spread" style={{ marginBottom: 10 }}>
@@ -839,7 +855,26 @@ function StoredDataCard({ a }: { a: Appliance }) {
           <Icon name="lock" size={12} /> Client-encrypted (AES-256-GCM), sealed at rest
         </div>
       )}
-      {sources.length === 0 && <div className="muted">No recovery points stored on this appliance yet.</div>}
+      {replicas.map((r) => {
+        const m = INDEX_STATUS[r.status] || INDEX_STATUS.pending;
+        return (
+          <div key={r.id} className="result-row" style={{ background: "color-mix(in srgb, var(--brand,#7a5cff) 8%, transparent)" }}>
+            <div className="result-icon" style={{ background: "var(--inset)", width: 34, height: 34 }}>
+              <Icon name="shield" size={16} />
+            </div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>Search index replica</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>
+                {r.destination_label} · {r.status === "ok" ? `${r.object_count.toLocaleString()} items · ${bytes(r.bytes)} · updated ${timeAgo(r.last_replicated_at)}`
+                  : r.status === "pending" ? "Localized appliance index — coming soon"
+                  : r.error || "not yet replicated"}
+              </div>
+            </div>
+            <Pill tone={m.tone} dot>{m.label}</Pill>
+          </div>
+        );
+      })}
+      {sources.length === 0 && replicas.length === 0 && <div className="muted">No recovery points stored on this appliance yet.</div>}
       {sources.map((s, i) => {
         const brand = brandForSource(s.source_type);
         return (

@@ -669,6 +669,7 @@ class IndexReplica(Base):
     key = Column(String, default="")              # storage object key of the encrypted index
     node_id = Column(String, nullable=True)       # node that produced this replica
     last_replicated_at = Column(DateTime, nullable=True)
+    last_verified_at = Column(DateTime, nullable=True)  # last integrity check
     error = Column(String, default="")
     created_at = Column(DateTime, default=_now)
 

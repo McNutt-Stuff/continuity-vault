@@ -692,6 +692,30 @@ class Agent:
         return {"store_id": store_id, "kind": entry["kind"],
                 "mirror_of_id": entry["mirror_of_id"]}
 
+    def _stage_index(self, params: dict) -> dict:
+        """Store a DR copy of a scope's encrypted search index delivered over the
+        signed command channel. Kept for future localized on-appliance search; the
+        file stays encrypted at rest (the appliance can't read it without the key)."""
+        import base64
+        blob = params.get("indexB64")
+        scope = params.get("scope", "tenant")
+        scope_id = params.get("scopeId", "")
+        if not blob:
+            return {"error": "missing index payload"}
+        idx_dir = DATA / "search-index"
+        try:
+            idx_dir.mkdir(parents=True, exist_ok=True)
+            safe = "".join(c for c in f"{scope}-{scope_id}" if c.isalnum() or c in "-_")
+            path = idx_dir / f"{safe}.sqlite.enc"
+            path.write_bytes(base64.b64decode(blob))
+        except (OSError, ValueError) as exc:
+            self.log.warning("stage index failed: %s", exc)
+            return {"error": str(exc)}
+        self.log.info("staged search index replica scope=%s:%s (%d bytes) at %s",
+                      scope, scope_id, path.stat().st_size, path)
+        return {"staged": True, "scope": scope, "scope_id": scope_id,
+                "bytes": path.stat().st_size, "object_count": params.get("objectCount")}
+
     def _telemetry(self) -> dict:
         cap = self.vault.capacity()
         plat = sysinfo.detect_platform()
@@ -842,6 +866,8 @@ class Agent:
                     result = self._forget_external_storage(payload["parameters"])
                 elif ctype == "RECONFIGURE_STORAGE":
                     result = self._reconfigure_external_storage(payload["parameters"])
+                elif ctype == "STAGE_INDEX":
+                    result = self._stage_index(payload["parameters"])
                 else:
                     result = {"note": f"acknowledged {ctype}"}
             except Exception as exc:

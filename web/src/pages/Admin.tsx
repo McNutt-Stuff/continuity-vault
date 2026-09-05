@@ -1387,6 +1387,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
           </table>
         </Card>
       )}
+      {tab === "usage" && <IndexReplicasBlock replicas={t.index_replicas} title="Search index replicas (DR copies of this customer's index)" />}
 
       {tab === "subscription" && (
         <Card style={{ marginBottom: 16 }}>
@@ -2091,6 +2092,26 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
               </tbody>
             </table>
           </Card>
+          {(live?.workers || []).length > 0 && (
+            <Card style={{ marginBottom: 14 }}>
+              <h3 style={{ margin: "0 0 4px", fontSize: 15 }}>Background workers</h3>
+              <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>In-process workers (replication, index integrity). Health is live and resets on restart.</div>
+              <table className="table">
+                <thead><tr><th>Worker</th><th>Health</th><th>State</th><th>Last activity</th><th>Detail</th></tr></thead>
+                <tbody>
+                  {(live?.workers || []).map((w: any) => (
+                    <tr key={w.name}>
+                      <td><div style={{ fontWeight: 600 }}>{w.name}</div>{w.runs != null && <div className="faint" style={{ fontSize: 10.5 }}>{w.runs} run(s)</div>}</td>
+                      <td><Pill tone={w.health === "ok" ? "ok" : w.health === "error" ? "danger" : "warn"} dot>{w.health}</Pill></td>
+                      <td><Pill tone={w.state === "running" ? "info" : w.state === "failed" ? "danger" : "ok"}>{w.state}</Pill></td>
+                      <td className="faint" style={{ fontSize: 12 }}>{w.updated_at ? fmtAbsolute(w.updated_at) : "—"}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>{w.message || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Card>
+          )}
           <div className="grid grid-2">
             <Card>
               <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Top processes</h3>
@@ -3173,6 +3194,44 @@ function RemoteTerminal({ id, name, onClose }: { id: string; name: string; onClo
   );
 }
 
+const INDEX_REPLICA_STATUS: Record<string, { tone: "ok" | "warn" | "info" | "danger"; label: string }> = {
+  ok: { tone: "ok", label: "Protected" }, stale: { tone: "warn", label: "Stale" },
+  error: { tone: "danger", label: "Error" }, pending: { tone: "info", label: "Pending" },
+  verifying: { tone: "info", label: "Verifying" },
+};
+
+// Reusable DR search-index replica health block for admin detail pages.
+function IndexReplicasBlock({ replicas, title = "Search index replicas" }: { replicas?: any[]; title?: string }) {
+  const rows = replicas || [];
+  return (
+    <Card>
+      <h3 style={{ margin: "0 0 4px", fontSize: 15 }}>{title}</h3>
+      <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
+        Encrypted disaster-recovery copies of the search index, verified on a schedule.
+      </div>
+      {rows.length === 0 ? <div className="muted">No index replicas yet.</div> : (
+        <table className="table">
+          <thead><tr><th>Destination</th><th>Status</th><th>Items</th><th>Replicated</th><th>Verified</th></tr></thead>
+          <tbody>
+            {rows.map((r) => {
+              const m = INDEX_REPLICA_STATUS[r.status] || INDEX_REPLICA_STATUS.pending;
+              return (
+                <tr key={r.id}>
+                  <td><div style={{ fontWeight: 600 }}>{r.destination_label}</div>{r.node_name && <div className="faint" style={{ fontSize: 10.5 }}>{r.node_name}</div>}</td>
+                  <td><Pill tone={m.tone} dot>{m.label}</Pill>{r.error ? <div className="faint" style={{ fontSize: 10.5, color: "var(--danger)" }}>{r.error}</div> : null}</td>
+                  <td>{r.status === "ok" ? (r.object_count || 0).toLocaleString() : "—"}</td>
+                  <td className="faint" style={{ fontSize: 12 }}>{r.last_replicated_at ? fmtAbsolute(r.last_replicated_at) : "—"}</td>
+                  <td className="faint" style={{ fontSize: 12 }}>{r.last_verified_at ? fmtAbsolute(r.last_verified_at) : "never"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </Card>
+  );
+}
+
 type ApplianceTab = "health" | "storage" | "config" | "security" | "logs" | "commands";
 const APPLIANCE_TABS: { key: ApplianceTab; label: string; icon: IconName }[] = [
   { key: "health", label: "System health", icon: "activity" },
@@ -3359,6 +3418,7 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
 
       {tab === "storage" && (
         <div className="grid grid-2">
+          <IndexReplicasBlock replicas={a.index_replicas} title="Search index replicas (this appliance)" />
           <Card>
             <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Storage volumes</h3>
             <div className="stack" style={{ gap: 10 }}>

@@ -40,6 +40,7 @@ COMMAND_TYPES = {
     "QUARANTINE",
     "SEAL",
     "OPEN_TERMINAL",
+    "STAGE_INDEX",
 }
 
 

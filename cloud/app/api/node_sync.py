@@ -538,9 +538,11 @@ def keys_report(db: Session) -> dict:
 def node_live(authorization: str = Header(default=""), db: Session = Depends(get_db)):
     _require_fleet(authorization)
     from .. import sysinfo
+    from ..workers import status as worker_status
     s = get_settings()
     out = sysinfo.live(cert_host=s.domain)
     out["db"] = _db_stats(db)
+    out["workers"] = worker_status.snapshot()
     return out
 
 

@@ -93,6 +93,11 @@ def start_scheduler() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("index replication failed")
             try:
+                from . import integrity
+                integrity.verify_due()
+            except Exception:  # noqa: BLE001
+                logger.exception("index integrity verification failed")
+            try:
                 _prune_db()
             except Exception:  # noqa: BLE001
                 logger.exception("db prune failed")
