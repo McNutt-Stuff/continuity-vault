@@ -541,6 +541,15 @@ export default function Search() {
   const [dateField, setDateField] = useState<"date" | "captured">("date");
   const [dateOpen, setDateOpen] = useState(false);
   const [data, setData] = useState<SearchResp | null>(null);
+  // Filters apply on demand (explicit "Apply filters" / Enter / search), NOT live:
+  // re-running on every checkbox raced and dropped rapid selections. A signature of
+  // the current selection vs. the last-applied one drives the Apply button's state.
+  const filterSig = JSON.stringify({
+    s: [...sources].sort(), t: [...types].sort(), l: [...labels].sort(),
+    a: attr, sb: sortBy, sd: sortDir, df: dateFrom, dt: dateTo, dfld: dateField,
+  });
+  const [appliedSig, setAppliedSig] = useState("");
+  const filtersDirty = !!data && appliedSig !== filterSig;
   const [locked, setLocked] = useState(false);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
@@ -704,8 +713,11 @@ export default function Search() {
       const text = await blob.text();
       const oversized = text.trimStart().startsWith("{") && text.includes("content_exceeds_cap");
       // Calendar events: render a formatted event card (title, when, where, who).
-      if (!oversized && (item.doc_type === "event" || item.category === "calendar"
-          || item.source_type === "google_calendar" || item.source_type === "outlook_calendar")) {
+      // Any calendar source normalizes to doc_type "event"; also match known
+      // calendar source types so every provider opens the same card.
+      if (!oversized && (item.doc_type === "event"
+          || item.source_type === "google_calendar" || item.source_type === "outlook_calendar"
+          || item.source_type === "icloud_calendar")) {
         try {
           setViewing({ item, kind: "calendar", calendar: parseCalendar(JSON.parse(text)), url });
           await loadRecovered();
@@ -821,6 +833,7 @@ export default function Search() {
       if (dateTo) params.set("date_to", dateTo);
       if (dateFrom || dateTo) params.set("date_field", dateField);
       setData(await api.get<SearchResp>(`/search?${params.toString()}`));
+      setAppliedSig(filterSig);  // mark the just-applied selection as current
       setLocked(false);
     } catch (e) {
       if (e instanceof ApiError && e.status === 403) {
@@ -838,7 +851,9 @@ export default function Search() {
   useEffect(() => {
     if (me?.passkey_verified) void run();
     else setLocked(true);
-  }, [me?.passkey_verified, sources, types, labels, attr, sortBy, sortDir, dateFrom, dateTo, dateField]);
+    // Filters no longer auto-run — they apply via the "Apply filters" button / Enter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me?.passkey_verified]);
 
   if (locked) {
     return (
@@ -1064,6 +1079,13 @@ export default function Search() {
               {hasFilters && (
                 <button className="btn ghost sm" style={{ alignSelf: "flex-end" }} onClick={clearAll}>Clear all</button>
               )}
+              <button className={`btn sm ${filtersDirty ? "primary" : "ghost"}`}
+                      style={{ alignSelf: "flex-end" }} disabled={!filtersDirty}
+                      title={filtersDirty ? "Apply the selected filters and reload results"
+                                          : "No unapplied filter changes"}
+                      onClick={() => void run()}>
+                <Icon name="check" size={14} /> Apply filters
+              </button>
               <div className="filter-select" style={{ marginLeft: "auto", position: "relative" }}>
                 <span>Date range</span>
                 <button className={`btn sm ${hasDate ? "primary" : "ghost"}`}
@@ -1135,6 +1157,11 @@ export default function Search() {
       {data && (
         <div className="muted" style={{ marginBottom: 10, fontSize: 13 }}>
           {data.count} result{data.count === 1 ? "" : "s"}
+          {filtersDirty && (
+            <span style={{ color: "var(--warn)", marginLeft: 8 }}>
+              · filters changed — <button className="fs-linkbtn" onClick={() => void run()}>Apply</button> to update
+            </span>
+          )}
         </div>
       )}
 
