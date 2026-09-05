@@ -742,6 +742,8 @@ def setup_storage(appliance_id: str, body: StorageSetupRequest,
     if not a or a.tenant_id != tenant.id:
         raise HTTPException(404, "appliance not found")
     _require_can_manage_appliance(principal, tenant, appliance_id, db)
+    logger.info("storage setup requested: appliance=%s serial=%r name=%r mirror_of=%s by=%s",
+                appliance_id, body.serial, body.name, body.mirror_of_id, principal.user_id)
     if not body.confirm:
         raise HTTPException(400, "formatting must be explicitly confirmed")
     if not body.serial:
@@ -752,7 +754,12 @@ def setup_storage(appliance_id: str, body: StorageSetupRequest,
                   if d.get("serial")}
     dev = candidates.get(body.serial)
     if not dev:
-        raise HTTPException(409, "that drive is no longer detected on the appliance")
+        logger.warning("storage setup rejected: serial %r not in the appliance's currently-"
+                       "detected removable drives %s (telemetry age may be stale, or the drive "
+                       "was unplugged/already claimed). appliance=%s",
+                       body.serial, sorted(candidates), appliance_id)
+        raise HTTPException(409, "That drive is no longer detected on the appliance. "
+                                 "Reconnect it and refresh the detected-drives list, then retry.")
     # A mirror shadows exactly one existing store (its source must belong here).
     kind = "external"
     if body.mirror_of_id:
@@ -769,13 +776,30 @@ def setup_storage(appliance_id: str, body: StorageSetupRequest,
     db.add(s)
     db.commit()
     db.refresh(s)
-    fleet.issue_command(db, a, "SETUP_STORAGE", principal.user_id, {
-        "storeId": s.id, "serial": body.serial, "device": dev.get("device") or body.device,
-        "name": s.name, "kind": kind, "mirrorOfId": body.mirror_of_id})
+    # Dispatch the signed SETUP_STORAGE command. If it can't be signed/queued, the
+    # setup can't proceed — mark the store errored (so it's visible + removable)
+    # and surface a clear reason instead of a bare 500 with no trace.
+    try:
+        cmd = fleet.issue_command(db, a, "SETUP_STORAGE", principal.user_id, {
+            "storeId": s.id, "serial": body.serial, "device": dev.get("device") or body.device,
+            "name": s.name, "kind": kind, "mirrorOfId": body.mirror_of_id})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("storage setup: could not issue SETUP_STORAGE for appliance=%s store=%s",
+                         appliance_id, s.id)
+        s.state = "error"
+        db.commit()
+        raise HTTPException(502, f"Could not dispatch the setup command to the appliance: {exc}")
+    online = bool(a.last_heartbeat_at and (_now() - a.last_heartbeat_at).total_seconds() < 90)
+    logger.info("storage setup dispatched: appliance=%s store=%s command=%s online=%s — the "
+                "appliance will format+mount on its next heartbeat", appliance_id, s.id, cmd.id, online)
+    if not online:
+        logger.warning("storage setup: appliance %s is OFFLINE (last heartbeat %s) — the command "
+                       "is queued and runs when it reconnects", appliance_id, a.last_heartbeat_at)
     audit.record(db, actor=principal.user_id, action="appliance.storage_setup",
                  tenant_id=tenant.id, resource=a.id, severity="notice",
                  detail={"storage": s.name, "serial": body.serial, "mirror": bool(body.mirror_of_id)})
-    return {"id": s.id, "name": s.name, "kind": s.kind, "state": s.state}
+    return {"id": s.id, "name": s.name, "kind": s.kind, "state": s.state,
+            "appliance_online": online}
 
 
 class MirrorRequest(BaseModel):

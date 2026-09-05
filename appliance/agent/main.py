@@ -533,7 +533,11 @@ class Agent:
         try:
             req_path.write_text(json.dumps({"action": action, "params": params}))
         except OSError as exc:
+            self.log.error("storage %s: could not queue request to the root helper at %s: %s",
+                           action, EXT_QUEUE, exc)
             return {"error": f"could not queue storage request: {exc}"}
+        self.log.info("storage %s: queued request %s for the root helper (%s); waiting up to %ds "
+                      "for cv-appliance-storage.service to process it", action, req_id, EXT_QUEUE, timeout)
         deadline = time.time() + timeout
         while time.time() < deadline:
             if res_path.exists():
@@ -542,9 +546,14 @@ class Agent:
                 finally:
                     res_path.unlink(missing_ok=True)
                     req_path.unlink(missing_ok=True)
+                self.log.info("storage %s: root helper responded: %s", action, result)
                 return result
             time.sleep(0.5)
         req_path.unlink(missing_ok=True)
+        self.log.error("storage %s: the root helper never responded within %ds. The privileged "
+                       "helper (cv-appliance-storage.service / .path) is likely not installed or "
+                       "not running — re-run the appliance installer. Queue dir: %s",
+                       action, timeout, EXT_QUEUE)
         return {"error": "storage helper did not respond (is cv-appliance-storage "
                          "installed and running?)"}
 
