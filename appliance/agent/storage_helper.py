@@ -51,6 +51,8 @@ def _write_result(req_id: str, payload: dict) -> None:
 def _handle(req: dict) -> dict:
     action = req.get("action")
     params = req.get("params") or {}
+    print(f"[storage-helper] handling action={action} store={params.get('storeId')} "
+          f"serial={params.get('serial')} kind={params.get('kind')}", flush=True)
     if action == "setup":
         store_id = params.get("storeId")
         if not store_id:
@@ -98,6 +100,7 @@ def process_once() -> int:
             result = {"error": str(exc)}
         except Exception as exc:  # noqa: BLE001
             result = {"error": f"{type(exc).__name__}: {exc}"}
+        print(f"[storage-helper] req {req_id} -> {result}", flush=True)
         _write_result(req_id, result)
         req_path.unlink(missing_ok=True)
         handled += 1

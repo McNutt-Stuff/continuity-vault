@@ -846,6 +846,11 @@ def delete_storage(appliance_id: str, storage_id: str,
     _require_can_manage_appliance(principal, tenant, appliance_id, db)
     if s.kind in ("builtin", "dedicated"):
         raise HTTPException(400, "the primary volume cannot be removed")
+    # Capture what we need BEFORE the row is deleted/expired (reading s.name after
+    # db.delete()+commit() raises a detached-instance error).
+    store_name, store_kind = s.name, s.kind
+    logger.info("removing appliance storage %s (%s, kind=%s, state=%s) from appliance %s",
+                storage_id, store_name, store_kind, s.state, appliance_id)
     # Any mirrors shadowing this store lose their source — revert them to plain
     # external stores so they stop being treated as mirrors.
     for m in (db.query(ApplianceStorage)
@@ -853,14 +858,34 @@ def delete_storage(appliance_id: str, storage_id: str,
         m.mirror_of_id = None
         m.kind = "external"
     a = db.get(Appliance, appliance_id)
-    # Tell the appliance to unmount + deregister the drive (data is left intact).
-    if a and s.kind in ("external", "mirror"):
-        fleet.issue_command(db, a, "FORGET_STORAGE", principal.user_id, {"storeId": s.id})
+    # Best-effort: tell the appliance to unmount + deregister the drive (data is
+    # left intact). A failed/offline appliance or an unsignable command must NEVER
+    # block removing the record — the store row is the source of truth in the UI.
+    forget_issued = False
+    if a and store_kind in ("external", "mirror"):
+        try:
+            fleet.issue_command(db, a, "FORGET_STORAGE", principal.user_id, {"storeId": storage_id})
+            forget_issued = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not issue FORGET_STORAGE for %s (removing record anyway): %s",
+                           storage_id, exc)
+            db.rollback()
+            # Re-fetch after rollback so the delete below is on a live instance.
+            s = db.get(ApplianceStorage, storage_id)
+            if s is None:
+                return {"ok": True, "forget_issued": False}
+            for m in (db.query(ApplianceStorage)
+                      .filter(ApplianceStorage.mirror_of_id == storage_id).all()):
+                m.mirror_of_id = None
+                m.kind = "external"
     db.delete(s)
     db.commit()
     audit.record(db, actor=principal.user_id, action="appliance.storage_removed",
-                 tenant_id=tenant.id, resource=appliance_id, detail={"storage": s.name})
-    return {"ok": True}
+                 tenant_id=tenant.id, resource=appliance_id,
+                 detail={"storage": store_name, "forget_issued": forget_issued})
+    logger.info("appliance storage %s (%s) removed; forget_command=%s",
+                storage_id, store_name, forget_issued)
+    return {"ok": True, "forget_issued": forget_issued}
 
 
 # --------------------------------------------------------------------------

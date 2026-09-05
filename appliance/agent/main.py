@@ -861,9 +861,9 @@ class Agent:
                 elif ctype == "REQUEST_VERIFICATION":
                     result = {"integrity": "verified"}
                 elif ctype == "SETUP_STORAGE":
-                    result = self._setup_external_storage(payload["parameters"])
+                    result = await asyncio.to_thread(self._setup_external_storage, payload["parameters"])
                 elif ctype == "FORGET_STORAGE":
-                    result = self._forget_external_storage(payload["parameters"])
+                    result = await asyncio.to_thread(self._forget_external_storage, payload["parameters"])
                 elif ctype == "RECONFIGURE_STORAGE":
                     result = self._reconfigure_external_storage(payload["parameters"])
                 elif ctype == "STAGE_INDEX":
