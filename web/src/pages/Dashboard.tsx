@@ -48,6 +48,14 @@ function fmtOldest(iso: string | null): string {
 const ICONS = ["mail", "key", "cloud", "file", "database", "image", "activity", "user", "server", "shield", "lock", "clock", "grid", "link"];
 const iconName = (n: string) => (ICONS.includes(n) ? n : "database") as never;
 
+function purgeCountdown(executeAt: string | null): string {
+  if (!executeAt) return "soon";
+  const ms = new Date(executeAt.endsWith("Z") ? executeAt : `${executeAt}Z`).getTime() - Date.now();
+  if (ms <= 0) return "now";
+  const h = Math.floor(ms / 3_600_000), m = Math.floor((ms % 3_600_000) / 60_000);
+  return h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
+}
+
 export default function Dashboard() {
   const nav = useNavigate();
   const { me } = useAuth();
@@ -57,6 +65,7 @@ export default function Dashboard() {
   const [period, setPeriod] = useState("week");
   const [trends, setTrends] = useState<Trends | null>(null);
   const [actions, setActions] = useState<PendingAction[]>([]);
+  const [purges, setPurges] = useState<{ id: string; source_label: string; all_destinations: boolean; destination_labels: string[]; data_map_active: boolean; execute_at: string | null }[]>([]);
   const [pickerAccount, setPickerAccount] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [trendsLoaded, setTrendsLoaded] = useState(false);
@@ -75,6 +84,7 @@ export default function Dashboard() {
   useEffect(() => {
     api.get<Tenant>("/tenant").then(setTenant).catch(() => {});
     api.get<{ pq_available?: boolean }>("/health").then(setHealth).catch(() => {});
+    api.get<typeof purges>("/connectors/purge-requests").then(setPurges).catch(() => {});
     reloadActions();
   }, []);
 
@@ -124,6 +134,26 @@ export default function Dashboard() {
           </button>
         </div>
       </div>
+
+      {purges.map((p) => (
+        <Card key={p.id} style={{ marginBottom: 16, borderColor: "var(--danger)", cursor: "pointer" }} onClick={() => nav("/connectors")}>
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            <div className="result-icon" style={{ background: "var(--inset)", color: "var(--danger)" }}>
+              <Icon name="alert" size={18} />
+            </div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>
+                Purge scheduled — {p.source_label} ({p.all_destinations ? "everywhere" : (p.destination_labels.join(", ") || "selected storage")}) runs {purgeCountdown(p.execute_at)}
+              </div>
+              <div className="faint" style={{ fontSize: 12.5 }}>
+                This permanently deletes the data and its search-index records and cannot be undone once it runs. Manage it (cancel or run now) on the Sources page.
+                {p.data_map_active && " A data map still routes this source — it will re-create data unless you disable/remove that mapping."}
+              </div>
+            </div>
+            <Icon name="link" size={16} />
+          </div>
+        </Card>
+      ))}
 
       {ov?.cloud_deletion?.pending && (
         <Card style={{ marginBottom: 16, borderColor: "var(--danger)", cursor: "pointer" }} onClick={() => nav("/onboarding")}>

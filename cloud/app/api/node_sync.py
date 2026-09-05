@@ -234,6 +234,7 @@ class PushPayload(BaseModel):
     network_usage: list[dict] = []
     integration_runs: list[dict] = []
     communications: list[dict] = []
+    index_replicas: list[dict] = []
 
 
 _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
@@ -267,7 +268,8 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     counts = {"receipts": 0, "documents": 0, "connector_accounts": 0,
               "jobs": 0, "agents": 0, "appliances": 0, "appliance_storages": 0,
               "insights": 0,
-              "integrations": 0, "network": 0, "communications": 0}
+              "integrations": 0, "network": 0, "communications": 0,
+              "index_replicas": 0}
     # A node can hold data for a tenant/user that was removed on the control
     # plane; inserting it would violate a FK and abort the whole push. Skip any
     # row whose tenant or owner isn't present here so one orphan can't block sync.
@@ -370,6 +372,24 @@ def push(body: PushPayload, authorization: str = Header(default=""),
             db.add(UserInsights(**kw))
         counts["insights"] += 1
     _ingest_integration_push(db, body, counts, valid_tenants, valid_users)
+    # Search-index replica health (DR copies of the index the node produced). Key
+    # on (scope, scope_id, destination) since the row id differs per DB.
+    from ..models import IndexReplica
+    for ir in body.index_replicas:
+        if not _known(ir):
+            continue
+        kw = _deser(IndexReplica, ir)
+        existing = (db.query(IndexReplica)
+                    .filter(IndexReplica.scope == ir.get("scope"),
+                            IndexReplica.scope_id == ir.get("scope_id"),
+                            IndexReplica.destination == ir.get("destination")).first())
+        if existing is not None:
+            for k, v in kw.items():
+                if k != "id":
+                    setattr(existing, k, v)
+        else:
+            db.add(IndexReplica(**kw))
+        counts["index_replicas"] += 1
     # Communications history from the node's email service. The control plane owns
     # the open fields (the tracking pixel always hits the CP), so never overwrite
     # them from a node push — which also preserves a stub created by an early open.

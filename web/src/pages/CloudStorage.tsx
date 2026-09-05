@@ -27,6 +27,13 @@ interface ArkiveCloud {
   enabled: boolean; used_bytes: number; recovery_points: number; object_count: number;
   source_count: number; last_backup_at: string | null; sources: StorageSource[];
 }
+interface IndexReplica {
+  id: string; destination: string; destination_label: string; status: string;
+  object_count: number; bytes: number; last_replicated_at: string | null; error: string;
+}
+interface IndexStatus {
+  scope: string; replicas: IndexReplica[]; protected: boolean; healthy: number; total: number;
+}
 
 const HEALTH: Record<string, { tone: "ok" | "warn" | "info" | "danger"; label: string; dot: string }> = {
   healthy: { tone: "ok", label: "Healthy", dot: "#2dbe60" },
@@ -85,6 +92,7 @@ function FieldInput({ f, value, onChange, placeholder, showRequired = true }: {
 export default function CloudStorage() {
   const [list, setList] = useState<ListResp | null>(null);
   const [arkive, setArkive] = useState<ArkiveCloud | null>(null);
+  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -98,6 +106,7 @@ export default function CloudStorage() {
       ]);
       setList(l);
       setArkive(a);
+      setIndexStatus(await api.get<IndexStatus>("/index/status").catch(() => null));
     } catch { /* ignore */ }
     finally { setLoading(false); }
   }
@@ -133,6 +142,8 @@ export default function CloudStorage() {
 
       {/* Arkive Cloud — our hosted, fully-managed tier. Read-only: usage only. */}
       <ArkiveCloudRow data={arkive} onOpen={() => setArkiveDetail(true)} />
+
+      <IndexProtectionCard status={indexStatus} />
 
       {/* Bring your own storage — customer-owned buckets with full controls. */}
       <div className="spread" style={{ margin: "24px 0 12px", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
@@ -178,6 +189,56 @@ export default function CloudStorage() {
                          onDone={() => { setShowAdd(false); void load(); }} />
       )}
     </>
+  );
+}
+
+const INDEX_STATUS: Record<string, { tone: "ok" | "warn" | "info" | "danger"; label: string }> = {
+  ok: { tone: "ok", label: "Protected" },
+  stale: { tone: "warn", label: "Stale" },
+  error: { tone: "danger", label: "Error" },
+  pending: { tone: "info", label: "Pending" },
+};
+
+// The search index is what lets Arkive piece stored data back together, so we
+// replicate it (encrypted) to each storage destination for disaster recovery.
+function IndexProtectionCard({ status }: { status: IndexStatus | null }) {
+  if (!status || status.replicas.length === 0) return null;
+  return (
+    <Card style={{ marginTop: 16, borderLeft: "3px solid #7a5cff" }}>
+      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 8 }}>
+        <Icon name="database" size={16} />
+        <div style={{ fontWeight: 600, fontSize: 14 }}>Search index protection</div>
+        <Pill tone={status.protected ? "ok" : "warn"} dot>
+          {status.healthy}/{status.total} replicated
+        </Pill>
+      </div>
+      <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
+        An encrypted copy of your unified-search index is kept alongside your data on each storage
+        location so it can be restored after a failure ({status.scope === "user" ? "your account's index" : "your organization's index"}).
+      </div>
+      <div className="stack" style={{ gap: 6 }}>
+        {status.replicas.map((r) => {
+          const m = INDEX_STATUS[r.status] || INDEX_STATUS.pending;
+          return (
+            <div key={r.id} className="row" style={{ gap: 10, alignItems: "center", justifyContent: "space-between",
+                 padding: "8px 10px", background: "var(--inset)", borderRadius: 8 }}>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <Icon name={r.destination.startsWith("store:") || r.destination.startsWith("appliance") ? "server" : "cloud"} size={14} />
+                <span style={{ fontWeight: 600, fontSize: 12.5 }}>{r.destination_label}</span>
+              </div>
+              <div className="row" style={{ gap: 14, alignItems: "center", fontSize: 12 }}>
+                {r.status === "ok" && (
+                  <span className="faint">{r.object_count.toLocaleString()} items · {bytes(r.bytes)} · {fmtAgo(r.last_replicated_at)}</span>
+                )}
+                {r.status === "pending" && <span className="faint">Localized appliance index coming soon</span>}
+                {r.status === "error" && <span style={{ color: "var(--danger)" }}>{r.error || "failed"}</span>}
+                <Pill tone={m.tone} dot>{m.label}</Pill>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
   );
 }
 

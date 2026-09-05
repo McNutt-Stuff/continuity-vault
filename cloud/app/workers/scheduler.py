@@ -84,6 +84,15 @@ def start_scheduler() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("cloud-unsubscribe purge failed")
             try:
+                _run_due_purges()
+            except Exception:  # noqa: BLE001
+                logger.exception("source purge run failed")
+            try:
+                from . import index_replication
+                index_replication.replicate_due()
+            except Exception:  # noqa: BLE001
+                logger.exception("index replication failed")
+            try:
                 _prune_db()
             except Exception:  # noqa: BLE001
                 logger.exception("db prune failed")
@@ -231,6 +240,32 @@ def _check_appliance_health() -> None:
             except Exception:  # noqa: BLE001
                 db.rollback()
                 logger.exception("appliance health check failed for %s", a.id)
+
+
+def _run_due_purges() -> None:
+    """Execute scheduled source purges whose grace window has elapsed. Runs on the
+    control plane (where the PurgeRequest rows live); _execute_purge fans the
+    deletion out to the tenant's assigned node so the index is removed everywhere."""
+    from ..models import PurgeRequest
+    from ..api.connectors import _execute_purge
+    now = datetime.utcnow()
+    with SessionLocal() as db:
+        due = (db.query(PurgeRequest)
+               .filter(PurgeRequest.status == "scheduled",
+                       PurgeRequest.execute_at <= now).all())
+        for req in due:
+            try:
+                req.status = "running"
+                db.commit()
+                counts = _execute_purge(db, req)
+                logger.warning("purge executed: request=%s account=%s %s",
+                               req.id, req.connector_account_id, counts)
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                req.status = "failed"
+                req.error = str(exc)[:500]
+                db.commit()
+                logger.exception("purge failed: request=%s", req.id)
 
 
 def _purge_cloud_unsubscribed() -> None:

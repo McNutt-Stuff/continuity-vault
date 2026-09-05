@@ -2878,6 +2878,35 @@ def storage_usage(db: Session = Depends(get_db)):
 # Infrastructure backups (node/CP core-state backups to storage services)     #
 # =========================================================================== #
 
+@router.get("/index-replicas")
+def index_replicas(db: Session = Depends(get_db)):
+    """Fleet-wide search-index replication health: one row per (scope, destination)
+    with the tenant + producing node, so ops can confirm every customer's index is
+    replicated for disaster recovery."""
+    from ..models import IndexReplica
+    tenants = {t.id: t.name for t in db.query(Tenant).all()}
+    nodes = {n.id: n.name for n in db.query(Node).all()}
+    rows = []
+    healthy = total = 0
+    for r in db.query(IndexReplica).all():
+        total += 1
+        if r.status == "ok":
+            healthy += 1
+        rows.append({
+            "id": r.id, "tenant_id": r.tenant_id,
+            "tenant_name": tenants.get(r.tenant_id, r.tenant_id),
+            "scope": r.scope, "scope_id": r.scope_id,
+            "destination": r.destination, "destination_label": r.destination_label or r.destination,
+            "status": r.status, "object_count": r.object_count or 0, "bytes": int(r.bytes or 0),
+            "node_name": nodes.get(r.node_id) if r.node_id else "Control plane",
+            "last_replicated_at": r.last_replicated_at.isoformat() if r.last_replicated_at else None,
+            "error": r.error or "",
+        })
+    rows.sort(key=lambda x: (x["tenant_name"], x["destination_label"]))
+    return {"replicas": rows, "healthy": healthy, "total": total,
+            "scopes": len({(r["scope"], r["scope_id"]) for r in rows})}
+
+
 @router.get("/backups")
 def backups_overview(db: Session = Depends(get_db)):
     """Fleet-wide infrastructure backup status: coverage, per-node last run,

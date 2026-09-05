@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
@@ -605,6 +606,74 @@ def purge_targets(account_id: str,
 
 class PurgeBody(BaseModel):
     destinations: list[str] | None = None  # subset of destination ids, or None/["all"] = everywhere
+    execute_now: bool = False              # skip the grace window (still needs confirmation client-side)
+
+
+# Grace window between confirming a purge and it running, so a customer can change
+# their mind. Overridable per request via execute_now.
+PURGE_GRACE_HOURS = 24
+
+
+def _now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _data_map_active(db: Session, account: ConnectorAccount) -> bool:
+    """True when a Collection still routes this source, so it will re-accrue data
+    on the next sync unless the mapping is disabled/removed."""
+    return bool(account.active) and db.query(Collection).filter(
+        Collection.connector_account_id == account.id).count() > 0
+
+
+def _purge_request_view(db: Session, r) -> dict:
+    from .search import _location_label, _store_label_map
+    labels = _store_label_map(db, r.tenant_id)
+    dests = r.destinations or []
+    return {
+        "id": r.id, "connector_account_id": r.connector_account_id,
+        "source_type": r.source_type, "source_label": r.source_label,
+        "status": r.status, "all_destinations": bool(r.all_destinations),
+        "destinations": dests,
+        "destination_labels": [_location_label(d, labels) for d in dests] or (["Everywhere"] if r.all_destinations else []),
+        "data_map_active": bool(r.data_map_active),
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "execute_at": r.execute_at.isoformat() if r.execute_at else None,
+        "executed_at": r.executed_at.isoformat() if r.executed_at else None,
+        "result": r.result or {}, "error": r.error or "",
+    }
+
+
+def _execute_purge(db: Session, req) -> dict:
+    """Run a scheduled purge: delete the source's data from the chosen destinations
+    (or everywhere) on the assigned node AND the control plane, then the index +
+    account when nothing remains. Called by the worker or execute-now."""
+    from ..models import Node
+    account = db.get(ConnectorAccount, req.connector_account_id)
+    all_mode = bool(req.all_destinations)
+    dests = req.destinations or []
+    node_result = None
+    if get_settings().node_sync_scope and req.tenant_id:
+        tenant = db.get(Tenant, req.tenant_id)
+        node = db.get(Node, tenant.node_id) if tenant and tenant.node_id else None
+        if node and node.endpoint:
+            node_result = _node_purge(node, req.connector_account_id, req.tenant_id,
+                                      None if all_mode else dests)
+    counts = {"documents": 0, "recovery_points": 0, "collections": 0, "removed": False}
+    if account:
+        counts = (_purge_source_local(db, account) if all_mode
+                  else _purge_destinations(db, account, dests))
+    if node_result:
+        counts["node"] = node_result
+    req.status = "done"
+    req.executed_at = _now_naive()
+    req.result = counts
+    db.commit()
+    audit.record(db, actor=req.created_by or "system", action="connector.purged",
+                 tenant_id=req.tenant_id, resource=req.connector_account_id,
+                 category="security", severity="warning",
+                 detail={"label": req.source_label,
+                         "destinations": "all" if all_mode else dests, **counts})
+    return counts
 
 
 @router.post("/accounts/{account_id}/purge")
@@ -612,38 +681,106 @@ def purge(account_id: str, body: PurgeBody = PurgeBody(),
           principal: security.Principal = Depends(security.get_principal),
           tenant: Tenant = Depends(security.get_tenant),
           db: Session = Depends(get_db)):
-    """Permanently delete data captured from a source, optionally only from chosen
-    destinations. Irreversible. Requires the source's mapping to be disabled first
-    and the ``purge_enabled`` capability flag (an admin clears it for a legal hold)."""
+    """Schedule an irreversible purge of a source's data (optionally only from
+    chosen destinations). Runs after a grace window (default 24h) unless
+    execute_now is set. Requires the ``purge_enabled`` capability flag (an admin
+    clears it for a legal hold). A still-active data map is WARNED about (it will
+    re-accrue data), not blocked."""
     from .. import features
-    from ..models import Node, User
+    from ..models import PurgeRequest, User
     account = db.get(ConnectorAccount, account_id)
     if not account or account.tenant_id != tenant.id or account.owner_user_id != principal.user_id:
         raise HTTPException(404, "account not found")
     user = db.get(User, principal.user_id)
     if not features.resolve(user, tenant, "purge_enabled"):
         raise HTTPException(403, "Data purge is disabled for this account (legal hold).")
-    # The mapping must be disabled/removed first: a still-active source keeps
-    # collecting, so purging underneath it would immediately re-accrue data.
-    if account.active:
-        raise HTTPException(409, "Deactivate this source (disable its data mapping) before purging.")
+    # Only one active purge per source at a time.
+    existing = db.query(PurgeRequest).filter(
+        PurgeRequest.connector_account_id == account_id,
+        PurgeRequest.status.in_(["scheduled", "running"])).first()
+    if existing:
+        raise HTTPException(409, "A purge is already scheduled for this source.")
     dests = body.destinations
     all_mode = (not dests) or ("all" in dests)
-    # Federated: purge the node's local data first, then the control-plane copies.
-    node_result = None
-    if get_settings().node_sync_scope and tenant.node_id:
-        node = db.get(Node, tenant.node_id)
-        if node and node.endpoint:
-            node_result = _node_purge(node, account_id, tenant.id,
-                                      None if all_mode else dests)
-    label = account.account_label
-    counts = _purge_source_local(db, account) if all_mode else _purge_destinations(db, account, dests)
+    grace = timedelta(0) if body.execute_now else timedelta(hours=PURGE_GRACE_HOURS)
+    req = PurgeRequest(
+        tenant_id=tenant.id, owner_user_id=principal.user_id,
+        connector_account_id=account_id, source_type=account.connector_type,
+        source_label=account.account_label, all_destinations=all_mode,
+        destinations=[] if all_mode else list(dests),
+        data_map_active=_data_map_active(db, account),
+        created_by=principal.user_id, execute_at=_now_naive() + grace,
+        status="scheduled",
+    )
+    db.add(req)
     db.commit()
-    audit.record(db, actor=principal.user_id, action="connector.purged",
+    db.refresh(req)
+    audit.record(db, actor=principal.user_id, action="connector.purge_scheduled",
                  tenant_id=tenant.id, resource=account_id, category="security",
                  severity="warning",
-                 detail={"label": label, "destinations": "all" if all_mode else dests, **counts})
-    return {"ok": True, **counts, "node": node_result}
+                 detail={"label": req.source_label, "execute_now": body.execute_now,
+                         "destinations": "all" if all_mode else dests})
+    if body.execute_now:
+        req.status = "running"
+        db.commit()
+        counts = _execute_purge(db, req)
+        return {"ok": True, "executed": True, "request": _purge_request_view(db, req), **counts}
+    return {"ok": True, "executed": False, "request": _purge_request_view(db, req)}
+
+
+@router.get("/purge-requests")
+def list_purge_requests(principal: security.Principal = Depends(security.get_principal),
+                        tenant: Tenant = Depends(security.get_tenant),
+                        db: Session = Depends(get_db)):
+    """Active (scheduled/running) purges for the caller — drives the countdown
+    alerts on the Overview and the Sources page."""
+    from ..models import PurgeRequest
+    rows = (db.query(PurgeRequest)
+            .filter(PurgeRequest.tenant_id == tenant.id,
+                    PurgeRequest.owner_user_id == principal.user_id,
+                    PurgeRequest.status.in_(["scheduled", "running"]))
+            .order_by(PurgeRequest.execute_at.asc()).all())
+    return [_purge_request_view(db, r) for r in rows]
+
+
+@router.post("/purge-requests/{req_id}/cancel")
+def cancel_purge(req_id: str,
+                 principal: security.Principal = Depends(security.get_principal),
+                 tenant: Tenant = Depends(security.get_tenant),
+                 db: Session = Depends(get_db)):
+    from ..models import PurgeRequest
+    r = db.get(PurgeRequest, req_id)
+    if not r or r.tenant_id != tenant.id or r.owner_user_id != principal.user_id:
+        raise HTTPException(404, "purge request not found")
+    if r.status not in ("scheduled",):
+        raise HTTPException(409, f"cannot cancel a purge that is {r.status}")
+    r.status = "cancelled"
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="connector.purge_cancelled",
+                 tenant_id=tenant.id, resource=r.connector_account_id, category="security")
+    return {"ok": True, "status": r.status}
+
+
+@router.post("/purge-requests/{req_id}/execute-now")
+def execute_purge_now(req_id: str,
+                      principal: security.Principal = Depends(security.get_principal),
+                      tenant: Tenant = Depends(security.get_tenant),
+                      db: Session = Depends(get_db)):
+    """Skip the remaining grace window and run the purge immediately."""
+    from .. import features
+    from ..models import PurgeRequest, User
+    r = db.get(PurgeRequest, req_id)
+    if not r or r.tenant_id != tenant.id or r.owner_user_id != principal.user_id:
+        raise HTTPException(404, "purge request not found")
+    if r.status != "scheduled":
+        raise HTTPException(409, f"cannot execute a purge that is {r.status}")
+    user = db.get(User, principal.user_id)
+    if not features.resolve(user, tenant, "purge_enabled"):
+        raise HTTPException(403, "Data purge is disabled for this account (legal hold).")
+    r.status = "running"
+    db.commit()
+    counts = _execute_purge(db, r)
+    return {"ok": True, "executed": True, "request": _purge_request_view(db, r), **counts}
 
 
 def _identity_from_id_token(tokens: dict) -> str | None:

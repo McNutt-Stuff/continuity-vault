@@ -58,10 +58,25 @@ interface AgentSource {
   last_backup_at: string | null; last_object_count: number; destinations: string[];
 }
 
+interface PurgeRequest {
+  id: string; connector_account_id: string; source_type: string; source_label: string;
+  status: string; all_destinations: boolean; destinations: string[]; destination_labels: string[];
+  data_map_active: boolean; execute_at: string | null;
+}
+
 function agentOnline(a?: Agent): boolean {
   if (!a || a.state === "quarantined" || !a.last_heartbeat_at) return false;
   const iso = a.last_heartbeat_at.endsWith("Z") ? a.last_heartbeat_at : `${a.last_heartbeat_at}Z`;
   return Date.now() - new Date(iso).getTime() < 90_000;
+}
+
+function purgeCountdown(executeAt: string | null): string {
+  if (!executeAt) return "soon";
+  const iso = executeAt.endsWith("Z") ? executeAt : `${executeAt}Z`;
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return "now";
+  const h = Math.floor(ms / 3_600_000), m = Math.floor((ms % 3_600_000) / 60_000);
+  return h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
 }
 
 export default function Connectors() {
@@ -71,6 +86,7 @@ export default function Connectors() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [agentSources, setAgentSources] = useState<AgentSource[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
+  const [purges, setPurges] = useState<PurgeRequest[]>([]);
   const [setup, setSetup] = useState<CatalogItem | null>(null);
   const [toast, setToast] = useState("");
   const [query, setQuery] = useState("");
@@ -86,6 +102,7 @@ export default function Connectors() {
       setAgents(await api.get<Agent[]>("/agents").catch(() => [] as Agent[]));
       const cols = await api.get<AgentSource[]>("/collections").catch(() => [] as AgentSource[]);
       setAgentSources(cols.filter((c) => c.is_agent));
+      setPurges(await api.get<PurgeRequest[]>("/connectors/purge-requests").catch(() => [] as PurgeRequest[]));
       const t = await api.get<{ vaults: Vault[] }>("/tenant");
       setVaults(t.vaults);
     } finally {
@@ -416,14 +433,6 @@ export default function Connectors() {
       await notify({ title: "Couldn't load purge options", message: (e as ApiError).message, tone: "danger" });
       return;
     }
-    // The data mapping must be disabled/removed first.
-    if (targets.active) {
-      await notify({
-        title: "Deactivate the source first", tone: "warn",
-        message: `Disable ${a.account_label}'s data mapping by deactivating the source before you can purge its data.`,
-      });
-      return;
-    }
     const opts = [
       { label: "Everywhere — remove this source completely", value: "all" },
       ...targets.destinations.map((d) => ({
@@ -431,33 +440,70 @@ export default function Connectors() {
         value: d.id,
       })),
     ];
+    // Step 1 — where + when. Warn (don't block) if a data map still routes here.
     const sel = await formDialog({
       title: `Purge ${a.account_label}`,
-      message: "Choose where to permanently delete this source's data from. This is irreversible.",
+      message: targets.active
+        ? "⚠️ A data map still routes this source, so it will RE-CREATE data on the next sync unless you disable or remove that mapping in the Data Map first. Choose what to purge and when:"
+        : "Choose where to permanently delete this source's data from, and when. This is irreversible.",
       confirmLabel: "Continue",
-      fields: [{ name: "where", label: "Purge from", defaultValue: "all", options: opts }],
+      fields: [
+        { name: "where", label: "Purge from", defaultValue: "all", options: opts },
+        { name: "when", label: "When", defaultValue: "grace", options: [
+          { label: "In 24 hours (recommended — cancel anytime)", value: "grace" },
+          { label: "Immediately — no grace period", value: "now" },
+        ] },
+      ],
     });
     if (!sel) return;
-    const where = sel.where;
+    const where = sel.where, when = sel.when;
     const scope = where === "all"
       ? "everywhere — the source will be removed completely"
       : (opts.find((o) => o.value === where)?.label ?? where);
+    // Step 2 — hard irreversible confirmation.
     const ok2 = await confirmDialog({
-      title: "This cannot be undone",
-      message: `Once purged, ${a.account_label}'s data is NOT recoverable. Purge from ${scope}?`,
-      tone: "danger", confirmLabel: "Purge permanently",
+      title: "This permanently destroys data",
+      message: `Once purged, ${a.account_label}'s data is NOT recoverable — the encrypted copies are deleted from ${scope}, and its search index records are erased everywhere they live (cloud, appliance, node). ${when === "now" ? "This runs IMMEDIATELY." : "This runs in 24 hours; you can cancel or run it sooner from Overview or Sources."} Continue?`,
+      tone: "danger", confirmLabel: when === "now" ? "Purge now — permanent" : "Schedule purge",
     });
     if (!ok2) return;
+    // Step 3 — for execute-now, one more explicit confirmation.
+    if (when === "now") {
+      const ok3 = await confirmDialog({
+        title: "Final confirmation",
+        message: `Type-of-no-return: purge ${a.account_label} from ${scope} right now. There is no undo.`,
+        tone: "danger", confirmLabel: "Yes, purge now",
+      });
+      if (!ok3) return;
+    }
     try {
-      const r = await api.post<{ documents?: number; recovery_points?: number; removed?: boolean }>(
-        `/connectors/accounts/${a.id}/purge`, { destinations: where === "all" ? ["all"] : [where] });
-      flash(r.removed
-        ? `Purged — source removed, ${(r.recovery_points || 0).toLocaleString()} recovery points deleted`
-        : `Purged ${(r.recovery_points || 0).toLocaleString()} recovery point${(r.recovery_points || 0) === 1 ? "" : "s"}`);
+      const r = await api.post<{ executed?: boolean; request?: PurgeRequest }>(
+        `/connectors/accounts/${a.id}/purge`,
+        { destinations: where === "all" ? ["all"] : [where], execute_now: when === "now" });
+      flash(r.executed
+        ? `Purged ${a.account_label}`
+        : `Purge scheduled — runs in 24h. Cancel or run it now from Overview or here.`);
       await load();
     } catch (e) {
       await notify({ title: "Couldn't purge", message: (e as ApiError).message, tone: "danger" });
     }
+  }
+
+  async function cancelPurge(p: PurgeRequest) {
+    const ok = await confirmDialog({ title: "Cancel this purge?",
+      message: `Keep ${p.source_label}'s data. The scheduled purge will not run.`, confirmLabel: "Cancel purge" });
+    if (!ok) return;
+    try { await api.post(`/connectors/purge-requests/${p.id}/cancel`, {}); flash("Purge cancelled"); await load(); }
+    catch (e) { await notify({ title: "Couldn't cancel", message: (e as ApiError).message, tone: "danger" }); }
+  }
+
+  async function executePurgeNow(p: PurgeRequest) {
+    const ok = await confirmDialog({ title: "Purge now — permanent",
+      message: `Immediately and permanently delete ${p.source_label}'s data. There is no undo.`,
+      tone: "danger", confirmLabel: "Purge now" });
+    if (!ok) return;
+    try { await api.post(`/connectors/purge-requests/${p.id}/execute-now`, {}); flash(`Purged ${p.source_label}`); await load(); }
+    catch (e) { await notify({ title: "Couldn't purge", message: (e as ApiError).message, tone: "danger" }); }
   }
 
   // Group the catalog by functional type or provider family so the page stays
@@ -498,6 +544,33 @@ export default function Connectors() {
           <Icon name="link" size={15} /> Add source
         </button>
       </div>
+
+      {purges.length > 0 && (
+        <div className="stack" style={{ gap: 8, marginBottom: 16 }}>
+          {purges.map((p) => (
+            <div key={p.id} className="card" style={{ borderLeft: "3px solid var(--danger)", background: "var(--inset)", padding: "12px 14px" }}>
+              <div className="spread" style={{ gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <Icon name="alert" size={16} />
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 13.5 }}>
+                      Purge scheduled — {p.source_label} ({p.all_destinations ? "everywhere" : (p.destination_labels.join(", ") || "selected storage")})
+                    </div>
+                    <div className="faint" style={{ fontSize: 12 }}>
+                      Runs {purgeCountdown(p.execute_at)}. This permanently deletes the data and its index records. This cannot be undone once it runs.
+                      {p.data_map_active && " ⚠️ A data map still routes this source — it will re-create data unless you disable/remove that mapping."}
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn sm ghost" onClick={() => cancelPurge(p)}>Cancel</button>
+                  <button className="btn sm danger" onClick={() => executePurgeNow(p)}>Purge now</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {showAdd && (
         <div className="modal-backdrop" onClick={() => setShowAdd(false)}>

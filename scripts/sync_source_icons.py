@@ -72,6 +72,14 @@ SOURCE_ICONS: dict[str, dict] = {
     "gcp":        {"file": "Google Cloud icon (2026).svg", "search": "Google Cloud icon 2026"},
 }
 
+# Variant/local source types that reuse another type's brand mark. After the real
+# icons download, we copy the target's SVG to the alias filename so a direct
+# /source-icons/<alias>.svg request resolves too (mirror of the frontend/backend
+# registries: web/src/components/sourceIcons.ts + cloud/app/source_icons.py).
+SOURCE_ICON_ALIASES: dict[str, str] = {
+    "outlook_local": "outlook",
+}
+
 
 def _get(url: str, timeout: int = 25) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": UA})
@@ -126,6 +134,12 @@ def sync() -> int:
         else:
             print(f"  ✗ {stype:<14} could not resolve an SVG (check the title/search)")
             fail += 1
+    # Materialise variant aliases (e.g. outlook_local.svg = outlook.svg).
+    for alias, target in SOURCE_ICON_ALIASES.items():
+        src = OUT_DIR / f"{target}.svg"
+        if src.exists():
+            (OUT_DIR / f"{alias}.svg").write_bytes(src.read_bytes())
+            print(f"  ↳ {alias:<14} alias -> {target}.svg")
     print(f"\nSynced {ok} icon(s), {fail} missing → {OUT_DIR}")
     return 0 if fail == 0 else 1
 

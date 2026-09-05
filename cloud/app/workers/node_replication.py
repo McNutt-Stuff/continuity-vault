@@ -386,6 +386,7 @@ def _push(s) -> int:
         except ValueError:
             comm_since = None
     comm_high = comm_since
+    index_replicas = []
     with SessionLocal() as db:
         rq = db.query(SnapshotReceipt)
         if since is not None:
@@ -455,10 +456,15 @@ def _push(s) -> int:
             communications.append(_row(row))
             if row.created_at and (comm_high is None or row.created_at > comm_high):
                 comm_high = row.created_at
+        # Search-index replica health (DR copies of the index on each storage), so
+        # the portal/admin show index protection for node-routed tenants.
+        from ..models import IndexReplica
+        for row in db.query(IndexReplica).all():
+            index_replicas.append(_row(row))
     if not (receipts or documents or accounts or jobs or agents or appliances
             or appliance_storages or insights
             or integ_instances or net_clients or net_apps or net_usage or integ_runs
-            or communications):
+            or communications or index_replicas):
         return 0
     res = _post("/nodes/sync/push", {
         "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
@@ -468,6 +474,7 @@ def _push(s) -> int:
         "integration_instances": integ_instances, "network_clients": net_clients,
         "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
         "communications": communications,
+        "index_replicas": index_replicas,
     })
     if res and res.get("ok"):
         if high is not None:

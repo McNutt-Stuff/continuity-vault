@@ -623,6 +623,56 @@ class RecoveredItem(Base):
     destroyed = Column(Boolean, default=False)
 
 
+class PurgeRequest(Base):
+    """A scheduled, irreversible deletion of a source's data from chosen storage
+    destinations (and the search index everywhere it lives). Created with a grace
+    window (default 24h) during which the owner can cancel or execute immediately;
+    a worker runs it once ``execute_at`` passes."""
+
+    __tablename__ = "purge_requests"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    owner_user_id = Column(String, index=True)
+    connector_account_id = Column(String, index=True)
+    source_type = Column(String, default="")
+    source_label = Column(String, default="")
+    destinations = Column(JSON, default=list)   # [] / None = everywhere
+    all_destinations = Column(Boolean, default=False)
+    status = Column(String, default="scheduled", index=True)  # scheduled|cancelled|running|done|failed
+    data_map_active = Column(Boolean, default=False)  # a mapping still routes here (will re-accrue)
+    created_by = Column(String, default="")
+    created_at = Column(DateTime, default=_now)
+    execute_at = Column(DateTime, nullable=False, index=True)
+    executed_at = Column(DateTime, nullable=True)
+    result = Column(JSON, default=dict)
+    error = Column(String, default="")
+
+
+class IndexReplica(Base):
+    """Health of a replicated copy of a scope's unified-search index on one storage
+    destination. The index is serialized to an encrypted SQLite file and written
+    alongside the data it describes so it can be restored (or, in future, drive a
+    localized search on an appliance) after a catastrophe. One row per
+    (scope, destination)."""
+
+    __tablename__ = "index_replicas"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    scope = Column(String, default="tenant")     # "user" | "tenant"
+    scope_id = Column(String, index=True)         # user_id or tenant_id
+    destination = Column(String, index=True)      # cv-cloud | customer-s3 | byos:<id> | store:<id>
+    destination_label = Column(String, default="")
+    status = Column(String, default="pending")    # ok | stale | error | pending
+    object_count = Column(Integer, default=0)
+    bytes = Column(BigInteger, default=0)
+    signature = Column(String, default="")        # index content fingerprint (skip unchanged)
+    key = Column(String, default="")              # storage object key of the encrypted index
+    node_id = Column(String, nullable=True)       # node that produced this replica
+    last_replicated_at = Column(DateTime, nullable=True)
+    error = Column(String, default="")
+    created_at = Column(DateTime, default=_now)
+
+
 class AuditEvent(Base):
     """Tamper-evident audit ledger (append-only, hash-chained)."""
 

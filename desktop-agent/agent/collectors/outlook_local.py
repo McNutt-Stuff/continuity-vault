@@ -46,6 +46,7 @@ log = logging.getLogger("arkive")
 _GROUP = Path.home() / "Library" / "Group Containers" / "UBF8T346G9.Office" / "Outlook"
 _APPLE_EPOCH = 978307200  # Mac absolute time base (2001-01-01) in Unix seconds
 _MAX_ROWS = 20000         # per record type, safety cap
+_MAX_MESSAGES = 500000    # HxStore message fragments scanned per run (grouped after)
 _MAX_MIME_BYTES = 100 * 1024 * 1024
 _STATE_VERSION = 3
 
@@ -383,6 +384,10 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
             "SELECT name FROM sqlite_master WHERE type='table'")}
 
         # -- Emails + their attachments ------------------------------------ #
+        # New Outlook caches each email as SEVERAL fragments (a ~255-char preview
+        # plus, often, a full copy) that share a message_id (or block). We group
+        # by logical identity and keep the RICHEST fragment so the backed-up email
+        # carries the full body/subject/date, not a truncated preview.
         if want("mail") and "messages" in tables:
             mcols = [r[1] for r in con.execute("PRAGMA table_info(messages)")]
 
@@ -390,13 +395,42 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                 col = _hx_choose(mcols, *names)
                 return row[col] if col else None
 
+            def _score(row) -> int:
+                bk = (mget(row, "body_kind") or "").lower()
+                subj = (mget(row, "subject") or "").strip()
+                inherited = bool(mget(row, "subject_inherited"))
+                return ((2 if bk == "full" else 1) * 10_000_000
+                        + len(mget(row, "html") or "") * 2
+                        + len(mget(row, "body") or "")
+                        + (1_000_000 if subj and not inherited else 0))
+
+            best: Dict[str, sqlite3.Row] = {}
+            att_by_group: Dict[str, Tuple[set, set]] = {}
+            subj_by_group: Dict[str, str] = {}   # a real (non-inherited) subject
             order = "ORDER BY sent_unix DESC" if "sent_unix" in mcols else ""
-            for row in con.execute(f"SELECT rowid AS _rid, * FROM messages {order} LIMIT {_MAX_ROWS}"):
-                mid = mget(row, "message_id")
+            for row in con.execute(f"SELECT rowid AS _rid, * FROM messages {order} LIMIT {_MAX_MESSAGES}"):
+                mid = (mget(row, "message_id") or "").strip()
                 block = mget(row, "block") or row["_rid"]
-                key = re.sub(r"[^A-Za-z0-9._@+-]", "_", str(mid)) if mid else f"blk{block}"
-                oid = f"outlook_local:mail:hx:{key}"
-                subject = (mget(row, "subject") or "(no subject)").strip() or "(no subject)"
+                key = mid or f"blk{block}"
+                names, ids = att_by_group.setdefault(key, (set(), set()))
+                for n in _decode_json_list(mget(row, "attachment_names_json")):
+                    names.add(n)
+                for i in _decode_json_list(mget(row, "attachment_ids_json")):
+                    if str(i).isdigit():
+                        ids.add(int(i))
+                subj = (mget(row, "subject") or "").strip()
+                if subj and not mget(row, "subject_inherited") and key not in subj_by_group:
+                    subj_by_group[key] = subj
+                cur = best.get(key)
+                if cur is None or _score(row) > _score(cur):
+                    best[key] = row
+
+            for key, row in best.items():
+                mid = (mget(row, "message_id") or "").strip()
+                oid = "outlook_local:mail:hx:" + re.sub(r"[^A-Za-z0-9._@+-]", "_", key)
+                subject = (subj_by_group.get(key)
+                           or (mget(row, "subject") or "").strip() or "(no subject)")
+                subject_inherited = key not in subj_by_group and bool(mget(row, "subject_inherited"))
                 sender = mget(row, "sender") or ""
                 sender_name = mget(row, "sender_name") or ""
                 recipients = mget(row, "recipients") or ""
@@ -404,15 +438,14 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                 date_text = mget(row, "sent_utc") or ""
                 body = mget(row, "body") or ""
                 html_body = mget(row, "html") or ""
+                body_kind = (mget(row, "body_kind") or "").lower()
                 frm = (f"{sender_name} <{sender}>".strip() if sender_name and sender
                        else (sender or sender_name))
 
-                att_candidates = _decode_json_list(mget(row, "attachment_names_json"))
-                att_ids = [int(x) for x in _decode_json_list(mget(row, "attachment_ids_json"))
-                           if str(x).isdigit()]
-
+                names, ids = att_by_group.get(key, (set(), set()))
+                att_ids = sorted(ids)
                 att_refs: List[dict] = []
-                for cand in att_candidates:
+                for cand in sorted(names):
                     path = _resolve_attachment(cand, att_ids, exact, normalized, by_record)
                     if not path:
                         continue
@@ -433,7 +466,9 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                      "date_text": date_text, "message_id": mid or "",
                      "has_mime": True, "content_backed_up": True,
                      "source": "new-outlook", "capture": "experimental-hxstore",
-                     "body_kind": mget(row, "body_kind") or "",
+                     "body_kind": body_kind or "preview",
+                     "preview_only": body_kind != "full",
+                     "subject_inherited": subject_inherited,
                      "has_attachments": bool(att_refs),
                      "attachments": att_refs, "modified": when},
                     ["Outlook", "Mail"])

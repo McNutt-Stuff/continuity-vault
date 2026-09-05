@@ -184,20 +184,19 @@ def _ic(name: str) -> str:
 
 
 # Source types with a brand icon synced into the portal (web/public/source-icons).
-# Keep in sync with scripts/sync_source_icons.py SOURCE_ICONS.
-_BRAND_ICON_TYPES = {
-    "gmail", "onepassword", "outlook", "onedrive", "dropbox", "icloud",
-    "google_drive", "slack", "notion", "github", "reddit", "facebook",
-    "instagram", "linkedin", "evernote", "google_calendar", "google_contacts",
-    "google_photos", "imessage", "ubiquiti", "aws", "azure", "gcp",
-}
+# The formal registry (cloud/app/source_icons.py) mirrors the frontend so icons —
+# including variant aliases like outlook_local -> outlook — stay consistent.
+from . import source_icons as _source_icons
+
+_BRAND_ICON_TYPES = _source_icons.BRAND_ICON_TYPES
 
 
 def _source_icon_url(source_type: str) -> str:
     """Absolute URL to the source's brand icon on the portal — the SAME asset the
-    UI renders. Empty when there's no synced brand icon for the type."""
-    if source_type in _BRAND_ICON_TYPES:
-        return f"{_portal_url()}/source-icons/{source_type}.svg"
+    UI renders (aliases resolved). Empty when there's no synced brand icon."""
+    resolved = _source_icons.icon_source_type(source_type)
+    if resolved:
+        return f"{_portal_url()}/source-icons/{resolved}.svg"
     return ""
 
 
