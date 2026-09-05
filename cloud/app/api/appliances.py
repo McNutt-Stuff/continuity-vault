@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import PlainTextResponse, Response, FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -1350,6 +1350,29 @@ def control_plane_bundle(appliance: Appliance = Depends(_agent_appliance),
                  action="appliance.control_plane_retrust", tenant_id=appliance.tenant_id,
                  resource=appliance.id, detail={"key_id": bundle.get("keyId")})
     return {"bundle": bundle}
+
+
+@agent_router.get("/index-replica")
+def index_replica_pull(scope: str, scopeId: str, storeId: str,
+                       appliance: Appliance = Depends(_agent_appliance),
+                       db: Session = Depends(get_db)):
+    """Stream the staged encrypted search-index blob for a scope so the appliance
+    can PULL its DR copy (the STAGE_INDEX command carries only a pointer, never the
+    blob). Authenticated by the appliance bearer token; the store must belong to
+    this appliance and this appliance's tenant."""
+    store = db.get(ApplianceStorage, storeId)
+    if not store or store.appliance_id != appliance.id:
+        raise HTTPException(404, "store not found for this appliance")
+    from ..workers import index_replication
+    path = index_replication.staged_index_path(scope, scopeId, storeId)
+    if not path.exists():
+        logger.warning("index-replica pull: no staged blob for scope=%s:%s store=%s "
+                       "(appliance=%s)", scope, scopeId, storeId, appliance.id)
+        raise HTTPException(404, "no staged index for this scope")
+    logger.info("index-replica pull: serving %d bytes to appliance=%s scope=%s:%s",
+                path.stat().st_size, appliance.id, scope, scopeId)
+    return FileResponse(str(path), media_type="application/octet-stream",
+                        filename=path.name)
 
 
 @agent_router.post("/command-result")

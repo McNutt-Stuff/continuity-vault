@@ -227,16 +227,31 @@ def _self_node_id(db) -> Optional[str]:
     return n.id if n else None
 
 
-# Cap for staging an index over the signed command channel (large indexes stay
-# pending until a bulk appliance-transfer path exists).
-_APPLIANCE_STAGE_CAP = 24 * 1024 * 1024
+def stage_dir() -> Path:
+    """Where encrypted per-scope index blobs are staged for appliances to PULL.
+    Under the object store's parent so it's inside the service's writable paths."""
+    import os
+    base = os.environ.get("CV_OBJECT_STORE") or "/var/lib/continuity-vault/object_store"
+    d = Path(base).parent / "index-staging"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def stage_filename(scope: str, scope_id: str, store_id: str) -> str:
+    safe = "".join(c for c in f"{scope}-{scope_id}-{store_id}" if c.isalnum() or c in "-_")
+    return f"{safe}.sqlite.enc"
+
+
+def staged_index_path(scope: str, scope_id: str, store_id: str) -> Path:
+    return stage_dir() / stage_filename(scope, scope_id, store_id)
 
 
 def _stage_index_to_appliance(db, scope: dict, dest: str, cipher: bytes,
                               count: int, signature: str, node_id: Optional[str]) -> None:
-    """Deliver the encrypted index to an appliance via a signed STAGE_INDEX command
-    so it holds a DR copy (framework for future localized on-appliance search)."""
-    import base64
+    """Stage the encrypted index for an appliance to PULL over its authenticated
+    HTTPS channel, then issue a small signed STAGE_INDEX command pointing at it.
+    The blob is NEVER embedded in the command envelope (that both capped the size
+    at 24MB and bloated appliance_commands), so any index size can replicate."""
     from ..models import Appliance, ApplianceStorage
     from .. import fleet
     sid = dest.split(":", 1)[1] if ":" in dest else None
@@ -246,28 +261,34 @@ def _stage_index_to_appliance(db, scope: dict, dest: str, cipher: bytes,
         _upsert_replica(db, scope, dest, status="error", node_id=node_id,
                         error="appliance for store not found")
         return
-    if len(cipher) > _APPLIANCE_STAGE_CAP:
-        _upsert_replica(db, scope, dest, status="pending", node_id=node_id,
-                        object_count=count, bytes=len(cipher),
-                        error="index too large to stage over the command channel yet")
-        return
     existing = (db.query(IndexReplica)
                 .filter(IndexReplica.scope == scope["scope"],
                         IndexReplica.scope_id == scope["scope_id"],
                         IndexReplica.destination == dest).first())
     if existing and existing.status == "ok" and existing.signature == signature:
         return  # unchanged since last stage
+    # Write the encrypted blob to the staging dir (atomic) for the appliance to GET.
+    try:
+        path = staged_index_path(scope["scope"], scope["scope_id"], sid or "")
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(cipher)
+        tmp.replace(path)
+    except OSError as exc:
+        _upsert_replica(db, scope, dest, status="error", node_id=node_id,
+                        object_count=count, bytes=len(cipher),
+                        error=f"could not stage index blob: {exc}"[:400])
+        return
     try:
         fleet.issue_command(db, appliance, "STAGE_INDEX", "system", {
             "scope": scope["scope"], "scopeId": scope["scope_id"],
             "storeId": sid, "key": _INDEX_KEY, "objectCount": count,
-            "signature": signature,
-            "indexB64": base64.b64encode(cipher).decode()})
+            "bytes": len(cipher), "signature": signature, "pull": True})
         _upsert_replica(db, scope, dest, status="ok", object_count=count,
                         bytes=len(cipher), signature=signature, key=_INDEX_KEY,
                         node_id=node_id, last_replicated_at=_now(), error="")
-        logger.info("index staged to appliance %s scope=%s:%s (%d bytes)",
-                    appliance.id, scope["scope"], scope["scope_id"], len(cipher))
+        logger.info("index staged for appliance %s scope=%s:%s (%d bytes, pull) — "
+                    "STAGE_INDEX issued", appliance.id, scope["scope"],
+                    scope["scope_id"], len(cipher))
     except Exception as exc:  # noqa: BLE001
         _upsert_replica(db, scope, dest, status="error", node_id=node_id,
                         error=f"stage command failed: {exc}"[:400])

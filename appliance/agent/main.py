@@ -230,6 +230,29 @@ class Agent:
         self._load_registration()
         if not self.activated:
             self._load_pending()
+        self._log_storage_helper_health()
+
+    def _log_storage_helper_health(self) -> None:
+        """Log whether the privileged storage helper (needed to format/mount
+        external drives) looks installed, so a failed setup is diagnosable."""
+        try:
+            import subprocess
+            q_ok = EXT_QUEUE.is_dir()
+            try:
+                r = subprocess.run(["systemctl", "is-active", "cv-appliance-storage.path"],
+                                   capture_output=True, text=True, timeout=5)
+                unit = (r.stdout or r.stderr).strip() or "unknown"
+            except Exception as exc:  # noqa: BLE001
+                unit = f"unchecked ({exc})"
+            if q_ok and unit == "active":
+                self.log.info("storage helper ready: queue=%s cv-appliance-storage.path=active",
+                              EXT_QUEUE)
+            else:
+                self.log.warning("storage helper may NOT be ready: queue_dir_exists=%s "
+                                 "cv-appliance-storage.path=%s — external-drive setup will time "
+                                 "out until the installer runs. queue=%s", q_ok, unit, EXT_QUEUE)
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("could not check storage helper health: %s", exc)
 
     # -- registration / activation ------------------------------------
 
@@ -469,6 +492,10 @@ class Agent:
                                  cp_key, local_key)
                 await self._retrust_control_plane(client, cp_key)
             ncmd = len(data.get("commands", []))
+            if ncmd:
+                self.log.info("heartbeat: %d command(s) queued: %s", ncmd,
+                              ", ".join(c.get("payload", {}).get("commandType", "?")
+                                        for c in data.get("commands", [])))
             for command in data.get("commands", []):
                 await self._handle_command(client, command)
         # Visible so heartbeat activity can be confirmed in the appliance log.
@@ -702,28 +729,59 @@ class Agent:
                 "mirror_of_id": entry["mirror_of_id"]}
 
     def _stage_index(self, params: dict) -> dict:
-        """Store a DR copy of a scope's encrypted search index delivered over the
-        signed command channel. Kept for future localized on-appliance search; the
+        """Store a DR copy of a scope's encrypted search index. Large indexes are
+        PULLED over the authenticated HTTPS channel (the command carries only a
+        pointer); tiny legacy payloads may still arrive inline as indexB64. The
         file stays encrypted at rest (the appliance can't read it without the key)."""
         import base64
-        blob = params.get("indexB64")
         scope = params.get("scope", "tenant")
         scope_id = params.get("scopeId", "")
-        if not blob:
-            return {"error": "missing index payload"}
+        store_id = params.get("storeId", "")
         idx_dir = DATA / "search-index"
+        safe = "".join(c for c in f"{scope}-{scope_id}" if c.isalnum() or c in "-_")
+        path = idx_dir / f"{safe}.sqlite.enc"
         try:
             idx_dir.mkdir(parents=True, exist_ok=True)
-            safe = "".join(c for c in f"{scope}-{scope_id}" if c.isalnum() or c in "-_")
-            path = idx_dir / f"{safe}.sqlite.enc"
-            path.write_bytes(base64.b64decode(blob))
-        except (OSError, ValueError) as exc:
-            self.log.warning("stage index failed: %s", exc)
+        except OSError as exc:
+            self.log.error("stage index: cannot create %s: %s", idx_dir, exc)
             return {"error": str(exc)}
+        blob = params.get("indexB64")
+        if blob:
+            self.log.info("stage index: writing inline payload scope=%s:%s", scope, scope_id)
+            try:
+                path.write_bytes(base64.b64decode(blob))
+            except (OSError, ValueError) as exc:
+                self.log.error("stage index (inline) failed scope=%s:%s: %s", scope, scope_id, exc)
+                return {"error": str(exc)}
+        elif params.get("pull"):
+            url = (f"{self._base()}/appliance/index-replica"
+                   f"?scope={scope}&scopeId={scope_id}&storeId={store_id}")
+            self.log.info("stage index: pulling scope=%s:%s (%s bytes expected) from %s",
+                          scope, scope_id, params.get("bytes"), url)
+            try:
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                with httpx.Client(timeout=120) as c:
+                    with c.stream("GET", url, headers=self._headers()) as resp:
+                        if resp.status_code != 200:
+                            body = resp.read()[:200]
+                            self.log.error("stage index: pull HTTP %s for scope=%s:%s — %s",
+                                           resp.status_code, scope, scope_id, body)
+                            return {"error": f"index pull failed: HTTP {resp.status_code}"}
+                        with open(tmp, "wb") as fh:
+                            for chunk in resp.iter_bytes(1024 * 256):
+                                fh.write(chunk)
+                tmp.replace(path)
+            except Exception as exc:  # noqa: BLE001
+                self.log.exception("stage index: pull failed scope=%s:%s", scope, scope_id)
+                return {"error": f"index pull failed: {exc}"}
+        else:
+            self.log.warning("stage index: no payload and no pull flag scope=%s:%s", scope, scope_id)
+            return {"error": "missing index payload"}
+        size = path.stat().st_size
         self.log.info("staged search index replica scope=%s:%s (%d bytes) at %s",
-                      scope, scope_id, path.stat().st_size, path)
+                      scope, scope_id, size, path)
         return {"staged": True, "scope": scope, "scope_id": scope_id,
-                "bytes": path.stat().st_size, "object_count": params.get("objectCount")}
+                "bytes": size, "object_count": params.get("objectCount")}
 
     def _telemetry(self) -> dict:
         cap = self.vault.capacity()
@@ -876,7 +934,7 @@ class Agent:
                 elif ctype == "RECONFIGURE_STORAGE":
                     result = self._reconfigure_external_storage(payload["parameters"])
                 elif ctype == "STAGE_INDEX":
-                    result = self._stage_index(payload["parameters"])
+                    result = await asyncio.to_thread(self._stage_index, payload["parameters"])
                 else:
                     result = {"note": f"acknowledged {ctype}"}
             except Exception as exc:
