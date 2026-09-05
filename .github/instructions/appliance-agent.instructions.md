@@ -18,6 +18,11 @@ description: "On-prem appliance agent — sandbox, privileged ops, commands, sto
   fleet signer bundle), policyHash. On signer drift the appliance re-pins via `/appliance/control-plane-bundle`.
   Wrap each handler in try/except → post an acked-with-error result so a failure stops redelivery and never
   crashes the heartbeat. Valid command types live in `cv_crypto/command.COMMAND_TYPES`.
+- **A NEW command type MUST be added to `cv_crypto/command.COMMAND_TYPES`** — it gates BOTH the cloud issue
+  side (`fleet.issue_command` → `ValueError: unknown command type X`) and the appliance verify side. Handling
+  it in `_handle_command` alone is not enough. Checklist: (1) add to `COMMAND_TYPES`, (2) handle in
+  `_handle_command`, (3) issue via `fleet.issue_command`. Both CP and appliance must run the new `cv_crypto`
+  (deploy cloud + let the appliance self-update), or a stale appliance rejects it on receipt.
 - **Outbound-only** management plane: the appliance heartbeats the CP (or its assigned node), drains commands,
   posts results. It never accepts inbound management. Storage/recovery bytes stay on-device.
 - **Shipping code:** the appliance bundle lists explicit files (`api/appliances.py` `_BUNDLE_FILES`/`_BUNDLE_DIRS`).
