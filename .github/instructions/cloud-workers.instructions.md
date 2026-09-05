@@ -1,0 +1,25 @@
+---
+applyTo: "cloud/app/workers/**/*.py"
+description: "Background workers: scheduler, jobs, replication, pruning, index replication."
+---
+
+# Background workers
+
+- The **scheduler** (`scheduler.py`) is a daemon loop; each step is wrapped in try/except so one failure
+  can't kill the thread. Add new periodic work as its own `try/except` in the loop calling a dedicated
+  function. Interval-gate expensive work (module-level `_last_*` timestamp) so idle cycles are cheap.
+- **Run on the assigned node.** In a federated fleet each server's DB only holds its own tenants' data.
+  Work that reads/writes a tenant's index/data must run where that tenant lives: the assigned node for
+  `tenant.node_id`, the control plane for unassigned tenants. Filter scopes by node ownership
+  (see `index_replication._scopes`); don't process another node's tenants.
+- **Never block startup.** Heavy one-time jobs (big-table backfills, index builds) run here in the
+  background (`CREATE INDEX CONCURRENTLY` via a worker AUTOCOMMIT connection), NOT in `db.py`.
+- **Sessions:** use `with SessionLocal() as db:`; commit per unit of work; `db.rollback()` on error before
+  continuing. Don't hold a transaction open across a long external call (idle-in-transaction blocks autovacuum).
+- **Node→CP propagation:** results a node produces (receipts, documents, jobs, index replicas, insights) are
+  pushed to the CP in `node_replication._push`; the CP applies them in `api/node_sync.py`. Add new pushed
+  models to both, guarded by a `valid_tenants` check so an orphan row can't abort the whole push.
+- **Pruning** (`pruning.py`) bounds high-churn tables; NEVER prune `audit_events` (hash-chained) or
+  `search_documents`/`snapshot_receipts` (recovery/history). Free big TOASTed JSON payloads on state
+  transition, not via a recurring `col::text <> '{}'` predicate (that detoasts the whole table).
+- **Memory:** stream rows (`.yield_per`) and ingest in bounded batches for anything that could be large.

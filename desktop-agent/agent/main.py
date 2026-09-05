@@ -325,8 +325,11 @@ class Agent:
         self._last_heartbeat = time.time()
         data = r.json()
         self.reg["config"] = data.get("config", self.reg.get("config", {}))
-        # Cloud-driven advanced setting: verbose (DEBUG) logging.
-        agent_log.set_verbose(bool(self.reg.get("config", {}).get("verbose_logging")))
+        # Cloud-driven log verbosity: explicit log_level wins, else the legacy
+        # verbose_logging bool (debug), else info.
+        _cfg = self.reg.get("config", {})
+        agent_log.set_level(_cfg.get("log_level")
+                            or ("debug" if _cfg.get("verbose_logging") else "info"))
         # Menu-bar icon show/hide preference — restart to apply if it changed.
         self._apply_tray_preference()
         # Per-node routing: once the tenant is pinned to a customer node the cloud

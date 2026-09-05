@@ -42,6 +42,15 @@ def set_verbose(verbose: bool) -> None:
     logging.getLogger("arkive").setLevel(logging.DEBUG if verbose else logging.INFO)
 
 
+_LEVELS = {"debug": logging.DEBUG, "info": logging.INFO,
+           "warning": logging.WARNING, "error": logging.ERROR}
+
+
+def set_level(name: str) -> None:
+    """Set the log level by name (cloud config CV_LOG_LEVEL / agent log_level)."""
+    logging.getLogger("arkive").setLevel(_LEVELS.get((name or "").lower(), logging.INFO))
+
+
 def tail(log_file: Path, lines: int = 50) -> list[str]:
     try:
         return log_file.read_text(errors="replace").splitlines()[-lines:]

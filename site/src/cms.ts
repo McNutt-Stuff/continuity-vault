@@ -10,6 +10,7 @@
 
 import { site, home, pricing, about } from "./content";
 import { applyPricing } from "./pricing";
+import { injectAnalytics } from "./analytics";
 
 const LOCAL_URL = "/site.json";
 const REMOTE_URL = `${site.appUrl}/api/site`;
@@ -61,6 +62,7 @@ async function fetchJson(url: string): Promise<any | null> {
 export function applyInlineCms(): boolean {
   const g = (globalThis as any).__ARKIVE_CMS__;
   if (!g || typeof g !== "object") return false;
+  injectAnalytics(g.analytics_id);
   applyPricing(g.pricing);
   if (g.published === false) return false;
   applyCms(g.content);
@@ -73,6 +75,7 @@ export function applyInlineCms(): boolean {
 export async function loadCms(): Promise<void> {
   const body = (await fetchJson(LOCAL_URL)) ?? (await fetchJson(REMOTE_URL));
   if (!body) return; // offline / no source → keep bundled defaults
+  injectAnalytics(body.analytics_id);
   applyPricing(body.pricing);
   if (body.published === false) return; // unpublished → keep bundled defaults
   applyCms(body.content);

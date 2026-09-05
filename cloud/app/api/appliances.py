@@ -883,6 +883,8 @@ _BUNDLE_FILES = (
     "infra/systemd/cv-appliance-agent.service",
     "infra/systemd/cv-appliance-selfupdate.service",
     "infra/systemd/cv-appliance-selfupdate.timer",
+    "infra/systemd/cv-appliance-storage.service",
+    "infra/systemd/cv-appliance-storage.path",
     "updater/appliance-update.sh",
 )
 
@@ -1257,10 +1259,24 @@ def heartbeat(body: HeartbeatRequest,
                     len(delivered), appliance.id, delivered_types)
     from .. import services
     return {"commands": delivered,
+            "config": _appliance_runtime_config(db, appliance),
             "latest_version": _appliance_bundle_version(),
             "control_plane_key_id": fleet.cloud_public_bundle().get("keyId"),
             "node_url": services.tenant_node_url(db, appliance.tenant_id),
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
+
+
+def _appliance_runtime_config(db: Session, appliance: Appliance) -> dict:
+    """Runtime settings delivered to the appliance from its assigned configuration
+    profile (e.g. log level), so admins can tune it from the config-profile page."""
+    from ..models import ConfigProfile
+    data = {}
+    pid = getattr(appliance, "config_profile_id", None)
+    if pid:
+        prof = db.get(ConfigProfile, pid)
+        if prof and prof.enabled:
+            data = prof.data or {}
+    return {"log_level": (data.get("CV_LOG_LEVEL") or "info")}
 
 
 class CommandResultRequest(BaseModel):

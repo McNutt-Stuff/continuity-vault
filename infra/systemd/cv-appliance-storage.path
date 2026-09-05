@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch the Arkive storage queue and run the privileged storage helper
+
+[Path]
+# The agent drops req-*.json files here; each change starts the helper service.
+PathModified=/var/lib/continuity-vault-appliance/storage-queue
+Unit=cv-appliance-storage.service
+
+[Install]
+WantedBy=multi-user.target

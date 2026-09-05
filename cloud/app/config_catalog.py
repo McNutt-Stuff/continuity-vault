@@ -63,6 +63,14 @@ CONFIG_CATALOG: list[dict] = [
     {"key": "tenant.default_shared", "label": "Default shared account tenant",
      "type": "string", "group": "Services", "choices": "shared-tenant",
      "description": "The shared tenant that personal (downgraded) accounts on this node belong to."},
+    {"key": "CV_GA_MEASUREMENT_ID", "label": "Google Analytics measurement ID",
+     "type": "string", "group": "Analytics", "example": "G-XXXXXXXXXX",
+     "description": "Google Analytics 4 measurement ID (gtag.js). When set, the portal "
+                    "and the public marketing site on this node load Google Analytics with it."},
+    {"key": "CV_LOG_LEVEL", "label": "Log level",
+     "type": "string", "group": "Diagnostics", "example": "info", "choices": "log-level",
+     "description": "Verbosity for this node's services and its agents/appliances "
+                    "(debug|info|warning|error). Higher detail aids troubleshooting; info is normal."},
 ]
 
 _INDEX = {c["key"]: c for c in CONFIG_CATALOG}

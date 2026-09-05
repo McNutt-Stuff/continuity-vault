@@ -69,8 +69,18 @@ def get_site(db: Session = Depends(get_db)):
     row = _content_row(db)
     merged = {**DEFAULT_SITE, **(row.content or {})}
     return {"content": merged, "pricing": _public_pricing(db),
+            "analytics_id": _analytics_id(db),
             "published": bool(row.published),
             "updated_at": row.updated_at.isoformat() if row.updated_at else None}
+
+
+def _analytics_id(db: Session) -> str:
+    """The node's configured Google Analytics measurement ID (empty when unset)."""
+    try:
+        from .. import node_config
+        return (node_config.get(db, "CV_GA_MEASUREMENT_ID", "") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _public_pricing(db: Session) -> dict:

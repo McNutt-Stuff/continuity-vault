@@ -1,0 +1,13 @@
+[Unit]
+Description=Arkive Appliance privileged storage helper (format/mount external drives)
+# Runs as root, OUTSIDE the agent sandbox, so it can partition/format/mount USB
+# and removable drives the sandboxed agent (NoNewPrivileges) cannot touch. It
+# processes requests the agent drops into the storage queue and hands the ready
+# volume back to the agent's service account.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/continuity-vault/appliance
+EnvironmentFile=/etc/continuity-vault/appliance.env
+ExecStart=/opt/continuity-vault/.venv/bin/python -m agent.storage_helper
+# Intentionally NOT sandboxed: mount/mkfs/parted need root + device access.

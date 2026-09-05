@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import time
+import uuid
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Optional
@@ -193,6 +194,8 @@ STORAGE_ROOT, STORAGE_KIND, STORAGE_NAME = _resolve_storage()
 # that remembers them (by serial) so a reconnected drive is re-mounted on boot.
 EXT_BASE = DATA / "ext"
 EXT_REGISTRY = DATA / "ext_stores.json"
+# Requests to the root storage helper (privileged format/mount) are dropped here.
+EXT_QUEUE = DATA / "storage-queue"
 
 
 class Agent:
@@ -441,6 +444,12 @@ class Agent:
                 return
             # Adopt the assigned node URL for all subsequent signaling.
             self._set_node_url(data.get("node_url") or None)
+            # Cloud-driven log verbosity (from the appliance's assigned config).
+            lvl = (data.get("config") or {}).get("log_level")
+            if lvl and lvl != getattr(self, "_log_level", None):
+                self._log_level = lvl
+                agent_log.set_level(lvl)
+                self.log.info("log level set to %s (cloud config)", lvl)
             # Cloud advertises the current bundle version; the root self-update
             # timer applies it headlessly. Log when an update is pending.
             latest = data.get("latest_version")
@@ -511,6 +520,33 @@ class Agent:
             EXT_REGISTRY.write_text(json.dumps(self._ext_stores))
         except Exception as exc:  # noqa: BLE001
             self.log.warning("could not persist external-storage registry: %s", exc)
+
+    def _delegate_storage(self, action: str, params: dict, timeout: int = 240) -> dict:
+        """Hand a privileged disk op (format/mount/unmount) to the ROOT helper via
+        the storage queue and wait for its result. The helper runs unsandboxed
+        (cv-appliance-storage.service, triggered by cv-appliance-storage.path)
+        because the agent can't gain privileges under NoNewPrivileges."""
+        req_id = uuid.uuid4().hex
+        EXT_QUEUE.mkdir(parents=True, exist_ok=True)
+        res_path = EXT_QUEUE / f"res-{req_id}.json"
+        req_path = EXT_QUEUE / f"req-{req_id}.json"
+        try:
+            req_path.write_text(json.dumps({"action": action, "params": params}))
+        except OSError as exc:
+            return {"error": f"could not queue storage request: {exc}"}
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if res_path.exists():
+                try:
+                    result = json.loads(res_path.read_text())
+                finally:
+                    res_path.unlink(missing_ok=True)
+                    req_path.unlink(missing_ok=True)
+                return result
+            time.sleep(0.5)
+        req_path.unlink(missing_ok=True)
+        return {"error": "storage helper did not respond (is cv-appliance-storage "
+                         "installed and running?)"}
 
     def _mount_ext_stores(self) -> None:
         """Mount every already-set-up external drive that's currently present, then
@@ -589,18 +625,18 @@ class Agent:
         return rows, detected
 
     def _setup_external_storage(self, params: dict) -> dict:
-        """Handle a cloud-signed SETUP_STORAGE command: format + mount + register a
-        new external drive. DESTRUCTIVE but guarded (serial-matched, external-only)."""
+        """Handle a cloud-signed SETUP_STORAGE command. The privileged format+mount
+        runs in the ROOT helper (the sandboxed agent can't partition/mount and can't
+        sudo under NoNewPrivileges); we then adopt the ready volume in place."""
         store_id = params.get("storeId")
         serial = params.get("serial") or ""
         if not store_id:
             return {"error": "missing storeId"}
-        res = storage_ops.setup_device(
-            device=params.get("device", ""), serial=serial, store_id=store_id,
-            name=params.get("name", "External Storage"), mount_base=str(EXT_BASE),
-            dedicated_path=settings.dedicated_path,
-            mirror_of_id=params.get("mirrorOfId"),
-            kind=params.get("kind", "external"))
+        res = self._delegate_storage("setup", params, timeout=240)
+        if not res.get("ok"):
+            self.log.error("external storage setup failed for %s (%s): %s",
+                           params.get("name"), serial, res.get("error") or "unknown")
+            return {"error": res.get("error") or "storage setup failed", "store_id": store_id}
         # Persist to the registry (replace any prior entry for this store/serial).
         self._ext_stores = [e for e in self._ext_stores
                             if e.get("store_id") != store_id and e.get("serial") != serial]
@@ -616,11 +652,15 @@ class Agent:
                 "capacity_bytes": res["capacity_bytes"], "used_bytes": res["used_bytes"]}
 
     def _forget_external_storage(self, params: dict) -> dict:
-        """Unmount + deregister an external store (data on the drive is left intact)."""
+        """Unmount + deregister an external store (data on the drive is left intact).
+        The unmount runs in the ROOT helper; registry cleanup is local."""
         store_id = params.get("storeId")
         mount = self._ext_mounts.pop(store_id, None)
-        if mount:
-            storage_ops.unmount(mount)
+        res = self._delegate_storage(
+            "forget", {"storeId": store_id, "mountpoint": mount}, timeout=60)
+        if not res.get("ok"):
+            self.log.warning("external storage forget helper error for %s: %s",
+                             store_id, res.get("error") or "unknown")
         self._ext_stores = [e for e in self._ext_stores if e.get("store_id") != store_id]
         self._save_ext_registry()
         self._apply_mirror_roots()
