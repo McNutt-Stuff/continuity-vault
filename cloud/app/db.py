@@ -260,6 +260,9 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE appliance_storages ADD COLUMN device_serial VARCHAR DEFAULT ''",
         "ALTER TABLE appliance_storages ADD COLUMN mirror_of_id VARCHAR",
         "ALTER TABLE appliance_storages ADD COLUMN last_seen_at TIMESTAMP",
+        # Integrity worker records the last successful verify per replica — added
+        # to the model after the table first shipped, so backfill the column.
+        "ALTER TABLE index_replicas ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMP",
         "ALTER TABLE nodes ADD COLUMN version_updated_at TIMESTAMP",
         "ALTER TABLE appliances ADD COLUMN version_updated_at TIMESTAMP",
         "ALTER TABLE desktop_agents ADD COLUMN version_updated_at TIMESTAMP",

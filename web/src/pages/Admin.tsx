@@ -5176,7 +5176,51 @@ function StorageUsageAdmin() {
           attribution follows each node's active storage target.
         </div>
       </Card>
+
+      <FleetIndexReplicas />
     </>
+  );
+}
+
+interface FleetReplica {
+  id: string; tenant_name: string; scope: string; destination: string; destination_label: string;
+  status: string; object_count: number; bytes: number; node_name: string;
+  last_replicated_at: string | null; error: string;
+}
+
+function FleetIndexReplicas() {
+  const [d, setD] = useState<{ replicas: FleetReplica[]; healthy: number; total: number; scopes: number } | null>(null);
+  useEffect(() => { api.get<any>("/admin/index-replicas").then(setD).catch(() => {}); }, []);
+  return (
+    <Card style={{ marginTop: 16 }}>
+      <div className="spread" style={{ marginBottom: 4 }}>
+        <h3 style={{ marginTop: 0, marginBottom: 0 }}>Search index replicas</h3>
+        {d && <Pill tone={d.total && d.healthy === d.total ? "ok" : d.total ? "warn" : "info"}>{d.healthy}/{d.total} healthy · {d.scopes} scopes</Pill>}
+      </div>
+      <div className="faint" style={{ fontSize: 12.5, marginBottom: 12 }}>
+        Encrypted disaster-recovery copies of every customer's search index across all storage destinations, verified on a schedule.
+      </div>
+      {!d ? <div className="muted">Loading index replicas…</div>
+        : d.replicas.length === 0 ? <div className="muted">No index replicas yet.</div> : (
+        <table className="table">
+          <thead><tr><th>Customer</th><th>Destination</th><th>Status</th><th>Items</th><th>Replicated</th></tr></thead>
+          <tbody>
+            {d.replicas.map((r) => {
+              const m = INDEX_REPLICA_STATUS[r.status] || INDEX_REPLICA_STATUS.pending;
+              return (
+                <tr key={r.id}>
+                  <td style={{ fontWeight: 600 }}>{r.tenant_name}</td>
+                  <td><div className="row" style={{ gap: 6 }}><DestIcon dest={r.destination} size={13} /> {r.destination_label}</div>{r.node_name && <div className="faint" style={{ fontSize: 10.5 }}>{r.node_name}</div>}</td>
+                  <td><Pill tone={m.tone} dot>{m.label}</Pill>{r.error ? <div className="faint" style={{ fontSize: 10.5, color: "var(--danger)" }}>{r.error}</div> : null}</td>
+                  <td>{r.status === "ok" ? (r.object_count || 0).toLocaleString() : "—"}</td>
+                  <td className="faint" style={{ fontSize: 12 }}>{r.last_replicated_at ? fmtAbsolute(r.last_replicated_at) : "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </Card>
   );
 }
 
