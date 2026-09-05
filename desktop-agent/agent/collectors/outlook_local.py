@@ -395,54 +395,110 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                 col = _hx_choose(mcols, *names)
                 return row[col] if col else None
 
-            def _score(row) -> int:
-                bk = (mget(row, "body_kind") or "").lower()
-                subj = (mget(row, "subject") or "").strip()
-                inherited = bool(mget(row, "subject_inherited"))
-                return ((2 if bk == "full" else 1) * 10_000_000
-                        + len(mget(row, "html") or "") * 2
-                        + len(mget(row, "body") or "")
-                        + (1_000_000 if subj and not inherited else 0))
+            def _norm(s) -> str:
+                return re.sub(r"\s+", " ", (s or "").strip().lower())
 
-            best: Dict[str, sqlite3.Row] = {}
-            att_by_group: Dict[str, Tuple[set, set]] = {}
-            subj_by_group: Dict[str, str] = {}   # a real (non-inherited) subject
-            order = "ORDER BY sent_unix DESC" if "sent_unix" in mcols else ""
+            def _su(row):
+                v = mget(row, "sent_unix")
+                try:
+                    return int(v) if v else None
+                except (TypeError, ValueError):
+                    return None
+
+            # Richness of a fragment's BODY (full copy beats the ~255-char preview).
+            def _body_score(row) -> int:
+                bk = (mget(row, "body_kind") or "").lower()
+                return ((2 if bk == "full" else 1) * 10_000_000
+                        + len(mget(row, "html") or "") * 2 + len(mget(row, "body") or ""))
+
+            # Trust of a fragment's ENVELOPE (sender/subject/date). A full-body block
+            # that hxprobe mis-addressed has no message_id + a borrowed subject, so it
+            # scores low and never dictates the sender.
+            def _env_score(row) -> int:
+                has_mid = 1 if (mget(row, "message_id") or "").strip() else 0
+                subj = (mget(row, "subject") or "").strip()
+                own_subject = 1 if (subj and not mget(row, "subject_inherited")) else 0
+                has_sender = 1 if (mget(row, "sender") or "").strip() else 0
+                return has_mid * 4 + own_subject * 2 + has_sender
+
+            # Pass 1: group fragments that carry a message_id (the reliable key);
+            # collect the rest as orphans (often a mis-addressed full-body block).
+            mid_groups: Dict[str, dict] = {}
+            subj_index: Dict[str, list] = {}   # normalized subject -> [message_id]
+            orphans: list = []
+            # Deterministic row order (by block) so grouping/tie-breaks are stable
+            # across runs and the content signature doesn't churn.
+            order = "ORDER BY block" if "block" in mcols else ""
             for row in con.execute(f"SELECT rowid AS _rid, * FROM messages {order} LIMIT {_MAX_MESSAGES}"):
                 mid = (mget(row, "message_id") or "").strip()
-                block = mget(row, "block") or row["_rid"]
-                key = mid or f"blk{block}"
-                names, ids = att_by_group.setdefault(key, (set(), set()))
-                for n in _decode_json_list(mget(row, "attachment_names_json")):
-                    names.add(n)
-                for i in _decode_json_list(mget(row, "attachment_ids_json")):
-                    if str(i).isdigit():
-                        ids.add(int(i))
-                subj = (mget(row, "subject") or "").strip()
-                if subj and not mget(row, "subject_inherited") and key not in subj_by_group:
-                    subj_by_group[key] = subj
-                cur = best.get(key)
-                if cur is None or _score(row) > _score(cur):
-                    best[key] = row
+                if mid:
+                    g = mid_groups.get(mid)
+                    if g is None:
+                        g = mid_groups[mid] = {"rows": [], "sent": set(), "subjects": set()}
+                    g["rows"].append(row)
+                    su = _su(row)
+                    if su is not None:
+                        g["sent"].add(su)
+                    subj = (mget(row, "subject") or "").strip()
+                    if subj and not mget(row, "subject_inherited"):
+                        ns = _norm(subj)
+                        if ns not in g["subjects"]:
+                            g["subjects"].add(ns)
+                            subj_index.setdefault(ns, []).append(mid)
+                else:
+                    orphans.append(row)
 
-            for key, row in best.items():
-                mid = (mget(row, "message_id") or "").strip()
-                oid = "outlook_local:mail:hx:" + re.sub(r"[^A-Za-z0-9._@+-]", "_", key)
-                subject = (subj_by_group.get(key)
-                           or (mget(row, "subject") or "").strip() or "(no subject)")
-                subject_inherited = key not in subj_by_group and bool(mget(row, "subject_inherited"))
-                sender = mget(row, "sender") or ""
-                sender_name = mget(row, "sender_name") or ""
-                recipients = mget(row, "recipients") or ""
-                when = _iso_from_unix(mget(row, "sent_unix"))
-                date_text = mget(row, "sent_utc") or ""
-                body = mget(row, "body") or ""
-                html_body = mget(row, "html") or ""
-                body_kind = (mget(row, "body_kind") or "").lower()
+            # Pass 2: attach each orphan to the message it belongs to (same subject +
+            # near-identical send time) so its full body enriches the RIGHT email;
+            # otherwise it's a standalone message keyed by subject/sender/time.
+            standalone: Dict[str, list] = {}
+            _WIN = 5  # seconds; fragments of one message share the send tick closely
+            for row in orphans:
+                su = _su(row)
+                subj = _norm(mget(row, "subject") or "")
+                attached = False
+                if su is not None and subj:
+                    for mid in subj_index.get(subj, []):
+                        g = mid_groups[mid]
+                        if any(abs(su - s) <= _WIN for s in g["sent"]):
+                            g["rows"].append(row)
+                            attached = True
+                            break
+                if not attached:
+                    # Key by subject + send time only — NOT sender, which hxprobe
+                    # can mis-assign to a full-body fragment; the envelope picker
+                    # then takes the trusted sender within the merged group.
+                    key = f"{subj}|{su}" if subj else f"blk{mget(row, 'block') or row['_rid']}"
+                    standalone.setdefault(key, []).append(row)
+
+            def _emit_group(group_key: str, rows: list, mid: str) -> None:
+                # Stable order so max()/attachment tie-breaks are deterministic.
+                rows = sorted(rows, key=lambda r: (mget(r, "block") or 0, r["_rid"]))
+                env = max(rows, key=_env_score)       # trusted headers
+                body_row = max(rows, key=_body_score)  # richest body
+                oid = ("outlook_local:mail:hx:" + re.sub(r"[^A-Za-z0-9._@+-]", "_", mid)) if mid \
+                    else ("outlook_local:mail:hx:" + hashlib.sha256(group_key.encode()).hexdigest()[:16])
+                subject = (mget(env, "subject") or "").strip() or "(no subject)"
+                subject_inherited = bool(mget(env, "subject_inherited")) and not mid
+                sender = mget(env, "sender") or ""
+                sender_name = mget(env, "sender_name") or ""
+                recipients = mget(env, "recipients") or ""
+                when = _iso_from_unix(mget(env, "sent_unix"))
+                date_text = mget(env, "sent_utc") or ""
+                body = mget(body_row, "body") or ""
+                html_body = mget(body_row, "html") or ""
+                body_kind = (mget(body_row, "body_kind") or "").lower()
                 frm = (f"{sender_name} <{sender}>".strip() if sender_name and sender
                        else (sender or sender_name))
 
-                names, ids = att_by_group.get(key, (set(), set()))
+                names: set = set()
+                ids: set = set()
+                for r in rows:
+                    for n in _decode_json_list(mget(r, "attachment_names_json")):
+                        names.add(n)
+                    for i in _decode_json_list(mget(r, "attachment_ids_json")):
+                        if str(i).isdigit():
+                            ids.add(int(i))
                 att_ids = sorted(ids)
                 att_refs: List[dict] = []
                 for cand in sorted(names):
@@ -474,6 +530,11 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                     ["Outlook", "Mail"])
                 if _emit_if_changed(obj, signature):
                     counts["mail"] += 1
+
+            for _mid, _g in mid_groups.items():
+                _emit_group(_mid, _g["rows"], _mid)
+            for _key, _rows in standalone.items():
+                _emit_group(_key, _rows, "")
 
         # -- Contacts ------------------------------------------------------- #
         if want("contacts") and "contacts" in tables:
