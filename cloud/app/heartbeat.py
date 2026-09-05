@@ -188,10 +188,28 @@ def _inline_into_index(webroot: str, body_text: str) -> None:
         import json
         from pathlib import Path as _Path
         from . import analytics
-        ga = (json.loads(body_text).get("analytics_id") or "").strip()
+        # Prefer THIS node's delivered CV_GA_MEASUREMENT_ID (heartbeat settings) over
+        # the /api/site analytics_id, which is the control plane's own node value —
+        # the public-web node's GA profile is delivered to it, not the CP.
+        ga = _delivered_ga() or (json.loads(body_text).get("analytics_id") or "").strip()
         analytics.inject_index(_Path(index), ga)
     except Exception as e:  # noqa: BLE001
         print(f"[heartbeat] could not inject analytics: {e}", file=sys.stderr)
+
+
+def _delivered_ga() -> str:
+    """CV_GA_MEASUREMENT_ID from this node's delivered settings (node-settings.json),
+    written by _apply_settings before the site is mirrored. Empty when unset."""
+    try:
+        with open(SETTINGS_PATH) as fh:
+            raw = json.load(fh) or {}
+        if isinstance(raw, dict) and ("profiles" in raw or "overrides" in raw):
+            eff = {**(raw.get("profiles") or {}), **(raw.get("overrides") or {})}
+        else:
+            eff = raw if isinstance(raw, dict) else {}
+        return (eff.get("CV_GA_MEASUREMENT_ID") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _apply_settings(payload: dict) -> None:
