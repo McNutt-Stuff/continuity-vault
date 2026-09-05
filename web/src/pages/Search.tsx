@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import type { ReactNode } from "react";
 import { api, ApiError, getToken } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, bytes, fmtAbsolute, Loading } from "../components/ui";
@@ -532,21 +533,22 @@ export default function Search() {
   const [sources, setSources] = useState<Set<string>>(new Set());          // selected collection ids
   const [types, setTypes] = useState<Set<string>>(() => new Set(DEFAULT_TYPES));  // selected categories
   const [labels, setLabels] = useState<Set<string>>(new Set());            // selected labels
-  const [attr, setAttr] = useState<string | null>(null);
-  const [attrKey, setAttrKey] = useState("");
+  const [attrs, setAttrs] = useState<string[]>([]);       // chained "key:value" attribute filters
+  const [attrKey, setAttrKey] = useState("");             // modal builder: chosen attribute key
+  const [attrDraft, setAttrDraft] = useState("");         // modal builder: value being typed
+  const [filterModalOpen, setFilterModalOpen] = useState(false);
   const [sortBy, setSortBy] = useState<"date" | "captured">("date");
   const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [dateField, setDateField] = useState<"date" | "captured">("date");
-  const [dateOpen, setDateOpen] = useState(false);
   const [data, setData] = useState<SearchResp | null>(null);
   // Filters apply on demand (explicit "Apply filters" / Enter / search), NOT live:
   // re-running on every checkbox raced and dropped rapid selections. A signature of
   // the current selection vs. the last-applied one drives the Apply button's state.
   const filterSig = JSON.stringify({
     s: [...sources].sort(), t: [...types].sort(), l: [...labels].sort(),
-    a: attr, sb: sortBy, sd: sortDir, df: dateFrom, dt: dateTo, dfld: dateField,
+    a: [...attrs].sort(), sb: sortBy, sd: sortDir, df: dateFrom, dt: dateTo, dfld: dateField,
   });
   const [appliedSig, setAppliedSig] = useState("");
   const filtersDirty = !!data && appliedSig !== filterSig;
@@ -826,7 +828,7 @@ export default function Search() {
       for (const id of sources) params.append("collection", id);
       for (const c of types) params.append("category", c);
       for (const l of labels) params.append("label", l);
-      if (attr) params.set("attr", attr);
+      for (const a of attrs) params.append("attr", a);
       params.set("sort", sortBy);
       params.set("direction", sortDir);
       if (dateFrom) params.set("date_from", dateFrom);
@@ -926,15 +928,6 @@ export default function Search() {
         <button className="btn primary sm" onClick={run}>Search</button>
       </div>
 
-      {loading && <Loading label="Searching your protected data…" />}
-      {!loading && data && data.results.length === 0 && (
-        <Card><div className="loading-state muted">
-          {data.total_indexed === 0
-            ? "Nothing is indexed yet — run a backup, then search."
-            : `No matches${q ? ` for “${q}”` : ""}. Search covers titles and indexed metadata (sender, path, tags, folder…), not encrypted file contents.`}
-        </div></Card>
-      )}
-
       {data && (() => {
         const cats = Object.entries(data.facets.category).sort((a, b) => b[1] - a[1]);
         const srcs = Object.entries(data.facets.source).sort((a, b) => b[1] - a[1]);
@@ -942,22 +935,14 @@ export default function Search() {
         const srcAccounts = data.facets.source_accounts || {};
         const attrKeys = Object.keys(data.facets.attributes || {});
         const attrVals = attrKey ? data.facets.attributes?.[attrKey] : undefined;
-        const attrValue = attr && attr.startsWith(`${attrKey}:`) ? attr.slice(attrKey.length + 1) : "";
-
-        const selTypes = cats.filter(([c]) => types.has(c)).length;
-        const selLabels = labelFacets.filter(([l]) => labels.has(l)).length;
-        const selSources = srcs.reduce(
-          (acc, [st]) => acc + (srcAccounts[st] || []).filter((a) => sources.has(a.id)).length, 0);
-        const typeSummary = selTypes === 0 ? "All types" : `${selTypes} type${selTypes === 1 ? "" : "s"} selected`;
-        const labelSummary = selLabels === 0 ? "All labels" : `${selLabels} label${selLabels === 1 ? "" : "s"} selected`;
-        const sourceSummary = selSources === 0 ? "All sources" : `${selSources} source${selSources === 1 ? "" : "s"} selected`;
 
         const typesIsDefault = types.size === DEFAULT_TYPES.length && DEFAULT_TYPES.every((t) => types.has(t));
-        const hasFilters = sources.size > 0 || labels.size > 0 || !!attr || !typesIsDefault;
         const hasDate = !!(dateFrom || dateTo);
+        const anyActive = sources.size > 0 || labels.size > 0 || attrs.length > 0 || !typesIsDefault || hasDate;
+
         function clearAll() {
           setSources(new Set()); setTypes(new Set(DEFAULT_TYPES)); setLabels(new Set());
-          setAttr(null); setAttrKey("");
+          setAttrs([]); setAttrKey(""); setAttrDraft(""); setDateFrom(""); setDateTo("");
         }
         const toggleType = (c: string) => setTypes((prev) => {
           const n = new Set(prev); n.has(c) ? n.delete(c) : n.add(c); return n;
@@ -973,188 +958,278 @@ export default function Search() {
           if (allSel) ids.forEach((i) => n.delete(i)); else ids.forEach((i) => n.add(i));
           return n;
         });
+        const addAttr = () => {
+          const v = attrDraft.trim();
+          if (!attrKey || !v) return;
+          const entry = `${attrKey}:${v}`;
+          setAttrs((prev) => (prev.includes(entry) ? prev : [...prev, entry]));
+          setAttrDraft("");
+        };
+        const removeAttr = (a: string) => setAttrs((prev) => prev.filter((x) => x !== a));
         const dateFieldLabel = dateField === "captured" ? "captured" : "object date";
-        const dateChip = hasDate
-          ? `${dateFrom || "…"} → ${dateTo || "…"} (${dateFieldLabel})`
-          : "";
+
+        // Account label lookup for source chips.
+        const acctLabel: Record<string, string> = {};
+        for (const st of Object.keys(srcAccounts)) for (const a of srcAccounts[st]) acctLabel[a.id] = a.label;
+
+        // Active-filter chips (each individually removable).
+        const chips: { key: string; label: ReactNode; onRemove: () => void }[] = [];
+        if (!typesIsDefault) {
+          const names = [...types].map((t) => CATEGORY_META[t]?.label ?? t);
+          chips.push({
+            key: "types",
+            label: <>Types: {types.size === 0 ? "all" : names.length <= 3 ? names.join(", ") : `${names.length} selected`}</>,
+            onRemove: () => setTypes(new Set(DEFAULT_TYPES)),
+          });
+        }
+        for (const id of sources) chips.push({
+          key: `src:${id}`, label: <>Source: {acctLabel[id] || id}</>,
+          onRemove: () => setSources((prev) => { const n = new Set(prev); n.delete(id); return n; }),
+        });
+        for (const l of labels) chips.push({
+          key: `lbl:${l}`, label: <>Label: {l}</>,
+          onRemove: () => setLabels((prev) => { const n = new Set(prev); n.delete(l); return n; }),
+        });
+        for (const a of attrs) {
+          const [k, ...rest] = a.split(":");
+          chips.push({ key: `attr:${a}`, label: <><span style={{ textTransform: "capitalize" }}>{k}</span>: {rest.join(":")}</>, onRemove: () => removeAttr(a) });
+        }
+        if (hasDate) chips.push({
+          key: "date", label: <>{dateFrom || "…"} → {dateTo || "…"} ({dateFieldLabel})</>,
+          onRemove: () => { setDateFrom(""); setDateTo(""); },
+        });
+
         return (
           <>
-            <div className="filter-bar">
-              {cats.length > 0 && (
-                <FilterMenu label="Type" summary={typeSummary} active={selTypes > 0}>
-                  <div className="fs-menu-head">
-                    <button className="fs-linkbtn" onClick={() => setTypes(new Set(cats.map(([c]) => c)))}>Select all</button>
-                    <button className="fs-linkbtn" onClick={() => setTypes(new Set())}>Clear</button>
-                  </div>
-                  {cats.map(([c, n]) => (
-                    <div key={c} className="fs-opt" onClick={() => toggleType(c)}>
-                      <FilterCheck state={types.has(c) ? "on" : "off"} />
-                      <span className="fs-opt-label">{CATEGORY_META[c]?.label ?? c}</span>
-                      <span className="fs-opt-count">{n}</span>
-                    </div>
-                  ))}
-                </FilterMenu>
-              )}
-              {srcs.length > 0 && (
-                <FilterMenu label="Source" summary={sourceSummary} active={selSources > 0} width={300}>
-                  <div className="fs-menu-head">
-                    <button className="fs-linkbtn"
-                            onClick={() => setSources(new Set(srcs.flatMap(([st]) => (srcAccounts[st] || []).map((a) => a.id))))}>
-                      Select all
-                    </button>
-                    <button className="fs-linkbtn" onClick={() => setSources(new Set())}>Clear</button>
-                  </div>
-                  {srcs.map(([st, n]) => {
-                    const accts = srcAccounts[st] || [];
-                    const ids = accts.map((a) => a.id);
-                    const sel = ids.filter((i) => sources.has(i)).length;
-                    const allSel = ids.length > 0 && sel === ids.length;
-                    const meta = SOURCE_META[st];
-                    const brand = brandForSource(st);
-                    return (
-                      <div key={st} className="fs-group">
-                        <div className="fs-opt" onClick={() => toggleSrcType(ids, allSel)}>
-                          <FilterCheck state={allSel ? "on" : sel > 0 ? "partial" : "off"} />
-                          <span className="fs-src-ic" style={{ background: brand ? "var(--inset)" : meta?.color ?? "var(--brand)" }}>
-                            {brand ? <BrandIcon name={brand} size={13} /> : <Icon name={meta?.icon ?? "database"} size={11} />}
-                          </span>
-                          <span className="fs-opt-label">{data.source_display?.[st] ?? meta?.label ?? st}</span>
-                          <span className="fs-opt-count">{n}</span>
-                        </div>
-                        {accts.map((a) => (
-                          <div key={a.id} className="fs-opt fs-sub" onClick={() => toggleAcct(a.id)}>
-                            <FilterCheck state={sources.has(a.id) ? "on" : "off"} />
-                            <span className="fs-opt-label">
-                              {a.label}{a.username ? <span className="fs-sub-user"> · {a.username}</span> : null}
-                            </span>
-                            <span className="fs-opt-count">{a.count}</span>
-                          </div>
-                        ))}
-                      </div>
-                    );
-                  })}
-                </FilterMenu>
-              )}
-              {labelFacets.length > 0 && (
-                <FilterMenu label="Label" summary={labelSummary} active={selLabels > 0}>
-                  <div className="fs-menu-head">
-                    <button className="fs-linkbtn" onClick={() => setLabels(new Set(labelFacets.map(([l]) => l)))}>Select all</button>
-                    <button className="fs-linkbtn" onClick={() => setLabels(new Set())}>Clear</button>
-                  </div>
-                  {labelFacets.map(([l, n]) => (
-                    <div key={l} className="fs-opt" onClick={() => toggleLabelSel(l)}>
-                      <FilterCheck state={labels.has(l) ? "on" : "off"} />
-                      <span className="fs-opt-label">{l}</span>
-                      <span className="fs-opt-count">{n}</span>
-                    </div>
-                  ))}
-                </FilterMenu>
-              )}
-              {attrKeys.length > 0 && (
-                <FilterMenu label="Attribute" summary={attrKey || "Choose…"} active={!!attrKey} width={200}>
-                  {(close) => (
-                    <>
-                      <div className="fs-menu-head">
-                        <button className="fs-linkbtn" onClick={() => { setAttrKey(""); setAttr(null); close(); }}>Clear</button>
-                      </div>
-                      {attrKeys.map((k) => (
-                        <div key={k} className="fs-opt" onClick={() => { setAttrKey(k); setAttr(null); close(); }}>
-                          <FilterCheck state={attrKey === k ? "on" : "off"} />
-                          <span className="fs-opt-label" style={{ textTransform: "capitalize" }}>{k}</span>
-                        </div>
-                      ))}
-                    </>
-                  )}
-                </FilterMenu>
-              )}
-              {attrKey && (
-                <AttrValue
-                  label={attrKey}
-                  value={attrValue}
-                  suggestions={Object.entries(attrVals || {})}
-                  contacts={data.facets.attribute_contacts?.[attrKey]}
-                  onChange={(v) => setAttr(v ? `${attrKey}:${v}` : null)}
-                />
-              )}
-              {hasFilters && (
-                <button className="btn ghost sm" style={{ alignSelf: "flex-end" }} onClick={clearAll}>Clear all</button>
-              )}
-              <button className={`btn sm ${filtersDirty ? "primary" : "ghost"}`}
-                      style={{ alignSelf: "flex-end" }} disabled={!filtersDirty}
-                      title={filtersDirty ? "Apply the selected filters and reload results"
-                                          : "No unapplied filter changes"}
-                      onClick={() => void run()}>
-                <Icon name="check" size={14} /> Apply filters
-              </button>
-              <div className="filter-select" style={{ marginLeft: "auto", position: "relative" }}>
-                <span>Date range</span>
-                <button className={`btn sm ${hasDate ? "primary" : "ghost"}`}
-                        title="Filter by a date range" onClick={() => setDateOpen((o) => !o)}>
-                  <Icon name="clock" size={14} />{hasDate ? " On" : ""}
+            {/* Filters header */}
+            <div className="spread" style={{ alignItems: "center", marginBottom: 8 }}>
+              <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                <h4 style={{ margin: 0, fontSize: 14 }}>Filters</h4>
+                <button className="btn sm ghost" onClick={() => setFilterModalOpen(true)}>
+                  <Icon name="plus" size={14} /> Add filter
                 </button>
-                {dateOpen && (
-                  <>
-                    <div style={{ position: "fixed", inset: 0, zIndex: 40 }} onClick={() => setDateOpen(false)} />
-                    <div style={{
-                      position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 50, width: 250,
-                      background: "var(--bg-elev-2)", border: "1px solid var(--border)",
-                      borderRadius: 10, padding: 12, boxShadow: "0 10px 30px rgba(0,0,0,0.28)",
-                    }}>
-                      <div className="stack" style={{ gap: 10 }}>
+                {anyActive && (
+                  <button className="btn sm ghost" onClick={clearAll} title="Remove all filters">
+                    <Icon name="x" size={13} /> Clear filters
+                  </button>
+                )}
+              </div>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <label className="filter-select">
+                  <span>Sort by</span>
+                  <div className="row" style={{ gap: 4, alignItems: "stretch" }}>
+                    <select value={sortBy} onChange={(e) => setSortBy(e.target.value as "date" | "captured")}>
+                      <option value="date">Object date</option>
+                      <option value="captured">Date captured</option>
+                    </select>
+                    <button className="btn ghost sm" style={{ minWidth: 32 }}
+                            title={sortDir === "desc" ? "Newest first (descending)" : "Oldest first (ascending)"}
+                            onClick={() => setSortDir((d) => (d === "desc" ? "asc" : "desc"))}>
+                      {sortDir === "desc" ? "↓" : "↑"}
+                    </button>
+                  </div>
+                </label>
+                <button className={`btn sm ${filtersDirty ? "primary" : "ghost"}`}
+                        disabled={!filtersDirty}
+                        title={filtersDirty ? "Apply the selected filters and reload results" : "No unapplied filter changes"}
+                        onClick={() => void run()}>
+                  <Icon name="check" size={14} /> Apply filters
+                </button>
+              </div>
+            </div>
+
+            {/* Active filters */}
+            <div className="active-filters" style={{ marginBottom: 14, minHeight: 28, alignItems: "center" }}>
+              <span className="faint" style={{ fontSize: 11.5, textTransform: "uppercase", letterSpacing: 0.4, marginRight: 4 }}>
+                Active filters
+              </span>
+              {chips.length === 0 && (
+                <span className="faint" style={{ fontSize: 12.5 }}>
+                  None — showing everything. <button className="fs-linkbtn" onClick={() => setFilterModalOpen(true)}>Add a filter</button>
+                </span>
+              )}
+              {chips.map((c) => (
+                <span key={c.key} className="filter-chip">{c.label}<button onClick={c.onRemove}>×</button></span>
+              ))}
+            </div>
+
+            {/* Add-filter modal */}
+            {filterModalOpen && (
+              <div className="modal-backdrop" onClick={() => setFilterModalOpen(false)}>
+                <div className="modal-panel" style={{ maxWidth: 620 }} onClick={(e) => e.stopPropagation()}>
+                  <div className="modal-head spread">
+                    <h3 style={{ margin: 0 }}><Icon name="grid" size={16} /> Filters</h3>
+                    <button className="btn ghost sm" onClick={() => setFilterModalOpen(false)}><Icon name="x" size={15} /></button>
+                  </div>
+                  <div className="modal-body" style={{ maxHeight: "64vh", overflowY: "auto" }}>
+                    {/* Type */}
+                    {cats.length > 0 && (
+                      <div style={{ marginBottom: 16 }}>
+                        <div className="fs-modal-sec">
+                          <span>Type</span>
+                          <span>
+                            <button className="fs-linkbtn" onClick={() => setTypes(new Set(cats.map(([c]) => c)))}>All</button>
+                            <button className="fs-linkbtn" onClick={() => setTypes(new Set())}>None</button>
+                          </span>
+                        </div>
+                        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                          {cats.map(([c, n]) => (
+                            <button key={c} className={`chip ${types.has(c) ? "active" : ""}`} onClick={() => toggleType(c)}>
+                              {CATEGORY_META[c]?.label ?? c} <span className="faint">{n}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {/* Source */}
+                    {srcs.length > 0 && (
+                      <div style={{ marginBottom: 16 }}>
+                        <div className="fs-modal-sec">
+                          <span>Source</span>
+                          <span>
+                            <button className="fs-linkbtn" onClick={() => setSources(new Set(srcs.flatMap(([st]) => (srcAccounts[st] || []).map((a) => a.id))))}>All</button>
+                            <button className="fs-linkbtn" onClick={() => setSources(new Set())}>None</button>
+                          </span>
+                        </div>
+                        <div style={{ border: "1px solid var(--border-soft)", borderRadius: 8, maxHeight: 220, overflowY: "auto" }}>
+                          {srcs.map(([st, n]) => {
+                            const accts = srcAccounts[st] || [];
+                            const ids = accts.map((a) => a.id);
+                            const sel = ids.filter((i) => sources.has(i)).length;
+                            const allSel = ids.length > 0 && sel === ids.length;
+                            const meta = SOURCE_META[st];
+                            const brand = brandForSource(st);
+                            return (
+                              <div key={st} className="fs-group">
+                                <div className="fs-opt" onClick={() => toggleSrcType(ids, allSel)}>
+                                  <FilterCheck state={allSel ? "on" : sel > 0 ? "partial" : "off"} />
+                                  <span className="fs-src-ic" style={{ background: brand ? "var(--inset)" : meta?.color ?? "var(--brand)" }}>
+                                    {brand ? <BrandIcon name={brand} size={13} /> : <Icon name={meta?.icon ?? "database"} size={11} />}
+                                  </span>
+                                  <span className="fs-opt-label">{data.source_display?.[st] ?? meta?.label ?? st}</span>
+                                  <span className="fs-opt-count">{n}</span>
+                                </div>
+                                {accts.map((a) => (
+                                  <div key={a.id} className="fs-opt fs-sub" onClick={() => toggleAcct(a.id)}>
+                                    <FilterCheck state={sources.has(a.id) ? "on" : "off"} />
+                                    <span className="fs-opt-label">
+                                      {a.label}{a.username ? <span className="fs-sub-user"> · {a.username}</span> : null}
+                                    </span>
+                                    <span className="fs-opt-count">{a.count}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {/* Attribute (chained) */}
+                    {attrKeys.length > 0 && (
+                      <div style={{ marginBottom: 16 }}>
+                        <div className="fs-modal-sec"><span>Attributes</span></div>
+                        {attrs.length > 0 && (
+                          <div className="row" style={{ gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                            {attrs.map((a) => {
+                              const [k, ...rest] = a.split(":");
+                              return <span key={a} className="filter-chip"><span style={{ textTransform: "capitalize" }}>{k}</span>: {rest.join(":")}<button onClick={() => removeAttr(a)}>×</button></span>;
+                            })}
+                          </div>
+                        )}
+                        <div className="row" style={{ gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+                          <label className="stack" style={{ gap: 4 }}>
+                            <span className="faint" style={{ fontSize: 11 }}>Attribute</span>
+                            <select className="input sm" value={attrKey}
+                                    onChange={(e) => { setAttrKey(e.target.value); setAttrDraft(""); }}
+                                    style={{ textTransform: "capitalize", minWidth: 140 }}>
+                              <option value="">Choose…</option>
+                              {attrKeys.map((k) => <option key={k} value={k}>{k}</option>)}
+                            </select>
+                          </label>
+                          {attrKey && (
+                            <div style={{ flex: "1 1 200px", minWidth: 180 }}>
+                              <span className="faint" style={{ fontSize: 11 }}>Value</span>
+                              <AttrValue
+                                label={attrKey}
+                                value={attrDraft}
+                                suggestions={Object.entries(attrVals || {})}
+                                contacts={data.facets.attribute_contacts?.[attrKey]}
+                                onChange={(v) => setAttrDraft(v)}
+                              />
+                            </div>
+                          )}
+                          <button className="btn sm primary" disabled={!attrKey || !attrDraft.trim()} onClick={addAttr}>
+                            <Icon name="plus" size={13} /> Add
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {/* Label */}
+                    {labelFacets.length > 0 && (
+                      <div style={{ marginBottom: 16 }}>
+                        <div className="fs-modal-sec">
+                          <span>Label</span>
+                          <span>
+                            <button className="fs-linkbtn" onClick={() => setLabels(new Set(labelFacets.map(([l]) => l)))}>All</button>
+                            <button className="fs-linkbtn" onClick={() => setLabels(new Set())}>None</button>
+                          </span>
+                        </div>
+                        <div className="row" style={{ gap: 6, flexWrap: "wrap", maxHeight: 160, overflowY: "auto" }}>
+                          {labelFacets.map(([l, n]) => (
+                            <button key={l} className={`chip ${labels.has(l) ? "active" : ""}`} onClick={() => toggleLabelSel(l)}>
+                              {l} <span className="faint">{n}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {/* Date range */}
+                    <div>
+                      <div className="fs-modal-sec"><span>Date range</span></div>
+                      <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
                         <label className="stack" style={{ gap: 4 }}>
                           <span className="faint" style={{ fontSize: 11 }}>Scope which date</span>
-                          <select className="input sm" value={dateField}
-                                  onChange={(e) => setDateField(e.target.value as "date" | "captured")}>
+                          <select className="input sm" value={dateField} onChange={(e) => setDateField(e.target.value as "date" | "captured")}>
                             <option value="date">Object date</option>
                             <option value="captured">Date captured</option>
                           </select>
                         </label>
                         <label className="stack" style={{ gap: 4 }}>
                           <span className="faint" style={{ fontSize: 11 }}>From</span>
-                          <input className="input sm" type="date" value={dateFrom}
-                                 max={dateTo || undefined} onChange={(e) => setDateFrom(e.target.value)} />
+                          <input className="input sm" type="date" value={dateFrom} max={dateTo || undefined} onChange={(e) => setDateFrom(e.target.value)} />
                         </label>
                         <label className="stack" style={{ gap: 4 }}>
                           <span className="faint" style={{ fontSize: 11 }}>To</span>
-                          <input className="input sm" type="date" value={dateTo}
-                                 min={dateFrom || undefined} onChange={(e) => setDateTo(e.target.value)} />
+                          <input className="input sm" type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => setDateTo(e.target.value)} />
                         </label>
-                        <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
-                          <button className="btn ghost sm" onClick={() => { setDateFrom(""); setDateTo(""); }}>Clear</button>
-                          <button className="btn primary sm" onClick={() => setDateOpen(false)}>Done</button>
-                        </div>
+                        {hasDate && <button className="btn ghost sm" onClick={() => { setDateFrom(""); setDateTo(""); }}>Clear dates</button>}
                       </div>
                     </div>
-                  </>
-                )}
-              </div>
-              <label className="filter-select">
-                <span>Sort by</span>
-                <div className="row" style={{ gap: 4, alignItems: "stretch" }}>
-                  <select value={sortBy} onChange={(e) => setSortBy(e.target.value as "date" | "captured")}>
-                    <option value="date">Object date</option>
-                    <option value="captured">Date captured</option>
-                  </select>
-                  <button className="btn ghost sm" style={{ minWidth: 32 }}
-                          title={sortDir === "desc" ? "Newest first (descending)" : "Oldest first (ascending)"}
-                          onClick={() => setSortDir((d) => (d === "desc" ? "asc" : "desc"))}>
-                    {sortDir === "desc" ? "↓" : "↑"}
-                  </button>
+                  </div>
+                  <div className="modal-foot spread">
+                    <button className="btn ghost sm" onClick={clearAll}>Clear all filters</button>
+                    <button className="btn primary" onClick={() => { setFilterModalOpen(false); void run(); }}>
+                      <Icon name="check" size={14} /> Apply filters
+                    </button>
+                  </div>
                 </div>
-              </label>
-            </div>
-
-            {(attr || hasDate) && (
-              <div className="active-filters">
-                {attr && <span className="filter-chip">{attr.replace(":", ": ")}<button onClick={() => setAttr(null)}>×</button></span>}
-                {hasDate && <span className="filter-chip">{dateChip}<button onClick={() => { setDateFrom(""); setDateTo(""); }}>×</button></span>}
               </div>
             )}
           </>
         );
       })()}
 
-      {data && (
+      {/* Results area — a spinner replaces stale results while a search runs. */}
+      {loading && <Loading label="Searching your protected data…" />}
+      {!loading && data && data.results.length === 0 && (
+        <Card><div className="loading-state muted">
+          {data.total_indexed === 0
+            ? "Nothing is indexed yet — run a backup, then search."
+            : `No matches${q ? ` for “${q}”` : ""}. Search covers titles and indexed metadata (sender, path, tags, folder…), not encrypted file contents.`}
+        </div></Card>
+      )}
+
+      {!loading && data && (
         <div className="muted" style={{ marginBottom: 10, fontSize: 13 }}>
           {data.count} result{data.count === 1 ? "" : "s"}
           {filtersDirty && (
@@ -1165,7 +1240,7 @@ export default function Search() {
         </div>
       )}
 
-      {data?.results.map((r) => {
+      {!loading && data?.results.map((r) => {
         const cm = CATEGORY_META[r.category] ?? { color: "var(--bg-elev-2)", icon: "database" as IconName, label: r.category };
         const sm = SOURCE_META[r.source_type];
         const brand = brandForSource(r.source_type);

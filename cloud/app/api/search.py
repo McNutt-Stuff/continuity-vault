@@ -595,18 +595,20 @@ def _enrich_contacts(db: Session, tenant_id: str, user_id: str, resp: dict) -> N
 def search(q: str = "", source_type: str | None = None, doc_type: str | None = None,
            category: list[str] | None = Query(None), label: list[str] | None = Query(None),
            collection: list[str] | None = Query(None),
-           attr: str | None = None, limit: int = 50, sort: str = "date",
+           attr: list[str] | None = Query(None), limit: int = 50, sort: str = "date",
            direction: str = "desc", date_from: str | None = None,
            date_to: str | None = None, date_field: str | None = None,
            principal: security.Principal = Depends(security.require_passkey),
            tenant: Tenant = Depends(security.get_tenant),
            db: Session = Depends(get_db)):
-    # attr is an optional "key:value" attribute filter (e.g. "folder:Inbox"),
-    # applied against the object's discrete indexed metadata.
-    attr_key, attr_val = "", ""
-    if attr and ":" in attr:
-        attr_key, attr_val = attr.split(":", 1)
-        attr_key = canonical_attr(attr_key)
+    # attr is an optional list of "key:value" attribute filters (e.g. "folder:Inbox",
+    # "from:alice@x.com") applied against the object's discrete indexed metadata —
+    # multiple are AND-chained (an item must match every one).
+    attr_filters: list[tuple[str, str]] = []
+    for a in (attr or []):
+        if a and ":" in a:
+            k, v = a.split(":", 1)
+            attr_filters.append((canonical_attr(k), v))
     # Type (category), label and source (per-account collection) filters are all
     # multi-select: an empty set means "no filter" (everything).
     cat_set = set(category or [])
@@ -624,7 +626,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     # pagination run in the DB against one current row per object (is_current),
     # instead of hauling the whole index into Python. Those two filters need the
     # JSON columns, so they fall through to the (correct) in-Python path below.
-    if allowed and not label_set and not attr_key:
+    if allowed and not label_set and not attr_filters:
         resp = _search_fast(
             db, tenant, allowed, q=q, source_type=source_type, doc_type=doc_type,
             cat_set=cat_set, coll_set=coll_set, date_from=date_from, date_to=date_to,
@@ -733,19 +735,28 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         return category_for_kind(r.doc_type)
 
     def _attr_match(r: SearchDocument) -> bool:
-        if not attr_key:
+        if not attr_filters:
             return True
-        want = attr_val.strip().lower()
-        # Match across every provider key that maps to the canonical attribute,
-        # case-insensitively, allowing a typed substring (free-form filtering).
-        for k, v in (r.meta or {}).items():
-            if canonical_attr(k) != attr_key:
-                continue
-            for val in (v if isinstance(v, (list, tuple)) else [v]):
-                s = str(val).lower()
-                if s and (s == want or (want and want in s)):
-                    return True
-        return False
+        meta_items = list((r.meta or {}).items())
+        # Every attribute filter must match (AND-chained); each matches across the
+        # provider keys that map to its canonical attribute, case-insensitively,
+        # allowing a typed substring.
+        for want_key, want_raw in attr_filters:
+            want = want_raw.strip().lower()
+            hit = False
+            for k, v in meta_items:
+                if canonical_attr(k) != want_key:
+                    continue
+                for val in (v if isinstance(v, (list, tuple)) else [v]):
+                    s = str(val).lower()
+                    if s and (s == want or (want and want in s)):
+                        hit = True
+                        break
+                if hit:
+                    break
+            if not hit:
+                return False
+        return True
 
     def _matches(r: SearchDocument, skip: str = "") -> bool:
         if skip != "source":
