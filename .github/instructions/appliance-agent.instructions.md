@@ -11,7 +11,10 @@ description: "On-prem appliance agent — sandbox, privileged ops, commands, sto
 - **Privileged disk ops** (partition/format/mount USB/external drives) CANNOT run in the agent. Delegate them
   to the ROOT helper: the agent drops a request in `<data>/storage-queue`, the `cv-appliance-storage.path`
   watcher starts `cv-appliance-storage.service` (root, unsandboxed) which runs `agent/storage_helper.py` and
-  writes a result the agent polls for. (`cvtool` is the manual/root CLI equivalent.)
+  writes a result the agent polls for. (`cvtool` is the manual/root CLI equivalent.) The queue dir + the
+  `.path` watch MUST both be `<CVA_DATA_DIR>/storage-queue` = `/var/lib/continuity-vault-appliance/data/storage-queue`
+  (CVA_DATA_DIR is `$DATA_DIR/data`, NOT `$DATA_DIR`); a mismatch means the watcher never fires and setup
+  hangs silently. `PathModified` only triggers on FUTURE changes — drain already-queued requests once on install.
 - **`import os` at module top.** `main.py` imports os/fcntl/pty locally inside functions; module-level code
   (runs at import) must not assume they're imported, or the agent crash-loops (`Restart=always`).
 - **Commands are signed** (spec 5.2): `_verify_command` checks applianceId, quarantine, signature (pinned
@@ -31,3 +34,9 @@ description: "On-prem appliance agent — sandbox, privileged ops, commands, sto
 - **Telemetry:** report everything the portal shows (storage kind/capacity/health, RAID/SMART, net, versions).
   Node-routed appliances need their runtime fields in `_PULL_EXCLUDE` so the pull doesn't clobber node-owned
   liveness.
+- **Durable writes — never silently lose a backup.** The vault (`vault.py`) VERIFIES every object file's
+  byte size after writing and raises on a short/failed write, and hashes over-long object ids to safe
+  filenames (`_safe_name`, 255-byte limit / Errno 36) — a truncated write must never be sealed recoverable.
+  An ingest the appliance accepted but failed to write returns `{"error": ...}` in `command-result`; the CP
+  (`api/appliances._enqueue_ingest_retry`) enqueues a durable retry so the backup re-attempts with backoff
+  and can be manually retried once the cause is fixed. Any new on-appliance write must follow the same rule.

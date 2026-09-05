@@ -23,3 +23,10 @@ description: "Background workers: scheduler, jobs, replication, pruning, index r
   `search_documents`/`snapshot_receipts` (recovery/history). Free big TOASTed JSON payloads on state
   transition, not via a recurring `col::text <> '{}'` predicate (that detoasts the whole table).
 - **Memory:** stream rows (`.yield_per`) and ingest in bounded batches for anything that could be large.
+- **Durable retry — no write is ever silently lost.** A destination write that fails is recorded in the
+  durable queue (`queue_registry.enqueue`) and retried with exponential backoff by `workers/queue.py`
+  (`run_due` re-runs the source backup to the single failed destination); success calls `resolve`, and a
+  user can force a retry via `queue_registry.retry` after fixing the cause. `sync_worker.ingest_objects`
+  enqueues issue-time failures and `resolve`s on success. When adding a new write path (a new destination
+  kind, or an async accept-then-write like appliance ingest), it MUST enqueue on failure and resolve on
+  confirmed success. VERIFY the bytes landed (size check) before treating a write as successful.

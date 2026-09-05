@@ -1406,6 +1406,12 @@ def command_result(body: CommandResultRequest,
         except Exception as exc:  # noqa: BLE001 - never fail the ack on staging error
             logger.warning("recovery staging failed for %s: %s", cmd.id, exc)
             result.setdefault("error", f"staging failed: {exc}")
+    # An ingest the appliance ACCEPTED but failed to write (e.g. a disk/mount error)
+    # must not be silently lost: enqueue a durable retry so the backup re-attempts
+    # (with backoff) and resumes once the underlying issue is resolved.
+    if cmd.command_type == "OPEN_INGEST_WINDOW" and (not body.accepted or result.get("error")):
+        _enqueue_ingest_retry(db, appliance, cmd,
+                              result.get("error") or "appliance rejected ingest command")
     cmd.result = result
     # The command is terminal now — drop the inline-ciphertext envelope so completed
     # commands don't bloat appliance_commands (its payload was already delivered).
@@ -1415,6 +1421,36 @@ def command_result(body: CommandResultRequest,
                  action="appliance.command_result", tenant_id=appliance.tenant_id,
                  resource=cmd.id, detail={"accepted": body.accepted})
     return {"ok": True}
+
+
+def _enqueue_ingest_retry(db: Session, appliance: Appliance,
+                          cmd: ApplianceCommand, error: str) -> None:
+    """Register a failed appliance ingest for durable, backed-off retry so a write
+    the appliance accepted-then-failed is re-attempted (never silently lost).
+    Reads the command params BEFORE the envelope is cleared."""
+    from .. import queue_registry as _q
+    from ..models import Collection, Tenant
+    params = (cmd.envelope or {}).get("payload", {}).get("parameters", {})
+    store_id = params.get("storageId")
+    collection_id = params.get("collectionId")
+    snapshot_id = params.get("snapshotId")
+    target = f"store:{store_id}" if store_id else "appliance"
+    label = ""
+    coll = db.get(Collection, collection_id) if collection_id else None
+    if coll:
+        label = f"{coll.name or coll.source_type} → {_q.target_label(target)}"
+    tenant = db.get(Tenant, appliance.tenant_id)
+    try:
+        _q.enqueue(db, tenant_id=appliance.tenant_id, target=target, error=error,
+                   collection_id=collection_id, snapshot_id=snapshot_id,
+                   node_id=(tenant.node_id if tenant else None),
+                   label=label)
+        db.commit()
+        logger.warning("appliance %s ingest failed (%s) → queued retry for %s",
+                       appliance.id, error, target)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not queue ingest retry for appliance %s: %s", appliance.id, exc)
+        db.rollback()
 
 
 def _stage_recovered_from_appliance(db: Session, appliance: Appliance,

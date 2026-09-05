@@ -21,6 +21,16 @@ client/server-encrypted; storage holds only ciphertext.
   Anything that reads/writes a tenant's data or index must work on the node that owns the tenant.
 - **Secrets never go through the model.** Don't log credentials. Don't route passwords through tools.
 - **Ensure logging is verbose at every level** enasure logs for appliances, endpoints and nodes are detailed and catch info, debug error and warnings and save to the right place. 
+- **Durable, resumable writes — NEVER silently lose a backup/sync/write.** Every write to a destination
+  (cv-cloud, customer-s3, byos, appliance store, appliance vault) MUST either succeed, or be recorded for
+  automatic retry AND allow a manual re-try after the issue is resolved. Use the durable queue
+  (`cloud/app/queue_registry.py` → `enqueue`/`resolve`/`retry`, drained with backoff by
+  `workers/queue.py`). A destination that fails at ISSUE time is enqueued by `sync_worker.ingest_objects`;
+  a destination that ACCEPTS then fails (e.g. an appliance ingest that errors in `command-result`) must
+  also `enqueue` a retry. VERIFY every write landed (byte-size check after write; the appliance vault and
+  `LocalFsDestination` do this) — a truncated/failed write must raise, never be sealed as recoverable.
+  Never mark a snapshot recoverable unless its bytes are confirmed written.
+
 
 ## Deploy loop
 - Push, then `sudo /opt/arkive-src/updater/git-update.sh cloud` on the control plane. A failing WEB build
