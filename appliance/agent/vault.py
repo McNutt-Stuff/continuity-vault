@@ -40,6 +40,32 @@ def _safe_name(object_id: str) -> str:
     return "h_" + hashlib.sha256(oid.encode("utf-8")).hexdigest()
 
 
+def _force_unlink(p: Path) -> None:
+    """Remove a file, clearing the immutable-emulating 0o444 bit first."""
+    try:
+        os.chmod(p, 0o644)
+    except OSError:
+        pass
+    p.unlink()
+
+
+def _force_rmtree(d: Path) -> None:
+    """Recursively remove a snapshot dir whose files are 0o444 (object-lock
+    emulation) — chmod each entry writable so the unlink/rmdir succeeds."""
+    import shutil
+
+    def _onerror(_func, path, _exc):
+        try:
+            os.chmod(path, 0o644)
+        except OSError:
+            pass
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    shutil.rmtree(d, onerror=_onerror)
+
+
 
 class VaultStore:
     def __init__(self, root: str, sm: StateMachine) -> None:
@@ -134,16 +160,21 @@ class VaultStore:
                    for m in self._mirror_roots)
 
     def sync_mirrors(self) -> dict:
-        """Reconcile every mirror volume with the primary vault: copy any snapshot
-        files/manifests the mirror is missing (backfill for a newly-added mirror,
-        and repair for any write the live duplication missed). Idempotent — only
-        copies what's absent. Returns {mirrors, snapshots_synced, files_copied,
-        errors}. A per-file failure is counted, never fatal."""
+        """Reconcile every mirror volume to be a TRUE 1:1 copy of the primary vault:
+        copy any snapshot files/manifests the mirror is missing (backfill for a
+        newly-added mirror, and repair for any write the live duplication missed),
+        AND prune anything on the mirror that no longer exists on the primary (so a
+        retention prune propagates instead of the mirror growing without bound).
+        Idempotent. Returns {mirrors, snapshots_synced, files_copied,
+        snapshots_pruned, files_pruned, errors}. A per-item failure is counted,
+        never fatal."""
         result = {"mirrors": len(self._mirror_roots), "snapshots_synced": 0,
-                  "files_copied": 0, "errors": 0}
+                  "files_copied": 0, "snapshots_pruned": 0, "files_pruned": 0,
+                  "errors": 0}
         if not self._mirror_roots or not self._protected.exists():
             return result
         snap_dirs = [d for d in self._protected.iterdir() if d.is_dir()]
+        primary_snaps = {d.name for d in snap_dirs}
         for mroot in self._mirror_roots:
             for snap in snap_dirs:
                 touched = False
@@ -172,6 +203,30 @@ class VaultStore:
                         result["errors"] += 1
                 if touched:
                     result["snapshots_synced"] += 1
+            # Deletion pass: make the mirror a true reflection — remove any snapshot
+            # the primary no longer has (retention prune), and any stray file within
+            # a shared snapshot that's absent from the primary. Guard against a
+            # transiently empty/unmounted primary wiping the mirror: only prune when
+            # the primary actually holds snapshots.
+            if not mroot.exists() or not primary_snaps:
+                continue
+            for md in mroot.iterdir():
+                if not md.is_dir():
+                    continue
+                try:
+                    if md.name not in primary_snaps:
+                        _force_rmtree(md)
+                        result["snapshots_pruned"] += 1
+                        continue
+                    for mf in md.rglob("*"):
+                        if not mf.is_file():
+                            continue
+                        rel = mf.relative_to(mroot)
+                        if mf.suffix == ".tmp" or not (self._protected / rel).exists():
+                            _force_unlink(mf)
+                            result["files_pruned"] += 1
+                except Exception:  # noqa: BLE001 — prune is best-effort per item
+                    result["errors"] += 1
         return result
 
     def capacity(self) -> dict:

@@ -634,24 +634,49 @@ class Agent:
         # Mirror the encrypted search index too (lives beside the vault, not inside it).
         idx_src = DATA / "search-index"
         idx_copied = 0
+        idx_pruned = 0
         if idx_src.is_dir():
+            src_files = {f.name for f in idx_src.glob("*.enc")}
             for mount in mirror_mounts:
                 dst_dir = Path(mount) / "search-index"
                 try:
                     dst_dir.mkdir(parents=True, exist_ok=True)
                     for f in idx_src.glob("*.enc"):
                         dst = dst_dir / f.name
-                        if dst.exists() and dst.stat().st_size == f.stat().st_size:
-                            continue
+                        s = f.stat()
+                        if dst.exists():
+                            d = dst.stat()
+                            # Re-copy when the replicated index file changed (size or
+                            # mtime) so the mirror reflects the latest index, not a
+                            # stale same-size copy.
+                            if d.st_size == s.st_size and int(d.st_mtime) >= int(s.st_mtime):
+                                continue
                         data = f.read_bytes()
                         tmp = dst.with_suffix(dst.suffix + ".tmp")
                         tmp.write_bytes(data)
+                        if tmp.stat().st_size != len(data):
+                            raise OSError("short index mirror write")
                         tmp.replace(dst)
                         idx_copied += 1
+                    # Prune index files the primary no longer has, so the mirror is a
+                    # true reflection instead of accumulating superseded index blobs.
+                    # Skip pruning if the primary index is empty (transient/unmounted)
+                    # so the mirror's index is never wiped by a fluke.
+                    if src_files:
+                        for dst in dst_dir.glob("*.enc"):
+                            if dst.name not in src_files:
+                                dst.unlink()
+                                idx_pruned += 1
+                    for stray in dst_dir.glob("*.tmp"):
+                        try:
+                            stray.unlink()
+                        except OSError:
+                            pass
                 except Exception as exc:  # noqa: BLE001
                     self.log.warning("mirror index sync to %s failed: %s", mount, exc)
                     res["errors"] = res.get("errors", 0) + 1
         res["index_files_copied"] = idx_copied
+        res["index_files_pruned"] = idx_pruned
         self.log.info("mirror sync (%s): %s", reason or "periodic", res)
         return res
 

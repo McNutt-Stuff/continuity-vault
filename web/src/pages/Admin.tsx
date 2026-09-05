@@ -1,5 +1,5 @@
 import { ReactNode, Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { useParams, useSearchParams, useNavigate } from "react-router-dom";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -256,8 +256,9 @@ async function nodeOptions(): Promise<{ label: string; value: string }[]> {
 }
 
 function Tenants() {
+  const [tparams] = useSearchParams();
   const [rows, setRows] = useState<any[]>([]);
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useState<string | null>(tparams.get("tenant"));
   const [toast, setToast] = useState("");
   const [q, setQ] = useState("");
   const [typeF, setTypeF] = useState("");
@@ -383,6 +384,7 @@ function Tenants() {
 
 // Global, filterable directory of every account across all tenants.
 function Users() {
+  const [uparams] = useSearchParams();
   const [rows, setRows] = useState<any[]>([]);
   const [tenants, setTenants] = useState<any[]>([]);
   const [plans, setPlans] = useState<any[]>([]);
@@ -393,7 +395,7 @@ function Users() {
   const [typeF, setTypeF] = useState("");
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 }>({ key: "email", dir: 1 });
   const [loading, setLoading] = useState(false);
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useState<string | null>(uparams.get("user"));
 
   async function load() {
     setLoading(true);
@@ -5584,6 +5586,7 @@ const LOG_SOURCE_LABEL: Record<string, string> = {
 
 function PlatformLogs() {
   const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
   const [facets, setFacets] = useState<LogFacets | null>(null);
   const [q, setQ] = useState("");
   const [levels, setLevels] = useState<Set<string>>(new Set(["warning", "error", "critical"]));
@@ -5663,23 +5666,23 @@ function PlatformLogs() {
       </div>
 
       <Card style={{ marginBottom: 14 }}>
-        <div className="filter-bar filter-toolbar" style={{ gap: 10, flexWrap: "wrap" }}>
-          <div className="search-bar" style={{ flex: "1 1 260px", minWidth: 220 }}>
-            <Icon name="search" size={15} />
-            <input placeholder="Search messages, logger, actor, resource…" value={q}
-                   onChange={(e) => setQ(e.target.value)} />
-          </div>
-          <select className="filter-bar-select" value={tenantId}
-                  onChange={(e) => setTenantId(e.target.value)}>
-            <option value="">All customers</option>
-            {(facets?.tenants || []).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-          </select>
-          <select className="filter-bar-select" value={nodeId}
-                  onChange={(e) => setNodeId(e.target.value)}>
-            <option value="">All nodes</option>
-            {(facets?.nodes || []).map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
-          </select>
-        </div>
+        <FilterBar
+          query={q}
+          onQuery={setQ}
+          placeholder="Search messages, logger, actor, resource…"
+          filters={[
+            {
+              label: "Customer", value: tenantId, onChange: setTenantId,
+              options: [{ label: "All customers", value: "" },
+                ...(facets?.tenants || []).map((t) => ({ label: t.name, value: t.id }))],
+            },
+            {
+              label: "Node", value: nodeId, onChange: setNodeId,
+              options: [{ label: "All nodes", value: "" },
+                ...(facets?.nodes || []).map((n) => ({ label: n.name, value: n.id }))],
+            },
+          ]}
+        />
         <div className="row" style={{ gap: 6, marginTop: 10, flexWrap: "wrap" }}>
           <span className="faint" style={{ fontSize: 11.5, alignSelf: "center" }}>Level:</span>
           {["debug", "info", "warning", "error", "critical"].map((lv) => (
@@ -5724,7 +5727,7 @@ function PlatformLogs() {
                   <td className="faint" style={{ fontSize: 12 }}>{LOG_SOURCE_LABEL[l.source] || l.source}</td>
                   <td style={{ fontSize: 12.5, maxWidth: 520, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{l.message}</td>
                   <td className="faint" style={{ fontSize: 11.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 150 }}>
-                    {l.tenant_name || l.node_name || l.logger || (l.appliance_id ? "appliance" : "")}
+                    {l.node_name || (l.appliance_id ? "appliance" : l.agent_id ? "endpoint" : l.logger || "—")}
                   </td>
                 </tr>
                 {expanded === l.id && (
@@ -5733,11 +5736,25 @@ function PlatformLogs() {
                       <div style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 11.5 }}>{l.message}</div>
                       <div className="row" style={{ gap: 14, flexWrap: "wrap", marginTop: 4 }} >
                         {l.logger && <span className="faint">logger: {l.logger}</span>}
-                        {l.tenant_name && <span className="faint">customer: {l.tenant_name}</span>}
                         {l.node_name && <span className="faint">node: {l.node_name}</span>}
                         {l.appliance_id && <span className="faint">appliance: {l.appliance_id.slice(0, 8)}</span>}
                         {l.agent_id && <span className="faint">agent: {l.agent_id.slice(0, 8)}</span>}
-                        {l.actor && <span className="faint">actor: {l.actor}</span>}
+                        {l.tenant_id && (
+                          <span className="faint">customer:{" "}
+                            <a role="button" tabIndex={0} style={{ cursor: "pointer", color: "var(--brand)" }}
+                               onClick={(e) => { e.stopPropagation(); navigate(`/admin/tenants?tenant=${l.tenant_id}`); }}>
+                              {l.tenant_name || l.tenant_id.slice(0, 8)}
+                            </a>
+                          </span>
+                        )}
+                        {l.actor && (
+                          <span className="faint">user:{" "}
+                            {/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(l.actor)
+                              ? <a role="button" tabIndex={0} style={{ cursor: "pointer", color: "var(--brand)" }}
+                                   onClick={(e) => { e.stopPropagation(); navigate(`/admin/users?user=${l.actor}`); }}>{l.actor.slice(0, 8)}</a>
+                              : l.actor}
+                          </span>
+                        )}
                         {l.resource && <span className="faint">resource: {l.resource}</span>}
                       </div>
                       {l.meta && Object.keys(l.meta).length > 0 && (
