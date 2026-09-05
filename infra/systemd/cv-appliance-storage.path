@@ -3,7 +3,9 @@ Description=Watch the Arkive storage queue and run the privileged storage helper
 
 [Path]
 # The agent drops req-*.json files here; each change starts the helper service.
-PathModified=/var/lib/continuity-vault-appliance/storage-queue
+# Must match the agent's queue dir = <CVA_DATA_DIR>/storage-queue and
+# CVA_DATA_DIR is /var/lib/continuity-vault-appliance/data (installer).
+PathModified=/var/lib/continuity-vault-appliance/data/storage-queue
 Unit=cv-appliance-storage.service
 
 [Install]

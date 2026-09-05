@@ -9,6 +9,7 @@ Snapshots are committed immutably and sealed with a signed receipt.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,21 @@ from .state_machine import StateMachine, State
 
 class SealedError(RuntimeError):
     """Raised when the protected storage path is accessed while sealed."""
+
+
+# Some sources (e.g. New Outlook HxStore) mint object ids far longer than the
+# 255-byte filename limit (Errno 36), or containing path separators. Map any
+# unsafe id to a deterministic hashed filename so writes never fail and reads
+# resolve to the same file. Short, clean ids keep their literal name (back-compat).
+_MAX_NAME_BYTES = 200
+
+
+def _safe_name(object_id: str) -> str:
+    oid = object_id or ""
+    if "/" not in oid and "\0" not in oid and len(oid.encode("utf-8")) <= _MAX_NAME_BYTES:
+        return oid
+    return "h_" + hashlib.sha256(oid.encode("utf-8")).hexdigest()
+
 
 
 class VaultStore:
@@ -70,13 +86,22 @@ class VaultStore:
         snap_dir = protected / snapshot_id
         snap_dir.mkdir(parents=True, exist_ok=True)
         for obj in objects:
-            p = snap_dir / obj["objectId"]
+            p = snap_dir / _safe_name(obj["objectId"])
             if p.exists():
                 continue  # already committed (immutable) — do not rewrite
-            p.write_text(json.dumps(obj))
+            data = json.dumps(obj)
+            p.write_text(data)
+            # Verify the write landed intact — a truncated/failed write must never
+            # be sealed as a recoverable backup.
+            written = p.stat().st_size
+            if written != len(data.encode("utf-8")):
+                raise OSError(f"short write for object {obj['objectId']!r}: "
+                              f"{written} of {len(data.encode('utf-8'))} bytes")
         mp = snap_dir / "manifest.json"
         if not mp.exists():
             mp.write_text(json.dumps(manifest))
+        if not mp.exists() or mp.stat().st_size == 0:
+            raise OSError(f"manifest not written for snapshot {snapshot_id}")
         # Immutable: remove write permission (emulated object-lock), best-effort.
         for p in snap_dir.rglob("*"):
             try:
@@ -87,7 +112,8 @@ class VaultStore:
 
     def read_object(self, snapshot_id: str, object_id: str) -> dict:
         self._require_open()
-        primary = self._protected / snapshot_id / object_id
+        name = _safe_name(object_id)
+        primary = self._protected / snapshot_id / name
         try:
             return json.loads(primary.read_text())
         except Exception:
@@ -95,7 +121,7 @@ class VaultStore:
             # primary copy is missing or unreadable (drive fault / bit rot).
             for mroot in self._mirror_roots:
                 try:
-                    return json.loads((mroot / snapshot_id / object_id).read_text())
+                    return json.loads((mroot / snapshot_id / name).read_text())
                 except Exception:
                     continue
             raise

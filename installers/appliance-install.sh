@@ -120,13 +120,19 @@ install_service() {
   cp "$INSTALL_DIR/infra/systemd/cv-appliance-agent.service" /etc/systemd/system/
   # Privileged storage helper (formats/mounts external drives the sandboxed agent
   # can't touch). The queue dir is group-writable by cvagent so the agent can drop
-  # requests; the root helper picks them up via the .path watcher.
-  install -d -o root -g "$CV_USER" -m 0770 "$DATA_DIR/storage-queue"
+  # requests; the root helper picks them up via the .path watcher. MUST match the
+  # agent's queue = <CVA_DATA_DIR>/storage-queue (CVA_DATA_DIR=$DATA_DIR/data).
+  install -d -o root -g "$CV_USER" -m 0770 "$DATA_DIR/data/storage-queue"
   cp "$INSTALL_DIR/infra/systemd/cv-appliance-storage.service" /etc/systemd/system/
   cp "$INSTALL_DIR/infra/systemd/cv-appliance-storage.path" /etc/systemd/system/
   systemctl daemon-reload
   systemctl enable cv-appliance-agent.service
-  systemctl enable --now cv-appliance-storage.path
+  systemctl enable cv-appliance-storage.path
+  # Restart (not just enable) so a changed watch path takes effect on self-update.
+  systemctl restart cv-appliance-storage.path
+  # PathModified only fires on FUTURE changes — drain anything already queued
+  # (e.g. a request left stuck by the earlier wrong watch path) once now.
+  systemctl start cv-appliance-storage.service || true
   systemctl restart cv-appliance-agent.service
 }
 

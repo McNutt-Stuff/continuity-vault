@@ -28,6 +28,19 @@ from typing import Dict, List, Optional
 from .config import get_settings
 
 settings = get_settings()
+
+import hashlib
+
+_MAX_FS_COMPONENT_BYTES = 200
+
+
+def _fs_safe_component(part: str) -> str:
+    """A single filesystem path component that never exceeds the 255-byte name
+    limit (Errno 36). Over-long components are hashed deterministically so the
+    same key always maps to the same file on read and write."""
+    if len(part.encode("utf-8")) <= _MAX_FS_COMPONENT_BYTES:
+        return part
+    return "h_" + hashlib.sha256(part.encode("utf-8")).hexdigest()
 log = logging.getLogger("arkive.storage")
 
 
@@ -79,13 +92,23 @@ class LocalFsDestination(ProtectionDestination):
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _p(self, tenant_prefix: str, key: str) -> Path:
-        p = self.root / tenant_prefix / key
+        # Some sources mint object ids longer than the 255-byte filename limit
+        # (Errno 36). Hash any over-long path component deterministically so local
+        # writes never fail; the same key always maps to the same file (read+write
+        # go through here) and object-store backends with long keys are unaffected.
+        safe_key = "/".join(_fs_safe_component(part) for part in key.split("/"))
+        p = self.root / tenant_prefix / safe_key
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
     def put_object(self, tenant_prefix, key, data, immutable=True) -> str:
         path = self._p(tenant_prefix, key)
         path.write_bytes(data)
+        # Verify the bytes landed intact — a truncated/failed write must never be
+        # treated as a successful backup.
+        written = path.stat().st_size
+        if written != len(data):
+            raise OSError(f"short write to {path}: {written} of {len(data)} bytes")
         if immutable:
             os.chmod(path, 0o444)  # emulate object-lock
         return str(path)
