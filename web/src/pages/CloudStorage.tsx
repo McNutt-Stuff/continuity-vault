@@ -33,6 +33,7 @@ interface IndexReplica {
 }
 interface IndexStatus {
   scope: string; replicas: IndexReplica[]; protected: boolean; healthy: number; total: number;
+  by_destination?: Record<string, IndexReplica>;
 }
 
 const HEALTH: Record<string, { tone: "ok" | "warn" | "info" | "danger"; label: string; dot: string }> = {
