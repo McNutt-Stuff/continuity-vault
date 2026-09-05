@@ -61,7 +61,7 @@ interface AgentSource {
 interface PurgeRequest {
   id: string; connector_account_id: string; source_type: string; source_label: string;
   status: string; all_destinations: boolean; destinations: string[]; destination_labels: string[];
-  data_map_active: boolean; execute_at: string | null;
+  data_map_active: boolean; keep_source?: boolean; execute_at: string | null;
 }
 
 function agentOnline(a?: Agent): boolean {
@@ -425,7 +425,7 @@ export default function Connectors() {
     }
   }
 
-  async function purge(a: Account) {
+  async function purge(a: Account, keepSource: boolean) {
     let targets: { active: boolean; destinations: { id: string; label: string; recovery_points: number; bytes: number }[] };
     try {
       targets = await api.get(`/connectors/accounts/${a.id}/purge-targets`);
@@ -440,52 +440,73 @@ export default function Connectors() {
         value: d.id,
       })),
     ];
-    // Step 1 — where + when. Warn (don't block) if a data map still routes here.
-    const sel = await formDialog({
-      title: `Purge ${a.account_label}`,
-      message: targets.active
-        ? "⚠️ A data map still routes this source, so it will RE-CREATE data on the next sync unless you disable or remove that mapping in the Data Map first. Choose what to purge and when:"
-        : "Choose where to permanently delete this source's data from, and when. This is irreversible.",
-      confirmLabel: "Continue",
-      fields: [
-        { name: "where", label: "Purge from", defaultValue: "all", options: opts },
-        { name: "when", label: "When", defaultValue: "grace", options: [
-          { label: "In 24 hours (recommended — cancel anytime)", value: "grace" },
-          { label: "Immediately — no grace period", value: "now" },
-        ] },
-      ],
-    });
-    if (!sel) return;
-    const where = sel.where, when = sel.when;
-    const scope = where === "all"
-      ? "everywhere — the source will be removed completely"
-      : (opts.find((o) => o.value === where)?.label ?? where);
+    // Step 1 — where + when. Purge-data keeps the source (no destination choice —
+    // it wipes all stored data); Remove-source offers per-destination or everywhere.
+    let where = "all";
+    let when = "grace";
+    if (keepSource) {
+      const sel = await formDialog({
+        title: `Purge ${a.account_label}'s data`,
+        message: "Permanently deletes ALL backed-up data and search records for this source, but KEEPS the source connected — it will back up fresh on the next sync. This is irreversible.",
+        confirmLabel: "Continue",
+        fields: [
+          { name: "when", label: "When", defaultValue: "grace", options: [
+            { label: "In 24 hours (recommended — cancel anytime)", value: "grace" },
+            { label: "Immediately — no grace period", value: "now" },
+          ] },
+        ],
+      });
+      if (!sel) return;
+      when = sel.when;
+    } else {
+      const sel = await formDialog({
+        title: `Remove ${a.account_label}`,
+        message: targets.active
+          ? "⚠️ A data map still routes this source, so it will RE-CREATE data on the next sync unless you disable or remove that mapping in the Data Map first. Choose what to remove and when:"
+          : "Choose where to permanently delete this source's data from, and when. This is irreversible.",
+        confirmLabel: "Continue",
+        fields: [
+          { name: "where", label: "Remove from", defaultValue: "all", options: opts },
+          { name: "when", label: "When", defaultValue: "grace", options: [
+            { label: "In 24 hours (recommended — cancel anytime)", value: "grace" },
+            { label: "Immediately — no grace period", value: "now" },
+          ] },
+        ],
+      });
+      if (!sel) return;
+      where = sel.where; when = sel.when;
+    }
+    const scope = keepSource
+      ? "everywhere — the source stays connected and keeps backing up"
+      : where === "all"
+        ? "everywhere — the source will be removed completely"
+        : (opts.find((o) => o.value === where)?.label ?? where);
     // Step 2 — hard irreversible confirmation.
     const ok2 = await confirmDialog({
-      title: "This permanently destroys data",
-      message: `Once purged, ${a.account_label}'s data is NOT recoverable — the encrypted copies are deleted from ${scope}, and its search index records are erased everywhere they live (cloud, appliance, node). ${when === "now" ? "This runs IMMEDIATELY." : "This runs in 24 hours; you can cancel or run it sooner from Overview or Sources."} Continue?`,
-      tone: "danger", confirmLabel: when === "now" ? "Purge now — permanent" : "Schedule purge",
+      title: keepSource ? "This permanently destroys the backed-up data" : "This permanently destroys data",
+      message: `Once ${keepSource ? "purged" : "removed"}, ${a.account_label}'s data is NOT recoverable — the encrypted copies are deleted from ${scope}, and its search index records are erased everywhere they live (cloud, appliance, node). ${when === "now" ? "This runs IMMEDIATELY." : "This runs in 24 hours; you can cancel or run it sooner from Overview or Sources."} Continue?`,
+      tone: "danger", confirmLabel: when === "now" ? (keepSource ? "Purge now — permanent" : "Remove now — permanent") : (keepSource ? "Schedule purge" : "Schedule removal"),
     });
     if (!ok2) return;
     // Step 3 — for execute-now, one more explicit confirmation.
     if (when === "now") {
       const ok3 = await confirmDialog({
         title: "Final confirmation",
-        message: `Type-of-no-return: purge ${a.account_label} from ${scope} right now. There is no undo.`,
-        tone: "danger", confirmLabel: "Yes, purge now",
+        message: `Point of no return: ${keepSource ? "purge" : "remove"} ${a.account_label} from ${scope} right now. There is no undo.`,
+        tone: "danger", confirmLabel: keepSource ? "Yes, purge now" : "Yes, remove now",
       });
       if (!ok3) return;
     }
     try {
       const r = await api.post<{ executed?: boolean; request?: PurgeRequest }>(
         `/connectors/accounts/${a.id}/purge`,
-        { destinations: where === "all" ? ["all"] : [where], execute_now: when === "now" });
+        { destinations: where === "all" ? ["all"] : [where], execute_now: when === "now", keep_source: keepSource });
       flash(r.executed
-        ? `Purged ${a.account_label}`
-        : `Purge scheduled — runs in 24h. Cancel or run it now from Overview or here.`);
+        ? (keepSource ? `Purged ${a.account_label}'s data` : `Removed ${a.account_label}`)
+        : `${keepSource ? "Purge" : "Removal"} scheduled — runs in 24h. Cancel or run it now from Overview or here.`);
       await load();
     } catch (e) {
-      await notify({ title: "Couldn't purge", message: (e as ApiError).message, tone: "danger" });
+      await notify({ title: keepSource ? "Couldn't purge" : "Couldn't remove", message: (e as ApiError).message, tone: "danger" });
     }
   }
 
@@ -554,11 +575,12 @@ export default function Connectors() {
                   <Icon name="alert" size={16} />
                   <div>
                     <div style={{ fontWeight: 600, fontSize: 13.5 }}>
-                      Purge scheduled — {p.source_label} ({p.all_destinations ? "everywhere" : (p.destination_labels.join(", ") || "selected storage")})
+                      {p.keep_source ? "Data purge" : "Source removal"} scheduled — {p.source_label} ({p.keep_source ? "keeps the source connected" : p.all_destinations ? "everywhere" : (p.destination_labels.join(", ") || "selected storage")})
                     </div>
                     <div className="faint" style={{ fontSize: 12 }}>
                       Runs {purgeCountdown(p.execute_at)}. This permanently deletes the data and its index records. This cannot be undone once it runs.
-                      {p.data_map_active && " ⚠️ A data map still routes this source — it will re-create data unless you disable/remove that mapping."}
+                      {p.keep_source && " The source stays connected and will back up fresh on the next sync."}
+                      {!p.keep_source && p.data_map_active && " ⚠️ A data map still routes this source — it will re-create data unless you disable/remove that mapping."}
                     </div>
                   </div>
                 </div>
@@ -715,7 +737,9 @@ export default function Connectors() {
                   <Menu items={([
                     { label: "Rename source", icon: "edit", onClick: () => rename(a) },
                     ...(c?.mode === "oauth" ? [{ label: "Re-authorize", icon: "key", onClick: () => reconnect(a) }] : []),
-                    ...(canPurge ? ["divider", { label: "Remove source", icon: "trash", danger: true, onClick: () => purge(a) }] : []),
+                    ...(canPurge ? ["divider",
+                      { label: "Purge data (keep source)", icon: "trash", danger: true, onClick: () => purge(a, true) },
+                      { label: "Remove source", icon: "trash", danger: true, onClick: () => purge(a, false) }] : []),
                   ] as MenuEntry[])} />
                 </>
               ) : (
@@ -730,7 +754,9 @@ export default function Connectors() {
                     { label: "Rename source", icon: "edit", onClick: () => rename(a) },
                     ...(c?.mode === "oauth" && !a.needs_reauth ? [{ label: "Re-authorize", icon: "key", onClick: () => reconnect(a) }] : []),
                     { label: "Deactivate", icon: "link", onClick: () => unlink(a) },
-                    ...(canPurge ? ["divider", { label: "Remove source", icon: "trash", danger: true, onClick: () => purge(a) }] : []),
+                    ...(canPurge ? ["divider",
+                      { label: "Purge data (keep source)", icon: "trash", danger: true, onClick: () => purge(a, true) },
+                      { label: "Remove source", icon: "trash", danger: true, onClick: () => purge(a, false) }] : []),
                   ] as MenuEntry[])} />
                 </>
               )}

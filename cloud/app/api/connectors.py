@@ -532,6 +532,26 @@ def _purge_source_local(db: Session, account: ConnectorAccount) -> dict:
             "collections": len(coll_ids), "removed": True}
 
 
+def _purge_source_data_only(db: Session, account: ConnectorAccount) -> dict:
+    """Delete all of a source's recovery points + index records everywhere, but
+    KEEP the source connected and its data-map mappings so it keeps backing up.
+    (Purge the data, not the source.)"""
+    from ..models import SearchDocument, SnapshotReceipt
+    coll_ids = [c.id for c in db.query(Collection)
+                .filter(Collection.connector_account_id == account.id).all()]
+    docs = receipts = 0
+    if coll_ids:
+        docs = db.query(SearchDocument).filter(
+            SearchDocument.collection_id.in_(coll_ids)).delete(synchronize_session=False)
+        receipts = db.query(SnapshotReceipt).filter(
+            SnapshotReceipt.collection_id.in_(coll_ids)).delete(synchronize_session=False)
+        # Reset per-collection backup state so the next run re-captures cleanly.
+        for c in db.query(Collection).filter(Collection.id.in_(coll_ids)).all():
+            c.last_backup_run_at = None
+    return {"documents": int(docs or 0), "recovery_points": int(receipts or 0),
+            "collections": 0, "removed": False, "kept_source": True}
+
+
 def _purge_destinations(db: Session, account: ConnectorAccount, dests: list[str]) -> dict:
     """Delete only the recovery points stored at the selected destinations. When
     no recovery points remain anywhere, the source's data is gone everywhere so
@@ -559,14 +579,14 @@ def _purge_destinations(db: Session, account: ConnectorAccount, dests: list[str]
 
 
 def _node_purge(node, account_id: str, tenant_id: str,
-                destinations: list[str] | None = None) -> dict | None:
+                destinations: list[str] | None = None, keep_source: bool = False) -> dict | None:
     import httpx
     from .site import _fleet_secret
     url = (node.endpoint or "").rstrip("/") + "/nodes/sync/purge"
     try:
         with httpx.Client(timeout=30) as c:
             r = c.post(url, json={"account_id": account_id, "tenant_id": tenant_id,
-                                  "destinations": destinations},
+                                  "destinations": destinations, "keep_source": keep_source},
                        headers={"Authorization": f"Bearer {_fleet_secret()}"})
             r.raise_for_status()
             return r.json()
@@ -607,6 +627,7 @@ def purge_targets(account_id: str,
 class PurgeBody(BaseModel):
     destinations: list[str] | None = None  # subset of destination ids, or None/["all"] = everywhere
     execute_now: bool = False              # skip the grace window (still needs confirmation client-side)
+    keep_source: bool = False              # purge the data but keep the source connected + syncing
 
 
 # Grace window between confirming a purge and it running, so a customer can change
@@ -636,6 +657,7 @@ def _purge_request_view(db: Session, r) -> dict:
         "destinations": dests,
         "destination_labels": [_location_label(d, labels) for d in dests] or (["Everywhere"] if r.all_destinations else []),
         "data_map_active": bool(r.data_map_active),
+        "keep_source": bool(getattr(r, "keep_source", False)),
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "execute_at": r.execute_at.isoformat() if r.execute_at else None,
         "executed_at": r.executed_at.isoformat() if r.executed_at else None,
@@ -650,6 +672,7 @@ def _execute_purge(db: Session, req) -> dict:
     from ..models import Node
     account = db.get(ConnectorAccount, req.connector_account_id)
     all_mode = bool(req.all_destinations)
+    keep_source = bool(getattr(req, "keep_source", False))
     dests = req.destinations or []
     node_result = None
     if get_settings().node_sync_scope and req.tenant_id:
@@ -657,11 +680,15 @@ def _execute_purge(db: Session, req) -> dict:
         node = db.get(Node, tenant.node_id) if tenant and tenant.node_id else None
         if node and node.endpoint:
             node_result = _node_purge(node, req.connector_account_id, req.tenant_id,
-                                      None if all_mode else dests)
+                                      None if all_mode else dests, keep_source=keep_source)
     counts = {"documents": 0, "recovery_points": 0, "collections": 0, "removed": False}
     if account:
-        counts = (_purge_source_local(db, account) if all_mode
-                  else _purge_destinations(db, account, dests))
+        if keep_source:
+            counts = _purge_source_data_only(db, account)
+        elif all_mode:
+            counts = _purge_source_local(db, account)
+        else:
+            counts = _purge_destinations(db, account, dests)
     if node_result:
         counts["node"] = node_result
     req.status = "done"
@@ -708,6 +735,7 @@ def purge(account_id: str, body: PurgeBody = PurgeBody(),
         connector_account_id=account_id, source_type=account.connector_type,
         source_label=account.account_label, all_destinations=all_mode,
         destinations=[] if all_mode else list(dests),
+        keep_source=bool(body.keep_source),
         data_map_active=_data_map_active(db, account),
         created_by=principal.user_id, execute_at=_now_naive() + grace,
         status="scheduled",

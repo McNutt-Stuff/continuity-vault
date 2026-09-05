@@ -263,6 +263,7 @@ def _apply_additive_migrations() -> None:
         # Integrity worker records the last successful verify per replica — added
         # to the model after the table first shipped, so backfill the column.
         "ALTER TABLE index_replicas ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMP",
+        "ALTER TABLE purge_requests ADD COLUMN IF NOT EXISTS keep_source BOOLEAN DEFAULT false",
         "ALTER TABLE nodes ADD COLUMN version_updated_at TIMESTAMP",
         "ALTER TABLE appliances ADD COLUMN version_updated_at TIMESTAMP",
         "ALTER TABLE desktop_agents ADD COLUMN version_updated_at TIMESTAMP",

@@ -638,6 +638,7 @@ class PurgeRequest(Base):
     source_label = Column(String, default="")
     destinations = Column(JSON, default=list)   # [] / None = everywhere
     all_destinations = Column(Boolean, default=False)
+    keep_source = Column(Boolean, default=False)  # purge data but keep the source connected
     status = Column(String, default="scheduled", index=True)  # scheduled|cancelled|running|done|failed
     data_map_active = Column(Boolean, default=False)  # a mapping still routes here (will re-accrue)
     created_by = Column(String, default="")

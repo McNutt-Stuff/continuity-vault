@@ -15,7 +15,7 @@ interface StoreHealth {
   drive_health?: string; temperature_c?: number; power?: string;
   smart?: { enabled: boolean; status?: string };
   raid?: { enabled: boolean; status?: string };
-  device?: string; mirror_of?: string | null;
+  device?: string; mirror_of?: string | null; setup_error?: string;
 }
 interface Store {
   id: string; name: string; kind: string;
