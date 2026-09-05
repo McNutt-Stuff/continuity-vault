@@ -16,6 +16,13 @@ interface StoreHealth {
   smart?: { enabled: boolean; status?: string };
   raid?: { enabled: boolean; status?: string };
   device?: string; mirror_of?: string | null; setup_error?: string;
+  mirror_integrity?: {
+    in_sync?: boolean | null; checked_at?: string | null;
+    data_missing?: number; data_extra?: number;
+    index_missing?: number; index_extra?: number;
+    primary_files?: number; mirror_files?: number;
+    primary_bytes?: number; mirror_bytes?: number;
+  };
 }
 interface Store {
   id: string; name: string; kind: string;
@@ -948,6 +955,7 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, m
   const provisioning = s.state === "provisioning";
   const errored = s.state === "error";
   const barTone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : undefined;
+  const mi = h.mirror_integrity;
   const chips: { label: string; value: string; tone: "ok" | "warn" | "danger" | "info" }[] = [];
   if (!disconnected && !provisioning) {
     if (h.drive_health) chips.push({ label: "Drive", value: h.drive_health, tone: h.drive_health === "healthy" ? "ok" : "danger" });
@@ -955,6 +963,11 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, m
     if (h.raid?.enabled) chips.push({ label: "RAID", value: h.raid.status ?? "—", tone: h.raid.status === "optimal" ? "ok" : "danger" });
     if (h.temperature_c != null) chips.push({ label: "Temp", value: `${h.temperature_c}°C`, tone: h.temperature_c >= 60 ? "warn" : "info" });
     if (h.power) chips.push({ label: "Power", value: h.power, tone: h.power === "ok" ? "ok" : "danger" });
+    if (isMirror && mi) chips.push(mi.in_sync == null
+      ? { label: "Mirror", value: "verifying…", tone: "info" }
+      : mi.in_sync
+        ? { label: "Mirror", value: "in sync", tone: "ok" }
+        : { label: "Mirror", value: "out of sync", tone: "danger" });
   }
 
   function showAdvanced() {
@@ -976,6 +989,13 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, m
       ["RAID", h.raid?.enabled ? (h.raid.status || "—") : "n/a"],
       ["Temperature", h.temperature_c != null ? `${h.temperature_c}°C` : "—"],
       ["Power", h.power || "—"],
+      ...(isMirror && mi ? ([
+        ["Mirror integrity", mi.in_sync == null ? "Verifying…" : mi.in_sync ? "In sync (verified 1:1)" : "Out of sync"],
+        ["Last verified", mi.checked_at ? new Date(mi.checked_at).toLocaleString() : "—"],
+        ["Data files (mirror/primary)", `${mi.mirror_files ?? "?"} / ${mi.primary_files ?? "?"}`],
+        ["Data missing / extra", `${mi.data_missing ?? 0} / ${mi.data_extra ?? 0}`],
+        ["Index missing / extra", `${mi.index_missing ?? 0} / ${mi.index_extra ?? 0}`],
+      ] as [string, string][]) : []),
     ];
     onAdvanced({ title: `${s.name} — details`, rows });
   }

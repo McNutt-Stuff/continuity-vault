@@ -142,6 +142,42 @@ def cmd_forget(args) -> int:
     return 0
 
 
+def cmd_verify(args) -> int:
+    """Show the latest mirror-integrity report (does the mirror match the primary
+    1:1, data + index). The agent computes this on a schedule + after each sync;
+    this reads the cached result."""
+    rep_path = Path(settings.data_dir) / "mirror_integrity.json"
+    try:
+        rep = json.loads(rep_path.read_text())
+    except Exception:
+        rep = {}
+    if args.json:
+        print(json.dumps(rep, indent=2))
+        return 0
+    if not rep:
+        print("No integrity report yet — the agent runs a check ~90s after start, "
+              "after each sync, and every 6h. Try again shortly.")
+        return 0
+    overall = rep.get("in_sync")
+    tag = "IN SYNC" if overall else ("NO MIRRORS" if overall is None else "OUT OF SYNC")
+    print(f"Mirror integrity: {tag}   (checked {rep.get('checked_at', '?')})")
+    for s in rep.get("stores", []):
+        d = s.get("data") or {}
+        i = s.get("index") or {}
+        state = "in sync" if s.get("in_sync") else ("disconnected" if not s.get("connected") else "OUT OF SYNC")
+        print(f"\n  {s.get('name','Mirror')}  [SN {s.get('serial','?')}]  — {state}")
+        print(f"    data:  {d.get('mirror_files', 0)}/{d.get('primary_files', 0)} files, "
+              f"{_fmt_bytes(d.get('mirror_bytes'))}/{_fmt_bytes(d.get('primary_bytes'))}"
+              f"  (missing {d.get('missing', 0)}, extra {d.get('extra', 0)})")
+        print(f"    index: {i.get('mirror_files', 0)}/{i.get('primary_files', 0)} files"
+              f"  (missing {i.get('missing', 0)}, extra {i.get('extra', 0)})")
+        for r in (d.get("sample_missing") or [])[:5]:
+            print(f"      missing: {r}")
+        for r in (d.get("sample_extra") or [])[:5]:
+            print(f"      extra:   {r}")
+    return 0 if rep.get("in_sync") in (True, None) else 1
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="agent.storage_cli",
                                 description="Arkive appliance external-storage management")
@@ -157,6 +193,9 @@ def main(argv=None) -> int:
     pf = sub.add_parser("forget", help="unmount + deregister a store (data kept)")
     pf.add_argument("store_id")
     pf.set_defaults(func=cmd_forget)
+    pv = sub.add_parser("verify", help="show the latest mirror-integrity report")
+    pv.add_argument("--json", action="store_true")
+    pv.set_defaults(func=cmd_verify)
     args = p.parse_args(argv)
     return args.func(args)
 

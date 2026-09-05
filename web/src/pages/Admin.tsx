@@ -3456,6 +3456,11 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
                       <Pill tone={!raid.enabled ? "info" : raid.status === "optimal" ? "ok" : raid.status === "rebuilding" ? "warn" : "danger"} dot={!!raid.enabled}>RAID {raid.enabled ? raid.status : "not configured"}</Pill>
                       <Pill tone={!smart.enabled ? "info" : smart.status === "passed" ? "ok" : "danger"} dot={!!smart.enabled}>SMART {smart.enabled ? smart.status : "n/a"}</Pill>
                       {h.temperature_c != null && <Pill tone={h.temperature_c >= 60 ? "warn" : "info"}>{h.temperature_c}°C</Pill>}
+                      {s.kind === "mirror" && h.mirror_integrity && (
+                        <Pill tone={h.mirror_integrity.in_sync == null ? "info" : h.mirror_integrity.in_sync ? "ok" : "danger"} dot>
+                          Mirror {h.mirror_integrity.in_sync == null ? "verifying…" : h.mirror_integrity.in_sync ? "in sync" : "out of sync"}
+                        </Pill>
+                      )}
                       <button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => setOpenStore(open ? null : s.id)}>
                         {open ? "Hide" : "Drive health"} {open ? "▴" : "▾"}
                       </button>
@@ -3478,6 +3483,16 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
                               {(smart.drives || []).map((dr: any) => <span key={dr.device} className="faint" style={{ fontSize: 11 }}>{dr.device.replace("/dev/", "")}:{dr.status}</span>)}
                             </span>
                           : "Not available (no SMART passthrough / smartmontools)"} />
+                        {s.kind === "mirror" && h.mirror_integrity && (() => {
+                          const mi = h.mirror_integrity;
+                          return <>
+                            <Row2 label="Mirror integrity" value={<Pill tone={mi.in_sync == null ? "info" : mi.in_sync ? "ok" : "danger"} dot>{mi.in_sync == null ? "verifying…" : mi.in_sync ? "in sync (1:1)" : "out of sync"}</Pill>} />
+                            <Row2 label="Last verified" value={mi.checked_at ? new Date(mi.checked_at).toLocaleString() : "—"} />
+                            <Row2 label="Data files (mirror/primary)" value={`${mi.mirror_files ?? "?"} / ${mi.primary_files ?? "?"}`} />
+                            <Row2 label="Data missing / extra" value={`${mi.data_missing ?? 0} / ${mi.data_extra ?? 0}`} />
+                            <Row2 label="Index missing / extra" value={`${mi.index_missing ?? 0} / ${mi.index_extra ?? 0}`} />
+                          </>;
+                        })()}
                       </div>
                     )}
                   </div>

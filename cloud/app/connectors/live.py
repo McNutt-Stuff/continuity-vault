@@ -1291,6 +1291,24 @@ def fetch_google_contacts(access_token: str,
                 break
 
 
+# Event metadata that churns server-side without a meaningful content change
+# (etag/updated/sequence bump on any touch, incl. reminders firing). Excluded from
+# the dedup hash so an unchanged event never re-versions on every sync.
+_CAL_VOLATILE_KEYS = {"etag", "updated", "created", "sequence", "reminders",
+                      "colorId", "iCalUID", "@odata.etag", "lastModifiedDateTime",
+                      "changeKey", "originalStartTime"}
+
+
+def _stable_event_hash(ev: dict) -> str:
+    """Content-based dedup key for a calendar event (Google or Microsoft): hash the
+    event with volatile metadata stripped, so it only re-versions on a real change
+    (title/when/where/who/recurrence), not on a timestamp/etag bump."""
+    clean = {k: v for k, v in ev.items() if k not in _CAL_VOLATILE_KEYS}
+    blob = json.dumps(clean, sort_keys=True, separators=(",", ":"),
+                      default=str, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(b"calendar:" + blob).hexdigest()
+
+
 def _event_object_date(ev: dict) -> Optional[datetime]:
     """Timeline date for a calendar event = its ORIGINAL / first-occurrence start
     (for a recurring series Google returns the master with start = first
@@ -1360,7 +1378,8 @@ def fetch_google_calendar(access_token: str,
                         preview=f"{when} · {ev.get('location', '')}".strip(" ·"),
                         meta=meta,
                         labels=[cal_name],
-                        modified_at=_event_object_date(ev))
+                        modified_at=_event_object_date(ev),
+                        content_hash=_stable_event_hash(ev))
                 token = body.get("nextPageToken")
                 if not token:
                     break

@@ -110,6 +110,15 @@ def _op(args: List[str], env: dict) -> str:
 # an unchanged item hash differently each run, creating a spurious new version.
 _VOLATILE_FIELD_KEYS = ("totp",)
 
+# Metadata keys that 1Password bumps WITHOUT the secret's content changing (an
+# internal re-save, a version tick, a "last edited by" refresh). Excluding them —
+# plus anything ending in "_at" (updated_at/created_at/…) — from the dedup hash
+# means an item only re-versions when its actual content changes, not when its
+# timestamp moves. NOTE: user-set date FIELD values live in field["value"], not
+# in these metadata keys, so a real edit to a date field still re-versions.
+_HASH_DROP_KEYS = {"updated_at", "created_at", "last_edited_by", "version",
+                   "totp", "last_used", "recorded_at", "state"}
+
 
 def _canonical_payload(detail: dict) -> bytes:
     """Deterministic serialization for content-hash dedup: drop live/volatile
@@ -122,6 +131,27 @@ def _canonical_payload(detail: dict) -> bytes:
                 f.pop(k, None)
     return json.dumps(clean, sort_keys=True, ensure_ascii=False,
                       separators=(",", ":")).encode("utf-8")
+
+
+def _scrub_for_hash(obj):
+    """Recursively strip volatile/timestamp metadata so the dedup hash reflects
+    only the item's real content."""
+    if isinstance(obj, dict):
+        return {k: _scrub_for_hash(v) for k, v in obj.items()
+                if k not in _HASH_DROP_KEYS and not str(k).endswith("_at")}
+    if isinstance(obj, list):
+        return [_scrub_for_hash(v) for v in obj]
+    return obj
+
+
+def _stable_content_hash(item_id: str, detail: dict) -> str:
+    """Content-based dedup key immune to 1Password's timestamp/version churn: hash
+    the scrubbed item content, NOT its updated_at — so an item that 1Password
+    re-touched without a real edit keeps the same hash and never re-versions."""
+    scrubbed = _scrub_for_hash(detail)
+    blob = json.dumps(scrubbed, sort_keys=True, ensure_ascii=False,
+                      separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(f"onepassword:{item_id}:".encode() + blob).hexdigest()
 
 
 def collect(op_token: str = "") -> List[dict]:
@@ -146,13 +176,11 @@ def collect(op_token: str = "") -> List[dict]:
             if f.get("purpose") == "USERNAME":
                 username = f.get("value", "")
         payload = _canonical_payload(detail)
-        # Dedup on 1Password's own edit timestamp — the authoritative "changed"
-        # signal — so unchanged items never re-version, even if a display field
-        # (e.g. a live TOTP code) varies between reads. Fall back to the payload
-        # hash only when no timestamp is available.
-        updated = str(detail.get("updated_at") or it.get("updated_at") or "")
-        content_hash = (hashlib.sha256(f"onepassword:{it['id']}:{updated}".encode()).hexdigest()
-                        if updated else hashlib.sha256(payload).hexdigest())
+        # Dedup on the item's STABLE content (timestamps/version scrubbed) rather
+        # than 1Password's updated_at — which bumps on internal re-saves and made
+        # unchanged items re-version every run. A real content edit still changes
+        # the hash; a spurious timestamp move no longer does.
+        content_hash = _stable_content_hash(it["id"], detail)
         objects.append({
             "object_id": f"onepassword:{it['id']}",
             "kind": kind,

@@ -704,7 +704,8 @@ export default function Search() {
       const text = await blob.text();
       const oversized = text.trimStart().startsWith("{") && text.includes("content_exceeds_cap");
       // Calendar events: render a formatted event card (title, when, where, who).
-      if (!oversized && (item.doc_type === "event" || item.source_type === "google_calendar")) {
+      if (!oversized && (item.doc_type === "event" || item.category === "calendar"
+          || item.source_type === "google_calendar" || item.source_type === "outlook_calendar")) {
         try {
           setViewing({ item, kind: "calendar", calendar: parseCalendar(JSON.parse(text)), url });
           await loadRecovered();

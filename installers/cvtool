@@ -203,7 +203,9 @@ cmd_storage() {
         _agent_reload
         echo "Storage forgotten (data on the drive was kept); the agent has been notified."
       fi ;;
-    *) echo "usage: cvtool storage [list | setup <SERIAL> --name <NAME> [--mirror <STORE_ID>] | forget <STORE_ID>]" >&2; return 1 ;;
+    verify|integrity)
+      _storage_py verify "$@" ;;
+    *) echo "usage: cvtool storage [list | setup <SERIAL> --name <NAME> [--mirror <STORE_ID>] | forget <STORE_ID> | verify]" >&2; return 1 ;;
   esac
 }
 
@@ -226,6 +228,7 @@ Commands:
   storage setup <SN> --name <NAME> [--mirror <STORE_ID>]
                        Format + adopt a detected USB/external drive (DESTRUCTIVE)
   storage forget <STORE_ID>
+  storage verify       Show mirror-drive integrity (1:1 with the primary — data + index)
                        Unmount + deregister a drive (data on the drive is kept)
   help                 Show this reference
 

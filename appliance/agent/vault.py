@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -228,6 +229,56 @@ class VaultStore:
                 except Exception:  # noqa: BLE001 — prune is best-effort per item
                     result["errors"] += 1
         return result
+
+    def verify_mirrors(self) -> dict:
+        """Compare each mirror volume to the primary vault and report integrity —
+        file/byte counts on each side, how many files are missing (absent or a size
+        mismatch) or extra on the mirror, and whether it's a true 1:1 copy.
+        Read-only; safe to run any time. Feeds the scheduled integrity check + the
+        admin/customer appliance views."""
+        report = {"mirrors": len(self._mirror_roots), "in_sync": True, "roots": [],
+                  "checked_at": datetime.now(timezone.utc).replace(
+                      microsecond=0, tzinfo=None).isoformat() + "Z"}
+        if not self._mirror_roots:
+            return report
+        if not self._protected.exists():
+            report["in_sync"] = False
+            report["error"] = "primary vault path is not present"
+            return report
+        prim: dict[str, int] = {}
+        for f in self._protected.rglob("*"):
+            if f.is_file():
+                try:
+                    prim[str(f.relative_to(self._protected))] = f.stat().st_size
+                except OSError:
+                    continue
+        prim_snaps = sum(1 for d in self._protected.iterdir() if d.is_dir())
+        for mroot in self._mirror_roots:
+            mir: dict[str, int] = {}
+            present = mroot.exists()
+            if present:
+                for f in mroot.rglob("*"):
+                    if f.is_file() and f.suffix != ".tmp":
+                        try:
+                            mir[str(f.relative_to(mroot))] = f.stat().st_size
+                        except OSError:
+                            continue
+            missing = [r for r, s in prim.items() if mir.get(r) != s]
+            extra = [r for r in mir if r not in prim]
+            in_sync = present and not missing and not extra
+            report["roots"].append({
+                "mirror_root": str(mroot), "connected": present,
+                "primary_snapshots": prim_snaps,
+                "mirror_snapshots": (sum(1 for d in mroot.iterdir() if d.is_dir())
+                                     if present else 0),
+                "primary_files": len(prim), "mirror_files": len(mir),
+                "primary_bytes": sum(prim.values()), "mirror_bytes": sum(mir.values()),
+                "missing": len(missing), "extra": len(extra), "in_sync": in_sync,
+                "sample_missing": missing[:10], "sample_extra": extra[:10],
+            })
+            if not in_sync:
+                report["in_sync"] = False
+        return report
 
     def capacity(self) -> dict:
         used = sum(f.stat().st_size for f in self._protected.rglob("*")

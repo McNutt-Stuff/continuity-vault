@@ -22,6 +22,7 @@ import os
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Optional
@@ -197,6 +198,13 @@ EXT_BASE = DATA / "ext"
 EXT_REGISTRY = DATA / "ext_stores.json"
 # Requests to the root storage helper (privileged format/mount) are dropped here.
 EXT_QUEUE = DATA / "storage-queue"
+# Cached mirror-integrity report (written by the scheduled verify; read by
+# telemetry + `cvtool mirror-verify`).
+MIRROR_INTEGRITY = DATA / "mirror_integrity.json"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None).isoformat() + "Z"
 
 
 class Agent:
@@ -678,7 +686,82 @@ class Agent:
         res["index_files_copied"] = idx_copied
         res["index_files_pruned"] = idx_pruned
         self.log.info("mirror sync (%s): %s", reason or "periodic", res)
+        # Refresh the integrity report after a sync that changed the mirror so the
+        # admin/customer views reflect the new state promptly (cheap vs. the 6h loop).
+        if any(res.get(k) for k in ("files_copied", "files_pruned", "snapshots_pruned",
+                                    "index_files_copied", "index_files_pruned")):
+            try:
+                self._verify_mirrors("after sync")
+            except Exception as exc:  # noqa: BLE001
+                self.log.debug("post-sync verify failed: %s", exc)
         return res
+
+    def _verify_mirrors(self, reason: str = "") -> dict:
+        """Read-only integrity check: confirm every mirror volume is a true 1:1 copy
+        of the primary vault AND the replicated search index. Caches the report to
+        MIRROR_INTEGRITY so telemetry (→ admin + customer views) and `cvtool
+        mirror-verify` can show per-drive status without re-walking every time."""
+        mirror_entries = [e for e in self._ext_stores
+                          if e.get("kind") == "mirror" and e["store_id"] in self._ext_mounts]
+        report: dict = {"mirrors": len(mirror_entries),
+                        "checked_at": _now_iso(), "in_sync": True, "stores": []}
+        if not mirror_entries:
+            report["in_sync"] = None  # nothing to verify
+            self._write_mirror_integrity(report)
+            return report
+        try:
+            vault_rep = self.vault.verify_mirrors()
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("mirror verify (data) failed: %s", exc)
+            vault_rep = {"roots": [], "in_sync": False, "error": str(exc)[:200]}
+        # Match each vault-root report back to its store by mount path.
+        by_root = {r.get("mirror_root"): r for r in vault_rep.get("roots", [])}
+        idx_src = DATA / "search-index"
+        src_idx = {f.name: f.stat().st_size for f in idx_src.glob("*.enc")} if idx_src.is_dir() else {}
+        for e in mirror_entries:
+            sid = e["store_id"]
+            mount = self._ext_mounts.get(sid)
+            data_root = str(Path(mount) / "vault" / "protected") if mount else ""
+            drep = by_root.get(data_root, {})
+            # Index integrity for this mount.
+            idx_dir = Path(mount) / "search-index" if mount else None
+            mir_idx = ({f.name: f.stat().st_size for f in idx_dir.glob("*.enc")}
+                       if idx_dir and idx_dir.is_dir() else {})
+            idx_missing = sum(1 for n, s in src_idx.items() if mir_idx.get(n) != s)
+            idx_extra = sum(1 for n in mir_idx if n not in src_idx)
+            data_ok = bool(drep.get("in_sync"))
+            idx_ok = (idx_missing == 0 and idx_extra == 0)
+            store_ok = data_ok and idx_ok
+            report["stores"].append({
+                "store_id": sid, "name": e.get("name", "Mirror"),
+                "serial": e.get("serial", ""), "mirror_of_id": e.get("mirror_of_id"),
+                "connected": bool(drep.get("connected", bool(mount))),
+                "in_sync": store_ok,
+                "data": {k: drep.get(k) for k in (
+                    "primary_snapshots", "mirror_snapshots", "primary_files",
+                    "mirror_files", "primary_bytes", "mirror_bytes", "missing",
+                    "extra", "sample_missing", "sample_extra")},
+                "index": {"primary_files": len(src_idx), "mirror_files": len(mir_idx),
+                          "missing": idx_missing, "extra": idx_extra},
+            })
+            if not store_ok:
+                report["in_sync"] = False
+        self._write_mirror_integrity(report)
+        self.log.info("mirror verify (%s): in_sync=%s stores=%d",
+                      reason or "scheduled", report["in_sync"], len(report["stores"]))
+        return report
+
+    def _write_mirror_integrity(self, report: dict) -> None:
+        try:
+            MIRROR_INTEGRITY.write_text(json.dumps(report))
+        except Exception as exc:  # noqa: BLE001
+            self.log.debug("could not cache mirror integrity: %s", exc)
+
+    def _read_mirror_integrity(self) -> dict:
+        try:
+            return json.loads(MIRROR_INTEGRITY.read_text())
+        except Exception:  # noqa: BLE001
+            return {}
 
     def _reload_ext_storage(self) -> None:
         """Re-read the external-storage registry and (re)mount known drives, then
@@ -701,6 +784,8 @@ class Agent:
         the cloud surfaces for setup."""
         detected = sysinfo.detect_external_storage(self._excluded_disks())
         rows: list[dict] = []
+        integ = self._read_mirror_integrity()
+        integ_by_store = {s.get("store_id"): s for s in (integ.get("stores") or [])}
         for e in self._ext_stores:
             sid = e["store_id"]
             mount = self._ext_mounts.get(sid)
@@ -713,6 +798,28 @@ class Agent:
                     used = (st.f_blocks - st.f_bfree) * st.f_frsize
                 except Exception:
                     pass
+            health = {"drive_health": "healthy" if connected else "disconnected",
+                      "device": mount or "", "serial": e.get("serial", ""),
+                      "mirror_of": e.get("mirror_of_id")}
+            # Fold the last mirror-integrity result onto a mirror store so the admin
+            # + customer views can show whether it's a verified 1:1 copy.
+            if e.get("kind") == "mirror":
+                si = integ_by_store.get(sid)
+                if si is not None:
+                    health["mirror_integrity"] = {
+                        "in_sync": si.get("in_sync"),
+                        "checked_at": integ.get("checked_at"),
+                        "data_missing": (si.get("data") or {}).get("missing"),
+                        "data_extra": (si.get("data") or {}).get("extra"),
+                        "index_missing": (si.get("index") or {}).get("missing"),
+                        "index_extra": (si.get("index") or {}).get("extra"),
+                        "primary_files": (si.get("data") or {}).get("primary_files"),
+                        "mirror_files": (si.get("data") or {}).get("mirror_files"),
+                        "primary_bytes": (si.get("data") or {}).get("primary_bytes"),
+                        "mirror_bytes": (si.get("data") or {}).get("mirror_bytes"),
+                    }
+                else:
+                    health["mirror_integrity"] = {"in_sync": None, "checked_at": None}
             rows.append({
                 "name": e.get("name", "External Storage"),
                 "kind": e.get("kind", "external"),
@@ -724,9 +831,7 @@ class Agent:
                 "free_bytes": max(cap - used, 0),
                 "connected": connected,
                 "state": "ready" if connected else "disconnected",
-                "health": {"drive_health": "healthy" if connected else "disconnected",
-                           "device": mount or "", "serial": e.get("serial", ""),
-                           "mirror_of": e.get("mirror_of_id")},
+                "health": health,
             })
         return rows, detected
 
@@ -1303,6 +1408,7 @@ async def _registration_loop() -> None:
         asyncio.create_task(_heartbeat_loop())
         asyncio.create_task(_integrations_loop())
         asyncio.create_task(_provision_loop())
+        asyncio.create_task(_integrity_loop())
 
 
 async def _heartbeat_loop() -> None:
@@ -1317,6 +1423,19 @@ async def _heartbeat_loop() -> None:
             else:
                 agent.log.error("heartbeat error: %s", exc)
         await asyncio.sleep(interval)
+
+
+async def _integrity_loop() -> None:
+    """Periodically verify every mirror volume is a true 1:1 copy of the primary
+    (data + index). Runs a first pass shortly after boot, then every 6h; the result
+    is cached + shipped in telemetry so the admin/customer views show drive status."""
+    await asyncio.sleep(90)  # let mounts settle + a first sync happen
+    while True:
+        try:
+            await asyncio.to_thread(agent._verify_mirrors, "scheduled")
+        except Exception as exc:  # noqa: BLE001
+            agent.log.warning("scheduled mirror verify failed: %s", exc)
+        await asyncio.sleep(6 * 3600)
 
 
 async def _integrations_loop() -> None:
