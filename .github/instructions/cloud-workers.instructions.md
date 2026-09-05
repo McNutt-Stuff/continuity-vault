@@ -22,11 +22,19 @@ description: "Background workers: scheduler, jobs, replication, pruning, index r
 - **Pruning** (`pruning.py`) bounds high-churn tables; NEVER prune `audit_events` (hash-chained) or
   `search_documents`/`snapshot_receipts` (recovery/history). Free big TOASTed JSON payloads on state
   transition, not via a recurring `col::text <> '{}'` predicate (that detoasts the whole table).
-- **Memory:** stream rows (`.yield_per`) and ingest in bounded batches for anything that could be large.
-- **Durable retry — no write is ever silently lost.** A destination write that fails is recorded in the
+- **Memory:** stream rows (`.yield_per`) and ingest in bounded batches for anything that could be large.- **Durable retry — no write is ever silently lost.** A destination write that fails is recorded in the
   durable queue (`queue_registry.enqueue`) and retried with exponential backoff by `workers/queue.py`
   (`run_due` re-runs the source backup to the single failed destination); success calls `resolve`, and a
   user can force a retry via `queue_registry.retry` after fixing the cause. `sync_worker.ingest_objects`
   enqueues issue-time failures and `resolve`s on success. When adding a new write path (a new destination
   kind, or an async accept-then-write like appliance ingest), it MUST enqueue on failure and resolve on
   confirmed success. VERIFY the bytes landed (size check) before treating a write as successful.
+- **Source-failure detail is a STANDARD** (troubleshoot from admin Platform Logs). A connector/source sync
+  failure MUST run through `sync_worker._record_sync_error` (sets `last_error`/`last_error_at`/`fail_count`,
+  needs-reauth on auth errors, and `audit.record`s a tenant-attributed LogEntry that feeds `source_problem`
+  notifications). `_normalize_sync_error` captures the exception + HTTP status + a bounded response snippet
+  from `exc.response`, so RAISE errors that preserve `.response` (`raise … from exc`) rather than restringing
+  them. When you record a source event directly, pass `audit.record(..., detail={type, account, error,
+  reason/code, <op context>})` — `audit.record` folds those into the Platform-Logs message + carries the full
+  detail in `meta`. Never swallow, never log secrets. See `connectors.instructions.md` → “Logging & error
+  detail — STANDARD”.

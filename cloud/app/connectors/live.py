@@ -104,6 +104,26 @@ class _HistoryGone(Exception):
     """Gmail history is too old to page from; a full resync is required."""
 
 
+def _raise_api(source: str, r: "httpx.Response", ctx: str = "") -> None:
+    """Raise a detailed, response-preserving error for a failed provider call so
+    the sync worker records WHY (status + body snippet) and flags needs-reauth on
+    401/403. Use at whole-fetch failure points instead of swallowing + returning
+    empty (which records a false 0-object success)."""
+    snippet = ""
+    try:
+        snippet = (r.text or "").strip().replace("\n", " ")[:200]
+    except Exception:  # noqa: BLE001
+        snippet = ""
+    where = f" [{ctx}]" if ctx else ""
+    raise httpx.HTTPStatusError(
+        f"{source} API {r.status_code}{where}: {snippet}",
+        request=r.request, response=r)
+
+
+def _is_auth_status(code: int) -> bool:
+    return code in (401, 403)
+
+
 def _gmail_message(c: httpx.Client, headers: dict, mid: str,
                    cap: int = _DEFAULT_CAP) -> Optional[SourceObject]:
     # format=raw returns the full RFC822 message (body + attachments) plus
@@ -721,7 +741,7 @@ def stream_dropbox(access_token: str, cursor=None, config: Optional[dict] = None
                         dbx_cursor = None
                         rmap[root] = None
                         continue
-                    break
+                    _raise_api("Dropbox", r, ctx=f"list_folder path={dbx_path or '/'}")
                 body = r.json()
                 for it in body.get("entries", []):
                     if it.get(".tag") != "file":
@@ -824,6 +844,10 @@ def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = Non
                     r = c.get(url, headers=headers, params=params)
                     if r.status_code >= 400:
                         rmap[root] = None
+                        # A stale pagination link can be dropped; a real auth/server
+                        # error is raised so the source is flagged, not silently empty.
+                        if link is None or _is_auth_status(r.status_code) or r.status_code >= 500:
+                            _raise_api("OneDrive", r, ctx=f"children root={root}")
                         break
                     body = r.json()
                     for it in body.get("value", []):
@@ -854,7 +878,9 @@ def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = Non
                 if r.status_code >= 400:
                     if link is not None:  # stale delta link — restart this root
                         rmap[root] = None
-                    break
+                        break
+                    # Initial fetch failed for real — surface it (needs-reauth on 401/403).
+                    _raise_api("OneDrive", r, ctx=f"delta root={root}")
                 body = r.json()
                 for it in body.get("value", []):
                     if it.get("folder") or it.get("deleted") or not it.get("file"):
@@ -1012,8 +1038,12 @@ def stream_drive(access_token: str, cursor=None, config: Optional[dict] = None,
                     params["pageToken"] = page_token
                 r = c.get(f"{GDRIVE_API}/files", headers=headers, params=params)
                 if r.status_code >= 400:
-                    logger.warning("drive list %s: %s", r.status_code, r.text[:200])
-                    break
+                    # A specific folder that's gone/inaccessible is skipped; a real
+                    # auth/quota/server failure is raised so the source is flagged.
+                    if r.status_code == 404:
+                        logger.warning("drive list skip folder %s: 404", folder_id)
+                        break
+                    _raise_api("Google Drive", r, ctx=f"list folder={folder_id}")
                 body = r.json()
                 for f in body.get("files", []):
                     if f.get("mimeType") == "application/vnd.google-apps.folder":
@@ -1233,10 +1263,11 @@ def fetch_google_contacts(access_token: str,
                 params["pageToken"] = token
             r = c.get(url, headers=headers, params=params)
             if r.status_code >= 400:
-                logger.warning("Google People API %s: %s (enable the People API in the "
-                               "Google Cloud project and grant contacts.readonly)",
-                               r.status_code, r.text[:300])
-                return
+                snippet = (r.text or "").strip().replace("\n", " ")[:200]
+                raise httpx.HTTPStatusError(
+                    f"Google People API {r.status_code}: {snippet} — enable the People "
+                    f"API in the Google Cloud project and grant contacts.readonly",
+                    request=r.request, response=r)
             body = r.json()
             for p in body.get("connections", []):
                 name = ((p.get("names") or [{}])[0]).get("displayName") or "Contact"
@@ -1284,10 +1315,11 @@ def fetch_google_calendar(access_token: str,
     with httpx.Client(timeout=60) as c:
         cals = c.get(f"{base}/users/me/calendarList", headers=headers)
         if cals.status_code >= 400:
-            logger.warning("Google Calendar API %s: %s (enable the Calendar API in the "
-                           "Google Cloud project and grant calendar.readonly)",
-                           cals.status_code, cals.text[:300])
-            return
+            snippet = (cals.text or "").strip().replace("\n", " ")[:200]
+            raise httpx.HTTPStatusError(
+                f"Google Calendar API {cals.status_code}: {snippet} — enable the "
+                f"Calendar API in the Google Cloud project and grant calendar.readonly",
+                request=cals.request, response=cals)
         for cal in cals.json().get("items", []):
             cal_id = cal.get("id")
             cal_name = cal.get("summary", "Calendar")
@@ -1302,6 +1334,12 @@ def fetch_google_calendar(access_token: str,
                     params["pageToken"] = token
                 r = c.get(f"{base}/calendars/{cal_id}/events", headers=headers, params=params)
                 if r.status_code >= 400:
+                    # Token expired / access revoked mid-run → surface it; a single
+                    # inaccessible calendar (e.g. 404) is skipped so the rest run.
+                    if _is_auth_status(r.status_code) or r.status_code >= 500:
+                        _raise_api("Google Calendar", r, ctx=f"events cal={cal_id}")
+                    logger.warning("Google Calendar events skip cal=%s: %s %s",
+                                   cal_id, r.status_code, r.text[:200])
                     break
                 body = r.json()
                 for ev in body.get("items", []):
@@ -1371,8 +1409,7 @@ def iter_picker_media(access_token: str, session_id: str) -> Iterable[dict]:
                 params["pageToken"] = page
             r = c.get(f"{_PICKER}/mediaItems", headers=headers, params=params)
             if r.status_code >= 400:
-                logger.warning("Picker mediaItems %s: %s", r.status_code, r.text[:300])
-                return
+                _raise_api("Google Photos Picker", r, ctx="mediaItems")
             body = r.json()
             for it in body.get("mediaItems", []):
                 yield it

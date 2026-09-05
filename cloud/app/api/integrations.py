@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import credstore, security
+from .. import credstore, security, audit
 from ..db import get_db
 from ..integrations import all_integrations, get_integration
 from ..integrations.source_map import candidate_service, map_app_to_source
@@ -876,6 +876,17 @@ def appliance_report(body: IntegrationReport,
         db.commit()
         logger.exception("integration report ingest failed: integration=%s appliance=%s",
                          inst.id, appliance.id)
+        # Tenant-attributed audit → Platform Logs shows WHICH customer/integration
+        # failed and WHY (feeds the source-problem notification pipeline too).
+        try:
+            audit.record(db, actor=f"appliance:{appliance.serial}",
+                         action="integration.run_failed", tenant_id=tid, resource=inst.id,
+                         category="connector", severity="warning",
+                         detail={"type": inst.integration_type,
+                                 "account": inst.name or inst.integration_type,
+                                 "error": inst.last_error, "appliance": appliance.id})
+        except Exception:  # noqa: BLE001
+            pass
         return {"ok": False, "error": inst.last_error}
 
 

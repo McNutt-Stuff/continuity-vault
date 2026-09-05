@@ -177,6 +177,14 @@ def _adopt_fleet_secrets(secrets_blob: dict, *, source: str) -> bool:
         except Exception:  # noqa: BLE001
             logger.debug("could not reload session secret", exc_info=True)
         changed.append("session")
+    signer = secrets_blob.get("signer")
+    if signer:
+        try:
+            from .. import fleet
+            if fleet.import_signer_secret(signer):
+                changed.append("signer")
+        except Exception:  # noqa: BLE001
+            logger.debug("could not adopt fleet signer", exc_info=True)
     if changed:
         logger.warning("adopted fleet %s secret(s) from %s — federation crypto now "
                        "aligned with the control plane", "+".join(changed), source)
@@ -189,11 +197,18 @@ def _sync_fleet_secrets(s, bundle: dict) -> None:
     channel and adopt + persist them. Cheap no-op once aligned."""
     want_kek = bundle.get("fleet_key_fp") or ""
     want_sess = bundle.get("session_key_fp") or ""
-    if not want_kek and not want_sess:
+    want_signer = bundle.get("signer_fp") or ""
+    if not want_kek and not want_sess and not want_signer:
         return
     have_kek = _fp(os.environ.get("CV_KEK_SECRET", "dev-kek"))
     have_sess = _fp(get_settings().session_secret)
-    if want_kek == have_kek and want_sess == have_sess:
+    have_signer = ""
+    try:
+        from .. import fleet
+        have_signer = fleet.signer_key_id()
+    except Exception:  # noqa: BLE001
+        have_signer = ""
+    if want_kek == have_kek and want_sess == have_sess and want_signer == have_signer:
         return
     secrets_blob = _post("/nodes/sync/fleet-secrets",
                          {"node": s.node_name or s.domain})

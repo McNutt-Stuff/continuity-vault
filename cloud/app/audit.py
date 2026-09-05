@@ -101,10 +101,22 @@ def record(db: Session, actor: str, action: str, tenant_id: Optional[str] = None
                     "critical": "critical", "error": "error"}
         src = ("auth" if action.startswith("auth.")
                else "audit" if category == "admin" else "activity")
+        # Fold the audit detail into the log line so the Platform Logs view shows
+        # WHY (e.g. the connector error), not just the action code. Build a short
+        # human summary from the common keys and carry the full detail in meta.
+        d = detail or {}
+        summary = f"{action} {resource}".strip()
+        bits = []
+        for k in ("account", "type", "error", "message", "reason"):
+            v = d.get(k)
+            if v:
+                bits.append(f"{k}={v}")
+        if bits:
+            summary = f"{summary} — " + ", ".join(str(b) for b in bits)
         logsink.emit(level=_sev_lvl.get(severity, "info"), source=src,
-                     logger_name=f"audit.{category}", message=f"{action} {resource}".strip(),
+                     logger_name=f"audit.{category}", message=summary[:2000],
                      tenant_id=tenant_id, actor=actor, resource=resource,
-                     meta={"action": action, "category": category})
+                     meta={"action": action, "category": category, **d})
     except Exception:  # noqa: BLE001
         pass
     return event

@@ -81,11 +81,26 @@ def _is_timeout_error(exc: Exception) -> bool:
 
 def _normalize_sync_error(exc: Exception) -> str:
     msg = (str(exc).strip() or exc.__class__.__name__)
+    # Capture the provider's HTTP status + a short response snippet when present,
+    # so a source failure records WHY (e.g. invalid_grant, quota exceeded) instead
+    # of a bare exception class. Error responses carry codes/descriptions, not
+    # secrets, and we cap the snippet.
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        code = getattr(resp, "status_code", None)
+        body = ""
+        try:
+            body = (resp.text or "").strip().replace("\n", " ")[:200]
+        except Exception:  # noqa: BLE001
+            body = ""
+        extra = " ".join(x for x in (f"HTTP {code}" if code else "", body) if x).strip()
+        if extra and extra not in msg:
+            msg = f"{msg} ({extra})".strip()
     if _is_auth_error(exc):
-        return ("Authentication failed: " + msg)[:500]
+        return ("Authentication failed: " + msg)[:800]
     if _is_timeout_error(exc):
-        return ("Connection timeout: " + msg)[:500]
-    return msg[:500]
+        return ("Connection timeout: " + msg)[:800]
+    return msg[:800]
 
 
 def _record_sync_success(db: Session, account: Optional[ConnectorAccount], count: int) -> None:

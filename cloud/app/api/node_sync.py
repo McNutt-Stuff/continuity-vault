@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from sqlalchemy import DateTime
 from sqlalchemy.orm import Session
 
-from .. import keybroker
+from .. import keybroker, fleet
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
@@ -84,12 +84,15 @@ def _fp(secret: str | None) -> str:
 
 def _fleet_crypto_secrets() -> dict:
     """The crypto secrets the fleet shares so a node can unwrap replicated vault
-    keys + decrypt connector credentials. The CP is authoritative; these are the
-    EFFECTIVE values it actually uses (matching credstore/keybroker defaults)."""
+    keys + decrypt connector credentials, AND sign appliance commands with the same
+    key as the control plane. The CP is authoritative; these are the EFFECTIVE
+    values it actually uses (matching credstore/keybroker defaults)."""
     kek = os.environ.get("CV_KEK_SECRET", "dev-kek")
     sess = get_settings().session_secret
     return {"kek": kek, "session_secret": sess,
-            "kek_fp": _fp(kek), "session_fp": _fp(sess)}
+            "signer": fleet.export_signer_secret(),
+            "kek_fp": _fp(kek), "session_fp": _fp(sess),
+            "signer_fp": fleet.signer_key_id()}
 
 
 class FleetIdent(BaseModel):
@@ -253,6 +256,7 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         # on a mismatch, so it self-aligns without a hand-set CV_KEK_SECRET.
         "fleet_key_fp": _fp(os.environ.get("CV_KEK_SECRET", "dev-kek")),
         "session_key_fp": _fp(get_settings().session_secret),
+        "signer_fp": fleet.signer_key_id(),
     }
 
 

@@ -33,6 +33,17 @@ client/server-encrypted; storage holds only ciphertext.
   filters, default warn/error, tenant/node/appliance scoping, drill-down from node/appliance cards). When you
   add a new component or failure path, make sure its logs reach this store (log via a `cv.*` logger, or emit
   via `logsink.emit(...)`), and record `Node.last_log_push_at` visibility. Prune keeps info/debug 7d, warn+ 30d.
+- **Granular error detail is a STANDARD for sources/connectors/integrations.** Every source/connector/
+  integration failure must be triageable from the admin **Platform Logs** WITHOUT shell access: record the
+  HTTP status code, the provider's error code/reason (`invalid_grant`, `quotaExceeded`, …), a bounded
+  response-body snippet (~200 chars), and the operation context (endpoint, account, folder/cursor/object id) —
+  never the full payload, never secrets (tokens/passwords/`Authorization`). RAISE errors that preserve
+  `.response` (`raise … from exc`) so `sync_worker._normalize_sync_error` captures the status+snippet, and
+  route them through `sync_worker._record_sync_error` (→ `last_error`/`fail_count`/needs-reauth +
+  tenant-attributed audit LogEntry + `source_problem` notification). When emitting an event yourself, pass
+  `audit.record(..., detail={type, account, error, reason/code, <op context>})` — those keys are folded into
+  the log message and the full detail into `meta`. Details: `.github/instructions/connectors.instructions.md`
+  → “Logging & error detail — STANDARD”. A bare `except: return []` or a terse `"failed"` log is a bug.
 - **Durable, resumable writes — NEVER silently lose a backup/sync/write.** Every write to a destination
   (cv-cloud, customer-s3, byos, appliance store, appliance vault) MUST either succeed, or be recorded for
   automatic retry AND allow a manual re-try after the issue is resolved. Use the durable queue

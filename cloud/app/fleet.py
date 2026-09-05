@@ -72,6 +72,46 @@ def cloud_public_bundle() -> dict:
     return fleet_signer().public_bundle()
 
 
+def signer_key_id() -> str:
+    """Stable public id of the fleet signer (advertised as a fingerprint so a node
+    can detect it needs to adopt the control plane's signer)."""
+    return fleet_signer().key_id
+
+
+def export_signer_secret() -> dict:
+    """The FULL private fleet-signer bundle, for distribution to customer-tenant
+    nodes so every box signs appliance commands with the SAME key. Without this a
+    node signs with its own random key and an appliance (pinned to the control
+    plane's key) rejects every node-issued command. Delivered only over the
+    authenticated fleet channel (see api/node_sync fleet-secrets)."""
+    s = fleet_signer()
+    return {
+        "keyId": s.key_id, "profileId": s.profile.profile_id,
+        "classicalPriv": base64.b64encode(s.classical_priv).decode(),
+        "classicalPub": base64.b64encode(s.classical_pub).decode(),
+        "pqAlg": s.pq_alg,
+        "pqPriv": base64.b64encode(s.pq_priv).decode(),
+        "pqPub": base64.b64encode(s.pq_pub).decode(),
+    }
+
+
+def import_signer_secret(bundle: dict) -> bool:
+    """Adopt the control plane's fleet signer (persist to the local signer path +
+    reset the cached signer so the next sign/verify uses it). Returns True if it
+    changed. Idempotent — a no-op once the node already holds the CP's key."""
+    global _FLEET_SIGNER
+    if not bundle or not bundle.get("keyId"):
+        return False
+    try:
+        if fleet_signer().key_id == bundle["keyId"]:
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    _SIGNER_PATH.write_text(json.dumps(bundle))
+    _FLEET_SIGNER = None  # force reload from the newly-written file
+    return True
+
+
 def policy_hash(appliance: Appliance) -> str:
     """A deterministic hash of the local-policy view the command must match.
 
