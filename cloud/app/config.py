@@ -130,8 +130,11 @@ class Settings(BaseSettings):
     # + search index for the tenants assigned to it, replicates their config from
     # the control plane (which it cannot reach at the DB level), runs sync
     # locally, and pushes results back. The control plane then skips tenants that
-    # are assigned to a node. REQUIRES the whole fleet to share CV_KEK_SECRET so a
-    # node can use the replicated vault keys + connector credentials.
+    # are assigned to a node. The fleet shares CV_KEK_SECRET + CV_SESSION_SECRET so
+    # a node can unwrap the replicated vault keys + decrypt connector credentials;
+    # a node auto-adopts these from the control plane on pull (see
+    # node_sync /fleet-secrets + node_replication._sync_fleet_secrets), so a
+    # mismatched hand-set value self-heals instead of silently failing every sync.
     node_sync_scope: bool = False          # CV_NODE_SYNC_SCOPE (enable federation)
 
 

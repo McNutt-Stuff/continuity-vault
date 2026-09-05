@@ -754,28 +754,60 @@ class Agent:
     def _push_objects(self, source_type: str, objects: list, destinations: list,
                       max_batch_bytes: int = 32 * 1024 * 1024, max_batch: int = 500) -> int:
         """Client-encrypt each object and push in batches bounded by cumulative
-        size (files can be large) so no single request is oversized."""
+        size (files can be large) so no single request is oversized. A batch that
+        fails with a PERSISTENT error (a single oversized/malformed object) is
+        isolated object-by-object so one bad item never blocks the rest — the good
+        objects still land and the bad ones are recorded for retry. A transient
+        control-plane outage still defers the whole collect (re-raised)."""
         pushed = 0
+        self._push_delivered: set = set()
+        self._push_failed: set = set()
         batch: list = []
         batch_bytes = 0
+
+        def _flush(b: list) -> None:
+            nonlocal pushed
+            if not b:
+                return
+            try:
+                n = self._push_batch(source_type, b, destinations)
+                pushed += n
+                self._push_delivered.update(o["object_id"] for o in b)
+            except ControlPlaneUnavailable:
+                raise  # transient — defer the whole collect, retry next cycle
+            except httpx.HTTPStatusError as exc:
+                # The server RESPONDED with an error status -> a specific object is
+                # bad (oversized/malformed). Isolate object-by-object so the rest
+                # still land and only the offending item is recorded for retry.
+                # (Connection/timeout errors are NOT caught here — they propagate
+                # and defer the whole collect, so an outage never drops good data.)
+                code = exc.response.status_code if exc.response is not None else "?"
+                if len(b) == 1:
+                    self._push_failed.add(b[0]["object_id"])
+                    self.log.error("push: dropping object %s (%s) rejected by server (HTTP %s): %s",
+                                   b[0].get("object_id"), source_type, code, str(exc)[:200])
+                    return
+                self.log.warning("push: batch of %d rejected (HTTP %s) — isolating the bad "
+                                 "object so the rest still land", len(b), code)
+                for o in b:
+                    _flush([o])
+
         for o in objects:
             plaintext = base64.b64decode(o["content_b64"])
-            # Prefer a collector-supplied stable hash (e.g. 1Password dedups on
-            # its own edit timestamp, immune to volatile display fields); else
-            # hash the plaintext. Encryption uses a fresh nonce each run, so the
-            # ciphertext is never a stable dedup key.
             o.setdefault("content_hash", hashlib.sha256(plaintext).hexdigest())
             envelope = encrypt_content(self.agent_key, plaintext, o["object_id"])
             o["content_b64"] = base64.b64encode(envelope).decode()
             o["client_encrypted"] = True
             o["size_bytes"] = len(envelope)
             if batch and (batch_bytes + len(envelope) > max_batch_bytes or len(batch) >= max_batch):
-                pushed += self._push_batch(source_type, batch, destinations)
+                _flush(batch)
                 batch, batch_bytes = [], 0
             batch.append(o)
             batch_bytes += len(envelope)
-        if batch:
-            pushed += self._push_batch(source_type, batch, destinations)
+        _flush(batch)
+        if self._push_failed:
+            self.log.warning("push: %d/%d object(s) could not be delivered (%s) — kept for retry",
+                             len(self._push_failed), len(objects), source_type)
         return pushed
 
     def _push_batch(self, source_type: str, batch: list, destinations: list) -> int:
@@ -817,9 +849,10 @@ class Agent:
         known = self._load_files_state()
         objects, new_state, unchanged = files_collector.collect(file_config, known)
         total = self._push_objects("endpoint_files", objects, destinations) if objects else 0
-        # Only persist the new state once the changed files actually landed, so a
-        # failed push is retried next run rather than silently skipped.
-        if total == len(objects):
+        # Persist state only when everything delivered (files state is path-keyed).
+        # Isolation still lands every good file this run; a run with a failing file
+        # re-collects + re-pushes next cycle (server dedups) until it clears.
+        if not objects or not getattr(self, "_push_failed", set()):
             self._save_files_state(new_state)
         self._last_collect = time.time()
         results = [{"collector": "endpoint_files", "objects": total, "unchanged": unchanged}]
@@ -872,10 +905,10 @@ class Agent:
             objects, new_state = imessage.collect(cfg, state)
             pushed = self._push_objects("imessage", objects, destinations) if objects else 0
             total += pushed
-            if objects and pushed != len(objects):
-                self.log.warning("imessage: chunk partially pushed (%d/%d) — will retry "
-                                 "next run", pushed, len(objects))
-                break
+            dropped = len(getattr(self, "_push_failed", set()))
+            if objects and dropped:
+                self.log.warning("imessage: %d message(s) in this chunk could not be delivered "
+                                 "and were logged+skipped so the backlog isn't stalled", dropped)
             new_rowid = int(new_state.get("last_rowid") or prev_rowid)
             if new_rowid > prev_rowid:
                 # Persist the advanced cursor per chunk so progress is durable.
@@ -922,7 +955,11 @@ class Agent:
         else:
             self._collector_notices.pop("outlook_local", None)
         total = self._push_objects("outlook_local", objects, destinations) if objects else 0
-        if total == len(objects):
+        if objects:
+            # Advance state for delivered objects; drop the few that persistently
+            # failed so they're retried next run (never blocks the rest).
+            for fid in getattr(self, "_push_failed", set()):
+                (new_state.get("sigs") or {}).pop(fid, None)
             self._save_json_state(self._outlook_state_file, new_state)
         self._last_collect = time.time()
         results = [{"collector": "outlook_local", "objects": total}]

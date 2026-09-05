@@ -66,7 +66,9 @@ def _is_auth_error(exc: Exception) -> bool:
     s = str(exc).lower()
     tokens = ("401", "403", "invalid_grant", "invalid_token", "unauthorized",
               "forbidden", "token has expired", "token expired", "reauth",
-              "access_denied", "revoked", "needs-reauth", "invalid credentials")
+              "access_denied", "revoked", "needs-reauth", "invalid credentials",
+              "authentication failed", "invalid email", "invalid password",
+              "app-specific password")
     return any(t in s for t in tokens)
 
 
@@ -855,9 +857,18 @@ def _account_config(db: Session, collection: Collection,
     try:
         creds = credstore.decrypt(collection.tenant_id, account.encrypted_credentials)
     except Exception as exc:
-        logger.warning("credentials decrypt failed during sync: source=%s account=%s error=%s",
-                       collection.source_type, getattr(account, "account_label", "?"), exc)
-        return {}
+        # AES-GCM InvalidTag stringifies to "" — surface a real message. This
+        # almost always means the node's CV_KEK_SECRET differs from where the
+        # source was linked (a federated node can't decrypt CP-encrypted creds),
+        # so every sync here fails. Raise so the standard error path records it on
+        # the account (last_error/fail_count), audits it WITH the tenant, and feeds
+        # the source-problem notification — instead of silently retrying forever.
+        detail = (str(exc).strip() or exc.__class__.__name__)
+        raise RuntimeError(
+            f"Stored credentials could not be decrypted ({detail}). The encryption "
+            f"key on this server may not match where the source was connected — "
+            f"reconnect the source, or align the node's key with the control plane."
+        ) from exc
     # Credential access is security-relevant — record it in the audit ledger.
     audit.record(db, actor="sync-worker", action="connector.credentials_accessed",
                  tenant_id=collection.tenant_id, resource=account.id,

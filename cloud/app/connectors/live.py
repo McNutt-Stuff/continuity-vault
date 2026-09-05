@@ -1065,8 +1065,14 @@ def fetch_icloud(username: str, password: str,
     try:
         api = PyiCloudService(username, password)
     except Exception as exc:
-        logger.warning("iCloud auth failed: %s", exc)
-        return
+        # Surface as an auth failure so the sync worker flags the source
+        # needs-reauth and notifies — not a silent empty (healthy-looking) pull.
+        detail = (str(exc).strip() or exc.__class__.__name__)
+        logger.warning("iCloud auth failed: %s", detail)
+        raise PermissionError(
+            f"iCloud authentication failed: {detail}. iCloud needs an app-specific "
+            f"password (appleid.apple.com → Sign-In & Security) and can't sync an "
+            f"account with interactive two-factor enabled.") from exc
     if getattr(api, "requires_2fa", False) or getattr(api, "requires_2sa", False):
         logger.info("iCloud account requires interactive 2FA; cannot sync headlessly")
         return

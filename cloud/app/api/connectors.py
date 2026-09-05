@@ -595,6 +595,70 @@ def _node_purge(node, account_id: str, tenant_id: str,
         return None
 
 
+def _node_purge_collection(node, collection_id: str, tenant_id: str,
+                           destinations: list[str] | None = None,
+                           keep_source: bool = False) -> dict | None:
+    """Purge an agent-collected source (a single Collection, no connector account)
+    on the tenant's node — same contract as _node_purge but keyed on collection."""
+    import httpx
+    from .site import _fleet_secret
+    url = (node.endpoint or "").rstrip("/") + "/nodes/sync/purge"
+    try:
+        with httpx.Client(timeout=30) as c:
+            r = c.post(url, json={"collection_id": collection_id, "tenant_id": tenant_id,
+                                  "destinations": destinations, "keep_source": keep_source},
+                       headers={"Authorization": f"Bearer {_fleet_secret()}"})
+            r.raise_for_status()
+            return r.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("node collection purge failed: %s", exc)
+        return None
+
+
+def _purge_collection_data_only(db: Session, coll: Collection) -> dict:
+    """Delete one collection's recovery points + index records everywhere but KEEP
+    the collection so it keeps backing up (purge the data, not the source)."""
+    from ..models import SearchDocument, SnapshotReceipt
+    docs = db.query(SearchDocument).filter(
+        SearchDocument.collection_id == coll.id).delete(synchronize_session=False)
+    receipts = db.query(SnapshotReceipt).filter(
+        SnapshotReceipt.collection_id == coll.id).delete(synchronize_session=False)
+    coll.last_backup_run_at = None
+    return {"documents": int(docs or 0), "recovery_points": int(receipts or 0),
+            "collections": 0, "removed": False, "kept_source": True}
+
+
+def _purge_collection_local(db: Session, coll: Collection) -> dict:
+    """Delete one collection's index + recovery points + the collection itself."""
+    from ..models import SearchDocument, SnapshotReceipt
+    docs = db.query(SearchDocument).filter(
+        SearchDocument.collection_id == coll.id).delete(synchronize_session=False)
+    receipts = db.query(SnapshotReceipt).filter(
+        SnapshotReceipt.collection_id == coll.id).delete(synchronize_session=False)
+    db.delete(coll)
+    return {"documents": int(docs or 0), "recovery_points": int(receipts or 0),
+            "collections": 1, "removed": True}
+
+
+def _purge_collection_destinations(db: Session, coll: Collection, dests: list[str]) -> dict:
+    """Delete one collection's recovery points at the selected destinations only.
+    When nothing remains anywhere, its index + the collection are removed too."""
+    from ..models import SearchDocument, SnapshotReceipt
+    receipts = db.query(SnapshotReceipt).filter(
+        SnapshotReceipt.collection_id == coll.id,
+        SnapshotReceipt.destination.in_(dests)).delete(synchronize_session=False)
+    remaining = db.query(SnapshotReceipt).filter(
+        SnapshotReceipt.collection_id == coll.id).count()
+    if remaining == 0:
+        docs = db.query(SearchDocument).filter(
+            SearchDocument.collection_id == coll.id).delete(synchronize_session=False)
+        db.delete(coll)
+        return {"documents": int(docs or 0), "recovery_points": int(receipts or 0),
+                "collections": 1, "removed": True}
+    return {"documents": 0, "recovery_points": int(receipts or 0),
+            "collections": 0, "removed": False}
+
+
 @router.get("/accounts/{account_id}/purge-targets")
 def purge_targets(account_id: str,
                   principal: security.Principal = Depends(security.get_principal),
@@ -652,6 +716,7 @@ def _purge_request_view(db: Session, r) -> dict:
     dests = r.destinations or []
     return {
         "id": r.id, "connector_account_id": r.connector_account_id,
+        "collection_id": getattr(r, "collection_id", None),
         "source_type": r.source_type, "source_label": r.source_label,
         "status": r.status, "all_destinations": bool(r.all_destinations),
         "destinations": dests,
@@ -670,14 +735,42 @@ def _execute_purge(db: Session, req) -> dict:
     (or everywhere) on the assigned node AND the control plane, then the index +
     account when nothing remains. Called by the worker or execute-now."""
     from ..models import Node
-    account = db.get(ConnectorAccount, req.connector_account_id)
     all_mode = bool(req.all_destinations)
     keep_source = bool(getattr(req, "keep_source", False))
     dests = req.destinations or []
     node_result = None
+    tenant = db.get(Tenant, req.tenant_id) if req.tenant_id else None
+    node = db.get(Node, tenant.node_id) if tenant and tenant.node_id else None
+
+    # Agent-collected source (a single Collection, no connector account).
+    if getattr(req, "collection_id", None):
+        coll = db.get(Collection, req.collection_id)
+        if get_settings().node_sync_scope and node and node.endpoint:
+            node_result = _node_purge_collection(node, req.collection_id, req.tenant_id,
+                                                 None if all_mode else dests, keep_source=keep_source)
+        counts = {"documents": 0, "recovery_points": 0, "collections": 0, "removed": False}
+        if coll:
+            if keep_source:
+                counts = _purge_collection_data_only(db, coll)
+            elif all_mode:
+                counts = _purge_collection_local(db, coll)
+            else:
+                counts = _purge_collection_destinations(db, coll, dests)
+        if node_result:
+            counts["node"] = node_result
+        req.status = "done"
+        req.executed_at = _now_naive()
+        req.result = counts
+        db.commit()
+        audit.record(db, actor=req.created_by or "system", action="connector.purged",
+                     tenant_id=req.tenant_id, resource=req.collection_id,
+                     category="security", severity="warning",
+                     detail={"label": req.source_label, "agent_source": True,
+                             "destinations": "all" if all_mode else dests, **counts})
+        return counts
+
+    account = db.get(ConnectorAccount, req.connector_account_id)
     if get_settings().node_sync_scope and req.tenant_id:
-        tenant = db.get(Tenant, req.tenant_id)
-        node = db.get(Node, tenant.node_id) if tenant and tenant.node_id else None
         if node and node.endpoint:
             node_result = _node_purge(node, req.connector_account_id, req.tenant_id,
                                       None if all_mode else dests, keep_source=keep_source)

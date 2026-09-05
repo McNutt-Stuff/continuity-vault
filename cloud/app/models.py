@@ -634,6 +634,7 @@ class PurgeRequest(Base):
     tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
     owner_user_id = Column(String, index=True)
     connector_account_id = Column(String, index=True)
+    collection_id = Column(String, index=True)  # set for agent-collected sources (no connector account)
     source_type = Column(String, default="")
     source_label = Column(String, default="")
     destinations = Column(JSON, default=list)   # [] / None = everywhere

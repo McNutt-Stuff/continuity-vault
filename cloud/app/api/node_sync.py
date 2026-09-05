@@ -19,9 +19,9 @@ Key material and connector credentials are wrapped with the fleet-wide
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 from datetime import datetime
-
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import DateTime
@@ -72,6 +72,39 @@ def _require_fleet(authorization: str) -> None:
     expected = _fleet_secret() or ""
     if not token or not expected or not secrets.compare_digest(token, expected):
         raise HTTPException(401, "invalid node credentials")
+
+
+def _fp(secret: str | None) -> str:
+    """Non-reversible fingerprint of a fleet crypto secret, so a node can detect a
+    mismatch (and fetch the real value) without the secret ever crossing the wire
+    on every poll."""
+    import hashlib
+    return hashlib.sha256(secret.encode()).hexdigest()[:16] if secret else ""
+
+
+def _fleet_crypto_secrets() -> dict:
+    """The crypto secrets the fleet shares so a node can unwrap replicated vault
+    keys + decrypt connector credentials. The CP is authoritative; these are the
+    EFFECTIVE values it actually uses (matching credstore/keybroker defaults)."""
+    kek = os.environ.get("CV_KEK_SECRET", "dev-kek")
+    sess = get_settings().session_secret
+    return {"kek": kek, "session_secret": sess,
+            "kek_fp": _fp(kek), "session_fp": _fp(sess)}
+
+
+class FleetIdent(BaseModel):
+    node: str = ""
+
+
+@router.post("/fleet-secrets")
+def fleet_secrets(body: FleetIdent = FleetIdent(), authorization: str = Header(default="")):
+    """Deliver the fleet crypto secrets (KEK + session secret) to an authenticated
+    node so federation crypto self-aligns instead of relying on hand-set env. Gated
+    by the fleet secret — which already authorizes pulling every tenant's config +
+    wrapped keys, so this grants no new data reach. Nodes call it ONLY when the
+    fingerprint advertised in the pull differs from what they hold."""
+    _require_fleet(authorization)
+    return _fleet_crypto_secrets()
 
 
 def _ser(obj) -> dict:
@@ -215,6 +248,11 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "pending_insights": pending_insights,
         "agent_commands": agent_commands,
         "key_records": key_records,
+        # Fingerprints of the fleet crypto secrets (never the secrets themselves).
+        # The node compares these to what it holds and fetches /fleet-secrets only
+        # on a mismatch, so it self-aligns without a hand-set CV_KEK_SECRET.
+        "fleet_key_fp": _fp(os.environ.get("CV_KEK_SECRET", "dev-kek")),
+        "session_key_fp": _fp(get_settings().session_secret),
     }
 
 
@@ -679,7 +717,8 @@ def node_backup(authorization: str = Header(default="")):
 
 
 class PurgeReq(BaseModel):
-    account_id: str
+    account_id: str | None = None
+    collection_id: str | None = None  # set for agent-collected sources (no connector account)
     tenant_id: str
     destinations: list[str] | None = None
     keep_source: bool = False
@@ -693,11 +732,27 @@ def node_purge(body: PurgeReq, authorization: str = Header(default=""),
     ``destinations`` limits the purge to specific stores; None/["all"] = everywhere.
     ``keep_source`` wipes the data but keeps the source connected + syncing."""
     _require_fleet(authorization)
+    dests = body.destinations
+    # Agent-collected source: a single Collection with no connector account.
+    if body.collection_id:
+        from ..models import Collection
+        from .connectors import (_purge_collection_data_only, _purge_collection_local,
+                                 _purge_collection_destinations)
+        coll = db.get(Collection, body.collection_id)
+        if not coll or coll.tenant_id != body.tenant_id:
+            return {"ok": True, "documents": 0, "recovery_points": 0, "collections": 0}
+        if body.keep_source:
+            counts = _purge_collection_data_only(db, coll)
+        elif not dests or "all" in dests:
+            counts = _purge_collection_local(db, coll)
+        else:
+            counts = _purge_collection_destinations(db, coll, dests)
+        db.commit()
+        return {"ok": True, **counts}
     acct = db.get(ConnectorAccount, body.account_id)
     if not acct or acct.tenant_id != body.tenant_id:
         return {"ok": True, "documents": 0, "recovery_points": 0, "collections": 0}
     from .connectors import _purge_destinations, _purge_source_local, _purge_source_data_only
-    dests = body.destinations
     if body.keep_source:
         counts = _purge_source_data_only(db, acct)
     elif not dests or "all" in dests:

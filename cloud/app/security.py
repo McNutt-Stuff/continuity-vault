@@ -35,6 +35,18 @@ from .models import Passkey, Tenant, User, Vault
 settings = get_settings()
 _serializer = URLSafeTimedSerializer(settings.session_secret, salt="cv-session")
 
+
+def set_session_secret(secret: str) -> None:
+    """Adopt a new session-signing secret at runtime (a customer-tenant node aligns
+    to the control plane's fleet secret so it can validate the same session tokens
+    the portal issues and the CP proxies to it). Rebuilds the serializer in place."""
+    global _serializer
+    _serializer = URLSafeTimedSerializer(secret, salt="cv-session")
+    try:
+        settings.session_secret = secret
+    except Exception:  # noqa: BLE001
+        pass
+
 # In-memory challenge store (prototype). Production: short-lived cache/redis.
 _challenges: dict[str, tuple[str, float]] = {}
 

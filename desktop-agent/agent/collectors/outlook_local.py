@@ -411,15 +411,20 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                 return ((2 if bk == "full" else 1) * 10_000_000
                         + len(mget(row, "html") or "") * 2 + len(mget(row, "body") or ""))
 
-            # Trust of a fragment's ENVELOPE (sender/subject/date). A full-body block
-            # that hxprobe mis-addressed has no message_id + a borrowed subject, so it
-            # scores low and never dictates the sender.
+            # Trust of a fragment's ENVELOPE (sender/subject/date/recipients). A
+            # full-body block that hxprobe mis-addressed has no message_id + a
+            # borrowed subject, so it scores low and never dictates the sender.
+            # Within a message_id group, several fragments tie on mid+subject+sender;
+            # the small full-body bonus (kept BELOW the has_mid weight) breaks that
+            # tie toward the full copy, whose recipients are correct — the preview
+            # fragment often carries a mis-assigned "to" address.
             def _env_score(row) -> int:
                 has_mid = 1 if (mget(row, "message_id") or "").strip() else 0
                 subj = (mget(row, "subject") or "").strip()
                 own_subject = 1 if (subj and not mget(row, "subject_inherited")) else 0
                 has_sender = 1 if (mget(row, "sender") or "").strip() else 0
-                return has_mid * 4 + own_subject * 2 + has_sender
+                full_body = 1 if (mget(row, "body_kind") or "").lower() == "full" else 0
+                return has_mid * 4 + own_subject * 2 + has_sender + full_body
 
             # Pass 1: group fragments that carry a message_id (the reliable key);
             # collect the rest as orphans (often a mis-addressed full-body block).

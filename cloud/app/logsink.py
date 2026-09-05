@@ -64,16 +64,27 @@ def _source_for_logger(name: str) -> str:
 
 def _self_node_info(db) -> tuple[Optional[str], str]:
     """Cached (node_id, node_name) for the running node so captured rows are
-    attributed. CP = is_self node; a customer node = its own row."""
+    attributed. Resolve by the configured node identity FIRST — a customer node
+    pulls the fleet's ``nodes`` from the control plane, which can overwrite the
+    local ``is_self`` flag and make the node stamp its logs with the CP's id
+    (so node logs masquerade as control-plane logs). The configured name is the
+    node's own identity and never clobbered; is_self is only a fallback."""
     global _self_node, _self_node_at
     if _self_node and time.time() - _self_node_at < 120:
         return _self_node
+    info: tuple[Optional[str], str] = (None, "")
     try:
         from .models import Node
-        n = db.query(Node).filter(Node.is_self.is_(True)).first()
-        _self_node = (n.id, n.name) if n else (None, "")
+        from .config import get_settings
+        s = get_settings()
+        name = (getattr(s, "node_name", "") or getattr(s, "domain", "") or "").strip()
+        n = db.query(Node).filter(Node.name == name).first() if name else None
+        if n is None:
+            n = db.query(Node).filter(Node.is_self.is_(True)).first()
+        info = (n.id, n.name) if n else (None, "")
     except Exception:  # noqa: BLE001
-        _self_node = (None, "")
+        info = (None, "")
+    _self_node = info
     _self_node_at = time.time()
     return _self_node
 

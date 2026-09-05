@@ -85,6 +85,11 @@ _PULL_ORDER = [
 # would clobber a just-recorded sync error/cursor before it's ever pushed).
 _PULL_EXCLUDE = {
     "desktop_agents": {"pending_commands", "last_scan", "fs_expansions"},
+    # A node identifies ITSELF via is_self. The control plane's fleet has is_self
+    # set on the CP row; pulling that down would flip the node's self-identity to
+    # the CP — so it stamps its own logs (and resolves node_config profiles) as the
+    # control plane. Never let a pull touch is_self.
+    "nodes": {"is_self"},
     "connector_accounts": {"sync_cursor", "last_sync_at", "last_object_count",
                            "last_error", "last_error_at", "auth_status"},
     # The node's scheduler owns each mapping's run stamp; pulling the control
@@ -127,6 +132,88 @@ def _write_state(d: dict) -> None:
         _state_path().write_text(json.dumps(d))
     except Exception:
         logger.debug("could not persist replication state", exc_info=True)
+
+
+def _fleet_secrets_path() -> Path:
+    base = Path(os.environ.get("CV_KEY_STORE", "./cv_keystore")).parent
+    return base / "fleet_secrets.json"
+
+
+def _fp(secret: str | None) -> str:
+    import hashlib
+    return hashlib.sha256(secret.encode()).hexdigest()[:16] if secret else ""
+
+
+def _persist_fleet_secrets(d: dict) -> None:
+    """Store the adopted fleet secrets locally (0600) so a restart re-applies them
+    BEFORE any worker runs — otherwise a stale CV_KEK_SECRET in the unit's env
+    would win at boot and every decrypt would fail until the first pull."""
+    try:
+        p = _fleet_secrets_path()
+        p.write_text(json.dumps(d))
+        try:
+            p.chmod(0o600)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001
+        logger.debug("could not persist fleet secrets", exc_info=True)
+
+
+def _adopt_fleet_secrets(secrets_blob: dict, *, source: str) -> bool:
+    """Apply KEK + session secret in-process so credstore/keybroker (read CV_KEK_SECRET
+    at call time) and the session serializer use the fleet values. Never logs the
+    secret. Returns True if anything changed."""
+    changed = []
+    kek = secrets_blob.get("kek")
+    if kek and os.environ.get("CV_KEK_SECRET", "dev-kek") != kek:
+        os.environ["CV_KEK_SECRET"] = kek
+        changed.append("KEK")
+    sess = secrets_blob.get("session_secret")
+    if sess and get_settings().session_secret != sess:
+        os.environ["CV_SESSION_SECRET"] = sess
+        try:
+            from .. import security
+            security.set_session_secret(sess)
+        except Exception:  # noqa: BLE001
+            logger.debug("could not reload session secret", exc_info=True)
+        changed.append("session")
+    if changed:
+        logger.warning("adopted fleet %s secret(s) from %s — federation crypto now "
+                       "aligned with the control plane", "+".join(changed), source)
+    return bool(changed)
+
+
+def _sync_fleet_secrets(s, bundle: dict) -> None:
+    """Compare the fingerprints the control plane advertised in the pull to what we
+    hold; on a mismatch, fetch the real secrets over the authenticated fleet
+    channel and adopt + persist them. Cheap no-op once aligned."""
+    want_kek = bundle.get("fleet_key_fp") or ""
+    want_sess = bundle.get("session_key_fp") or ""
+    if not want_kek and not want_sess:
+        return
+    have_kek = _fp(os.environ.get("CV_KEK_SECRET", "dev-kek"))
+    have_sess = _fp(get_settings().session_secret)
+    if want_kek == have_kek and want_sess == have_sess:
+        return
+    secrets_blob = _post("/nodes/sync/fleet-secrets",
+                         {"node": s.node_name or s.domain})
+    if not secrets_blob:
+        logger.warning("fleet-secret mismatch detected but the control plane didn't "
+                       "return the secrets — will retry next cycle")
+        return
+    if _adopt_fleet_secrets(secrets_blob, source="control plane"):
+        _persist_fleet_secrets({"kek": os.environ.get("CV_KEK_SECRET"),
+                                "session_secret": get_settings().session_secret})
+
+
+def load_persisted_fleet_secrets() -> None:
+    """Re-apply fleet secrets adopted on a previous run, called at startup BEFORE
+    workers start so a restart never runs a sync with a stale env key. No network."""
+    try:
+        blob = json.loads(_fleet_secrets_path().read_text())
+    except Exception:  # noqa: BLE001
+        return
+    _adopt_fleet_secrets(blob, source="local store")
 
 
 def _load_cursor() -> str | None:
@@ -217,6 +304,10 @@ def _pull(s) -> int:
                    {"name": s.node_name or s.domain, "role": s.node_role or "customer-tenant"})
     if not bundle:
         return 0
+    # Self-align the fleet crypto secrets FIRST — before any wrapped key is
+    # unwrapped or credential decrypted below — so a node with a stale/hand-set
+    # CV_KEK_SECRET adopts the control plane's and can actually read what it holds.
+    _sync_fleet_secrets(s, bundle)
     n = 0
     skipped = 0
     with SessionLocal() as db:
@@ -562,6 +653,10 @@ def start_replication() -> None:
         time.sleep(10)
         while True:
             try:
+                _ensure_self_node(s)
+            except Exception:  # noqa: BLE001
+                logger.debug("self-node reconcile failed", exc_info=True)
+            try:
                 _pull(s)
             except Exception:  # noqa: BLE001
                 logger.exception("replication pull cycle failed")
@@ -575,3 +670,30 @@ def start_replication() -> None:
     _thread.start()
     logger.info("node replication started (control plane=%s, every %ds)",
                 s.control_plane_url, interval)
+
+
+def _ensure_self_node(s) -> None:
+    """Re-assert THIS node's ``is_self`` from its configured identity, idempotently.
+    A node pulls the fleet's ``nodes`` from the control plane; earlier builds let
+    that overwrite the local ``is_self`` flag, so the node adopted the CP's row as
+    "self" — mis-stamping its logs as the control plane and mis-resolving
+    node_config / backup targets. Correct it here so an already-affected node
+    self-heals: exactly the row matching our name is is_self, all others are not."""
+    name = (getattr(s, "node_name", "") or getattr(s, "domain", "") or "").strip()
+    if not name:
+        return
+    with SessionLocal() as db:
+        me = db.query(Node).filter(Node.name == name).first()
+        if me is None:
+            return
+        changed = False
+        if not me.is_self:
+            me.is_self = True
+            changed = True
+        for other in db.query(Node).filter(Node.is_self.is_(True), Node.id != me.id).all():
+            other.is_self = False
+            changed = True
+        if changed:
+            db.commit()
+            logger.warning("corrected self-node identity to %s (is_self was pointing "
+                           "elsewhere — logs/config now attribute to this node)", name)

@@ -175,7 +175,11 @@ def startup() -> None:
     from .workers.scheduler import start_scheduler
     role = settings.node_role or "control-plane"
     if settings.node_sync_scope and role != "control-plane":
-        from .workers.node_replication import start_replication
+        from .workers.node_replication import start_replication, load_persisted_fleet_secrets
+        # Re-apply any fleet crypto secrets this node previously adopted from the
+        # control plane BEFORE workers run, so a restart with a stale env key never
+        # fails decrypts (the first pull would otherwise have to re-align first).
+        load_persisted_fleet_secrets()
         start_replication()
         start_scheduler()
     else:

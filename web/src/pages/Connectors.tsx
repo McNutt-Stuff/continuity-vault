@@ -363,19 +363,86 @@ export default function Connectors() {
     }
   }
 
-  async function removeAgentSource(s: AgentSource) {
-    const ok = await confirmDialog({
-      title: `Remove ${s.name}?`,
-      message: "This deletes the source and its backup history from search. The agent stops collecting it. This cannot be undone.",
-      confirmLabel: "Remove", tone: "danger",
-    });
-    if (!ok) return;
+  async function purgeAgentSource(s: AgentSource, keepSource: boolean) {
+    let targets: { active: boolean; destinations: { id: string; label: string; recovery_points: number; bytes: number }[] };
     try {
-      await api.del(`/collections/${s.id}`);
-      flash("Source removed");
+      targets = await api.get(`/collections/${s.id}/purge-targets`);
+    } catch (e) {
+      await notify({ title: "Couldn't load purge options", message: (e as ApiError).message, tone: "danger" });
+      return;
+    }
+    const opts = [
+      { label: "Everywhere — remove this source completely", value: "all" },
+      ...targets.destinations.map((d) => ({
+        label: `${d.label} — ${bytes(d.bytes)} · ${d.recovery_points} recovery point${d.recovery_points === 1 ? "" : "s"}`,
+        value: d.id,
+      })),
+    ];
+    // Step 1 — where + when. Purge-data keeps the source; Remove-source lets the
+    // customer pick which storage locations to purge from (or everywhere).
+    let where = "all";
+    let when = "grace";
+    if (keepSource) {
+      const sel = await formDialog({
+        title: `Purge ${s.name}'s data`,
+        message: "Permanently deletes ALL backed-up data and search records for this source, but KEEPS the agent collecting it — it will back up fresh on the next run. This is irreversible.",
+        confirmLabel: "Continue",
+        fields: [
+          { name: "when", label: "When", defaultValue: "grace", options: [
+            { label: "In 24 hours (recommended — cancel anytime)", value: "grace" },
+            { label: "Immediately — no grace period", value: "now" },
+          ] },
+        ],
+      });
+      if (!sel) return;
+      when = sel.when;
+    } else {
+      const sel = await formDialog({
+        title: `Remove ${s.name}`,
+        message: "Choose which storage locations to permanently delete this source's data from, and when. This is irreversible.",
+        confirmLabel: "Continue",
+        fields: [
+          { name: "where", label: "Remove from", defaultValue: "all", options: opts },
+          { name: "when", label: "When", defaultValue: "grace", options: [
+            { label: "In 24 hours (recommended — cancel anytime)", value: "grace" },
+            { label: "Immediately — no grace period", value: "now" },
+          ] },
+        ],
+      });
+      if (!sel) return;
+      where = sel.where; when = sel.when;
+    }
+    const scope = keepSource
+      ? "everywhere — the agent keeps collecting this source"
+      : where === "all"
+        ? "everywhere — the source will be removed completely"
+        : (opts.find((o) => o.value === where)?.label ?? where);
+    // Step 2 — hard irreversible confirmation.
+    const ok2 = await confirmDialog({
+      title: keepSource ? "This permanently destroys the backed-up data" : "This permanently destroys data",
+      message: `Once ${keepSource ? "purged" : "removed"}, ${s.name}'s data is NOT recoverable — the encrypted copies are deleted from ${scope}, and its search index records are erased everywhere they live (cloud, appliance, node). ${when === "now" ? "This runs IMMEDIATELY." : "This runs in 24 hours; you can cancel or run it sooner from Overview or Sources."} Continue?`,
+      tone: "danger", confirmLabel: when === "now" ? (keepSource ? "Purge now — permanent" : "Remove now — permanent") : (keepSource ? "Schedule purge" : "Schedule removal"),
+    });
+    if (!ok2) return;
+    // Step 3 — for execute-now, one more explicit confirmation.
+    if (when === "now") {
+      const ok3 = await confirmDialog({
+        title: "Final confirmation",
+        message: `Point of no return: ${keepSource ? "purge" : "remove"} ${s.name} from ${scope} right now. There is no undo.`,
+        tone: "danger", confirmLabel: keepSource ? "Yes, purge now" : "Yes, remove now",
+      });
+      if (!ok3) return;
+    }
+    try {
+      const r = await api.post<{ executed?: boolean; request?: PurgeRequest }>(
+        `/collections/${s.id}/purge`,
+        { destinations: where === "all" ? ["all"] : [where], execute_now: when === "now", keep_source: keepSource });
+      flash(r.executed
+        ? (keepSource ? `Purged ${s.name}'s data` : `Removed ${s.name}`)
+        : `${keepSource ? "Purge" : "Removal"} scheduled — runs in 24h. Cancel or run it now from Overview or here.`);
       await load();
     } catch (e) {
-      await notify({ title: "Couldn't remove", message: (e as ApiError).message, tone: "danger" });
+      await notify({ title: keepSource ? "Couldn't purge" : "Couldn't remove", message: (e as ApiError).message, tone: "danger" });
     }
   }
 
@@ -815,7 +882,9 @@ export default function Connectors() {
                     { label: "Rename source", icon: "edit", onClick: () => renameAgentSource(s) },
                     { label: "Agent settings", icon: "gear", onClick: () => window.location.assign("/agents") },
                     ...(me?.features?.purge_enabled !== false
-                      ? ["divider", { label: "Remove source", icon: "trash", danger: true, onClick: () => removeAgentSource(s) }]
+                      ? ["divider",
+                          { label: "Purge data (keep source)", icon: "trash", danger: true, onClick: () => purgeAgentSource(s, true) },
+                          { label: "Remove source", icon: "trash", danger: true, onClick: () => purgeAgentSource(s, false) }]
                       : []),
                   ] as MenuEntry[])} />
                 </div>

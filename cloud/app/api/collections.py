@@ -286,6 +286,92 @@ def delete_collection(collection_id: str,
     return {"ok": True}
 
 
+@router.get("/{collection_id}/purge-targets")
+def collection_purge_targets(collection_id: str,
+                             principal: security.Principal = Depends(security.get_principal),
+                             tenant: Tenant = Depends(security.get_tenant),
+                             db: Session = Depends(get_db)):
+    """Destinations an agent-collected source's data is stored at, so the customer
+    can choose which storage locations to purge from (parity with connector
+    sources). Also reports whether a data map still routes it (re-accrues)."""
+    from .search import _location_label, _store_label_map
+    c = db.get(Collection, collection_id)
+    if not c or c.tenant_id != tenant.id:
+        raise HTTPException(404, "collection not found")
+    store_labels = _store_label_map(db, tenant.id)
+    agg: dict[str, dict] = {}
+    for rc in (db.query(SnapshotReceipt)
+               .filter(SnapshotReceipt.collection_id == c.id).all()):
+        d = agg.setdefault(rc.destination, {"id": rc.destination,
+                           "label": _location_label(rc.destination, store_labels),
+                           "recovery_points": 0, "bytes": 0})
+        d["recovery_points"] += 1
+        d["bytes"] += int(rc.total_bytes or 0)
+    return {"active": True,
+            "destinations": sorted(agg.values(), key=lambda x: x["label"])}
+
+
+class CollectionPurgeBody(BaseModel):
+    destinations: list[str] | None = None  # subset of destination ids, or None/["all"] = everywhere
+    execute_now: bool = False
+    keep_source: bool = False  # purge the data but keep the agent source collecting
+
+
+@router.post("/{collection_id}/purge")
+def collection_purge(collection_id: str, body: CollectionPurgeBody = CollectionPurgeBody(),
+                     principal: security.Principal = Depends(security.get_principal),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    """Schedule an irreversible purge of an agent-collected source's data,
+    optionally only from chosen destinations, keeping or removing the source.
+    Runs after a 24h grace window unless execute_now. Requires the
+    ``purge_enabled`` capability (an admin clears it for a legal hold). The
+    destinations are wiped on the tenant's node AND the control plane."""
+    from datetime import timedelta
+    from .. import features
+    from ..models import PurgeRequest, User
+    from ..api.connectors import _execute_purge, _purge_request_view, PURGE_GRACE_HOURS, _now_naive
+    c = db.get(Collection, collection_id)
+    if not c or c.tenant_id != tenant.id:
+        raise HTTPException(404, "collection not found")
+    user = db.get(User, principal.user_id)
+    if not features.resolve(user, tenant, "purge_enabled"):
+        raise HTTPException(403, "Data purge is disabled for this account (legal hold).")
+    existing = db.query(PurgeRequest).filter(
+        PurgeRequest.collection_id == collection_id,
+        PurgeRequest.status.in_(["scheduled", "running"])).first()
+    if existing:
+        raise HTTPException(409, "A purge is already scheduled for this source.")
+    dests = body.destinations
+    all_mode = (not dests) or ("all" in dests)
+    grace = timedelta(0) if body.execute_now else timedelta(hours=PURGE_GRACE_HOURS)
+    req = PurgeRequest(
+        tenant_id=tenant.id, owner_user_id=principal.user_id,
+        connector_account_id=None, collection_id=collection_id,
+        source_type=c.source_type, source_label=c.name, all_destinations=all_mode,
+        destinations=[] if all_mode else list(dests),
+        keep_source=bool(body.keep_source),
+        data_map_active=True,
+        created_by=principal.user_id, execute_at=_now_naive() + grace,
+        status="scheduled",
+    )
+    db.add(req)
+    db.commit()
+    db.refresh(req)
+    audit.record(db, actor=principal.user_id, action="connector.purge_scheduled",
+                 tenant_id=tenant.id, resource=collection_id, category="security",
+                 severity="warning",
+                 detail={"label": c.name, "agent_source": True,
+                         "execute_now": body.execute_now,
+                         "destinations": "all" if all_mode else dests})
+    if body.execute_now:
+        req.status = "running"
+        db.commit()
+        counts = _execute_purge(db, req)
+        return {"ok": True, "executed": True, "request": _purge_request_view(db, req), **counts}
+    return {"ok": True, "executed": False, "request": _purge_request_view(db, req)}
+
+
 @router.post("/{collection_id}/prune")
 def prune_collection(collection_id: str,
                      principal: security.Principal = Depends(security.get_principal),
