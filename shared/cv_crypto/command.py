@@ -41,6 +41,8 @@ COMMAND_TYPES = {
     "SEAL",
     "OPEN_TERMINAL",
     "STAGE_INDEX",
+    "SETUP_STORAGE",
+    "FORGET_STORAGE",
 }
 
 
