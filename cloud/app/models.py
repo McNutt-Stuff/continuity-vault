@@ -764,7 +764,37 @@ class Node(Base):
     # resiliency (use different services, not the same one twice).
     backup_service_ids = Column(JSON, default=list)
     last_heartbeat_at = Column(DateTime, nullable=True)
+    last_log_push_at = Column(DateTime, nullable=True)  # last time this node pushed its logs to the CP
     created_at = Column(DateTime, default=_now)
+
+
+class LogEntry(Base):
+    """A single unified operational log line — the control plane is the one place
+    to view logs from everything (cloud + nodes + appliances + endpoint agents +
+    connectors/integrations + auth/user actions/audits). Written by the in-process
+    log sink (cloud + node app loggers), device-log ingest (appliance/agent
+    recent_logs), and the audit dual-write. Customer-tenant nodes push their rows
+    to the CP every ~30s (cursor advances only on confirmed delivery). Pruned by
+    retention (info/debug shorter than warning+)."""
+
+    __tablename__ = "log_entries"
+    id = Column(String, primary_key=True, default=_uuid)
+    ts = Column(DateTime, index=True, default=_now)      # when the event happened
+    level = Column(String, default="info", index=True)   # debug|info|warning|error|critical
+    # Which part of the platform produced it (drives the category filter):
+    # cloud|node|appliance|endpoint|connector|integration|auth|activity|audit
+    source = Column(String, default="cloud", index=True)
+    logger = Column(String, default="")
+    message = Column(Text, default="")
+    tenant_id = Column(String, index=True, nullable=True)  # customer association (nullable = platform)
+    node_id = Column(String, index=True, nullable=True)
+    node_name = Column(String, default="")
+    appliance_id = Column(String, index=True, nullable=True)
+    agent_id = Column(String, index=True, nullable=True)
+    actor = Column(String, default="")                   # user id/email for user actions
+    resource = Column(String, default="")
+    meta = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_now, index=True)  # ingest time = the node→CP push cursor
 
 
 class BackupRun(Base):

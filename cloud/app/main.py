@@ -132,6 +132,14 @@ def startup() -> None:
 
         seed()
 
+    # Unified log sink — capture cv.*/arkive.* app logs into the platform log store
+    # so the control plane is the one place to view logs (nodes push theirs up).
+    try:
+        from . import logsink
+        logsink.install()
+    except Exception:  # noqa: BLE001
+        pass
+
     # Apply this node's configured timezone to the process so API log timestamps
     # and server-side time formatting reflect CV_TIMEZONE (the scheduler keeps it
     # in sync as the config changes).

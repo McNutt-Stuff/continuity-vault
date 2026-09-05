@@ -1557,6 +1557,7 @@ def _node_view(db: Session, n: Node) -> dict:
         "backup_service_ids": backup_ids,
         "backup_services": [nm for nm in (_svc_name(s) for s in backup_ids) if nm],
         "last_heartbeat_at": n.last_heartbeat_at.isoformat() if n.last_heartbeat_at else None,
+        "last_log_push_at": n.last_log_push_at.isoformat() if n.last_log_push_at else None,
     }
 
 
@@ -2853,6 +2854,122 @@ def test_service_object(sid: str, body: "ServiceTest | None" = None,
                                                "ok": result["ok"], "error": result["error"]})
         return result
     return {"ok": False, "error": "test not supported for this service kind"}
+
+
+# =========================================================================== #
+# Platform Logs — the one place to view logs from everything (cloud + nodes +  #
+# appliances + endpoint agents + connectors + auth/user-actions/audits).       #
+# =========================================================================== #
+_LOG_LEVELS = ["debug", "info", "warning", "error", "critical"]
+_LOG_SOURCES = ["cloud", "node", "appliance", "endpoint", "connector",
+                "integration", "auth", "activity", "audit"]
+_DEFAULT_LOG_LEVELS = ["warning", "error", "critical"]
+
+
+def _log_row(le, tenants: dict) -> dict:
+    return {
+        "id": le.id, "ts": le.ts.isoformat() if le.ts else None,
+        "level": le.level, "source": le.source, "logger": le.logger or "",
+        "message": le.message or "",
+        "tenant_id": le.tenant_id, "tenant_name": tenants.get(le.tenant_id) if le.tenant_id else "",
+        "node_id": le.node_id, "node_name": le.node_name or "",
+        "appliance_id": le.appliance_id, "agent_id": le.agent_id,
+        "actor": le.actor or "", "resource": le.resource or "",
+        "meta": le.meta or {},
+    }
+
+
+@router.get("/logs")
+def platform_logs(q: str = "", level: str = "", source: str = "",
+                  tenant_id: str = "", node_id: str = "", appliance_id: str = "",
+                  agent_id: str = "", since: str = "", before: str = "",
+                  limit: int = 200,
+                  principal: security.Principal = Depends(security.require_platform_admin),
+                  db: Session = Depends(get_db)):
+    """Unified, filterable, searchable platform log feed. Defaults to warnings +
+    errors; pass ``level`` to widen to info/debug. Keyset-paginated by ``before``
+    (the ts of the last row from the previous page)."""
+    from ..models import LogEntry
+    from sqlalchemy import or_
+    limit = max(1, min(int(limit or 200), 500))
+    levels = [x for x in level.split(",") if x] or _DEFAULT_LOG_LEVELS
+    sources = [x for x in source.split(",") if x]
+    query = db.query(LogEntry).filter(LogEntry.level.in_(levels))
+    if sources:
+        query = query.filter(LogEntry.source.in_(sources))
+    if tenant_id:
+        query = query.filter(LogEntry.tenant_id == tenant_id)
+    if node_id:
+        query = query.filter(LogEntry.node_id == node_id)
+    if appliance_id:
+        query = query.filter(LogEntry.appliance_id == appliance_id)
+    if agent_id:
+        query = query.filter(LogEntry.agent_id == agent_id)
+    if since:
+        try:
+            query = query.filter(LogEntry.ts >= _parse_iso(since))
+        except Exception:  # noqa: BLE001
+            pass
+    if before:
+        try:
+            query = query.filter(LogEntry.ts < _parse_iso(before))
+        except Exception:  # noqa: BLE001
+            pass
+    if q.strip():
+        like = f"%{q.strip().lower()}%"
+        query = query.filter(or_(
+            func.lower(LogEntry.message).like(like),
+            func.lower(LogEntry.logger).like(like),
+            func.lower(LogEntry.actor).like(like),
+            func.lower(LogEntry.resource).like(like)))
+    rows = query.order_by(LogEntry.ts.desc()).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    tenants = {t.id: t.name for t in db.query(Tenant.id, Tenant.name).all()}
+    next_before = rows[-1].ts.isoformat() if (rows and has_more) else None
+    return {"logs": [_log_row(r, tenants) for r in rows],
+            "next_before": next_before, "has_more": has_more,
+            "levels": _LOG_LEVELS, "sources": _LOG_SOURCES}
+
+
+@router.get("/logs/facets")
+def platform_logs_facets(since: str = "",
+                         principal: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    """Filter options + level/source counts over the recent window (default 24h)."""
+    from ..models import LogEntry
+    from datetime import timedelta
+    cutoff = _now() - timedelta(hours=24)
+    if since:
+        try:
+            cutoff = _parse_iso(since)
+        except Exception:  # noqa: BLE001
+            pass
+    by_level = dict(db.query(LogEntry.level, func.count())
+                    .filter(LogEntry.ts >= cutoff).group_by(LogEntry.level).all())
+    by_source = dict(db.query(LogEntry.source, func.count())
+                     .filter(LogEntry.ts >= cutoff).group_by(LogEntry.source).all())
+    # Nodes + tenants that actually appear in logs, for the scoping dropdowns.
+    node_ids = [n for (n,) in db.query(LogEntry.node_id).filter(
+        LogEntry.node_id.isnot(None)).distinct().limit(200).all()]
+    nodes = [{"id": n.id, "name": n.name} for n in
+             db.query(Node).filter(Node.id.in_(node_ids)).all()] if node_ids else []
+    tids = [t for (t,) in db.query(LogEntry.tenant_id).filter(
+        LogEntry.tenant_id.isnot(None)).distinct().limit(500).all()]
+    tenants = [{"id": t.id, "name": t.name} for t in
+               db.query(Tenant).filter(Tenant.id.in_(tids)).all()] if tids else []
+    return {"levels": _LOG_LEVELS, "sources": _LOG_SOURCES,
+            "default_levels": _DEFAULT_LOG_LEVELS,
+            "by_level": {k: int(v) for k, v in by_level.items()},
+            "by_source": {k: int(v) for k, v in by_source.items()},
+            "nodes": sorted(nodes, key=lambda x: x["name"]),
+            "tenants": sorted(tenants, key=lambda x: x["name"])}
+
+
+def _parse_iso(s: str):
+    from datetime import datetime as _dt
+    d = _dt.fromisoformat(s.replace("Z", "+00:00"))
+    return d.replace(tzinfo=None) if d.tzinfo else d
 
 
 @router.get("/storage-usage")

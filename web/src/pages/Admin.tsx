@@ -1,5 +1,5 @@
-import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { ReactNode, Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useSearchParams } from "react-router-dom";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -165,6 +165,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "crypto", label: "Crypto", icon: "lock", group: "Infrastructure" },
   { key: "updates", label: "Updates", icon: "clock", group: "Infrastructure" },
   { key: "debug", label: "Debug", icon: "activity", group: "Infrastructure" },
+  { key: "logs", label: "Platform Logs", icon: "note", group: "Infrastructure" },
   { key: "audit", label: "Audit log", icon: "shield", group: "Infrastructure" },
   { key: "support-tickets", label: "Support tickets", icon: "help", group: "Support" },
   { key: "support-docs", label: "Documentation", icon: "file", group: "Support" },
@@ -196,6 +197,7 @@ export default function Admin() {
       {s === "audit" && <Audit />}
       {s === "updates" && <Updates />}
       {s === "debug" && <DebugAdmin />}
+      {s === "logs" && <PlatformLogs />}
       {s === "support-tickets" && <SupportTicketsAdmin />}
       {s === "support-docs" && <SupportDocsAdmin />}
     </>
@@ -1966,9 +1968,16 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
               </button>
             )}
             <button className="btn sm" onClick={() => ctl("restart", "cv-cloud", "Restart the Arkive application on this node?")}>Restart app</button>
+            <a className="btn sm ghost" href={`/admin/logs?node_id=${node.id}`} title="View this node's logs">
+              <Icon name="note" size={13} /> Logs
+            </a>
             {!node.is_self && <button className="btn danger sm" onClick={async () => { await onRemove(node); onBack(); }}>Remove</button>}
           </div>
         </div>
+      </div>
+      <div className="faint" style={{ fontSize: 11.5, marginBottom: 10, marginTop: -4 }}>
+        <Icon name="note" size={11} /> Last log push {node.last_log_push_at ? timeAgo(node.last_log_push_at) : (node.is_self ? "n/a (control plane)" : "never")}
+        {node.last_log_push_at ? <span title={fmtAbsolute(node.last_log_push_at)}> </span> : null}
       </div>
 
       <Card style={{ marginBottom: 14 }}>
@@ -3318,6 +3327,9 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
             <button className="btn sm" onClick={reassign} title="Move this appliance to another account/tenant (re-link)">
               <Icon name="link" size={13} /> Re-link
             </button>
+            <a className="btn sm ghost" href={`/admin/logs?appliance_id=${id}`} title="View this appliance's logs in Platform Logs">
+              <Icon name="note" size={13} /> Logs
+            </a>
             <button className="btn sm" onClick={() => void load()}><Icon name="activity" size={13} /> Refresh</button>
           </div>
         </div>
@@ -5545,6 +5557,206 @@ function IntegrationsAdmin() {
         </table>
       </Card>
       {flash && <div className="toast"><Icon name="check" size={15} /> {flash}</div>}
+    </>
+  );
+}
+
+// ---- Platform Logs (one place to view logs from everything) -----------------
+interface LogRow {
+  id: string; ts: string | null; level: string; source: string; logger: string;
+  message: string; tenant_id: string | null; tenant_name: string; node_id: string | null;
+  node_name: string; appliance_id: string | null; agent_id: string | null;
+  actor: string; resource: string; meta: Record<string, any>;
+}
+interface LogFacets {
+  levels: string[]; sources: string[]; default_levels: string[];
+  by_level: Record<string, number>; by_source: Record<string, number>;
+  nodes: { id: string; name: string }[]; tenants: { id: string; name: string }[];
+}
+const LOG_LEVEL_TONE: Record<string, "ok" | "info" | "warn" | "danger"> = {
+  debug: "ok", info: "info", warning: "warn", error: "danger", critical: "danger",
+};
+const LOG_SOURCE_LABEL: Record<string, string> = {
+  cloud: "Cloud", node: "Node", appliance: "Appliance", endpoint: "Endpoint",
+  connector: "Source connector", integration: "Integration", auth: "Authentication",
+  activity: "User activity", audit: "Audit",
+};
+
+function PlatformLogs() {
+  const [params, setParams] = useSearchParams();
+  const [facets, setFacets] = useState<LogFacets | null>(null);
+  const [q, setQ] = useState("");
+  const [levels, setLevels] = useState<Set<string>>(new Set(["warning", "error", "critical"]));
+  const [sources, setSources] = useState<Set<string>>(new Set());
+  const [tenantId, setTenantId] = useState(params.get("tenant_id") || "");
+  const [nodeId, setNodeId] = useState(params.get("node_id") || "");
+  const [applianceId, setApplianceId] = useState(params.get("appliance_id") || "");
+  const [logs, setLogs] = useState<LogRow[]>([]);
+  const [nextBefore, setNextBefore] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [auto, setAuto] = useState(true);
+
+  useEffect(() => { api.get<LogFacets>("/admin/logs/facets").then(setFacets).catch(() => {}); }, []);
+
+  function buildQs(before?: string): string {
+    const qs = new URLSearchParams();
+    if (q.trim()) qs.set("q", q.trim());
+    if (levels.size) qs.set("level", [...levels].join(","));
+    if (sources.size) qs.set("source", [...sources].join(","));
+    if (tenantId) qs.set("tenant_id", tenantId);
+    if (nodeId) qs.set("node_id", nodeId);
+    if (applianceId) qs.set("appliance_id", applianceId);
+    if (before) qs.set("before", before);
+    qs.set("limit", "200");
+    return qs.toString();
+  }
+  async function load() {
+    setLoading(true);
+    try {
+      const r = await api.get<{ logs: LogRow[]; next_before: string | null }>(`/admin/logs?${buildQs()}`);
+      setLogs(r.logs);
+      setNextBefore(r.next_before);
+    } catch { /* ignore */ } finally { setLoading(false); }
+  }
+  async function loadMore() {
+    if (!nextBefore) return;
+    try {
+      const r = await api.get<{ logs: LogRow[]; next_before: string | null }>(`/admin/logs?${buildQs(nextBefore)}`);
+      setLogs((cur) => [...cur, ...r.logs]);
+      setNextBefore(r.next_before);
+    } catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ },
+    [q, [...levels].join(","), [...sources].join(","), tenantId, nodeId, applianceId]);
+  useEffect(() => {
+    if (!auto) return;
+    const t = setInterval(() => { void load(); }, 15000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto, q, [...levels].join(","), [...sources].join(","), tenantId, nodeId, applianceId]);
+
+  function toggle(set: Set<string>, setter: (s: Set<string>) => void, v: string) {
+    const n = new Set(set);
+    n.has(v) ? n.delete(v) : n.add(v);
+    setter(n);
+  }
+  function clearScope() {
+    setTenantId(""); setNodeId(""); setApplianceId("");
+    const p = new URLSearchParams(params); ["tenant_id", "node_id", "appliance_id"].forEach((k) => p.delete(k));
+    setParams(p, { replace: true });
+  }
+  const hasScope = tenantId || nodeId || applianceId;
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
+        <div>
+          <h3 style={{ margin: 0 }}>Platform Logs</h3>
+          <div className="faint" style={{ fontSize: 12.5 }}>
+            Every log from across the platform — cloud, nodes, appliances, endpoints, connectors and audits — in one place.
+          </div>
+        </div>
+        <label className="row" style={{ gap: 6, fontSize: 12 }}>
+          <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} /> Auto-refresh
+        </label>
+      </div>
+
+      <Card style={{ marginBottom: 14 }}>
+        <div className="filter-bar filter-toolbar" style={{ gap: 10, flexWrap: "wrap" }}>
+          <div className="search-bar" style={{ flex: "1 1 260px", minWidth: 220 }}>
+            <Icon name="search" size={15} />
+            <input placeholder="Search messages, logger, actor, resource…" value={q}
+                   onChange={(e) => setQ(e.target.value)} />
+          </div>
+          <select className="filter-bar-select" value={tenantId}
+                  onChange={(e) => setTenantId(e.target.value)}>
+            <option value="">All customers</option>
+            {(facets?.tenants || []).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+          <select className="filter-bar-select" value={nodeId}
+                  onChange={(e) => setNodeId(e.target.value)}>
+            <option value="">All nodes</option>
+            {(facets?.nodes || []).map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
+          </select>
+        </div>
+        <div className="row" style={{ gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+          <span className="faint" style={{ fontSize: 11.5, alignSelf: "center" }}>Level:</span>
+          {["debug", "info", "warning", "error", "critical"].map((lv) => (
+            <button key={lv} className={`chip ${levels.has(lv) ? "active" : ""}`}
+                    style={{ fontSize: 11.5 }} onClick={() => toggle(levels, setLevels, lv)}>
+              <Pill tone={LOG_LEVEL_TONE[lv]} dot>{lv}</Pill>
+              {facets?.by_level?.[lv] ? <span className="faint" style={{ marginLeft: 4 }}>{facets.by_level[lv]}</span> : null}
+            </button>
+          ))}
+        </div>
+        <div className="row" style={{ gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+          <span className="faint" style={{ fontSize: 11.5, alignSelf: "center" }}>Source:</span>
+          {(facets?.sources || []).map((sc) => (
+            <button key={sc} className={`chip ${sources.has(sc) ? "active" : ""}`}
+                    style={{ fontSize: 11.5 }} onClick={() => toggle(sources, setSources, sc)}>
+              {LOG_SOURCE_LABEL[sc] || sc}
+              {facets?.by_source?.[sc] ? <span className="faint" style={{ marginLeft: 4 }}>{facets.by_source[sc]}</span> : null}
+            </button>
+          ))}
+        </div>
+        {hasScope && (
+          <div className="row" style={{ gap: 8, marginTop: 10, alignItems: "center" }}>
+            <span className="faint" style={{ fontSize: 12 }}>
+              Scoped to {applianceId ? "one appliance" : nodeId ? "one node" : "one customer"}.
+            </span>
+            <button className="btn sm ghost" onClick={clearScope}>Clear scope</button>
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <table className="table">
+          <thead><tr><th style={{ width: 130 }}>Time</th><th style={{ width: 80 }}>Level</th>
+            <th style={{ width: 120 }}>Source</th><th>Message</th><th style={{ width: 150 }}>Where</th></tr></thead>
+          <tbody>
+            {logs.map((l) => (
+              <Fragment key={l.id}>
+                <tr onClick={() => setExpanded(expanded === l.id ? null : l.id)}
+                    style={{ cursor: "pointer" }}>
+                  <td className="faint" style={{ fontSize: 11.5, whiteSpace: "nowrap" }}>{l.ts ? fmtAbsolute(l.ts) : "—"}</td>
+                  <td><Pill tone={LOG_LEVEL_TONE[l.level] || "info"} dot>{l.level}</Pill></td>
+                  <td className="faint" style={{ fontSize: 12 }}>{LOG_SOURCE_LABEL[l.source] || l.source}</td>
+                  <td style={{ fontSize: 12.5, maxWidth: 520, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{l.message}</td>
+                  <td className="faint" style={{ fontSize: 11.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 150 }}>
+                    {l.tenant_name || l.node_name || l.logger || (l.appliance_id ? "appliance" : "")}
+                  </td>
+                </tr>
+                {expanded === l.id && (
+                  <tr><td colSpan={5} style={{ background: "var(--inset)" }}>
+                    <div className="stack" style={{ gap: 4, padding: "8px 4px", fontSize: 12 }}>
+                      <div style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 11.5 }}>{l.message}</div>
+                      <div className="row" style={{ gap: 14, flexWrap: "wrap", marginTop: 4 }} >
+                        {l.logger && <span className="faint">logger: {l.logger}</span>}
+                        {l.tenant_name && <span className="faint">customer: {l.tenant_name}</span>}
+                        {l.node_name && <span className="faint">node: {l.node_name}</span>}
+                        {l.appliance_id && <span className="faint">appliance: {l.appliance_id.slice(0, 8)}</span>}
+                        {l.agent_id && <span className="faint">agent: {l.agent_id.slice(0, 8)}</span>}
+                        {l.actor && <span className="faint">actor: {l.actor}</span>}
+                        {l.resource && <span className="faint">resource: {l.resource}</span>}
+                      </div>
+                      {l.meta && Object.keys(l.meta).length > 0 && (
+                        <pre style={{ margin: 0, fontSize: 11, color: "var(--muted-c,#8a94a7)" }}>{JSON.stringify(l.meta, null, 2)}</pre>
+                      )}
+                    </div>
+                  </td></tr>
+                )}
+              </Fragment>
+            ))}
+            {logs.length === 0 && <tr><td colSpan={5} className="muted">{loading ? "Loading…" : "No log entries match these filters."}</td></tr>}
+          </tbody>
+        </table>
+        {nextBefore && (
+          <div style={{ textAlign: "center", marginTop: 12 }}>
+            <button className="btn sm ghost" onClick={() => void loadMore()}>Load older</button>
+          </div>
+        )}
+      </Card>
     </>
   );
 }

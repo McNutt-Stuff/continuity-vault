@@ -566,6 +566,16 @@ def heartbeat(body: AgentHeartbeat, request: Request,
         if merged != (agent.collectors or []):
             agent.collectors = merged
     agent.last_heartbeat_at = _now()
+    # Fold the endpoint agent's recent log lines into the unified platform log
+    # store so they're viewable from the control plane. Best-effort.
+    try:
+        from .. import logsink
+        logsink.ingest_device_logs(
+            db, source="endpoint", lines=tel.get("recent_logs") or [],
+            tenant_id=agent.tenant_id, agent_id=agent.id,
+            device_name=getattr(agent, "hostname", "") or agent.name or "")
+    except Exception:  # noqa: BLE001
+        pass
     # Drain several commands per heartbeat so interactive work (folder expansion)
     # isn't throttled to one per cycle. `command` (singular) stays for older agents.
     commands = []

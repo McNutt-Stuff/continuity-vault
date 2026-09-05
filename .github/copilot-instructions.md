@@ -21,6 +21,18 @@ client/server-encrypted; storage holds only ciphertext.
   Anything that reads/writes a tenant's data or index must work on the node that owns the tenant.
 - **Secrets never go through the model.** Don't log credentials. Don't route passwords through tools.
 - **Ensure logging is verbose at every level** enasure logs for appliances, endpoints and nodes are detailed and catch info, debug error and warnings and save to the right place. 
+- **All logs MUST be viewable from the control plane (one place).** Logs are a first-class product surface,
+  not an afterthought. Everything (cloud, nodes, appliances, endpoint agents, connectors/integrations, auth,
+  user actions, audits) funnels into the unified `log_entries` table via `cloud/app/logsink.py`:
+  (1) app loggers (`cv.*`/`arkive.*`) are captured by the in-process sink + flusher (runs on the CP AND every
+  customer-tenant node); (2) appliance/agent `recent_logs` are ingested on heartbeat (`logsink.ingest_device_logs`);
+  (3) `audit.record` dual-writes a LogEntry so auth/user-actions/audits appear too. Customer-tenant nodes PUSH
+  their `log_entries` to the CP every ~30s inside `workers/node_replication._push` — the `logs_cursor` advances
+  ONLY on confirmed delivery, so an undeliverable batch is retried whole and never dropped. The admin
+  **Platform Logs** page (`GET /api/admin/logs` + `/logs/facets`) is the one-stop viewer (unified-search-styled
+  filters, default warn/error, tenant/node/appliance scoping, drill-down from node/appliance cards). When you
+  add a new component or failure path, make sure its logs reach this store (log via a `cv.*` logger, or emit
+  via `logsink.emit(...)`), and record `Node.last_log_push_at` visibility. Prune keeps info/debug 7d, warn+ 30d.
 - **Durable, resumable writes — NEVER silently lose a backup/sync/write.** Every write to a destination
   (cv-cloud, customer-s3, byos, appliance store, appliance vault) MUST either succeed, or be recorded for
   automatic retry AND allow a manual re-try after the issue is resolved. Use the durable queue

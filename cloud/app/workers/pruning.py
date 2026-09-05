@@ -26,6 +26,8 @@ R_BACKUP_RUNS = 180      # infra-backup catalog
 R_PENDING_ACTIONS = 30   # resolved reminders
 R_NETWORK_USAGE = 60     # stale device×app usage edges
 R_NETWORK_SAMPLES = 90   # daily network trend rollups
+R_LOGS_LOW = 7           # info/debug platform log lines
+R_LOGS_HIGH = 30         # warning/error/critical platform log lines
 R_NODE_METRICS = 90      # telemetry time-series (also pruned by telemetry.py)
 
 
@@ -39,7 +41,7 @@ def prune_all(db) -> dict:
     """Prune every bounded-retention table. Each table is committed independently
     so one failure can't abort the rest. Returns per-table row counts. A session
     advisory lock ensures only one prune runs at a time (skips if already running)."""
-    from ..models import (ApplianceCommand, BackupRun, IntegrationRun, NetworkSample,
+    from ..models import (ApplianceCommand, BackupRun, IntegrationRun, LogEntry, NetworkSample,
                           NetworkUsage, NodeMetric, PendingAction, SyncJob)
     from .. import node_config
     now = datetime.utcnow()
@@ -104,6 +106,15 @@ def prune_all(db) -> dict:
 
     _do("network_samples_deleted", lambda: db.query(NetworkSample).filter(
         NetworkSample.day < now - timedelta(days=R_NETWORK_SAMPLES)).delete(
+            synchronize_session=False))
+
+    _do("logs_low_deleted", lambda: db.query(LogEntry).filter(
+        LogEntry.level.in_(["debug", "info"]),
+        LogEntry.ts < now - timedelta(days=R_LOGS_LOW)).delete(
+            synchronize_session=False))
+
+    _do("logs_high_deleted", lambda: db.query(LogEntry).filter(
+        LogEntry.ts < now - timedelta(days=R_LOGS_HIGH)).delete(
             synchronize_session=False))
 
     _do("node_metrics_deleted", lambda: db.query(NodeMetric).filter(

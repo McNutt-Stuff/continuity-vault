@@ -1277,6 +1277,17 @@ def heartbeat(body: HeartbeatRequest,
         db.rollback()
         logger.exception("storage telemetry sync failed for appliance %s", appliance.id)
 
+    # Fold the appliance's recent log lines into the unified platform log store so
+    # they're viewable from the control plane. Best-effort — never fail heartbeat.
+    try:
+        from .. import logsink
+        logsink.ingest_device_logs(
+            db, source="appliance", lines=(body.telemetry or {}).get("recent_logs") or [],
+            tenant_id=appliance.tenant_id, appliance_id=appliance.id,
+            device_name=appliance.name or appliance.serial or "")
+    except Exception:  # noqa: BLE001
+        db.rollback()
+
     # Deliver pending signed commands (management plane only). Delivery is
     # at-least-once: a command that was handed out but never acked (appliance
     # missed it, crashed mid-handling, or its result POST failed) is redelivered

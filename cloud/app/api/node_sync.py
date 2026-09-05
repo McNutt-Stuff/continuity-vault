@@ -237,6 +237,7 @@ class PushPayload(BaseModel):
     integration_runs: list[dict] = []
     communications: list[dict] = []
     index_replicas: list[dict] = []
+    log_entries: list[dict] = []
 
 
 _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
@@ -410,6 +411,22 @@ def push(body: PushPayload, authorization: str = Header(default=""),
                 kw.pop(f, None)
             db.add(Communication(**kw))
         counts["communications"] += 1
+    # Unified logs the node captured (its app logs + managed appliances/agents +
+    # audit dual-writes). Upsert by id; stamp the node so the admin can attribute +
+    # drill down. Record last_log_push_at so node details show the push freshness.
+    from ..models import LogEntry
+    for le in body.log_entries:
+        if not _known(le) or not _has_pk(LogEntry, le):
+            continue
+        if db.get(LogEntry, le.get("id")) is None:
+            kw = _deser(LogEntry, le)
+            if push_node is not None:
+                kw.setdefault("node_id", push_node.id)
+                kw.setdefault("node_name", push_node.name)
+            db.add(LogEntry(**kw))
+            counts["logs"] = counts.get("logs", 0) + 1
+    if push_node is not None:
+        push_node.last_log_push_at = datetime.utcnow()
     db.commit()
     return {"ok": True, **counts}
 

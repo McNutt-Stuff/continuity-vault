@@ -93,6 +93,20 @@ def record(db: Session, actor: str, action: str, tenant_id: Optional[str] = None
     flag = _request_audited.get()
     if flag is not None:
         flag["audited"] = True
+    # Dual-write into the unified log store so user actions / auth / audits appear
+    # in the one platform Logs view (never let a logging failure break the audit).
+    try:
+        from . import logsink
+        _sev_lvl = {"info": "info", "notice": "info", "warning": "warning",
+                    "critical": "critical", "error": "error"}
+        src = ("auth" if action.startswith("auth.")
+               else "audit" if category == "admin" else "activity")
+        logsink.emit(level=_sev_lvl.get(severity, "info"), source=src,
+                     logger_name=f"audit.{category}", message=f"{action} {resource}".strip(),
+                     tenant_id=tenant_id, actor=actor, resource=resource,
+                     meta={"action": action, "category": category})
+    except Exception:  # noqa: BLE001
+        pass
     return event
 
 
