@@ -20,6 +20,7 @@ client/server-encrypted; storage holds only ciphertext.
   HTTPS. File operations (search/retrieve/recovered/restore/fs) are proxied CP→node by `api/node_proxy.py`.
   Anything that reads/writes a tenant's data or index must work on the node that owns the tenant.
 - **Secrets never go through the model.** Don't log credentials. Don't route passwords through tools.
+- **Ensure logging is verbose at every level** enasure logs for appliances, endpoints and nodes are detailed and catch info, debug error and warnings and save to the right place. 
 
 ## Deploy loop
 - Push, then `sudo /opt/arkive-src/updater/git-update.sh cloud` on the control plane. A failing WEB build

@@ -2182,6 +2182,14 @@ def _config_changed() -> None:
         emailer.invalidate_config_cache()
     except Exception:  # noqa: BLE001
         pass
+    # Re-inject the (possibly changed) Google Analytics tag into the served SPAs.
+    try:
+        from .. import analytics
+        from ..db import SessionLocal
+        with SessionLocal() as db:
+            analytics.apply(db)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.get("/config-catalog")

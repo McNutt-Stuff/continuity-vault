@@ -182,6 +182,16 @@ def _inline_into_index(webroot: str, body_text: str) -> None:
         os.replace(tmp, index)
     except Exception as e:
         print(f"[heartbeat] could not inline site content: {e}", file=sys.stderr)
+        return
+    # Also inject the node's configured Google Analytics tag into <head>.
+    try:
+        import json
+        from pathlib import Path as _Path
+        from . import analytics
+        ga = (json.loads(body_text).get("analytics_id") or "").strip()
+        analytics.inject_index(_Path(index), ga)
+    except Exception as e:  # noqa: BLE001
+        print(f"[heartbeat] could not inject analytics: {e}", file=sys.stderr)
 
 
 def _apply_settings(payload: dict) -> None:

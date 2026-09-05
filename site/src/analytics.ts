@@ -7,6 +7,8 @@ let injected = false;
 export function injectAnalytics(id?: string | null): void {
   if (!id || injected || typeof document === "undefined") return;
   if (!/^G-[A-Z0-9]+$/i.test(id)) return; // GA4 measurement id shape
+  // Server-side injection (index.html <head>) already loaded it — don't double up.
+  if (document.querySelector('script[src*="googletagmanager.com/gtag/js"]')) { injected = true; return; }
   injected = true;
   const s = document.createElement("script");
   s.async = true;

@@ -143,6 +143,15 @@ def startup() -> None:
     except Exception:  # noqa: BLE001
         pass
 
+    # Inject the configured Google Analytics tag into the served index.html(s).
+    try:
+        from . import analytics
+        from .db import SessionLocal
+        with SessionLocal() as db:
+            analytics.apply(db)
+    except Exception:  # noqa: BLE001
+        pass
+
     # Clear jobs left "running" by a previous process — their worker threads died
     # with the old process, so they can never complete on their own.
     try:

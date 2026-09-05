@@ -24,7 +24,9 @@ RestartSec=3
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/continuity-vault
+# Data volume + the served SPA index.html files (the app injects the configured
+# Google Analytics tag into them; the '-' makes each optional on data-plane nodes).
+ReadWritePaths=/var/lib/continuity-vault -/opt/continuity-vault/web/dist -/opt/continuity-vault/site/dist
 PrivateTmp=true
 
 [Install]
