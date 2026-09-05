@@ -946,6 +946,7 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, m
   const isMirror = s.kind === "mirror";
   const disconnected = s.connected === false || s.state === "disconnected";
   const provisioning = s.state === "provisioning";
+  const errored = s.state === "error";
   const barTone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : undefined;
   const chips: { label: string; value: string; tone: "ok" | "warn" | "danger" | "info" }[] = [];
   if (!disconnected && !provisioning) {
@@ -998,6 +999,7 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, m
         </div>
         <div className="row" style={{ gap: 6, alignItems: "center" }}>
           {provisioning ? <Pill tone="warn" dot>Setting up</Pill>
+            : errored ? <Pill tone="danger" dot>Setup failed</Pill>
             : disconnected ? <Pill tone="danger" dot>Disconnected</Pill>
             : <Pill tone="ok" dot>Connected</Pill>}
           <Pill tone={s.kind === "builtin" ? "info" : isMirror ? "info" : "ok"}>{kindShort}</Pill>
@@ -1016,6 +1018,10 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, m
       ) : provisioning ? (
         <div className="faint" style={{ fontSize: 12, margin: "10px 0 2px" }}>
           Partitioning and formatting the drive… this volume will be ready shortly.
+        </div>
+      ) : errored ? (
+        <div style={{ fontSize: 12, margin: "10px 0 2px", color: "var(--danger)" }}>
+          Setup failed: {h.setup_error || "could not format the drive"}. Reconnect the drive if needed and try again.
         </div>
       ) : (
         <>

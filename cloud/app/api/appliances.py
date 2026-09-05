@@ -1412,6 +1412,10 @@ def command_result(body: CommandResultRequest,
     if cmd.command_type == "OPEN_INGEST_WINDOW" and (not body.accepted or result.get("error")):
         _enqueue_ingest_retry(db, appliance, cmd,
                               result.get("error") or "appliance rejected ingest command")
+    # Reflect a storage setup outcome on the store so the UI doesn't spin on
+    # "Setting up" forever — surface the failure reason (retryable from the UI).
+    if cmd.command_type == "SETUP_STORAGE":
+        _apply_setup_result(db, appliance, cmd, body.accepted, result)
     cmd.result = result
     # The command is terminal now — drop the inline-ciphertext envelope so completed
     # commands don't bloat appliance_commands (its payload was already delivered).
@@ -1421,6 +1425,32 @@ def command_result(body: CommandResultRequest,
                  action="appliance.command_result", tenant_id=appliance.tenant_id,
                  resource=cmd.id, detail={"accepted": body.accepted})
     return {"ok": True}
+
+
+def _apply_setup_result(db: Session, appliance: Appliance, cmd: ApplianceCommand,
+                        accepted: bool, result: dict) -> None:
+    """Reflect a SETUP_STORAGE outcome onto the ApplianceStorage row: a failure
+    marks the store 'error' with the reason (UI stops spinning, user can retry);
+    success leaves the store to flip 'ready' on the next storage telemetry sync."""
+    store_id = (cmd.envelope or {}).get("payload", {}).get("parameters", {}).get("storeId")
+    if not store_id:
+        return
+    store = db.get(ApplianceStorage, store_id)
+    if not store or store.appliance_id != appliance.id:
+        return
+    err = result.get("error") if (not accepted or result.get("error")) else None
+    if err:
+        store.state = "error"
+        h = dict(store.health or {})
+        h["setup_error"] = str(err)[:300]
+        store.health = h
+        logger.warning("appliance %s storage setup failed for store %s: %s",
+                       appliance.id, store_id, err)
+    else:
+        store.state = "ready"
+        h = dict(store.health or {})
+        h.pop("setup_error", None)
+        store.health = h
 
 
 def _enqueue_ingest_retry(db: Session, appliance: Appliance,

@@ -73,6 +73,33 @@ def _settle() -> None:
     time.sleep(1.0)
 
 
+def _release_device(device: str) -> None:
+    """Unmount every mounted partition/child of a whole disk (and swapoff) so it
+    can be wiped. A prior partial setup can leave a partition mounted at the ext
+    store path → wipefs/parted fail 'Device or resource busy'. Best-effort."""
+    # lsblk lists the disk and each child with its current mountpoint (if any).
+    ok, out = _run(["lsblk", "-nrpo", "NAME,MOUNTPOINT", device], timeout=15)
+    nodes: list[tuple[str, str]] = []
+    if ok:
+        for line in out.splitlines():
+            parts = line.split(None, 1)
+            if not parts:
+                continue
+            name = parts[0]
+            mnt = parts[1].strip() if len(parts) > 1 else ""
+            nodes.append((name, mnt))
+    # Unmount deepest children first (reverse), by mountpoint then by device node.
+    for name, mnt in reversed(nodes):
+        if mnt:
+            _run(["umount", mnt], timeout=30)
+            if os.path.ismount(mnt):
+                _run(["umount", "-l", mnt], timeout=30)  # lazy fallback
+        if name != device:
+            _run(["umount", name], timeout=30)
+            _run(["swapoff", name], timeout=15)
+    _settle()
+
+
 def setup_device(*, device: str, serial: str, store_id: str, name: str,
                  mount_base: str, dedicated_path: str, mirror_of_id: Optional[str] = None,
                  kind: str = "external") -> dict:
@@ -82,8 +109,18 @@ def setup_device(*, device: str, serial: str, store_id: str, name: str,
     dict describing the ready store (mountpoint, capacity, serial, marker)."""
     resolved = _guard_target(device, serial, dedicated_path)
 
+    # 0) Release the disk: a prior partial/failed setup may have left a partition
+    # of this drive mounted (or in swap), which makes wipefs/parted fail with
+    # "Device or resource busy". Unmount every child before wiping.
+    _release_device(resolved)
+
     # 1) Wipe any existing signatures + write a fresh single-partition GPT.
     ok, out = _run(["wipefs", "-a", resolved])
+    if not ok:
+        # udev may still hold the device momentarily after unmounts — settle + retry.
+        _settle()
+        _release_device(resolved)
+        ok, out = _run(["wipefs", "-a", resolved])
     if not ok:
         raise StorageOpError(f"could not clear the drive: {out[:200]}")
     ok, out = _run(["parted", "-s", resolved, "mklabel", "gpt"])
