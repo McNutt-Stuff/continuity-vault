@@ -606,11 +606,11 @@ def _sync_storage_telemetry(db: Session, a: Appliance, telemetry: dict) -> None:
                 s.device_serial = rep.get("device_serial")
             if rep.get("mirror_of_id") is not None:
                 s.mirror_of_id = rep.get("mirror_of_id")
-            # Leave a provisioning store alone until the drive reports it's ready.
+            # Leave a provisioning/errored store alone until the drive reports ready.
             if connected:
                 s.state = "ready"
                 s.last_seen_at = now
-            elif s.state != "provisioning":
+            elif s.state not in ("provisioning", "error"):
                 s.state = "disconnected"
             continue
         # Primary volume (no store_id): repurpose the single built-in/dedicated row
@@ -633,7 +633,7 @@ def _sync_storage_telemetry(db: Session, a: Appliance, telemetry: dict) -> None:
     for s in (db.query(ApplianceStorage)
               .filter(ApplianceStorage.appliance_id == a.id,
                       ApplianceStorage.kind.in_(["external", "mirror"])).all()):
-        if s.id not in seen_external and s.state != "provisioning":
+        if s.id not in seen_external and s.state not in ("provisioning", "error"):
             s.state = "disconnected"
             h = dict(s.health or {})
             h["drive_health"] = "disconnected"

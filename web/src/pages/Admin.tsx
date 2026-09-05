@@ -5099,9 +5099,10 @@ function ServiceTable({ title, rows, onEdit, onDelete, onTest, testable }: {
   );
 }
 
+interface CloudIndexReplica { status: string; object_count: number; last_replicated_at: string | null; error: string }
 interface StorageUsage {
   cloud_total: { bytes: number; objects: number; recovery_points: number; tenants: number };
-  by_tenant: { tenant_id: string; tenant_name: string; plan: string; licensed_bytes: number; bytes: number; objects: number; recovery_points: number }[];
+  by_tenant: { tenant_id: string; customer_id?: string; scope?: string; tenant_name: string; plan: string; licensed_bytes: number; bytes: number; objects: number; recovery_points: number; index_replica?: CloudIndexReplica | null }[];
   services: { id: string; name: string; kind: string; kind_label: string; enabled: boolean; nodes: string[]; active: boolean; settings: Record<string, string> }[];
 }
 
@@ -5151,76 +5152,43 @@ function StorageUsageAdmin() {
       </Card>
 
       <Card style={{ marginTop: 16 }}>
-        <h3 style={{ marginTop: 0 }}>Data stored by tenant</h3>
+        <h3 style={{ marginTop: 0 }}>Data stored by customer</h3>
         <table className="table">
-          <thead><tr><th>Tenant</th><th>Plan</th><th>Recovery points</th><th>Objects</th><th>Data stored</th><th>Of licensed</th></tr></thead>
+          <thead><tr><th>Customer</th><th>Plan</th><th>Recovery points</th><th>Objects</th><th>Data stored</th><th>Of licensed</th><th>Index replica</th></tr></thead>
           <tbody>
             {d.by_tenant.map((r) => {
               const pct = r.licensed_bytes ? Math.round((r.bytes / r.licensed_bytes) * 100) : null;
+              const rep = r.index_replica;
+              const m = rep ? (INDEX_REPLICA_STATUS[rep.status] || INDEX_REPLICA_STATUS.pending) : null;
               return (
-                <tr key={r.tenant_id}>
+                <tr key={`${r.scope || "tenant"}:${r.customer_id || r.tenant_id}`}>
                   <td style={{ fontWeight: 600 }}>{r.tenant_name}</td>
                   <td><Pill tone="info">{r.plan}</Pill></td>
                   <td>{r.recovery_points.toLocaleString()}</td>
                   <td>{r.objects.toLocaleString()}</td>
                   <td style={{ fontWeight: 600 }}>{bytes(r.bytes)}</td>
                   <td className="faint">{r.licensed_bytes ? `${bytes(r.licensed_bytes)} · ${pct}%` : "—"}</td>
+                  <td>
+                    {m ? (
+                      <>
+                        <Pill tone={m.tone} dot>{m.label}</Pill>
+                        {rep!.error ? <div className="faint" style={{ fontSize: 10.5, color: "var(--danger)" }}>{rep!.error}</div>
+                          : rep!.status === "ok" ? <div className="faint" style={{ fontSize: 10.5 }}>{rep!.last_replicated_at ? fmtAbsolute(rep!.last_replicated_at) : ""}</div> : null}
+                      </>
+                    ) : <span className="faint">—</span>}
+                  </td>
                 </tr>
               );
             })}
-            {d.by_tenant.length === 0 && <tr><td colSpan={6} className="muted">No cloud data stored yet.</td></tr>}
+            {d.by_tenant.length === 0 && <tr><td colSpan={7} className="muted">No cloud data stored yet.</td></tr>}
           </tbody>
         </table>
         <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-          Totals sum bytes written across all cloud recovery points (before de-duplication). Per-service
-          attribution follows each node's active storage target.
+          Totals sum bytes written across all cloud recovery points (before de-duplication). The index
+          replica is the encrypted disaster-recovery copy of that customer's search index in Arkive Cloud.
         </div>
       </Card>
-
-      <FleetIndexReplicas />
     </>
-  );
-}
-
-interface FleetReplica {
-  id: string; tenant_name: string; scope: string; destination: string; destination_label: string;
-  status: string; object_count: number; bytes: number; node_name: string;
-  last_replicated_at: string | null; error: string;
-}
-
-function FleetIndexReplicas() {
-  const [d, setD] = useState<{ replicas: FleetReplica[]; healthy: number; total: number; scopes: number } | null>(null);
-  useEffect(() => { api.get<any>("/admin/index-replicas").then(setD).catch(() => {}); }, []);
-  return (
-    <Card style={{ marginTop: 16 }}>
-      <div className="spread" style={{ marginBottom: 4 }}>
-        <h3 style={{ marginTop: 0, marginBottom: 0 }}>Search index replicas</h3>
-        {d && <Pill tone={d.total && d.healthy === d.total ? "ok" : d.total ? "warn" : "info"}>{d.healthy}/{d.total} healthy · {d.scopes} scopes</Pill>}
-      </div>
-      <div className="faint" style={{ fontSize: 12.5, marginBottom: 12 }}>
-        Encrypted disaster-recovery copies of every customer's search index across all storage destinations, verified on a schedule.
-      </div>
-      {!d ? <div className="muted">Loading index replicas…</div>
-        : d.replicas.length === 0 ? <div className="muted">No index replicas yet.</div> : (
-        <table className="table">
-          <thead><tr><th>Customer</th><th>Destination</th><th>Status</th><th>Items</th><th>Replicated</th></tr></thead>
-          <tbody>
-            {d.replicas.map((r) => {
-              const m = INDEX_REPLICA_STATUS[r.status] || INDEX_REPLICA_STATUS.pending;
-              return (
-                <tr key={r.id}>
-                  <td style={{ fontWeight: 600 }}>{r.tenant_name}</td>
-                  <td><div className="row" style={{ gap: 6 }}><DestIcon dest={r.destination} size={13} /> {r.destination_label}</div>{r.node_name && <div className="faint" style={{ fontSize: 10.5 }}>{r.node_name}</div>}</td>
-                  <td><Pill tone={m.tone} dot>{m.label}</Pill>{r.error ? <div className="faint" style={{ fontSize: 10.5, color: "var(--danger)" }}>{r.error}</div> : null}</td>
-                  <td>{r.status === "ok" ? (r.object_count || 0).toLocaleString() : "—"}</td>
-                  <td className="faint" style={{ fontSize: 12 }}>{r.last_replicated_at ? fmtAbsolute(r.last_replicated_at) : "—"}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
-    </Card>
   );
 }
 

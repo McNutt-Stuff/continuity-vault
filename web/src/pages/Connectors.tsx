@@ -730,7 +730,7 @@ export default function Connectors() {
                     { label: "Rename source", icon: "edit", onClick: () => rename(a) },
                     ...(c?.mode === "oauth" && !a.needs_reauth ? [{ label: "Re-authorize", icon: "key", onClick: () => reconnect(a) }] : []),
                     { label: "Deactivate", icon: "link", onClick: () => unlink(a) },
-                    ...(canPurge ? ["divider", { label: "Remove source", icon: "trash", danger: true, disabled: true, onClick: () => purge(a) }] : []),
+                    ...(canPurge ? ["divider", { label: "Remove source", icon: "trash", danger: true, onClick: () => purge(a) }] : []),
                   ] as MenuEntry[])} />
                 </>
               )}

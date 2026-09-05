@@ -2857,33 +2857,73 @@ def test_service_object(sid: str, body: "ServiceTest | None" = None,
 
 @router.get("/storage-usage")
 def storage_usage(db: Session = Depends(get_db)):
-    """How much data Arkive Cloud (cv-cloud) holds, broken down by tenant, plus
-    the storage service objects and the nodes that write to them."""
+    """How much data Arkive Cloud (cv-cloud) holds, broken down by CUSTOMER (each
+    dedicated/org tenant, and each personal account in a shared tenant), with that
+    customer's Arkive-Cloud search-index replica status, plus the storage services."""
+    from ..models import IndexReplica
     tenants = {t.id: t for t in db.query(Tenant).all()}
-    by_tenant: dict = {}
+    vaults = {v.id: v for v in db.query(Vault).all()}
+    users = {u.id: u for u in db.query(User).all()}
+    # cv-cloud index replicas keyed by (scope, scope_id): shared→("user", user_id),
+    # dedicated→("tenant", tenant_id). Only Arkive Cloud is shown in this view.
+    replicas = {(r.scope, r.scope_id): r
+                for r in db.query(IndexReplica)
+                .filter(IndexReplica.destination == "cv-cloud").all()}
+
+    def _customer_key(rc) -> tuple[str, str]:
+        t = tenants.get(rc.tenant_id)
+        if t and (t.tenant_type or "dedicated") == "shared":
+            v = vaults.get(rc.vault_id)
+            uid = v.owner_user_id if v else None
+            if uid:
+                return ("user", uid)
+        return ("tenant", rc.tenant_id)
+
+    by_customer: dict = {}
     total_bytes = total_objects = total_points = 0
     for r in db.query(SnapshotReceipt).filter(SnapshotReceipt.destination == "cv-cloud").all():
         b = r.total_bytes or 0
         total_bytes += b
         total_objects += r.object_count or 0
         total_points += 1
-        agg = by_tenant.setdefault(r.tenant_id, {"bytes": 0, "objects": 0, "points": 0})
+        key = _customer_key(r)
+        agg = by_customer.setdefault(key, {"bytes": 0, "objects": 0, "points": 0,
+                                           "tenant_id": r.tenant_id})
         agg["bytes"] += b
         agg["objects"] += r.object_count or 0
         agg["points"] += 1
 
-    tenant_rows = []
-    for tid, agg in by_tenant.items():
-        t = tenants.get(tid)
-        tenant_rows.append({
-            "tenant_id": tid,
-            "tenant_name": t.name if t else "(unknown)",
-            "plan": t.plan if t else "",
-            "licensed_bytes": (t.licensed_bytes or 0) if t else 0,
+    def _replica_view(scope: str, scope_id: str) -> dict | None:
+        rep = replicas.get((scope, scope_id))
+        if not rep:
+            return None
+        return {"status": rep.status, "object_count": rep.object_count or 0,
+                "last_replicated_at": rep.last_replicated_at.isoformat() if rep.last_replicated_at else None,
+                "error": rep.error or ""}
+
+    customer_rows = []
+    for (scope, sid), agg in by_customer.items():
+        t = tenants.get(agg["tenant_id"])
+        if scope == "user":
+            u = users.get(sid)
+            name = (u.full_name if u and getattr(u, "full_name", "") else None) or \
+                   (u.email if u else None) or "(personal account)"
+            plan = "personal"
+            licensed = 0
+        else:
+            name = t.name if t else "(unknown)"
+            plan = t.plan if t else ""
+            licensed = (t.licensed_bytes or 0) if t else 0
+        customer_rows.append({
+            "customer_id": sid, "scope": scope,
+            "tenant_id": agg["tenant_id"],
+            "tenant_name": name,  # kept key name for the table
+            "plan": plan, "licensed_bytes": licensed,
             "bytes": agg["bytes"], "objects": agg["objects"],
             "recovery_points": agg["points"],
+            "index_replica": _replica_view(scope, sid),
         })
-    tenant_rows.sort(key=lambda x: x["bytes"], reverse=True)
+    customer_rows.sort(key=lambda x: x["bytes"], reverse=True)
 
     svc_nodes: dict = {}
     for n in db.query(Node).all():
@@ -2905,8 +2945,8 @@ def storage_usage(db: Session = Depends(get_db)):
 
     return {
         "cloud_total": {"bytes": total_bytes, "objects": total_objects,
-                        "recovery_points": total_points, "tenants": len(tenant_rows)},
-        "by_tenant": tenant_rows,
+                        "recovery_points": total_points, "tenants": len(customer_rows)},
+        "by_tenant": customer_rows,
         "services": services,
     }
 

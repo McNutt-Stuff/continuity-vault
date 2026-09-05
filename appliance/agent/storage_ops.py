@@ -88,16 +88,44 @@ def _release_device(device: str) -> None:
             name = parts[0]
             mnt = parts[1].strip() if len(parts) > 1 else ""
             nodes.append((name, mnt))
-    # Unmount deepest children first (reverse), by mountpoint then by device node.
+    # Unmount deepest children first (reverse), by mountpoint then by device node,
+    # swapoff, and clear each partition's signatures so the whole-disk wipe below
+    # isn't blocked by the kernel still holding a partition.
     for name, mnt in reversed(nodes):
         if mnt:
+            print(f"[storage-ops] releasing {name} mounted at {mnt}", flush=True)
             _run(["umount", mnt], timeout=30)
             if os.path.ismount(mnt):
                 _run(["umount", "-l", mnt], timeout=30)  # lazy fallback
         if name != device:
             _run(["umount", name], timeout=30)
             _run(["swapoff", name], timeout=15)
+            _run(["wipefs", "-a", name], timeout=30)  # clear the partition first
+    _run(["blockdev", "--flushbufs", device], timeout=15)
     _settle()
+
+
+def _wipe_disk(device: str) -> tuple[bool, str]:
+    """Clear all signatures + partition table from a whole disk, robust against a
+    transiently-busy device. Releases holders, retries with settle, and finally
+    zeroes the head/tail + re-reads the partition table as a last resort."""
+    out = ""
+    for attempt in range(3):
+        _release_device(device)
+        ok, out = _run(["wipefs", "-af", device])
+        if ok:
+            return True, out
+        print(f"[storage-ops] wipefs {device} busy (attempt {attempt + 1}/3): {out[:120]}",
+              flush=True)
+        _settle()
+    # Last resort: zero the first/last 32MiB (GPT primary + backup) then re-read.
+    print(f"[storage-ops] zeroing {device} head as last resort", flush=True)
+    _run(["dd", "if=/dev/zero", f"of={device}", "bs=1M", "count=32",
+          "conv=fsync"], timeout=120)
+    _run(["blockdev", "--rereadpt", device], timeout=30)
+    _settle()
+    ok, out = _run(["wipefs", "-af", device])
+    return ok, out
 
 
 def setup_device(*, device: str, serial: str, store_id: str, name: str,
@@ -109,18 +137,9 @@ def setup_device(*, device: str, serial: str, store_id: str, name: str,
     dict describing the ready store (mountpoint, capacity, serial, marker)."""
     resolved = _guard_target(device, serial, dedicated_path)
 
-    # 0) Release the disk: a prior partial/failed setup may have left a partition
-    # of this drive mounted (or in swap), which makes wipefs/parted fail with
-    # "Device or resource busy". Unmount every child before wiping.
-    _release_device(resolved)
-
-    # 1) Wipe any existing signatures + write a fresh single-partition GPT.
-    ok, out = _run(["wipefs", "-a", resolved])
-    if not ok:
-        # udev may still hold the device momentarily after unmounts — settle + retry.
-        _settle()
-        _release_device(resolved)
-        ok, out = _run(["wipefs", "-a", resolved])
+    # 1) Release the disk (unmount any leftover partitions from a prior partial
+    # setup) and wipe all signatures + the partition table, robustly.
+    ok, out = _wipe_disk(resolved)
     if not ok:
         raise StorageOpError(f"could not clear the drive: {out[:200]}")
     ok, out = _run(["parted", "-s", resolved, "mklabel", "gpt"])
