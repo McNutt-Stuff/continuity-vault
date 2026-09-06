@@ -10,7 +10,8 @@ export default function Support() {
   const nav = useNavigate();
   const [content, setContent] = useState<SupportContent | null>(null);
   const [q, setQ] = useState("");
-  const [openNav, setOpenNav] = useState<Set<string>>(new Set());
+  // Slugs the user has EXPLICITLY collapsed — nested pages are expanded by default.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let alive = true;
@@ -88,7 +89,8 @@ export default function Support() {
   function renderNav(d: DocNavItem, depth: number) {
     const kids = d.children || [];
     const hasKids = kids.length > 0;
-    const open = hasKids && (openNav.has(d.slug) || activeTrail.has(d.slug));
+    // Expanded by default; a parent on the active page's trail stays open even if collapsed.
+    const open = hasKids && (!collapsed.has(d.slug) || activeTrail.has(d.slug));
     return (
       <div key={d.slug} className="support-nav-node">
         <div className="support-nav-row" style={{ paddingLeft: depth * 12 }}>
@@ -97,7 +99,7 @@ export default function Support() {
               className="support-nav-caret"
               aria-label={open ? "Collapse" : "Expand"}
               onClick={() =>
-                setOpenNav((s) => {
+                setCollapsed((s) => {
                   const n = new Set(s);
                   n.has(d.slug) ? n.delete(d.slug) : n.add(d.slug);
                   return n;

@@ -73,6 +73,25 @@ def _handle(req: dict) -> dict:
         except Exception as exc:  # noqa: BLE001
             return {**res, "ok": True, "chown_warning": str(exc)}
         return {**res, "ok": True}
+    if action == "mount":
+        # Re-mount an already-set-up drive (e.g. after a reboot lost the mount).
+        store_id = params.get("storeId")
+        if not store_id:
+            return {"error": "missing storeId"}
+        res = storage_ops.mount_known(
+            serial=params.get("serial", ""), store_id=store_id,
+            name=params.get("name", "External Storage"), mount_base=str(EXT_BASE),
+            mirror_of_id=params.get("mirrorOfId"), kind=params.get("kind", "external"))
+        if not res:
+            return {"ok": True, "present": False}  # drive not currently attached
+        mp = res["mountpoint"]
+        try:
+            subprocess.run(["chown", "-R", f"{SERVICE_USER}:{SERVICE_USER}", mp],
+                           capture_output=True, timeout=60)
+            os.chmod(mp, 0o750)
+        except Exception as exc:  # noqa: BLE001
+            return {**res, "ok": True, "chown_warning": str(exc)}
+        return {**res, "ok": True}
     if action == "forget":
         store_id = params.get("storeId")
         mp = params.get("mountpoint") or str(EXT_BASE / (store_id or ""))

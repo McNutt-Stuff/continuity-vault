@@ -2046,36 +2046,92 @@ def stream_github(access_token: str, cursor=None, config: Optional[dict] = None,
 # --------------------------------------------------------------------------- #
 
 CROSSBEAM_API = "https://api.crossbeam.com"
+# The OAuth audience host — some endpoints (e.g. /v0.1/users/me) may only answer here.
+CROSSBEAM_ALT_API = "https://api.getcrossbeam.com"
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def _org_uuid_from(d: object) -> Optional[str]:
+    """Pull an org uuid out of an organization-shaped dict: either a direct
+    ``uuid`` or a nested ``organization.uuid`` (membership wrapper)."""
+    if not isinstance(d, dict):
+        return None
+    u = d.get("uuid")
+    if isinstance(u, str) and _UUID_RE.match(u):
+        return u
+    org = d.get("organization")
+    if isinstance(org, dict):
+        u = org.get("uuid")
+        if isinstance(u, str) and _UUID_RE.match(u):
+            return u
+    return None
+
+
+def _find_org_uuid(obj: object) -> Optional[str]:
+    """Recursively locate an organization uuid anywhere in a /users/me response,
+    regardless of the exact shape (organizations[], organization_users[], a single
+    organization{}, or nested under another key)."""
+    if isinstance(obj, dict):
+        for key in ("organizations", "organization_users", "orgs", "organization"):
+            v = obj.get(key)
+            if isinstance(v, dict):
+                u = _org_uuid_from(v)
+                if u:
+                    return u
+            elif isinstance(v, list):
+                for it in v:
+                    u = _org_uuid_from(it)
+                    if u:
+                        return u
+        for v in obj.values():
+            u = _find_org_uuid(v)
+            if u:
+                return u
+    elif isinstance(obj, list):
+        for it in obj:
+            u = _find_org_uuid(it)
+            if u:
+                return u
+    return None
 
 
 def _crossbeam_org(c: httpx.Client, headers: dict) -> Optional[str]:
     """Resolve the organization uuid required in the ``Xbeam-Organization`` header.
     The documented source is ``/v0.1/users/me`` (falls back to ``/v1``); the org's
-    ``uuid`` lives in the ``organizations`` list."""
+    ``uuid`` is found anywhere in the response (shapes vary)."""
     data: dict = {}
-    for path in ("/v0.1/users/me", "/v1/users/me"):
-        r = c.get(f"{CROSSBEAM_API}{path}", headers=headers)
+    attempts = [
+        (CROSSBEAM_API, "/v0.1/users/me"), (CROSSBEAM_API, "/v1/users/me"),
+        (CROSSBEAM_ALT_API, "/v0.1/users/me"), (CROSSBEAM_ALT_API, "/v1/users/me"),
+    ]
+    for base, path in attempts:
+        try:
+            r = c.get(f"{base}{path}", headers=headers)
+        except Exception as exc:  # noqa: BLE001 — try the next host
+            logger.debug("crossbeam %s%s errored: %s", base, path, exc)
+            continue
         if r.status_code == 401:  # bad/expired token — always surface as needs-reauth
             _raise_api("Crossbeam", r, path)
         if r.status_code >= 400:
+            logger.debug("crossbeam %s%s returned HTTP %s", base, path, r.status_code)
             continue
         try:
-            data = r.json() or {}
+            body = r.json()
         except Exception:  # noqa: BLE001
-            data = {}
-        if data:
-            break
-    orgs = data.get("organizations")
-    if not isinstance(orgs, list):
-        orgs = data.get("organization_users") or data.get("orgs") or []
-    for o in orgs if isinstance(orgs, list) else []:
-        if not isinstance(o, dict):
-            continue
-        uuid = o.get("uuid") or (o.get("organization") or {}).get("uuid")
-        if uuid:
-            return str(uuid)
-    org = data.get("organization")
-    return str(org["uuid"]) if isinstance(org, dict) and org.get("uuid") else None
+            body = None
+        if isinstance(body, dict) and body:
+            data = body
+            uuid = _find_org_uuid(data)
+            # Log the shape (top-level keys only — never values/secrets) so an
+            # unresolved org can be diagnosed from Platform Logs.
+            logger.info("crossbeam %s%s keys=%s org_resolved=%s",
+                        base, path, sorted(data.keys())[:15], bool(uuid))
+            if uuid:
+                return uuid
+    return None
 
 
 def _crossbeam_paged(c: httpx.Client, url: str, headers: dict,

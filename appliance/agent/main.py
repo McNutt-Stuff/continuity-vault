@@ -212,6 +212,9 @@ class Agent:
         self.identity = ApplianceIdentity(settings.data_dir)
         self.sm = StateMachine(State.PROVISIONING)
         self.vault = VaultStore(str(STORAGE_ROOT / "vault"), self.sm)
+        # Logging must be ready BEFORE mounting external stores — the mount path
+        # and its error handler log, and both run here during __init__.
+        self.log = agent_log.setup_logging(_LOG_FILE)
         # External-storage registry + live mountpoints, then mount whatever is
         # present and point the vault at any mirror volumes.
         self._ext_stores: list[dict] = self._load_ext_registry()
@@ -224,7 +227,6 @@ class Agent:
         self.config: dict = {}
         self.tamper_state = "normal"
         self.pending_recovery: dict = {}  # snapshot -> awaiting local approval
-        self.log = agent_log.setup_logging(_LOG_FILE)
         self._last_update_note = ""
         self._last_latency_ms: Optional[int] = None  # heartbeat round-trip
         # Zero-touch pairing: when installed WITHOUT a linking code the appliance
@@ -595,20 +597,45 @@ class Agent:
 
     def _mount_ext_stores(self) -> None:
         """Mount every already-set-up external drive that's currently present, then
-        point the vault at any mirror volumes so writes/recoveries duplicate."""
+        point the vault at any mirror volumes so writes/recoveries duplicate.
+
+        The sandboxed agent can't mount (NoNewPrivileges), so a drive that isn't
+        already mounted is handed to the ROOT storage helper, which mounts it and
+        chowns it back. A drive that isn't present, or can't be mounted, is simply
+        skipped (logged) — never fatal to startup."""
         self._ext_mounts = {}
         for e in self._ext_stores:
             try:
-                res = storage_ops.mount_known(
-                    serial=e.get("serial", ""), store_id=e["store_id"],
-                    name=e.get("name", "External Storage"), mount_base=str(EXT_BASE),
-                    mirror_of_id=e.get("mirror_of_id"), kind=e.get("kind", "external"))
-                if res:
-                    self._ext_mounts[e["store_id"]] = res["mountpoint"]
+                mp = self._mount_known_ext(e)
+                if mp:
+                    self._ext_mounts[e["store_id"]] = mp
             except Exception as exc:  # noqa: BLE001
                 self.log.warning("could not mount external store %s: %s",
                                  e.get("name"), exc)
         self._apply_mirror_roots()
+
+    def _mount_known_ext(self, e: dict) -> Optional[str]:
+        """Return the mountpoint of a known external store, mounting it if needed.
+        Already-mounted drives (an agent restart without reboot) are adopted as-is;
+        otherwise the mount is delegated to the root helper because the agent can't
+        mount. Returns None when the drive isn't present or couldn't be mounted."""
+        store_id = e["store_id"]
+        mountpoint = os.path.join(str(EXT_BASE), store_id)
+        if os.path.ismount(mountpoint):
+            return mountpoint
+        # Not present (unplugged) — nothing to mount; skip quietly.
+        if not sysinfo.resolve_device_by_serial(e.get("serial", "")):
+            return None
+        res = self._delegate_storage("mount", {
+            "serial": e.get("serial", ""), "storeId": store_id,
+            "name": e.get("name", "External Storage"),
+            "mirrorOfId": e.get("mirror_of_id"), "kind": e.get("kind", "external"),
+        }, timeout=90)
+        if res.get("error"):
+            self.log.warning("could not mount external store %s via the root helper: %s",
+                             e.get("name"), res["error"])
+            return None
+        return res.get("mountpoint")
 
     def _apply_mirror_roots(self) -> None:
         roots = [os.path.join(self._ext_mounts[e["store_id"]], "vault")
