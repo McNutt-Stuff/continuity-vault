@@ -32,12 +32,13 @@ DEFAULT_SUPPORT_SECTIONS = [
 
 
 def _doc(slug, title, section, section_order, nav_order, icon, summary, body,
-         help_routes=None):
+         help_routes=None, required_plan=""):
     return {
         "slug": slug, "title": title, "section": section,
         "section_order": section_order, "nav_order": nav_order, "icon": icon,
         "summary": summary, "body": body.strip() + "\n",
-        "help_routes": help_routes or [], "published": True,
+        "help_routes": help_routes or [], "required_plan": required_plan,
+        "published": True,
     }
 
 
@@ -671,3 +672,335 @@ Still stuck? **[Contact support](/support/contact-support)**.
 """,
         help_routes=[]),
 ]
+
+
+# --------------------------------------------------------------------------- #
+# Per-source / per-integration reference pages.                               #
+# One page per connector and integration, under "Sources & Connections", with #
+# a consistent shape: what it backs up, how to connect, how the data maps into #
+# the taxonomy, and gotchas. Business-oriented sources carry a plan-gate label.#
+# --------------------------------------------------------------------------- #
+
+def _bullets(items) -> str:
+    return "\n".join(f"- {x}" for x in items)
+
+
+def _steps(items) -> str:
+    return "\n".join(f"{i}. {s}" for i, s in enumerate(items, 1))
+
+
+def _oauth_connect(name: str, access: str = "read-only") -> list:
+    return [
+        f"Open **Sources** in the portal and choose **{name}**.",
+        "Click **Connect** and sign in to your account.",
+        f"Approve {access} access when prompted.",
+        "The first backup starts automatically and then runs on your schedule.",
+    ]
+
+
+def _agent_connect(grant: str) -> list:
+    return [
+        "Install the **Arkive Desktop Agent** on the computer that holds this data "
+        "(**Sources → Desktop Agents**).",
+        grant,
+        "Open the **Data Map**, add this source and pick the agent to collect from.",
+        "The agent collects locally and pushes everything **client-encrypted** — the "
+        "cloud only ever sees ciphertext.",
+    ]
+
+
+def _source_doc(slug, title, icon, nav_order, tagline, backs_up, connect, mapping,
+                gotchas, required_plan="", extra=""):
+    body = (
+        f"# {title}\n\n{tagline}\n\n"
+        f"## What it backs up\n{backs_up}\n\n"
+        f"## How to connect\n{_steps(connect)}\n\n"
+        f"## What's captured & how it maps\n{_bullets(mapping)}\n\n"
+        f"## Good to know\n{_bullets(gotchas)}\n{extra}"
+    )
+    return _doc(slug, title, "Sources & Connections", _SOURCES, nav_order, icon,
+                tagline, body, help_routes=[], required_plan=required_plan)
+
+
+_SOURCE_PAGES = [
+    _source_doc(
+        "source-gmail", "Gmail", "mail", 50,
+        "Back up your Gmail — every message, thread and attachment — kept searchable and recoverable.",
+        "All mail across your labels (Inbox, Sent, Archive and custom labels), with full "
+        "message bodies and file attachments. Gmail runs an incremental delta sync plus an "
+        "independent deep-history backfill, so your whole mailbox is captured over time.",
+        _oauth_connect("Gmail"),
+        ["**Messages** — each email as `email` (sender, recipients, subject, label/folder, date).",
+         "**Files** — attachments are captured as their own objects (pdf, image, document…), "
+         "linked back to their message."],
+        ["Read-only — Arkive never sends, deletes or changes mail.",
+         "Spam, Trash and the Promotions / Social / Updates / Forums tabs are excluded by default.",
+         "Very large mailboxes back-fill across several runs."]),
+    _source_doc(
+        "source-outlook", "Outlook.com", "mail", 52,
+        "Back up your Outlook.com / Microsoft 365 mailbox with attachments.",
+        "Mail across your folders with bodies and attachments, via Microsoft Graph. Delta sync "
+        "keeps it current and a deep backfill captures history.",
+        _oauth_connect("Outlook.com"),
+        ["**Messages** — each email as `email` (from, to, subject, folder, date).",
+         "**Files** — attachments captured as their own file objects linked to the message."],
+        ["Read-only access through Microsoft Graph.",
+         "Uses delegated permissions — you approve exactly what Arkive can read.",
+         "For a locally-stored Outlook profile on a Mac, use **Outlook (local)** instead."]),
+    _source_doc(
+        "source-outlook-local", "Outlook (local)", "mail", 54,
+        "Back up the Outlook data stored locally on your Mac — mail, contacts, calendar and notes.",
+        "The on-device Outlook profile: email (with attachments), contacts, calendar events and "
+        "notes. Collected by the desktop agent, so nothing depends on cloud access.",
+        _agent_connect("Grant the agent **Full Disk Access** so it can read the Outlook profile "
+                       "under `~/Library/Group Containers/UBF8T346G9.Office/Outlook`."),
+        ["**Messages** — email as `email` with attachments as linked files.",
+         "**Contacts** — each contact as `person`.",
+         "**Calendar** — events as `event`.",
+         "**Notes** — Outlook notes as `note`."],
+        ["Collected locally by the agent — no mailbox credentials are sent to the cloud.",
+         "Requires macOS **Full Disk Access** for the agent.",
+         "Choose which of mail / contacts / calendar / notes to include in the Data Map."]),
+    _source_doc(
+        "source-onedrive", "OneDrive", "cloud", 56,
+        "Back up your OneDrive files and folders, with full version history over time.",
+        "Files and documents from your OneDrive, streamed in bounded batches so even a large "
+        "drive can't overwhelm memory. You can pick specific folders in the Data Map.",
+        _oauth_connect("OneDrive"),
+        ["**Documents** — Office files, PDFs and text (spreadsheet, presentation, pdf, text).",
+         "**Files / Images / Video & Audio** — everything else, classified by type."],
+        ["Read-only through Microsoft Graph.",
+         "Browsable — select whole folders to include or exclude.",
+         "Large libraries back-fill in the background."]),
+    _source_doc(
+        "source-dropbox", "Dropbox", "cloud", 58,
+        "Back up your Dropbox files and folders.",
+        "Files and documents from your Dropbox, streamed in bounded batches. Choose specific "
+        "folders in the Data Map.",
+        _oauth_connect("Dropbox"),
+        ["**Documents** — Office files, PDFs, text.",
+         "**Files / Images / Video & Audio** — classified by file type."],
+        ["Read-only scopes (files.content.read, files.metadata.read).",
+         "Browsable folder selection in the Data Map.",
+         "Version history is preserved as content changes."]),
+    _source_doc(
+        "source-google-drive", "Google Drive", "cloud", 60,
+        "Back up your Google Drive, including Google Docs, Sheets and Slides.",
+        "Files and native Google documents (exported to open formats), streamed in bounded "
+        "batches with folder selection in the Data Map.",
+        _oauth_connect("Google Drive"),
+        ["**Documents** — Docs/Sheets/Slides exported (text, spreadsheet, presentation, pdf).",
+         "**Files / Images / Video & Audio** — other content by type."],
+        ["Read-only (drive.readonly).",
+         "Google-native files are exported to open formats on capture.",
+         "Browsable folder selection; large drives back-fill over time."]),
+    _source_doc(
+        "source-icloud", "iCloud", "cloud", 62,
+        "Back up iCloud photos, files and contacts with an app-specific password.",
+        "iCloud Photos, iCloud Drive files and your contacts. Because Apple has no OAuth for "
+        "this, you connect with an **app-specific password**.",
+        ["At **appleid.apple.com**, generate an **app-specific password**.",
+         "Open **Sources → iCloud** and enter your Apple ID and that app-specific password.",
+         "Choose which of photos / files / contacts to include.",
+         "The first backup starts once connected."],
+        ["**Images / Video & Audio** — iCloud Photos (`photo`, `video`).",
+         "**Files / Documents** — iCloud Drive content by type.",
+         "**Contacts** — each contact as `person`."],
+        ["Use an app-specific password — never your main Apple ID password.",
+         "Accounts that force interactive 2FA on every login can't be synced unattended.",
+         "Pick photos / files / contacts independently in the Data Map."]),
+    _source_doc(
+        "source-endpoint-files", "Endpoint Files", "file", 64,
+        "Back up folders on your computer, external drives and network shares.",
+        "Any folders you choose on a machine running the desktop agent — local disks, external "
+        "drives and mounted network shares. The agent walks them and pushes each file encrypted.",
+        _agent_connect("No extra permissions beyond the folders you select (grant Full Disk "
+                       "Access if you want system locations)."),
+        ["**Documents / Files / Images / Video & Audio** — every file classified by type "
+         "(pdf, spreadsheet, presentation, text, image, video, audio, archive)."],
+        ["You choose exactly which folders to include, with file-type and size exclusions.",
+         "Runs entirely on the endpoint — the cloud only receives ciphertext.",
+         "Great for anything not covered by a cloud connector."]),
+    _source_doc(
+        "source-google-photos", "Google Photos", "image", 66,
+        "Back up photos and videos you pick from Google Photos.",
+        "Google now requires an interactive **picker** — you select the albums or items to back "
+        "up each session rather than granting blanket library access.",
+        ["Open **Sources → Google Photos** and click **Connect**.",
+         "Sign in and use the Google **picker** to choose albums or items.",
+         "Approve access to just those items.",
+         "Selected media is captured, encrypted and made searchable."],
+        ["**Images** — photos as `photo`/`image`.",
+         "**Video & Audio** — videos as `video`."],
+        ["Google's Picker API means you choose items each session — there's no full-library pull.",
+         "Read-only access to only the items you pick.",
+         "Re-run the picker to add more over time."]),
+    _source_doc(
+        "source-google-contacts", "Google Contacts", "user", 68,
+        "Back up your Google Contacts.",
+        "Your full contact list with names, emails, phone numbers and metadata.",
+        _oauth_connect("Google Contacts"),
+        ["**Contacts** — each contact as `person` (name, emails, phones, organization)."],
+        ["Read-only (contacts.readonly).",
+         "Kept in sync on your schedule."]),
+    _source_doc(
+        "source-google-calendar", "Google Calendar", "calendar", 70,
+        "Back up your Google Calendar events.",
+        "Events across your calendars, including titles, times, attendees and locations.",
+        _oauth_connect("Google Calendar"),
+        ["**Calendar** — each event as `event` (title, start/end, attendees, location)."],
+        ["Read-only (calendar.readonly).",
+         "Recurring and all-day events are captured; they're excluded from the default search "
+         "type to keep results tidy — filter to Calendar to see them."]),
+    _source_doc(
+        "source-1password", "1Password", "key", 72,
+        "Back up your 1Password items — collected locally, titles indexed, secrets stay encrypted.",
+        "Logins, passwords, secure notes, API keys and other items, collected on-device via the "
+        "1Password CLI (`op`). Secret values are envelope-encrypted; only non-secret titles and "
+        "metadata are ever indexed.",
+        _agent_connect("Unlock the 1Password app and enable **Settings → Developer → Integrate "
+                       "with 1Password CLI** so the agent's `op` calls are authorized."),
+        ["**Credentials** — each item by kind (`login`, `password`, `api_key`, `ssh_key`, "
+         "`secure_note`, `credit_card`, `wifi`, …). This category is **restricted**: only the "
+         "title and non-secret metadata are indexed; the payload stays envelope-encrypted."],
+        ["Collected locally — your vault contents never reach the cloud in plaintext.",
+         "Interactive by default: unlock 1Password, then use **Collect now**. Unattended "
+         "background collection needs a 1Password **service account** (Business plan).",
+         "Requires the 1Password desktop app + CLI on the agent's Mac."]),
+    _source_doc(
+        "source-imessage", "Apple Messages", "mail", 74,
+        "Back up iMessage / SMS threads and attachments from your Mac.",
+        "Your Messages history — individual and group threads, with attachments — read locally "
+        "from `chat.db` by the desktop agent. Whole threads can be reassembled in search.",
+        _agent_connect("Grant the agent **Full Disk Access** so it can read "
+                       "`~/Library/Messages/chat.db`."),
+        ["**Messages** — each message as `message` / `sms` / `chat` (from, thread, date).",
+         "**Files / Images / Video & Audio** — attachments as their own objects, linked to the "
+         "message."],
+        ["Collected locally on the Mac — nothing depends on iCloud.",
+         "Requires macOS **Full Disk Access**.",
+         "Group threads and attachments are preserved together."]),
+    _source_doc(
+        "source-reddit", "Reddit", "activity", 76,
+        "Back up your Reddit posts, comments, saved items and messages.",
+        "Your submitted posts, comments, saved items and private messages.",
+        _oauth_connect("Reddit"),
+        ["**Social** — posts and comments as `post` / `comment`, plus your `profile`.",
+         "**Messages** — private messages as `message`."],
+        ["Read-only history access.",
+         "Choose which of posts / comments / saved / messages to include."]),
+    _source_doc(
+        "source-facebook", "Facebook", "activity", 78,
+        "Back up your Facebook posts and photos.",
+        "Your posts and photos, subject to the permissions Facebook grants your account.",
+        _oauth_connect("Facebook"),
+        ["**Social** — posts as `post`.",
+         "**Images** — photos as `image`."],
+        ["Depth depends on Facebook's current permission model — some data needs app review.",
+         "Read-only; pick posts and/or photos in the Data Map."]),
+    _source_doc(
+        "source-instagram", "Instagram", "image", 80,
+        "Back up your Instagram photos and videos.",
+        "Your media library — photos and videos you've posted.",
+        _oauth_connect("Instagram"),
+        ["**Images** — photos as `image`.",
+         "**Video & Audio** — videos as `video`."],
+        ["Uses Instagram's Basic Display / media API (read-only).",
+         "Captions and media are captured together."]),
+    _source_doc(
+        "source-linkedin", "LinkedIn", "activity", 82,
+        "Back up your LinkedIn profile, and — with partner access — posts, messages and connections.",
+        "Always: your identity/profile and a consolidated résumé. With deeper LinkedIn partner "
+        "access: posts, messages and your connection list. Each richer section is best-effort and "
+        "skipped cleanly if the scope isn't granted.",
+        _oauth_connect("LinkedIn"),
+        ["**Social** — `profile`, plus `post` and `message` where partner access is granted.",
+         "**Contacts** — connections as `contact`.",
+         "**Documents** — a generated `resume`."],
+        ["Base 'Sign in with LinkedIn' grants only identity/profile + email.",
+         "Posts, messages and connections require LinkedIn's Community Management / partner APIs.",
+         "Missing scopes are skipped without failing the backup."]),
+    _source_doc(
+        "source-github", "GitHub", "code", 84,
+        "Back up your GitHub repositories, issues and pull requests.",
+        "Repository files (including private repos with the right scope), plus issues and pull "
+        "requests. Incremental delta sync with a deep-history backfill; pick repos like folders.",
+        _oauth_connect("GitHub"),
+        ["**Developer** — `repository`, `code` (files), `issue`, `pull_request`.",
+         "**Documents** — READMEs and text as `text`."],
+        ["The `repo` scope includes private repositories; `read:user`/`user:email` identify you.",
+         "Browsable — choose which repositories to include.",
+         "Honors GitHub rate limits and resumes automatically."]),
+    _source_doc(
+        "source-crossbeam", "Crossbeam", "insights", 86,
+        "Back up your Crossbeam partner-ecosystem data: accounts, leads, opportunities, partners, "
+        "populations and overlaps.",
+        "Your CRM records surfaced in Crossbeam (accounts and leads), your partners, the "
+        "populations (segments) you publish, and — on higher tiers — open opportunities and the "
+        "account/lead overlaps with partners.",
+        _oauth_connect("Crossbeam"),
+        ["**Sales & CRM** — `account`, `lead`, `opportunity`, `partner`, `population`, "
+         "`overlap`, `report` (with partner, population, owner, domain, industry and stage as "
+         "searchable fields)."],
+        ["Read-only OAuth (openid, read:partnerships, read:populations, read:reports).",
+         "Choose which record types to include in the Data Map.",
+         "Requires an organization you can access in Crossbeam."],
+        required_plan="business",
+        extra=(
+            "\n## Advanced: opportunities & partner overlaps\n"
+            "::: plan business\n"
+            "Own-deal **signals** and account/lead **overlaps** with partners are a Business-plan "
+            "capability. On Business and above, Arkive also captures these alongside your "
+            "accounts, leads and partners.\n"
+            ":::\n")),
+    _source_doc(
+        "source-evernote", "Evernote", "note", 88,
+        "Back up your Evernote notes and attachments.",
+        "Your notes across notebooks (with tags), including attached files. Evernote's modern "
+        "API is its MCP server over OAuth 2.0 — no legacy developer token needed.",
+        ["Open **Sources → Evernote** and click **Connect**.",
+         "Approve access on Evernote's consent screen.",
+         "Notes and attachments are pulled, encrypted, versioned and made searchable."],
+        ["**Notes** — each note as `note` (notebook, tags, author).",
+         "**Files** — attachments (resources) as their own objects, linked to the note."],
+        ["Uses Evernote's MCP server (mcp.evernote.com); the legacy Thrift API is deprecated.",
+         "The OAuth client registers dynamically — nothing to paste."]),
+    _source_doc(
+        "source-custom", "Custom Source", "database", 90,
+        "Bring your own data into Arkive as structured records.",
+        "A flexible connector for data that doesn't fit a built-in source — imported as records "
+        "you can search and recover like anything else.",
+        ["Open **Sources → Custom Source** and follow the configuration prompts.",
+         "Map your fields to a title, preview and metadata.",
+         "Records are encrypted, indexed and versioned like every other source."],
+        ["**Records** — each item as `record` (flexible metadata mapping)."],
+        ["Best for structured/tabular data or a bespoke integration.",
+         "Field mapping controls what's searchable."]),
+    _source_doc(
+        "integration-ubiquiti", "Ubiquiti UniFi (Integration)", "server", 92,
+        "Network intelligence from your Ubiquiti UniFi controller — see which apps and cloud "
+        "services are in use on your network.",
+        "Integrations run on an **appliance** with local LAN access. The Ubiquiti integration "
+        "queries your UniFi Dream Machine / controller for the applications and cloud services in "
+        "use, which clients are using them, and how much traffic — powering shadow-app detection "
+        "and analytics. It does not back up files; it produces network intelligence signals.",
+        ["Open **Integrations** and choose **Ubiquiti UniFi**.",
+         "Enter the controller host (e.g. `192.168.1.1`) and an admin username/password.",
+         "Arkive mints a scoped API key from those credentials, then discards the password.",
+         "The appliance polls the controller on an interval (default 60 min)."],
+        ["**Network signals** — clients, applications and traffic volumes (not file backups). "
+         "Feeds shadow-app detection and network analytics."],
+        ["Runs on an appliance because it needs LAN access to the controller.",
+         "The admin password is used once to mint a scoped API key, then discarded.",
+         "Polls on an interval (default 60 minutes)."],
+        required_plan="business",
+        extra=(
+            "\n## Availability\n"
+            "::: plan business\n"
+            "Integrations (network intelligence) are a Business-plan capability and require an "
+            "on-prem appliance for LAN access.\n"
+            ":::\n")),
+]
+
+DEFAULT_SUPPORT_DOCS.extend(_SOURCE_PAGES)
+

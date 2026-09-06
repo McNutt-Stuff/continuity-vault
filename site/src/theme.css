@@ -366,6 +366,28 @@ a.pill:hover { color: var(--text); border-color: var(--border-strong); }
   margin: 0 0 16px; padding: 12px 16px; border-left: 3px solid var(--brand-2);
   background: rgba(53, 208, 165, 0.06); border-radius: 0 10px 10px 0; color: var(--muted);
 }
+/* Plan-gating: page-level pill + in-body callout + inline badge. */
+.plan-gate-badge {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700;
+  line-height: 1; letter-spacing: 0.2px; padding: 3px 9px; border-radius: 999px;
+  background: rgba(245, 166, 35, 0.14); color: #f5a623; border: 1px solid rgba(245, 166, 35, 0.35);
+  vertical-align: middle; white-space: nowrap;
+}
+.plan-gate-badge[data-plan="enterprise"] {
+  background: rgba(122, 92, 255, 0.16); color: #a78bfa; border-color: rgba(122, 92, 255, 0.4);
+}
+.support-body .plan-gate {
+  margin: 0 0 18px; padding: 14px 16px; border-radius: 12px;
+  border: 1px solid rgba(245, 166, 35, 0.3); background: rgba(245, 166, 35, 0.05);
+}
+.support-body .plan-gate[data-plan="enterprise"] {
+  border-color: rgba(122, 92, 255, 0.34); background: rgba(122, 92, 255, 0.06);
+}
+.support-body .plan-gate-head {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap;
+}
+.support-body .plan-gate-note { font-size: 12.5px; color: var(--faint); }
+.support-body .plan-gate > :last-child { margin-bottom: 0; }
 .support-updated { margin-top: 30px; font-size: 12.5px; color: var(--faint); }
 .support-foot-cta {
   display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;

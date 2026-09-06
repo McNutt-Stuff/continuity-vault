@@ -4525,11 +4525,13 @@ function SourcesAdmin() {
   const [sources, setSources] = useState<SourceSlot[]>([]);
   const [objects, setObjects] = useState<ConfigObj[]>([]);
   const [toast, setToast] = useState("");
+  const [callback, setCallback] = useState("");
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
 
   async function load() {
     try { setSources(await api.get<SourceSlot[]>("/admin/sources")); } catch { /* ignore */ }
     try { setObjects(await api.get<ConfigObj[]>("/admin/config-objects")); } catch { /* ignore */ }
+    try { setCallback((await api.get<{ redirect_uri: string }>("/admin/oauth-callback")).redirect_uri); } catch { /* ignore */ }
   }
   useEffect(() => { void load(); }, []);
 
@@ -4567,6 +4569,19 @@ function SourcesAdmin() {
           Sources are grouped by family — change a source's family to regroup it (this also applies on the customer catalog).
           Deep backfill (where supported) runs a paced background crawl of full history alongside the fast recent sync.
         </div>
+        {callback && (
+          <div className="row" style={{ gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 16,
+               padding: "10px 12px", borderRadius: 10, border: "1px solid var(--border-soft)", background: "var(--inset)" }}>
+            <Icon name="link" size={16} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 600, fontSize: 12.5 }}>OAuth redirect / callback URL</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>Register this as the authorized redirect URI in each provider's OAuth app.</div>
+            </div>
+            <code className="mono" style={{ flex: 1, minWidth: 220, fontSize: 12, padding: "5px 9px",
+                 borderRadius: 6, background: "var(--bg-elev)", overflow: "auto", whiteSpace: "nowrap" }}>{callback}</code>
+            <button className="btn sm" onClick={() => { void navigator.clipboard?.writeText(callback); flash("Callback URL copied"); }}>Copy</button>
+          </div>
+        )}
         <div className="stack" style={{ gap: 20 }}>
           {families.map((fam) => (
             <div key={fam}>
@@ -6063,9 +6078,19 @@ function AdminStat({ icon, label, value, tint }: { icon: IconName; label: string
 interface AdminDoc {
   id: string; slug: string; title: string; section: string; section_order: number;
   nav_order: number; icon: string; summary: string; body: string;
-  help_routes: string[]; published: boolean;
+  help_routes: string[]; published: boolean; required_plan: string;
 }
 interface AdminSectionRow { id: string; name: string; order: number; icon: string; count: number; }
+
+// Plan tiers a doc/feature can be gated to (mirrors cloud/app/api/billing.py).
+const DOC_PLAN_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "All plans" },
+  { value: "personal", label: "Personal" },
+  { value: "consumer", label: "Consumer" },
+  { value: "family", label: "Family" },
+  { value: "business", label: "Business" },
+  { value: "enterprise", label: "Enterprise" },
+];
 
 type DocChangeKind = "new" | "refresh" | "preserved";
 interface DocChange { slug: string; title: string; section: string; change: DocChangeKind; fields: string[]; body: string; }
@@ -6156,6 +6181,7 @@ function SupportDocsAdmin() {
                     <div className="row" style={{ gap: 8, alignItems: "center" }}>
                       <span style={{ fontWeight: 600 }}>{d.title}</span>
                       {!d.published && <Pill tone="warn">draft</Pill>}
+                      {d.required_plan && <Pill tone="info">{d.required_plan} plan</Pill>}
                       {(d.help_routes || []).length > 0 && <Pill tone="info">contextual</Pill>}
                     </div>
                     <div className="faint" style={{ fontSize: 12 }}>
@@ -6353,6 +6379,7 @@ function DocEditor({ doc, sections, onCreateSection, onDone, onCancel }: {
   const [f, setF] = useState<AdminDoc>(doc || {
     id: "", slug: "", title: "", section: sections[0]?.name || "General", section_order: 100,
     nav_order: 100, icon: "book", summary: "", body: "", help_routes: [], published: true,
+    required_plan: "",
   });
   const [body, setBody] = useState(toEditorHtml(doc?.body || ""));
   const [routes, setRoutes] = useState((doc?.help_routes || []).join(", "));
@@ -6368,6 +6395,7 @@ function DocEditor({ doc, sections, onCreateSection, onDone, onCancel }: {
       section_order: sectOrder, nav_order: Number(f.nav_order) || 100,
       icon: f.icon || "book", summary: f.summary, body, published: f.published,
       help_routes: routes.split(",").map((r) => r.trim()).filter(Boolean),
+      required_plan: f.required_plan || "",
     };
     try {
       if (doc) await api.put(`/admin/support/docs/${doc.id}`, payload);
@@ -6422,6 +6450,12 @@ function DocEditor({ doc, sections, onCreateSection, onDone, onCancel }: {
           <label className="stack" style={{ gap: 5, width: 120 }}>
             <span className="faint" style={{ fontSize: 12 }}>Nav icon</span>
             <input className="input" value={f.icon} onChange={(e) => set("icon", e.target.value)} />
+          </label>
+          <label className="stack" style={{ gap: 5, width: 150 }}>
+            <span className="faint" style={{ fontSize: 12 }}>Required plan</span>
+            <select className="input" value={f.required_plan || ""} onChange={(e) => set("required_plan", e.target.value)}>
+              {DOC_PLAN_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
           </label>
           <label className="row" style={{ gap: 8, alignItems: "center", height: 34 }}>
             <input type="checkbox" checked={f.published} onChange={(e) => set("published", e.target.checked)} />

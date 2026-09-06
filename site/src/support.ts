@@ -11,6 +11,7 @@ export interface DocNavItem {
   icon: string;
   summary: string;
   nav_order: number;
+  required_plan?: string;
 }
 export interface DocSection {
   section: string;
@@ -25,6 +26,7 @@ export interface Doc {
   summary: string;
   body: string;
   help_routes: string[];
+  required_plan?: string;
   updated_at?: string | null;
 }
 export interface SupportContent {

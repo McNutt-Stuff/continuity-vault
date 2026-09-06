@@ -953,6 +953,10 @@ class SupportDoc(Base):
     # so the portal Help icon can deep-link to the right page.
     help_routes = Column(JSON, default=list)
     published = Column(Boolean, default=True, index=True)
+    # Plan tier a reader needs for the FEATURE this page documents (""/none = all
+    # plans). Renders a "Business plan" style gate badge on the page; in-body
+    # sections can gate individually via the :::plan <tier> callout syntax.
+    required_plan = Column(String, default="")
     # Hash of the DEFAULT (baseline) spec this doc was last seeded/updated from,
     # so "seed updates" can refresh unedited docs without clobbering admin edits.
     baseline_hash = Column(String, default="")

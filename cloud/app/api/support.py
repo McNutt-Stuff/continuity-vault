@@ -76,6 +76,7 @@ def _doc_public(d: SupportDoc) -> dict:
         "section_order": d.section_order, "nav_order": d.nav_order,
         "icon": d.icon or "book", "summary": d.summary or "", "body": d.body or "",
         "help_routes": d.help_routes or [],
+        "required_plan": d.required_plan or "",
         "updated_at": d.updated_at.isoformat() if d.updated_at else None,
     }
 
@@ -108,7 +109,8 @@ def _build_tree(docs: list[SupportDoc], order_map: dict | None = None) -> list[d
         if name not in order_map:
             s["order"] = min(s["order"], d.section_order)
         s["docs"].append({"slug": d.slug, "title": d.title, "icon": d.icon or "book",
-                          "summary": d.summary or "", "nav_order": d.nav_order})
+                          "summary": d.summary or "", "nav_order": d.nav_order,
+                          "required_plan": d.required_plan or ""})
     out = sorted(sections.values(), key=lambda s: (s["order"], s["section"]))
     for s in out:
         s["docs"].sort(key=lambda x: (x["nav_order"], x["title"]))
@@ -174,6 +176,7 @@ class DocIn(BaseModel):
     summary: str = ""
     body: str = ""
     help_routes: list[str] = []
+    required_plan: str = ""
     published: bool = True
 
 
@@ -194,6 +197,7 @@ def admin_create_doc(body: DocIn, principal: security.Principal = Depends(securi
         slug=slug, title=body.title, section=body.section,
         section_order=body.section_order, nav_order=body.nav_order, icon=body.icon,
         summary=body.summary, body=body.body, help_routes=body.help_routes,
+        required_plan=body.required_plan,
         published=body.published)
     _ensure_section(db, body.section)
     db.add(d)
@@ -224,6 +228,7 @@ def admin_update_doc(doc_id: str, body: DocIn,
     d.summary = body.summary
     d.body = body.body
     d.help_routes = body.help_routes
+    d.required_plan = body.required_plan
     d.published = body.published
     _ensure_section(db, body.section)
     db.commit()
@@ -272,7 +277,7 @@ def admin_seed_docs(principal: security.Principal = Depends(security.require_pla
 # Fields a baseline default controls; used to detect whether a doc still matches
 # the version we seeded (unedited) vs. an admin customization.
 _BASELINE_FIELDS = ("title", "section", "section_order", "nav_order",
-                    "icon", "summary", "body", "help_routes")
+                    "icon", "summary", "body", "help_routes", "required_plan")
 
 
 def _hash_fields(get) -> str:

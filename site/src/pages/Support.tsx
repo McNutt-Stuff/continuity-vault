@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { loadSupport, slugForRoute, SupportContent } from "../support";
-import { renderDoc } from "../md";
+import { renderDoc, planLabel } from "../md";
 import { site } from "../content";
 
 export default function Support() {
@@ -96,6 +96,12 @@ export default function Support() {
                   className={`support-nav-link ${d.slug === activeSlug ? "active" : ""}`}
                 >
                   {d.title}
+                  {d.required_plan && (
+                    <span className="plan-gate-badge" data-plan={d.required_plan}
+                          style={{ marginLeft: 6, fontSize: 9.5, padding: "1px 6px" }}>
+                      {planLabel(d.required_plan)}
+                    </span>
+                  )}
                 </Link>
               ))}
             </div>
@@ -119,6 +125,13 @@ export default function Support() {
               <Link to="/support">Help Center</Link> <span>›</span> <span>{doc.section}</span>
             </div>
             <h1>{doc.title}</h1>
+            {doc.required_plan && (
+              <div style={{ margin: "0 0 14px" }}>
+                <span className="plan-gate-badge" data-plan={doc.required_plan}>
+                  {planLabel(doc.required_plan)} plan &amp; above
+                </span>
+              </div>
+            )}
             {doc.summary && <p className="support-lead">{doc.summary}</p>}
             <div
               className="support-body"

@@ -6,9 +6,24 @@ function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// Plan-gating labels — mirror the license tiers in cloud/app/api/billing.py.
+const PLAN_LABELS: Record<string, string> = {
+  personal: "Personal", consumer: "Consumer", family: "Family",
+  business: "Business", enterprise: "Enterprise",
+};
+export function planLabel(tier: string): string {
+  const k = (tier || "").toLowerCase();
+  return PLAN_LABELS[k] || (k ? k.charAt(0).toUpperCase() + k.slice(1) : "Upgrade");
+}
+function planBadge(tier: string): string {
+  const k = (tier || "").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+  return `<span class="plan-gate-badge" data-plan="${k}">${planLabel(k)} plan</span>`;
+}
+
 function inline(s: string): string {
   let t = esc(s);
   t = t.replace(/`([^`]+)`/g, (_m, c) => `<code>${c}</code>`);
+  t = t.replace(/\[plan:([a-z0-9_-]+)\]/gi, (_m, p) => planBadge(p));
   t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, text, url) => {
     const safe = /^(https?:|\/)/i.test(url) ? url : "#";
     return `<a href="${safe}">${text}</a>`;
@@ -28,6 +43,14 @@ export function renderMarkdown(md: string): string {
     const line = lines[i];
     const t = line.trim();
     if (!t) { flush(); i++; continue; }
+    const pg = /^:::\s*plan\s+([a-z0-9_-]+)\s*$/i.exec(t);
+    if (pg) {
+      flush(); const tier = pg[1]; const inner: string[] = []; i++;
+      while (i < lines.length && lines[i].trim() !== ":::") { inner.push(lines[i]); i++; }
+      i++;
+      out.push(`<div class="plan-gate" data-plan="${tier.toLowerCase()}"><div class="plan-gate-head">${planBadge(tier)}<span class="plan-gate-note">Available on ${planLabel(tier)} and above</span></div>${renderMarkdown(inner.join("\n"))}</div>`);
+      continue;
+    }
     const h = /^(#{1,4})\s+(.*)$/.exec(t);
     if (h) { flush(); const l = h[1].length; out.push(`<h${l}>${inline(h[2])}</h${l}>`); i++; continue; }
     if (/^>\s?/.test(t)) {

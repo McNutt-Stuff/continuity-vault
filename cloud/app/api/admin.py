@@ -2527,6 +2527,15 @@ def list_sources(db: Session = Depends(get_db)):
     return out
 
 
+@router.get("/oauth-callback")
+def oauth_callback_info():
+    """The OAuth redirect/callback URL to register in a provider's app when wiring
+    up a new source integration. Surfaced on the admin Sources page so it's easy to
+    copy without digging through per-source setup steps."""
+    from ..connectors import oauth
+    return {"redirect_uri": oauth.redirect_uri()}
+
+
 class SourceUpdate(BaseModel):
     enabled: bool | None = None
     config_object_id: str | None = None
