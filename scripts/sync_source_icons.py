@@ -64,12 +64,20 @@ SOURCE_ICONS: dict[str, dict] = {
     "google_contacts": {"file": "Google Contacts icon.svg", "search": "Google Contacts icon"},
     "google_photos": {"file": "Google Photos icon (2020).svg", "search": "Google Photos logo"},
     "imessage":   {"file": "IMessage logo.svg", "search": "iMessage logo"},
+    # NOTE: Crossbeam has no brand file on Wikimedia Commons. Its icon is a
+    # locally-provided asset committed at web/public/source-icons/crossbeam.svg
+    # (brand logo embedded), so this script intentionally does NOT manage it.
+    "salesforce": {"file": "Salesforce.com logo.svg", "search": "Salesforce logo"},
     # Integrations (network intelligence) — matched by integration_type.
     "ubiquiti":   {"file": "Ubiquiti Logo 2023.svg", "search": "Ubiquiti logo"},
     # Bring-your-own cloud storage providers — matched by CustomerStorage.provider.
     "aws":        {"file": "Amazon Web Services Logo.svg", "search": "Amazon Web Services logo"},
     "azure":      {"file": "Microsoft Azure.svg", "search": "Microsoft Azure logo"},
     "gcp":        {"file": "Google Cloud icon (2026).svg", "search": "Google Cloud icon 2026"},
+    # Device/endpoint platform marks (Devices page). Brand logos from Commons.
+    "macos":      {"file": "Apple logo black.svg", "search": "Apple logo black"},
+    "windows":    {"file": "Windows logo - 2021.svg", "search": "Windows logo 2021"},
+    "android":    {"file": "Android robot.svg", "search": "Android robot logo"},
 }
 
 # Variant/local source types that reuse another type's brand mark. After the real
@@ -78,6 +86,8 @@ SOURCE_ICONS: dict[str, dict] = {
 # registries: web/src/components/sourceIcons.ts + cloud/app/source_icons.py).
 SOURCE_ICON_ALIASES: dict[str, str] = {
     "outlook_local": "outlook",
+    # iPhone/iPad share Apple's brand mark with the Mac.
+    "ios": "macos",
 }
 
 

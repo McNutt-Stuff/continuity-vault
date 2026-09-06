@@ -14,6 +14,7 @@ BRAND_ICON_TYPES: frozenset[str] = frozenset({
     "google_drive", "slack", "notion", "github", "reddit", "facebook",
     "instagram", "google_calendar", "google_contacts", "google_photos",
     "evernote", "linkedin", "imessage", "ubiquiti", "aws", "azure", "gcp",
+    "salesforce", "crossbeam",
 })
 
 # Variant/local types that reuse another type's brand mark (mirror the frontend).

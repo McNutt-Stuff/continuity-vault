@@ -2040,3 +2040,183 @@ def stream_github(access_token: str, cursor=None, config: Optional[dict] = None,
     state["cursor"] = cursor_out
 
 
+# --------------------------------------------------------------------------- #
+# Crossbeam (partner ecosystem: accounts, leads, opportunities, partners,      #
+# populations, overlaps, reports)                                              #
+# --------------------------------------------------------------------------- #
+
+CROSSBEAM_API = "https://api.crossbeam.com"
+
+
+def _crossbeam_org(c: httpx.Client, headers: dict) -> Optional[str]:
+    """Resolve the organization uuid required in the ``Xbeam-Organization`` header
+    from ``/v1/users/me`` (first org the token can access)."""
+    r = c.get(f"{CROSSBEAM_API}/v1/users/me", headers=headers)
+    if r.status_code >= 400:
+        _raise_api("Crossbeam", r, "users/me")
+    data = r.json() or {}
+    orgs = (data.get("organizations") or data.get("organization_users")
+            or data.get("orgs") or [])
+    for o in orgs if isinstance(orgs, list) else []:
+        if not isinstance(o, dict):
+            continue
+        uuid = o.get("uuid") or (o.get("organization") or {}).get("uuid")
+        if uuid:
+            return uuid
+    org = data.get("organization") or {}
+    return org.get("uuid") if isinstance(org, dict) else None
+
+
+def _crossbeam_paged(c: httpx.Client, url: str, headers: dict,
+                     optional: bool = False, cap_pages: int = 100) -> Iterable[dict]:
+    """Yield items from a Crossbeam list endpoint, following ``pagination.next_href``.
+
+    Auth failures (401) always raise (needs-reauth). ``optional`` endpoints that
+    a plan doesn't include (403/404) are skipped rather than failing the backup."""
+    next_url: Optional[str] = url
+    pages = 0
+    while next_url and pages < cap_pages:
+        pages += 1
+        r = c.get(next_url, headers=headers)
+        if r.status_code == 401:
+            _raise_api("Crossbeam", r, url)
+        if r.status_code >= 400:
+            if optional and r.status_code in (403, 404):
+                logger.debug("crossbeam optional endpoint %s unavailable (HTTP %s)",
+                             url, r.status_code)
+                return
+            _raise_api("Crossbeam", r, url)
+        body = r.json()
+        if isinstance(body, list):
+            yield from (it for it in body if isinstance(it, dict))
+            return
+        items = body.get("items") or body.get("data") or []
+        yield from (it for it in items if isinstance(it, dict))
+        nxt = (body.get("pagination") or {}).get("next_href")
+        if nxt and nxt.startswith("/"):
+            nxt = f"{CROSSBEAM_API}{nxt}"
+        next_url = nxt or None
+
+
+def _crossbeam_record(rec: dict, kind: str, label: str, content_cap: int) -> SourceObject:
+    """Map a Crossbeam account/lead/opportunity record to a CRM SourceObject."""
+    data = rec.get("record") if isinstance(rec.get("record"), dict) else rec
+    name = (data.get("company_name") or data.get("account_name") or data.get("name")
+            or data.get("full_name") or data.get("email") or label.rstrip("s"))
+    rid = rec.get("id") or rec.get("uuid") or data.get("id") or name
+    meta = {
+        "record_type": kind,
+        "domain": data.get("domain") or data.get("website"),
+        "owner": data.get("owner") or data.get("owner_name"),
+        "industry": data.get("industry"),
+        "stage": data.get("stage") or data.get("stage_name"),
+        "amount": data.get("amount") or data.get("deal_amount"),
+        "partner": rec.get("partner_name"),
+        "population": rec.get("population_name"),
+        "kind": kind,
+    }
+    meta = {k: v for k, v in meta.items() if v not in (None, "")}
+    preview = " · ".join(str(v) for v in
+                         (meta.get("domain"), meta.get("stage"), meta.get("owner")) if v)[:200]
+    content, _ = _capped(json.dumps(rec).encode(), content_cap)
+    return SourceObject(
+        object_id=f"crossbeam:{kind}:{rid}",
+        doc_type=kind, category="crm", title=str(name),
+        content=content, preview=preview, meta=meta, labels=[label],
+        modified_at=_parse_dt(rec.get("updated_at") or data.get("updated_at")))
+
+
+def fetch_crossbeam(config: dict, content_cap: int = _DEFAULT_CAP,
+                    options: Optional[dict] = None) -> Iterable[SourceObject]:
+    """Back up the org's Crossbeam data: partners, populations, CRM records
+    (accounts & leads), open opportunities (own-deals signals), partner overlaps,
+    and reports — normalized into the Sales & CRM taxonomy.
+
+    Requires an OAuth token plus the ``Xbeam-Organization`` header (the org uuid,
+    resolved from /v1/users/me and cached on the account config)."""
+    token = (config or {}).get("access_token")
+    if not token:
+        return
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    with httpx.Client(timeout=60) as c:
+        org = (config or {}).get("crossbeam_org") or _crossbeam_org(c, headers)
+        if org:
+            headers["Xbeam-Organization"] = str(org)
+
+        if _want(options, "partners"):
+            for p in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/partners", headers):
+                name = p.get("name") or p.get("organization_name") or "Partner"
+                pid = p.get("id") or p.get("uuid") or name
+                yield SourceObject(
+                    object_id=f"crossbeam:partner:{pid}",
+                    doc_type="partner", category="crm", title=str(name),
+                    content=json.dumps(p).encode(),
+                    preview=p.get("domain") or str(name),
+                    meta={"record_type": "partner", "partner": name,
+                          "domain": p.get("domain"), "kind": "partner"},
+                    labels=["Partners"], modified_at=_parse_dt(p.get("updated_at")))
+
+        if _want(options, "populations"):
+            for pop in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/populations", headers):
+                name = pop.get("name") or "Population"
+                pid = pop.get("id") or pop.get("uuid") or name
+                size = pop.get("record_count") or pop.get("size")
+                yield SourceObject(
+                    object_id=f"crossbeam:population:{pid}",
+                    doc_type="population", category="crm", title=str(name),
+                    content=json.dumps(pop).encode(),
+                    preview=(f"{size} records" if size is not None else str(name)),
+                    meta={"record_type": "population", "population": name,
+                          "size": size, "kind": "population"},
+                    labels=["Populations"], modified_at=_parse_dt(pop.get("updated_at")))
+
+        if _want(options, "accounts"):
+            for rec in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/records/accounts", headers):
+                yield _crossbeam_record(rec, "account", "Accounts", content_cap)
+
+        if _want(options, "leads"):
+            for rec in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/records/leads", headers):
+                yield _crossbeam_record(rec, "lead", "Leads", content_cap)
+
+        if _want(options, "opportunities"):
+            # Own open deals — an enterprise signal; skip cleanly if not licensed.
+            for rec in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/signals/own-deals",
+                                        headers, optional=True):
+                yield _crossbeam_record(rec, "opportunity", "Opportunities", content_cap)
+
+        if _want(options, "overlaps"):
+            for path in ("accounts", "leads"):
+                for ov in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/overlaps/{path}",
+                                           headers, optional=True):
+                    partner = ov.get("partner_name") or (ov.get("partner") or {}).get("name")
+                    rec = ov.get("record") if isinstance(ov.get("record"), dict) else ov
+                    name = (rec.get("company_name") or rec.get("name")
+                            or rec.get("full_name") or "Overlap")
+                    oid = ov.get("id") or ov.get("uuid") or f"{name}:{partner}"
+                    title = f"{name} ↔ {partner}" if partner else str(name)
+                    yield SourceObject(
+                        object_id=f"crossbeam:overlap:{oid}",
+                        doc_type="overlap", category="crm", title=title,
+                        content=json.dumps(ov).encode(),
+                        preview=" · ".join(str(v) for v in
+                                           (partner, rec.get("domain"),
+                                            ov.get("population_name")) if v)[:200],
+                        meta={"record_type": "overlap", "partner": partner,
+                              "population": ov.get("population_name"),
+                              "domain": rec.get("domain"), "kind": "overlap"},
+                        labels=["Overlaps", path.title()],
+                        modified_at=_parse_dt(ov.get("updated_at")))
+
+        if _want(options, "reports"):
+            for rep in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/reports", headers, optional=True):
+                name = rep.get("name") or "Report"
+                rid = rep.get("id") or rep.get("uuid") or name
+                yield SourceObject(
+                    object_id=f"crossbeam:report:{rid}",
+                    doc_type="report", category="crm", title=str(name),
+                    content=json.dumps(rep).encode(),
+                    preview=rep.get("description") or str(name),
+                    meta={"record_type": "report", "kind": "report"},
+                    labels=["Reports"], modified_at=_parse_dt(rep.get("updated_at")))
+
+

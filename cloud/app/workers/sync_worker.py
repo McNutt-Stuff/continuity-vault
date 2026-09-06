@@ -255,25 +255,47 @@ def _compose_preview(meta: dict, max_fields: int = 4) -> str:
     return " · ".join(bits)
 
 
+# An appliance is considered reachable for routing if it heartbeated within this
+# window (2 missed 30s beats + slack). Beyond it, writes queue for retry.
+_APPLIANCE_ONLINE_MAX_AGE_S = 120
+
+
+def _appliance_online(a: Optional[Appliance]) -> bool:
+    """True when the appliance has a fresh heartbeat (reachable for a write)."""
+    hb = getattr(a, "last_heartbeat_at", None) if a is not None else None
+    if hb is None:
+        return False
+    if hb.tzinfo is not None:
+        hb = hb.replace(tzinfo=None)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return (now - hb).total_seconds() < _APPLIANCE_ONLINE_MAX_AGE_S
+
+
 def _resolve_appliance(db: Session, tenant_id: str, kind: str) -> Optional[Appliance]:
     """Resolve a destination to a live appliance. Accepts the canonical
     ``store:<storageId>`` form, the legacy ``appliance:<id>`` form, and the bare
-    ``appliance`` (most-recent sealed unit)."""
+    ``appliance`` (most-recent sealed unit).
+
+    An appliance that hasn't heartbeated recently is treated as UNAVAILABLE
+    (returns None) so the caller enqueues the write for retry and it shows up in
+    the node's queue — rather than issuing a command that silently sits pending on
+    an offline unit while staging fills up."""
     if kind.startswith("store:"):
         store = db.get(ApplianceStorage, kind.split(":", 1)[1])
         if not store or store.tenant_id != tenant_id:
             return None
         a = db.get(Appliance, store.appliance_id)
-        return a if a and a.tenant_id == tenant_id else None
+        return a if a and a.tenant_id == tenant_id and _appliance_online(a) else None
     if ":" in kind:
         aid = kind.split(":", 1)[1]
         a = db.get(Appliance, aid)
-        return a if a and a.tenant_id == tenant_id else None
-    return (db.query(Appliance)
-            .filter(Appliance.tenant_id == tenant_id,
-                    Appliance.state.in_(["SEALED", "ONLINE_STAGING", "READY_TO_SEAL"]))
-            .order_by(Appliance.last_heartbeat_at.desc())
-            .first())
+        return a if a and a.tenant_id == tenant_id and _appliance_online(a) else None
+    a = (db.query(Appliance)
+         .filter(Appliance.tenant_id == tenant_id,
+                 Appliance.state.in_(["SEALED", "ONLINE_STAGING", "READY_TO_SEAL"]))
+         .order_by(Appliance.last_heartbeat_at.desc())
+         .first())
+    return a if a and _appliance_online(a) else None
 
 
 def _storage_id(kind: str) -> Optional[str]:

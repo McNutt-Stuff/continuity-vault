@@ -44,6 +44,7 @@ class Category(str, Enum):
     NOTE = "note"
     IDENTITY = "identity"
     RECORD = "record"
+    CRM = "crm"
 
 
 class Sensitivity(str, Enum):
@@ -80,6 +81,8 @@ CATEGORY_META: Dict[Category, dict] = {
                         "sensitivity": Sensitivity.RESTRICTED, "index_preview": False},
     Category.RECORD: {"display": "Records", "icon": "database",
                       "sensitivity": Sensitivity.STANDARD, "index_preview": True},
+    Category.CRM: {"display": "Sales & CRM", "icon": "insights",
+                   "sensitivity": Sensitivity.SENSITIVE, "index_preview": True},
 }
 
 # Canonical kinds per category.
@@ -104,6 +107,11 @@ KINDS: Dict[Category, List[str]] = {
                         "birth_certificate", "visa", "tax_document", "legal_document",
                         "medical_record", "insurance_policy", "identity"],
     Category.RECORD: ["database_row", "form_submission", "custom", "record"],
+    # Sales/CRM objects (Crossbeam, Salesforce, …). Accounts & opportunities are
+    # first-class business records; people stay in CONTACT.
+    Category.CRM: ["account", "opportunity", "lead", "deal", "campaign", "case",
+                   "contract", "quote", "pipeline", "partner", "population",
+                   "overlap", "signal", "report", "crm_note"],
 }
 
 KIND_TO_CATEGORY: Dict[str, str] = {

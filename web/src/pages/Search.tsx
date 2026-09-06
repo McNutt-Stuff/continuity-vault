@@ -147,6 +147,7 @@ const CATEGORY_META: Record<string, { icon: IconName; label: string; color: stri
   note: { icon: "note", label: "Notes", color: "#35d0a5" },
   identity: { icon: "shield", label: "Identity & Legal", color: "#f2545b" },
   record: { icon: "database", label: "Records", color: "#7a5cff" },
+  crm: { icon: "insights", label: "Sales & CRM", color: "#4b3bd6" },
 };
 
 const SOURCE_META: Record<string, { color: string; icon: IconName; label: string }> = {
@@ -160,6 +161,7 @@ const SOURCE_META: Record<string, { color: string; icon: IconName; label: string
   endpoint_files: { color: "#7a5cff", icon: "file", label: "Endpoint Files" },
   imessage: { color: "#34da50", icon: "mail", label: "Apple Messages" },
   outlook_local: { color: "#0a5bd3", icon: "mail", label: "Outlook (local)" },
+  crossbeam: { color: "#4b3bd6", icon: "insights", label: "Crossbeam" },
 };
 
 // Calendar is excluded from the default Type selection because recurring/all-day

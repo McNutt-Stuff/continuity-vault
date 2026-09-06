@@ -348,28 +348,30 @@ export default function Dashboard() {
             </div>
             {ov && ov.activity_24h && ov.activity_24h.objects > 0 ? (
               <>
-                <div className="row" style={{ gap: 20, marginBottom: 12 }}>
+                <div className="row" style={{ justifyContent: "space-evenly", textAlign: "center",
+                                              gap: 12, paddingBottom: 12, marginBottom: 6,
+                                              borderBottom: "1px solid var(--border-soft)" }}>
                   <div>
-                    <div style={{ fontSize: 26, fontWeight: 700, lineHeight: 1.1 }}>{ov.activity_24h.objects.toLocaleString()}</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, lineHeight: 1.1 }}>{ov.activity_24h.objects.toLocaleString()}</div>
                     <div className="faint" style={{ fontSize: 11.5 }}>object{ov.activity_24h.objects === 1 ? "" : "s"} backed up</div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 26, fontWeight: 700, lineHeight: 1.1 }}>{bytes(ov.activity_24h.bytes)}</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, lineHeight: 1.1 }}>{bytes(ov.activity_24h.bytes)}</div>
                     <div className="faint" style={{ fontSize: 11.5 }}>data protected</div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 26, fontWeight: 700, lineHeight: 1.1 }}>{ov.activity_24h.source_count}</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, lineHeight: 1.1 }}>{ov.activity_24h.source_count}</div>
                     <div className="faint" style={{ fontSize: 11.5 }}>source{ov.activity_24h.source_count === 1 ? "" : "s"}</div>
                   </div>
                 </div>
-                <div className="stack" style={{ gap: 4 }}>
+                <div className="stack" style={{ gap: 0 }}>
                   {ov.activity_24h.sources.map((s) => (
-                    <div key={s.key} className="row" style={{ gap: 10, alignItems: "center", padding: "5px 0" }}>
-                      <div className="result-icon" style={{ width: 28, height: 28, background: "var(--inset)" }}>
-                        <SourceIcon type={s.key} fallback="database" size={15} />
+                    <div key={s.key} className="row" style={{ gap: 10, alignItems: "center", padding: "3px 0" }}>
+                      <div className="result-icon" style={{ width: 24, height: 24, background: "var(--inset)" }}>
+                        <SourceIcon type={s.key} fallback="database" size={14} />
                       </div>
-                      <div className="flex1" style={{ fontSize: 13, fontWeight: 600 }}>{s.label}</div>
-                      <div className="faint" style={{ fontSize: 12, textAlign: "right" }}>
+                      <div className="flex1" style={{ fontSize: 12.5, fontWeight: 600 }}>{s.label}</div>
+                      <div className="faint" style={{ fontSize: 11.5, textAlign: "right" }}>
                         {s.objects.toLocaleString()} item{s.objects === 1 ? "" : "s"} · {bytes(s.bytes)}
                       </div>
                     </div>

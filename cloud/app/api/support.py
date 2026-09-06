@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import secrets
 from datetime import datetime, timezone
 
@@ -29,6 +30,8 @@ from .. import audit, emailer, security
 from ..db import get_db
 from ..models import (SupportDoc, SupportSection, SupportTicket, TicketMessage, Tenant, User)
 from ..support_defaults import DEFAULT_SUPPORT_DOCS, DEFAULT_SUPPORT_SECTIONS
+
+logger = logging.getLogger("cv.support")
 
 # Public docs (no auth) + customer tickets (logged-in) share this prefix.
 public_router = APIRouter(prefix="/support", tags=["support"])
@@ -285,55 +288,82 @@ def _doc_hash(d: SupportDoc) -> str:
     return _hash_fields(lambda k: getattr(d, k))
 
 
+def _changed_fields(d: SupportDoc, spec: dict) -> list[str]:
+    """Which baseline fields differ between the live doc and the default spec."""
+    return [k for k in _BASELINE_FIELDS if str(getattr(d, k)) != str(spec.get(k))]
+
+
 @admin_router.post("/seed-updates", dependencies=[Depends(security.require_platform_admin)])
 def admin_seed_updates(preview: bool = False, force: bool = False,
                        principal: security.Principal = Depends(security.require_platform_admin),
                        db: Session = Depends(get_db)):
-    """Publish the documentation changes that differ from what's live: add new
-    default pages AND refresh existing default pages whose baseline content
-    changed — WITHOUT clobbering admin-edited pages (unless ``force``). Pass
-    ``preview=true`` to see what would change without applying."""
-    created: list[str] = []
-    updated: list[str] = []
-    skipped: list[str] = []
-    sections_added = 0
-    for spec in DEFAULT_SUPPORT_SECTIONS:
-        if not db.query(SupportSection).filter(SupportSection.name == spec["name"]).first():
-            sections_added += 1
-            if not preview:
-                db.add(SupportSection(**spec))
-    for spec in DEFAULT_SUPPORT_DOCS:
-        sh = _spec_hash(spec)
-        d = db.query(SupportDoc).filter(SupportDoc.slug == spec["slug"]).first()
-        if d is None:
-            created.append(spec["slug"])
-            if not preview:
-                nd = SupportDoc(**spec)
-                nd.baseline_hash = sh
-                db.add(nd)
-            continue
-        dh = _doc_hash(d)
-        if dh == sh:
-            # Already matches the latest baseline; adopt the hash so it's tracked.
-            if not preview and d.baseline_hash != sh:
-                d.baseline_hash = sh
-            continue
-        unedited = (not d.baseline_hash) or (dh == d.baseline_hash)
-        if force or unedited:
-            updated.append(spec["slug"])
-            if not preview:
-                for k in _BASELINE_FIELDS:
-                    setattr(d, k, spec.get(k))
-                d.baseline_hash = sh
-                _ensure_section(db, spec.get("section") or "General")
-        else:
-            skipped.append(spec["slug"])  # admin-customized — preserved
-    if not preview:
-        db.commit()
-        audit.record(db, actor=principal.user_id, action="admin.support_docs_updated",
-                     category="admin", detail={"created": len(created), "updated": len(updated),
-                                               "skipped": len(skipped), "forced": force})
-    return {"ok": True, "preview": preview, "sections_added": sections_added,
+    """Compute (and, unless ``preview``, publish) the package of documentation
+    updates: new default pages, refreshed default pages whose baseline content
+    changed, and admin-edited pages that are PRESERVED unchanged (unless
+    ``force``). Returns a reviewable ``changes`` list so the admin can inspect
+    exactly what will be published before applying."""
+    changes: list[dict] = []            # per-page review entries
+    sections_added: list[str] = []
+    try:
+        for spec in DEFAULT_SUPPORT_SECTIONS:
+            if not db.query(SupportSection).filter(SupportSection.name == spec["name"]).first():
+                sections_added.append(spec["name"])
+                if not preview:
+                    db.add(SupportSection(**spec))
+                    db.flush()
+        for spec in DEFAULT_SUPPORT_DOCS:
+            sh = _spec_hash(spec)
+            d = db.query(SupportDoc).filter(SupportDoc.slug == spec["slug"]).first()
+            if d is None:
+                changes.append({"slug": spec["slug"], "title": spec["title"],
+                                "section": spec["section"], "change": "new",
+                                "fields": [], "body": spec.get("body", "")})
+                if not preview:
+                    _ensure_section(db, spec.get("section") or "General")
+                    nd = SupportDoc(**spec)
+                    nd.baseline_hash = sh
+                    db.add(nd)
+                    db.flush()
+                continue
+            dh = _doc_hash(d)
+            if dh == sh:
+                # Already matches the latest baseline; adopt the hash so it's tracked.
+                if not preview and d.baseline_hash != sh:
+                    d.baseline_hash = sh
+                continue
+            fields = _changed_fields(d, spec)
+            unedited = (not d.baseline_hash) or (dh == d.baseline_hash)
+            if force or unedited:
+                changes.append({"slug": spec["slug"], "title": spec["title"],
+                                "section": spec["section"], "change": "refresh",
+                                "fields": fields, "body": spec.get("body", "")})
+                if not preview:
+                    _ensure_section(db, spec.get("section") or "General")
+                    for k in _BASELINE_FIELDS:
+                        setattr(d, k, spec.get(k))
+                    d.baseline_hash = sh
+                    db.flush()
+            else:
+                changes.append({"slug": spec["slug"], "title": spec["title"],
+                                "section": spec["section"], "change": "preserved",
+                                "fields": fields, "body": spec.get("body", "")})
+        if not preview:
+            db.commit()
+            audit.record(db, actor=principal.user_id, action="admin.support_docs_updated",
+                         category="admin",
+                         detail={"created": sum(c["change"] == "new" for c in changes),
+                                 "updated": sum(c["change"] == "refresh" for c in changes),
+                                 "skipped": sum(c["change"] == "preserved" for c in changes),
+                                 "sections_added": len(sections_added), "forced": force})
+    except Exception as exc:  # noqa: BLE001 — surface a clear error instead of a bare 500
+        db.rollback()
+        logger.exception("documentation publish failed (preview=%s force=%s)", preview, force)
+        raise HTTPException(500, f"Publishing documentation updates failed: {exc}")
+    created = [c["slug"] for c in changes if c["change"] == "new"]
+    updated = [c["slug"] for c in changes if c["change"] == "refresh"]
+    skipped = [c["slug"] for c in changes if c["change"] == "preserved"]
+    return {"ok": True, "preview": preview, "sections_added": len(sections_added),
+            "sections": sections_added, "changes": changes,
             "created": created, "updated": updated, "skipped_customized": skipped}
 
 

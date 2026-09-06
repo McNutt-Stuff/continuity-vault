@@ -3061,6 +3061,7 @@ function Fleet() {
                 <td>
                   {a.tamper_state && a.tamper_state !== "normal" ? <Pill tone="danger" dot>tamper</Pill>
                     : !a.attestation_ok ? <Pill tone="warn" dot>attest</Pill>
+                    : !a.online ? <Pill tone="warn" dot>offline</Pill>
                     : <Pill tone="ok" dot>ok</Pill>}
                 </td>
                 <td><VersionPill version={a.software_version} updateAvailable={a.update_available} /></td>
@@ -6066,10 +6067,15 @@ interface AdminDoc {
 }
 interface AdminSectionRow { id: string; name: string; order: number; icon: string; count: number; }
 
+type DocChangeKind = "new" | "refresh" | "preserved";
+interface DocChange { slug: string; title: string; section: string; change: DocChangeKind; fields: string[]; body: string; }
+interface UpdatesPreview { sections: string[]; sections_added: number; changes: DocChange[]; }
+
 function SupportDocsAdmin() {
   const [docs, setDocs] = useState<AdminDoc[] | null>(null);
   const [sections, setSections] = useState<AdminSectionRow[]>([]);
   const [editing, setEditing] = useState<AdminDoc | "new" | null>(null);
+  const [reviewing, setReviewing] = useState(false);
 
   async function load() {
     try {
@@ -6083,32 +6089,6 @@ function SupportDocsAdmin() {
   }
   useEffect(() => { void load(); }, []);
 
-  async function seed() {
-    try {
-      const r = await api.post<{ created: number }>("/admin/support/seed", {});
-      notify({ message: `Published ${r.created} starter page(s).`, tone: "ok" });
-      void load();
-    } catch (e: any) { notify({ message: e.message, tone: "danger" }); }
-  }
-  async function seedUpdates() {
-    try {
-      const p = await api.post<{ created: string[]; updated: string[]; skipped_customized: string[]; sections_added: number }>(
-        "/admin/support/seed-updates?preview=true", {});
-      const total = p.created.length + p.updated.length + p.sections_added;
-      if (total === 0) { notify({ message: "The Help Center is already up to date.", tone: "ok" }); return; }
-      const ok = await confirmDialog({
-        title: "Publish documentation updates?",
-        confirmLabel: "Publish updates",
-        message: `${p.created.length} new page(s), ${p.updated.length} refreshed page(s)`
-          + (p.sections_added ? `, ${p.sections_added} new section(s)` : "")
-          + (p.skipped_customized.length ? `. ${p.skipped_customized.length} admin-edited page(s) are preserved unchanged.` : "."),
-      });
-      if (!ok) return;
-      const r = await api.post<{ created: string[]; updated: string[] }>("/admin/support/seed-updates", {});
-      notify({ message: `Published ${r.created.length} new + ${r.updated.length} refreshed page(s).`, tone: "ok" });
-      void load();
-    } catch (e: any) { notify({ message: e.message, tone: "danger" }); }
-  }
   async function remove(d: AdminDoc) {
     if (!(await confirmDialog({ title: `Delete “${d.title}”?`, message: "This removes the page from the public Help Center.", tone: "danger", confirmLabel: "Delete" }))) return;
     try { await api.del(`/admin/support/docs/${d.id}`); void load(); }
@@ -6151,8 +6131,7 @@ function SupportDocsAdmin() {
           Manage the public Help Center. Published pages sync to the support site on the next node heartbeat.
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <button className="btn sm" onClick={seed}><Icon name="sparkle" size={14} /> Seed defaults</button>
-          <button className="btn sm" onClick={seedUpdates}><Icon name="clock" size={14} /> Publish updates</button>
+          <button className="btn sm" onClick={() => setReviewing(true)}><Icon name="clock" size={14} /> Review &amp; publish updates</button>
           <button className="btn sm primary" onClick={() => setEditing("new")}><Icon name="edit" size={14} /> New page</button>
         </div>
       </div>
@@ -6163,7 +6142,7 @@ function SupportDocsAdmin() {
         <Card><div className="muted">Loading…</div></Card>
       ) : docs.length === 0 ? (
         <Card><div className="muted" style={{ padding: "10px 0" }}>
-          No documentation yet. Use <b>Seed defaults</b> to publish the starter Help Center, then edit freely.
+          No documentation yet. Use <b>Review &amp; publish updates</b> to publish the starter Help Center, then edit freely.
         </div></Card>
       ) : (
         orderedGroups.map(([section, items]) => (
@@ -6193,7 +6172,117 @@ function SupportDocsAdmin() {
           </Card>
         ))
       )}
+      {reviewing && <UpdatesReviewModal onClose={() => setReviewing(false)} reload={load} />}
     </>
+  );
+}
+
+const CHANGE_META: Record<DocChangeKind, { tone: "ok" | "info" | "warn"; label: string }> = {
+  new: { tone: "ok", label: "New" },
+  refresh: { tone: "info", label: "Refreshed" },
+  preserved: { tone: "warn", label: "Your edit kept" },
+};
+
+// Reviewable package of documentation updates: shows exactly which pages are new,
+// which are refreshed from the latest platform defaults, and which admin-edited
+// pages are preserved — with a per-page content preview — before publishing.
+function UpdatesReviewModal({ onClose, reload }: { onClose: () => void; reload: () => Promise<void> }) {
+  const [data, setData] = useState<UpdatesPreview | null>(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.post<UpdatesPreview>("/admin/support/seed-updates?preview=true", {})
+      .then(setData)
+      .catch((e: any) => setErr(e.message || "Couldn't compute updates"));
+  }, []);
+
+  const changes = data?.changes ?? [];
+  const news = changes.filter((c) => c.change === "new");
+  const refreshed = changes.filter((c) => c.change === "refresh");
+  const preserved = changes.filter((c) => c.change === "preserved");
+  const toPublish = news.length + refreshed.length + (data?.sections_added || 0);
+  const upToDate = !!data && toPublish === 0;
+
+  async function publish() {
+    setBusy(true); setErr("");
+    try {
+      const r = await api.post<{ created: string[]; updated: string[] }>("/admin/support/seed-updates", {});
+      notify({ message: `Published ${r.created.length} new + ${r.updated.length} refreshed page(s).`, tone: "ok" });
+      await reload();
+      onClose();
+    } catch (e: any) {
+      setErr(e.message || "Publish failed");
+    } finally { setBusy(false); }
+  }
+
+  const Row = (c: DocChange) => {
+    const meta = CHANGE_META[c.change];
+    const expanded = open === c.slug;
+    return (
+      <div key={c.slug} style={{ borderTop: "1px solid var(--border-soft)", padding: "9px 0" }}>
+        <div className="spread" style={{ alignItems: "center", gap: 8 }}>
+          <div style={{ minWidth: 0 }}>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <Pill tone={meta.tone}>{meta.label}</Pill>
+              <span style={{ fontWeight: 600 }}>{c.title}</span>
+            </div>
+            <div className="faint" style={{ fontSize: 12 }}>
+              /{c.slug} · {c.section}
+              {c.change === "refresh" && c.fields.length > 0 && <> · changes: {c.fields.join(", ")}</>}
+              {c.change === "preserved" && <> · left unchanged (your edits win)</>}
+            </div>
+          </div>
+          <button className="btn sm ghost" onClick={() => setOpen(expanded ? null : c.slug)}>
+            {expanded ? "Hide" : "Preview"}
+          </button>
+        </div>
+        {expanded && (
+          <pre className="mono" style={{ fontSize: 11.5, maxHeight: 260, overflow: "auto",
+               background: "rgba(0,0,0,0.28)", padding: 12, borderRadius: 10, margin: "8px 0 0",
+               whiteSpace: "pre-wrap" }}>{c.body || "(no content)"}</pre>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" style={{ maxWidth: 760 }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head spread">
+          <h3 style={{ margin: 0 }}><Icon name="clock" size={16} /> Review documentation updates</h3>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="x" size={15} /></button>
+        </div>
+        <div className="modal-body">
+          {err && <div className="hint-box" style={{ borderColor: "var(--danger-c,#f2545b)", marginBottom: 10 }}>{err}</div>}
+          {!data && !err && <div className="muted">Computing changes…</div>}
+          {data && (
+            <>
+              <div className="faint" style={{ fontSize: 12.5, marginBottom: 10 }}>
+                This package publishes the latest platform-authored documentation. New and refreshed
+                pages come from platform improvements; pages you've edited are preserved.
+                {(data.sections_added || 0) > 0 && <> {data.sections_added} new section(s) will be added.</>}
+              </div>
+              {upToDate && <div className="muted" style={{ padding: "8px 0" }}>The Help Center is already up to date.</div>}
+              {news.length > 0 && <div style={{ fontWeight: 700, margin: "6px 0 2px" }}>New pages ({news.length})</div>}
+              {news.map(Row)}
+              {refreshed.length > 0 && <div style={{ fontWeight: 700, margin: "12px 0 2px" }}>Refreshed pages ({refreshed.length})</div>}
+              {refreshed.map(Row)}
+              {preserved.length > 0 && <div style={{ fontWeight: 700, margin: "12px 0 2px" }}>Preserved — your edits ({preserved.length})</div>}
+              {preserved.map(Row)}
+            </>
+          )}
+        </div>
+        <div className="modal-foot">
+          <div style={{ flex: 1 }} />
+          <button className="btn ghost sm" onClick={onClose}>Cancel</button>
+          <button className="btn primary sm" disabled={busy || !data || upToDate} onClick={publish}>
+            <Icon name="check" size={14} /> {busy ? "Publishing…" : `Publish ${toPublish} update(s)`}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -172,6 +172,18 @@ def _providers() -> Dict[str, ProviderSpec]:
             client_secret=s.github_client_secret,
             extra_auth_params={},
         ),
+        "crossbeam": ProviderSpec(
+            connector_type="crossbeam",
+            authorize_url="https://auth.crossbeam.com/authorize",
+            token_url="https://auth.crossbeam.com/oauth/token",
+            scopes=["openid", "read:partnerships", "read:reports",
+                    "read:populations", "offline_access"],
+            client_id=s.crossbeam_client_id,
+            client_secret=s.crossbeam_client_secret,
+            # Crossbeam's Auth0 tenant requires the API audience on /authorize so
+            # the issued token is accepted by api.crossbeam.com.
+            extra_auth_params={"audience": "https://api.getcrossbeam.com"},
+        ),
     }
 
 

@@ -196,6 +196,47 @@ def update_config(agent_id: str, body: AgentConfigUpdate,
     return {"ok": True, "config": cfg}
 
 
+class AgentRename(BaseModel):
+    name: str
+
+
+@fleet_router.put("/{agent_id}")
+def rename_agent(agent_id: str, body: AgentRename,
+                 principal: security.Principal = Depends(security.get_principal),
+                 tenant: Tenant = Depends(security.get_tenant),
+                 db: Session = Depends(get_db)):
+    a = db.get(DesktopAgent, agent_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "agent not found")
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "name required")
+    a.name = name[:120]
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="agent.renamed",
+                 tenant_id=tenant.id, resource=a.id, detail={"name": a.name})
+    return _agent_view(a, db)
+
+
+@fleet_router.delete("/{agent_id}")
+def remove_agent(agent_id: str,
+                 principal: security.Principal = Depends(security.require_security_admin),
+                 tenant: Tenant = Depends(security.get_tenant),
+                 db: Session = Depends(get_db)):
+    """Retire a device: it stops collecting and disappears from the list. Its
+    already-backed-up data is kept (remove it from Sources to purge). The agent
+    self-deregisters when it next heartbeats and sees it's retired."""
+    a = db.get(DesktopAgent, agent_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "agent not found")
+    a.state = "retired"
+    a.enqueue_command({"type": "deregister", "params": {}})
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="agent.retired",
+                 tenant_id=tenant.id, resource=a.id, detail={"name": a.name})
+    return {"ok": True, "retired": True}
+
+
 class FsScanRequest(BaseModel):
     path: str = ""  # "" = list roots/drives
     rebuild: bool = False  # force a fresh index rebuild (vs. serve the cache)

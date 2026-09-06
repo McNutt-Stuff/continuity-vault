@@ -187,8 +187,8 @@ export default function Connectors() {
         return notify({
           title: hasIt ? `Enable ${c.displayName} first` : `No agent can collect ${c.displayName}`,
           message: hasIt
-            ? `This collector is turned off on your agent(s). Enable it under Agents → Collectors, then add the source.`
-            : `Install the Arkive desktop agent on the device that has ${c.displayName}, then enable the collector under Agents.`,
+            ? `This collector is turned off on your device(s). Enable it under Devices → Collectors, then add the source.`
+            : `Install the Arkive agent on the device that has ${c.displayName}, then enable the collector under Devices.`,
           tone: "warn",
         });
       }
@@ -742,8 +742,8 @@ export default function Connectors() {
           </ol>
           {setup.requiresAgent && (
             <button className="btn primary sm" style={{ marginTop: 12 }}
-                    onClick={() => window.location.assign("/agents")}>
-              <Icon name="user" size={14} /> Go to Desktop Agents
+                    onClick={() => window.location.assign("/devices")}>
+              <Icon name="user" size={14} /> Go to Devices
             </button>
           )}
         </Card>
@@ -866,7 +866,7 @@ export default function Connectors() {
                     </div>
                     {collectorOff && (
                       <div style={{ fontSize: 12, color: "var(--warn)", marginTop: 3, display: "flex", gap: 6, alignItems: "center" }}>
-                        <Icon name="alert" size={11} /> Collector turned off — enable it under <a href="/agents">Agents</a>
+                        <Icon name="alert" size={11} /> Collector turned off — enable it under <a href="/devices">Devices</a>
                       </div>
                     )}
                     {notice?.message && (
@@ -880,7 +880,7 @@ export default function Connectors() {
                   <button className="btn sm primary" onClick={() => agentBackup(s)}>Back up now</button>
                   <Menu items={([
                     { label: "Rename source", icon: "edit", onClick: () => renameAgentSource(s) },
-                    { label: "Agent settings", icon: "gear", onClick: () => window.location.assign("/agents") },
+                    { label: "Agent settings", icon: "gear", onClick: () => window.location.assign("/devices") },
                     ...(me?.features?.purge_enabled !== false
                       ? ["divider",
                           { label: "Purge data (keep source)", icon: "trash", danger: true, onClick: () => purgeAgentSource(s, true) },

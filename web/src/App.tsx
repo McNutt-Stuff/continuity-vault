@@ -19,7 +19,7 @@ import Snapshots from "./pages/Snapshots";
 import Restore from "./pages/Restore";
 import Onboarding from "./pages/Onboarding";
 import Admin, { ADMIN_SECTIONS } from "./pages/Admin";
-import Agents from "./pages/Agents";
+import Devices from "./pages/Devices";
 import Audit from "./pages/Audit";
 import ActivityPage from "./pages/Activity";
 import Settings from "./pages/Settings";
@@ -32,7 +32,7 @@ const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
   { to: "/insights", label: "Insights", icon: "insights", group: "" },
   { to: "/search", label: "Unified Search", icon: "search", group: "" },
   { to: "/connectors", label: "Sources", icon: "link", group: "Data sources" },
-  { to: "/agents", label: "Desktop Agents", icon: "user", group: "Data sources" },
+  { to: "/devices", label: "Devices", icon: "user", group: "Data sources" },
   { to: "/integrations", label: "Integrations", icon: "puzzle", group: "Data sources" },
   { to: "/mappings", label: "Data Map", icon: "database", group: "Protection" },
   { to: "/snapshots", label: "Recovery Points", icon: "clock", group: "Protection" },
@@ -79,7 +79,8 @@ export default function App() {
             <Route path="/appliances" element={<Appliances />} />
             {me.features?.cloud_storage_enabled !== false && <Route path="/cloud-storage" element={<CloudStorage />} />}
             {me.features?.integrations_enabled !== false && <Route path="/integrations" element={<Integrations />} />}
-            <Route path="/agents" element={<Agents />} />
+            <Route path="/devices" element={<Devices />} />
+            <Route path="/agents" element={<Navigate to="/devices" replace />} />
             <Route path="/restore" element={<Restore />} />
             <Route path="/audit" element={<Audit />} />
             <Route path="/settings" element={<Settings />} />

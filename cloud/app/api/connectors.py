@@ -118,6 +118,13 @@ def _setup_instructions(connector_type: str) -> list[str]:
             "The 'repo' scope backs up private repos too; 'read:user'/'user:email' identify the account.",
             "Set CV_GITHUB_CLIENT_ID and CV_GITHUB_CLIENT_SECRET on the server, then restart.",
         ]
+    if connector_type == "crossbeam":
+        return [
+            "In Crossbeam, go to app.crossbeam.com/integrations and Create Integration (custom app).",
+            f"Set the Callback URL to: {redirect}",
+            "Grant scopes: openid, read:partnerships, read:populations, read:reports, offline_access.",
+            "Set CV_CROSSBEAM_CLIENT_ID and CV_CROSSBEAM_CLIENT_SECRET on the server, then restart.",
+        ]
     return []
 
 
@@ -158,6 +165,7 @@ _SOURCE_FAMILY = {
     "reddit": "Reddit", "facebook": "Meta", "instagram": "Meta",
     "linkedin": "LinkedIn",
     "github": "GitHub",
+    "crossbeam": "Crossbeam",
     "evernote": "Evernote",
     "imessage": "Apple", "outlook_local": "Microsoft",
     "onepassword": "Endpoint Collected", "endpoint_files": "Endpoint Collected",
@@ -175,6 +183,7 @@ _SOURCE_TYPE = {
     "reddit": "Social", "facebook": "Social", "instagram": "Social",
     "linkedin": "Social",
     "github": "Developer",
+    "crossbeam": "Sales & CRM",
     "evernote": "Notes",
     "imessage": "Messages", "outlook_local": "Email",
     "custom": "Other",

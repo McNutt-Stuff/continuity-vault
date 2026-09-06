@@ -37,6 +37,16 @@ def _content_cap() -> int:
     return get_settings().content_max_bytes
 
 
+def _compose_crm_preview(meta: dict) -> str:
+    """A compact, non-sensitive one-liner for a CRM record card."""
+    bits = []
+    for k in ("record_type", "stage", "industry", "partner", "population", "domain", "owner"):
+        v = meta.get(k)
+        if v:
+            bits.append(str(v))
+    return " · ".join(bits[:4])
+
+
 @register_connector
 class EndpointFilesConnector(Connector):
     """Files collected from a desktop agent (local, external, and network drives).
@@ -949,6 +959,81 @@ class GitHubConnector(Connector):
             content=json.dumps({"number": 1, "title": "Sample issue"}).encode(),
             preview="A sample issue", meta={"repo": repo, "number": 1, "kind": "issue"},
             labels=[repo, "open"], modified_at=_dt(3))
+
+
+@register_connector
+class CrossbeamConnector(Connector):
+    """Crossbeam partner-ecosystem API. Pulls your CRM records surfaced in
+    Crossbeam (accounts, leads), your open opportunities/deals (signals), your
+    partners, the populations (segments) you publish, and the account/lead
+    OVERLAPS with partners — mapped into the Sales & CRM taxonomy."""
+
+    connector_type = "crossbeam"
+    display_name = "Crossbeam"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            streaming=True,  # record sets can be large → bounded ingest
+            searchable_fields=["record_type", "partner", "population", "owner",
+                               "domain", "industry", "stage", "kind"],
+            facet_fields=["record_type", "partner", "population", "kind", "industry"],
+            filter_categories=[
+                {"id": "accounts", "label": "Accounts"},
+                {"id": "leads", "label": "Leads"},
+                {"id": "opportunities", "label": "Opportunities & deals"},
+                {"id": "partners", "label": "Partners"},
+                {"id": "populations", "label": "Populations"},
+                {"id": "overlaps", "label": "Partner overlaps"},
+                {"id": "reports", "label": "Reports"},
+            ],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="oauth2",
+            authorize_url="https://auth.crossbeam.com/authorize",
+            token_url="https://auth.crossbeam.com/oauth/token",
+            scopes=["openid", "read:partnerships", "read:reports",
+                    "read:populations", "offline_access"],
+            icon="insights", color="#4b3bd6",
+            doc_types=["account", "lead", "opportunity", "partner", "population",
+                       "overlap", "report"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        config = config or {}
+        if config.get("access_token"):
+            yield from live.fetch_crossbeam(
+                config, _content_cap(),
+                options={"includeCategories": config.get("includeCategories")})
+            return
+        # Simulated dataset (demo/local) — one of each core record so the pipeline
+        # runs end to end without a live Crossbeam org.
+        samples = [
+            ("account", "Acme Corporation", "accounts",
+             {"record_type": "account", "domain": "acme.com", "industry": "Manufacturing",
+              "owner": "Dana Lee", "kind": "account"}),
+            ("lead", "Jordan Rivera — Globex", "leads",
+             {"record_type": "lead", "domain": "globex.com", "owner": "Sam Poe", "kind": "lead"}),
+            ("opportunity", "Initech — Platform expansion", "opportunities",
+             {"record_type": "opportunity", "stage": "Negotiation", "amount": 84000,
+              "domain": "initech.com", "kind": "opportunity"}),
+            ("partner", "Hooli (Partner)", "partners",
+             {"record_type": "partner", "domain": "hooli.com", "kind": "partner"}),
+            ("population", "Customers", "populations",
+             {"record_type": "population", "size": 1280, "kind": "population"}),
+            ("overlap", "Acme Corporation ↔ Hooli", "overlaps",
+             {"record_type": "overlap", "partner": "Hooli", "population": "Customers",
+              "domain": "acme.com", "kind": "overlap"}),
+        ]
+        for i, (kind, title, cat, meta) in enumerate(samples):
+            yield SourceObject(
+                object_id=_oid(self.connector_type, account_label, i),
+                doc_type=kind, category="crm", title=title,
+                content=json.dumps({"title": title, **meta}).encode(),
+                preview=_compose_crm_preview(meta), meta=meta,
+                labels=[cat.title()], modified_at=_dt(i))
 
 
 @register_connector

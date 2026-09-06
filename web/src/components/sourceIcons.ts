@@ -15,12 +15,20 @@ export const SYNCED_SOURCE_ICONS: ReadonlySet<string> = new Set([
   "google_drive", "slack", "notion", "github", "reddit", "facebook",
   "instagram", "google_calendar", "google_contacts", "google_photos",
   "evernote", "linkedin", "imessage", "ubiquiti", "aws", "azure", "gcp",
+  "salesforce", "crossbeam",
+  // Device/endpoint platform marks (Devices page).
+  "macos", "windows", "ios", "android",
 ]);
 
 // Variant/local types that reuse another type's brand mark (e.g. the local
 // Outlook store shows the Outlook logo). Keep in sync with the backend map.
 export const SOURCE_ICON_ALIASES: Readonly<Record<string, string>> = {
   outlook_local: "outlook",
+  darwin: "macos",
+  mac: "macos",
+  win: "windows",
+  win32: "windows",
+  ipados: "ios",
 };
 
 // Resolve a raw source type to the type whose SVG should render (applies aliases).

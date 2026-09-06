@@ -139,8 +139,10 @@ def _int_setting(db, key: str, default: int) -> int:
 
 
 def appliance_alert_minutes(db) -> int:
-    """How long an appliance may miss heartbeats before it's flagged offline."""
-    return max(5, _int_setting(db, "notif.appliance_offline_minutes", 30))
+    """How long an appliance may miss heartbeats before it's flagged offline.
+    Default 15 min — responsive enough to catch a powered-off unit quickly while
+    tolerating brief network blips / a couple of missed 30s beats."""
+    return max(5, _int_setting(db, "notif.appliance_offline_minutes", 15))
 
 
 def slow_latency_ms(db) -> int:
