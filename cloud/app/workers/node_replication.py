@@ -60,6 +60,7 @@ logger = logging.getLogger("cv.replication")
 
 _thread: threading.Thread | None = None
 _running_jobs: set[str] = set()
+_fleet_checked = False  # one-time log guard for the fleet-secret alignment check
 _running_insights: set[str] = set()
 
 # Upsert in FK-dependency order so a strict database accepts the rows.
@@ -195,10 +196,18 @@ def _sync_fleet_secrets(s, bundle: dict) -> None:
     """Compare the fingerprints the control plane advertised in the pull to what we
     hold; on a mismatch, fetch the real secrets over the authenticated fleet
     channel and adopt + persist them. Cheap no-op once aligned."""
+    global _fleet_checked
     want_kek = bundle.get("fleet_key_fp") or ""
     want_sess = bundle.get("session_key_fp") or ""
     want_signer = bundle.get("signer_fp") or ""
     if not want_kek and not want_sess and not want_signer:
+        # The control plane isn't advertising fingerprints yet (older CP build):
+        # log once so it's obvious auto-distribution can't run until the CP updates.
+        if not _fleet_checked:
+            _fleet_checked = True
+            logger.warning("fleet-secret auto-sync: control plane advertised no key "
+                           "fingerprints — it needs the fleet-secrets update deployed "
+                           "before this node can align its CV_KEK_SECRET")
         return
     have_kek = _fp(os.environ.get("CV_KEK_SECRET", "dev-kek"))
     have_sess = _fp(get_settings().session_secret)
@@ -209,13 +218,20 @@ def _sync_fleet_secrets(s, bundle: dict) -> None:
     except Exception:  # noqa: BLE001
         have_signer = ""
     if want_kek == have_kek and want_sess == have_sess and want_signer == have_signer:
+        if not _fleet_checked:
+            _fleet_checked = True
+            logger.info("fleet-secret auto-sync: KEK/session/signer already aligned "
+                        "with the control plane")
         return
+    logger.warning("fleet-secret mismatch (kek %s→%s) — fetching + adopting from the "
+                   "control plane", have_kek, want_kek)
     secrets_blob = _post("/nodes/sync/fleet-secrets",
                          {"node": s.node_name or s.domain})
     if not secrets_blob:
         logger.warning("fleet-secret mismatch detected but the control plane didn't "
                        "return the secrets — will retry next cycle")
         return
+    _fleet_checked = True
     if _adopt_fleet_secrets(secrets_blob, source="control plane"):
         _persist_fleet_secrets({"kek": os.environ.get("CV_KEK_SECRET"),
                                 "session_secret": get_settings().session_secret})
