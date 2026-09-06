@@ -974,9 +974,11 @@ class CrossbeamConnector(Connector):
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
             streaming=True,  # record sets can be large → bounded ingest
-            searchable_fields=["record_type", "partner", "population", "owner",
-                               "domain", "industry", "stage", "kind"],
-            facet_fields=["record_type", "partner", "population", "kind", "industry"],
+            # Order matters: the preview shows the first few of these, so lead with
+            # the useful identity fields, not the redundant record_type.
+            searchable_fields=["domain", "population", "owner", "industry", "stage",
+                               "partner", "amount", "record_type"],
+            facet_fields=["population", "partner", "industry", "record_type"],
             filter_categories=[
                 {"id": "accounts", "label": "Accounts"},
                 {"id": "leads", "label": "Leads"},

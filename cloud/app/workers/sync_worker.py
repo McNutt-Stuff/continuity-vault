@@ -24,6 +24,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Callable, List, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from cv_crypto.command import build_snapshot_manifest
@@ -652,6 +653,32 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                     SearchDocument.modified_at != src.modified_at,
                 ).update({SearchDocument.modified_at: src.modified_at},
                          synchronize_session=False)
+            # Self-heal derived index fields (title/preview/meta/labels) when the
+            # connector's extraction improved — repairs existing rows in place, no
+            # new version. Guarded on title/preview so it's a no-op (0 rows matched)
+            # once corrected and never churns on steady-state re-syncs.
+            if not zero_knowledge:
+                d_meta = _discrete_metadata(src.meta, display_keys)
+                d_preview = _compose_preview(d_meta)
+                d_title = str(src.title) if src.title is not None else ""
+                d_blob = " ".join(
+                    str(x) for x in [src.title, *(src.labels or []), *_flatten_values(d_meta)]
+                    if x is not None).strip()
+                db.query(SearchDocument).filter(
+                    SearchDocument.tenant_id == collection.tenant_id,
+                    SearchDocument.collection_id == collection.id,
+                    SearchDocument.object_id == src.object_id,
+                    SearchDocument.is_current.is_(True),
+                    or_(SearchDocument.title != d_title, SearchDocument.preview != d_preview),
+                ).update({
+                    SearchDocument.title: d_title,
+                    SearchDocument.preview: d_preview,
+                    SearchDocument.meta: d_meta,
+                    SearchDocument.doc_type: src.doc_type,
+                    SearchDocument.category: src.category,
+                    SearchDocument.labels: src.labels or [],
+                    SearchDocument.search_blob: d_blob,
+                }, synchronize_session=False)
             continue
 
         # New object, or content changed → record a new immutable version.

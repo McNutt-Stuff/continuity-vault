@@ -2165,31 +2165,108 @@ def _crossbeam_paged(c: httpx.Client, url: str, headers: dict,
         next_url = nxt or None
 
 
+_CROSSBEAM_LOGGED_SHAPES: set = set()
+
+
+def _cb_str(v) -> Optional[str]:
+    return v.strip() if isinstance(v, str) and v.strip() else None
+
+
+def _cb_name(data: dict) -> Optional[str]:
+    """Best-effort human name for a Crossbeam record. Crossbeam's record schema
+    varies, so try known keys first, then any name-ish key — at the top level AND
+    inside common nested field containers (mdm/fields/attributes/…)."""
+    priority = ("company_name", "account_name", "name", "display_name", "record_name",
+                "entity_name", "full_name", "title", "lead_name", "opportunity_name",
+                "deal_name", "company", "organization_name")
+
+    def scan(d: dict) -> Optional[str]:
+        if not isinstance(d, dict):
+            return None
+        for k in priority:
+            s = _cb_str(d.get(k))
+            if s:
+                return s
+        for k, v in d.items():
+            lk = k.lower()
+            if ("name" in lk or "company" in lk) and not any(
+                    t in lk for t in ("owner", "email", "id", "user", "file", "column")):
+                s = _cb_str(v)
+                if s:
+                    return s
+        return None
+
+    found = scan(data)
+    if found:
+        return found
+    for container in ("mdm", "fields", "attributes", "properties", "values",
+                      "data", "company", "account", "crm"):
+        found = scan(data.get(container))
+        if found:
+            return found
+    return None
+
+
+def _cb_populations(*objs: dict) -> list:
+    """Population names a record belongs to (accounts carry their segment info)."""
+    out: list = []
+    for data in objs:
+        if not isinstance(data, dict):
+            continue
+        pops = (data.get("populations") or data.get("population_names")
+                or data.get("population") or data.get("populations_by_id"))
+        seq = pops.values() if isinstance(pops, dict) else pops
+        if isinstance(seq, list):
+            for p in seq:
+                nm = _cb_str(p.get("name") or p.get("population_name")) if isinstance(p, dict) else _cb_str(p)
+                if nm and nm not in out:
+                    out.append(nm)
+        elif isinstance(pops, str) and pops.strip():
+            out.append(pops.strip())
+    return out
+
+
 def _crossbeam_record(rec: dict, kind: str, label: str, content_cap: int) -> SourceObject:
     """Map a Crossbeam account/lead/opportunity record to a CRM SourceObject."""
     data = rec.get("record") if isinstance(rec.get("record"), dict) else rec
-    name = (data.get("company_name") or data.get("account_name") or data.get("name")
-            or data.get("full_name") or data.get("email") or label.rstrip("s"))
-    rid = rec.get("id") or rec.get("uuid") or data.get("id") or name
+    owner = data.get("owner")
+    owner_name = (owner.get("owner_name") or owner.get("name")) if isinstance(owner, dict) else _cb_str(owner)
+    pops = _cb_populations(data, rec)
+    domain = (_cb_str(data.get("domain")) or _cb_str(data.get("website"))
+              or _cb_str(data.get("company_domain")) or _cb_str(data.get("email")))
+    partner = _cb_str(rec.get("partner_name") or data.get("partner_name"))
+    fallback = {"Accounts": "Account", "Leads": "Lead",
+                "Opportunities": "Opportunity"}.get(label, label.rstrip("s") or label)
+    name = _cb_name(data) or domain or partner or fallback
+    # Stable id (records carry a distinct id) — keep the same key order so existing
+    # objects don't re-ingest as duplicates.
+    rid = (rec.get("id") or rec.get("uuid") or data.get("id")
+           or rec.get("record_id") or data.get("record_id") or name)
     meta = {
-        "record_type": kind,
-        "domain": data.get("domain") or data.get("website"),
-        "owner": data.get("owner") or data.get("owner_name"),
-        "industry": data.get("industry"),
-        "stage": data.get("stage") or data.get("stage_name"),
-        "amount": data.get("amount") or data.get("deal_amount"),
-        "partner": rec.get("partner_name"),
-        "population": rec.get("population_name"),
-        "kind": kind,
+        "record_type": kind, "kind": kind,
+        "domain": domain,
+        "owner": owner_name,
+        "industry": _cb_str(data.get("industry")),
+        "stage": _cb_str(data.get("stage") or data.get("stage_name") or data.get("deal_stage")),
+        "amount": data.get("amount") or data.get("deal_amount") or data.get("value"),
+        "partner": partner,
+        "population": ", ".join(pops) if pops else None,
     }
-    meta = {k: v for k, v in meta.items() if v not in (None, "")}
+    meta = {k: v for k, v in meta.items() if v not in (None, "", [])}
+    # One-time schema probe (KEY NAMES ONLY — never values/PII) so an unexpected
+    # record shape can be diagnosed from Platform Logs.
+    if kind not in _CROSSBEAM_LOGGED_SHAPES:
+        _CROSSBEAM_LOGGED_SHAPES.add(kind)
+        logger.info("crossbeam %s record keys=%s name_resolved=%s",
+                    kind, sorted(data.keys())[:30], name != fallback)
     preview = " · ".join(str(v) for v in
-                         (meta.get("domain"), meta.get("stage"), meta.get("owner")) if v)[:200]
+                         (domain, meta.get("stage"), meta.get("population"), owner_name) if v)[:200]
     content, _ = _capped(json.dumps(rec).encode(), content_cap)
     return SourceObject(
         object_id=f"crossbeam:{kind}:{rid}",
         doc_type=kind, category="crm", title=str(name),
-        content=content, preview=preview, meta=meta, labels=[label],
+        content=content, preview=preview, meta=meta,
+        labels=[label] + pops[:3],
         modified_at=_parse_dt(rec.get("updated_at") or data.get("updated_at")))
 
 
