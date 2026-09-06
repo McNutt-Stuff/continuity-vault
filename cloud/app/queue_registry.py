@@ -205,7 +205,11 @@ def view(item: QueueItem) -> dict:
 def list_items(db: Session, *, node_id: str | None = None, include_self_null: bool = False,
                limit: int = 200) -> dict:
     """Active items first, then recently-resolved. When ``include_self_null`` the
-    control-plane-owned items (node_id NULL) are included alongside ``node_id``."""
+    control-plane-owned items (node_id NULL) are included alongside ``node_id``.
+
+    Also surfaces undeliverable **appliance commands** (pending / rejected) as
+    active rows so an offline appliance's stuck commands show up next to backup
+    retries — not just durable destination writes."""
     q = db.query(QueueItem)
     if node_id is not None:
         if include_self_null:
@@ -213,8 +217,79 @@ def list_items(db: Session, *, node_id: str | None = None, include_self_null: bo
         else:
             q = q.filter(QueueItem.node_id == node_id)
     rows = q.order_by(QueueItem.created_at.desc()).limit(limit).all()
-    active = [view(r) for r in rows if r.status in _ACTIVE]
+    q_active = [view(r) for r in rows if r.status in _ACTIVE]
     recent = [view(r) for r in rows if r.status not in _ACTIVE][:50]
+    cmd_items = _appliance_command_items(db, node_id, include_self_null)
+    active = q_active + cmd_items  # command rows are all current problems
     return {"active": active, "recent": recent,
-            "counts": {"active": len(active),
-                       "failed": sum(1 for r in rows if r.status == "failed")}}
+            "counts": {"active": len(q_active) + sum(1 for c in cmd_items if c["status"] == "waiting"),
+                       "failed": sum(1 for r in rows if r.status == "failed")
+                       + sum(1 for c in cmd_items if c["status"] == "rejected")}}
+
+
+_APPLIANCE_ONLINE_S = 120
+_CMD_LABELS = {
+    "OPEN_INGEST_WINDOW": "Store backup", "SETUP_STORAGE": "Set up storage",
+    "RECONFIGURE_STORAGE": "Reconfigure storage",
+}
+
+
+def _command_label(t: str) -> str:
+    return _CMD_LABELS.get(t or "", (t or "command").replace("_", " ").title())
+
+
+def _appliance_command_items(db: Session, node_id: str | None,
+                             include_self_null: bool) -> list[dict]:
+    """Pending (undelivered) and rejected appliance commands as queue-style rows.
+    Pending → ``waiting`` (delivers on the appliance's next heartbeat; flagged
+    offline when it hasn't beaten recently); rejected → ``rejected``."""
+    from .models import Appliance, ApplianceCommand, Tenant
+    cmds = (db.query(ApplianceCommand)
+            .filter(ApplianceCommand.status.in_(["pending", "rejected"]))
+            .order_by(ApplianceCommand.created_at.desc()).limit(200).all())
+    if not cmds:
+        return []
+    now = _now()
+    appl: dict = {}
+    tnode: dict = {}
+    out: list[dict] = []
+    for cmd in cmds:
+        if cmd.appliance_id not in appl:
+            appl[cmd.appliance_id] = db.get(Appliance, cmd.appliance_id)
+        a = appl[cmd.appliance_id]
+        if a is None:
+            continue
+        if node_id is not None:
+            if a.tenant_id not in tnode:
+                t = db.get(Tenant, a.tenant_id)
+                tnode[a.tenant_id] = t.node_id if t else None
+            nid = tnode[a.tenant_id]
+            if include_self_null:
+                if not (nid == node_id or nid is None):
+                    continue
+            elif nid != node_id:
+                continue
+        hb = a.last_heartbeat_at
+        if hb is not None and hb.tzinfo is not None:
+            hb = hb.replace(tzinfo=None)
+        online = bool(hb and (now - hb).total_seconds() < _APPLIANCE_ONLINE_S)
+        name = a.name or "Appliance"
+        if cmd.status == "rejected":
+            status = "rejected"
+            res = cmd.result if isinstance(cmd.result, dict) else {}
+            err = res.get("error") or res.get("message") or "Rejected by the appliance"
+        else:
+            status = "waiting"
+            err = ("Appliance offline — will deliver when it reconnects" if not online
+                   else "Waiting for the appliance to poll for commands")
+        out.append({
+            "id": f"cmd:{cmd.id}", "tenant_id": cmd.tenant_id, "node_id": node_id,
+            "collection_id": None, "snapshot_id": None,
+            "kind": "appliance_command", "target": "appliance",
+            "target_label": name, "label": f"{name} · {_command_label(cmd.command_type)}",
+            "status": status, "attempts": int(cmd.sequence or 0), "max_attempts": 0,
+            "next_attempt_at": None, "last_error": err,
+            "created_at": cmd.created_at.isoformat() if cmd.created_at else None,
+            "updated_at": None, "resolved_at": None, "online": online,
+        })
+    return out

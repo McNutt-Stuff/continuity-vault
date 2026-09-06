@@ -31,6 +31,7 @@ interface Mapping {
   account_label: string | null; account_username?: string | null; sensitivity: string; destinations: string[];
   index_fields: string[]; available_fields: string[];
   last_backup_at: string | null; last_object_count: number; last_recoverable: boolean;
+  last_error?: string | null; last_error_at?: string | null; fail_count?: number; needs_reauth?: boolean;
   offpolicy_points: number;
   backup_interval_minutes: number | null; default_interval_minutes: number;
   last_backup_run_at: string | null;
@@ -472,6 +473,7 @@ export default function Mappings() {
                   const jobs = jobsFor(m.id);
                   const job = jobs[0];
                   const isSyncing = !!syncing[m.id] || jobs.length > 0;
+                  const failed = !isSyncing && !!(m.last_error || m.needs_reauth);
                   const expanded = openActivity[m.id] || isSyncing;
                   const latest = evs[0];
                   const bf = m.backfill;
@@ -482,16 +484,24 @@ export default function Mappings() {
                         onClick={() => setOpenActivity((cur) => ({ ...cur, [m.id]: !expanded }))}
                       >
                         <span className="row" style={{ gap: 6, alignItems: "center" }}>
-                          {isSyncing ? <span className="spinner-dot" /> : <Icon name="activity" size={13} />}
-                          <span style={{ fontWeight: 600, fontSize: 12 }}>
-                            {job ? (job.message || "Syncing…") : isSyncing ? "Syncing…" : "Activity"}
+                          {isSyncing ? <span className="spinner-dot" />
+                            : failed ? <span style={{ color: "var(--danger-c,#f2545b)", display: "inline-flex" }}><Icon name="alert" size={13} /></span>
+                            : <Icon name="activity" size={13} />}
+                          <span style={{ fontWeight: 600, fontSize: 12, color: failed ? "var(--danger-c,#f2545b)" : undefined }}>
+                            {job ? (job.message || "Syncing…") : isSyncing ? "Syncing…"
+                              : failed ? (m.needs_reauth ? "Reconnect needed" : "Last sync failed") : "Activity"}
                           </span>
-                          {!job && evs.length > 0 && (
+                          {!job && !isSyncing && failed && (
+                            <span className="faint" style={{ fontSize: 11.5 }}>
+                              {m.last_error_at ? `· ${fmtTime(m.last_error_at)}` : ""}{(m.fail_count || 0) > 1 ? ` · ${m.fail_count}× in a row` : ""}
+                            </span>
+                          )}
+                          {!job && !isSyncing && !failed && evs.length > 0 && (
                             <span className="faint" style={{ fontSize: 11.5 }}>
                               · {latest.object_count ?? 0} objects → {destLabel(latest.destination || "cv-cloud")} · {fmtTime(latest.at)}
                             </span>
                           )}
-                          {!job && !isSyncing && evs.length === 0 && (
+                          {!job && !isSyncing && !failed && evs.length === 0 && (
                             <span className="faint" style={{ fontSize: 11.5 }}>
                               · {m.last_backup_at ? `last sync ${fmtTime(m.last_backup_at)}` : "no activity yet"}
                             </span>
@@ -501,6 +511,23 @@ export default function Mappings() {
                       </button>
                       {expanded && (
                         <div className="map-activity">
+                          {failed && (
+                            <div className="stack" style={{ gap: 4, marginBottom: 8, padding: "8px 10px", borderRadius: 8,
+                                 border: "1px solid rgba(242,84,91,0.35)", background: "rgba(242,84,91,0.08)" }}>
+                              <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                                <span style={{ color: "var(--danger-c,#f2545b)", display: "inline-flex" }}><Icon name="alert" size={13} /></span>
+                                <span style={{ fontWeight: 600, fontSize: 12, color: "var(--danger-c,#f2545b)" }}>
+                                  {m.needs_reauth ? "Reconnect needed" : "Last sync failed"}
+                                </span>
+                                {m.last_error_at && <span className="faint" style={{ fontSize: 11 }}>· {fmtTime(m.last_error_at)}</span>}
+                              </div>
+                              {m.last_error && <div className="faint" style={{ fontSize: 11.5, whiteSpace: "normal", wordBreak: "break-word" }}>{m.last_error}</div>}
+                              <div className="faint" style={{ fontSize: 11 }}>
+                                {m.needs_reauth ? "Reconnect this source under Sources to resume." : "Retries automatically on the next scheduled sync — or use Sync now."}
+                                {" "}Full history in <a href="/activity">Activity</a>.
+                              </div>
+                            </div>
+                          )}
                           {jobs.map((jb) => {
                             const jpct = jb.total > 0 ? Math.min(100, (jb.processed / jb.total) * 100) : 0;
                             return (

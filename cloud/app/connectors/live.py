@@ -2049,22 +2049,33 @@ CROSSBEAM_API = "https://api.crossbeam.com"
 
 
 def _crossbeam_org(c: httpx.Client, headers: dict) -> Optional[str]:
-    """Resolve the organization uuid required in the ``Xbeam-Organization`` header
-    from ``/v1/users/me`` (first org the token can access)."""
-    r = c.get(f"{CROSSBEAM_API}/v1/users/me", headers=headers)
-    if r.status_code >= 400:
-        _raise_api("Crossbeam", r, "users/me")
-    data = r.json() or {}
-    orgs = (data.get("organizations") or data.get("organization_users")
-            or data.get("orgs") or [])
+    """Resolve the organization uuid required in the ``Xbeam-Organization`` header.
+    The documented source is ``/v0.1/users/me`` (falls back to ``/v1``); the org's
+    ``uuid`` lives in the ``organizations`` list."""
+    data: dict = {}
+    for path in ("/v0.1/users/me", "/v1/users/me"):
+        r = c.get(f"{CROSSBEAM_API}{path}", headers=headers)
+        if r.status_code == 401:  # bad/expired token — always surface as needs-reauth
+            _raise_api("Crossbeam", r, path)
+        if r.status_code >= 400:
+            continue
+        try:
+            data = r.json() or {}
+        except Exception:  # noqa: BLE001
+            data = {}
+        if data:
+            break
+    orgs = data.get("organizations")
+    if not isinstance(orgs, list):
+        orgs = data.get("organization_users") or data.get("orgs") or []
     for o in orgs if isinstance(orgs, list) else []:
         if not isinstance(o, dict):
             continue
         uuid = o.get("uuid") or (o.get("organization") or {}).get("uuid")
         if uuid:
-            return uuid
-    org = data.get("organization") or {}
-    return org.get("uuid") if isinstance(org, dict) else None
+            return str(uuid)
+    org = data.get("organization")
+    return str(org["uuid"]) if isinstance(org, dict) and org.get("uuid") else None
 
 
 def _crossbeam_paged(c: httpx.Client, url: str, headers: dict,
@@ -2133,15 +2144,19 @@ def fetch_crossbeam(config: dict, content_cap: int = _DEFAULT_CAP,
     and reports — normalized into the Sales & CRM taxonomy.
 
     Requires an OAuth token plus the ``Xbeam-Organization`` header (the org uuid,
-    resolved from /v1/users/me and cached on the account config)."""
+    resolved from /v0.1/users/me or supplied as config['crossbeam_org'])."""
     token = (config or {}).get("access_token")
     if not token:
         return
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     with httpx.Client(timeout=60) as c:
         org = (config or {}).get("crossbeam_org") or _crossbeam_org(c, headers)
-        if org:
-            headers["Xbeam-Organization"] = str(org)
+        if not org:
+            raise ValueError(
+                "Crossbeam: could not determine your organization — the connected "
+                "account must belong to a Crossbeam organization (the org uuid comes "
+                "from /users/me). Reconnect Crossbeam with an org-member account.")
+        headers["Xbeam-Organization"] = str(org)
 
         if _want(options, "partners"):
             for p in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/partners", headers):

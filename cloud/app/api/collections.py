@@ -210,6 +210,13 @@ def _collection_view(db: Session, c: Collection) -> dict:
         "connector_account_id": c.connector_account_id,
         "account_label": account.account_label if account else None,
         "account_username": account.account_username if account else None,
+        # Last sync health (from the connector account) so the Data Map can show
+        # failures inline, not just successful recovery points.
+        "last_error": account.last_error if account else None,
+        "last_error_at": (account.last_error_at.isoformat()
+                          if account and account.last_error_at else None),
+        "fail_count": int(account.fail_count or 0) if account else 0,
+        "needs_reauth": bool(account and account.auth_status == "needs-reauth"),
         "sensitivity": c.sensitivity,
         "destinations": c.destinations or ["cv-cloud"],
         "index_fields": list(c.index_fields or []),

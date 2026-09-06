@@ -1795,9 +1795,11 @@ const MAX_LIVE = 60; // ~5 min of 5s live samples
 
 const QUEUE_KIND_LABEL: Record<string, string> = {
   storage_write: "Storage write", appliance_ingest: "Sync to appliance", cloud_sync: "Sync to cloud",
+  appliance_command: "Appliance command",
 };
 const QUEUE_STATUS_TONE: Record<string, "ok" | "info" | "warn" | "danger"> = {
   queued: "warn", delivering: "info", done: "ok", failed: "danger", canceled: "info",
+  waiting: "warn", rejected: "danger",
 };
 
 function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onRemove }: {
@@ -2347,7 +2349,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
             <div>
               <h3 style={{ margin: 0, fontSize: 15 }}>Activity queue</h3>
               <div className="faint" style={{ fontSize: 12 }}>
-                Backups pending delivery to an offline appliance or unreachable storage (appliance, Arkive Cloud, or your cloud). Retries run automatically and the queue empties once the connection is restored.
+                Backups and appliance commands pending delivery to an offline appliance or unreachable storage (appliance, Arkive Cloud, or your cloud). Retries run automatically and the queue empties once the connection is restored.
               </div>
             </div>
             <div className="row" style={{ gap: 8, alignItems: "center" }}>
@@ -2375,10 +2377,11 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
                       </td>
                       <td><span className="row" style={{ gap: 6 }}><DestIcon dest={q.target} size={13} /> {q.target_label}</span></td>
                       <td><Pill tone={QUEUE_STATUS_TONE[q.status] || "info"} dot>{q.status}</Pill></td>
-                      <td className="faint" style={{ fontSize: 12 }}>{q.attempts}/{q.max_attempts}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>{q.max_attempts ? `${q.attempts}/${q.max_attempts}` : "—"}</td>
                       <td className="faint" style={{ fontSize: 12 }}>
                         {q.status === "queued" && q.next_attempt_at ? timeAgo(q.next_attempt_at)
-                          : q.status === "done" ? "delivered" : "—"}
+                          : q.status === "done" ? "delivered"
+                          : q.status === "waiting" ? "on reconnect" : "—"}
                       </td>
                       <td className="faint" style={{ fontSize: 11.5, maxWidth: 260, whiteSpace: "normal" }}>{q.last_error || "—"}</td>
                       <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
