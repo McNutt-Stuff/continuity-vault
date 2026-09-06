@@ -2349,7 +2349,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
             <div>
               <h3 style={{ margin: 0, fontSize: 15 }}>Activity queue</h3>
               <div className="faint" style={{ fontSize: 12 }}>
-                Backups and appliance commands pending delivery to an offline appliance or unreachable storage (appliance, Arkive Cloud, or your cloud). Retries run automatically and the queue empties once the connection is restored.
+                Backups and appliance commands pending delivery to an offline appliance or unreachable storage (appliance, Arkive Cloud, or your cloud). Items retry indefinitely (never abandoned) and clear automatically when connectivity returns — cancel to remove one manually.
               </div>
             </div>
             <div className="row" style={{ gap: 8, alignItems: "center" }}>
@@ -2377,7 +2377,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
                       </td>
                       <td><span className="row" style={{ gap: 6 }}><DestIcon dest={q.target} size={13} /> {q.target_label}</span></td>
                       <td><Pill tone={QUEUE_STATUS_TONE[q.status] || "info"} dot>{q.status}</Pill></td>
-                      <td className="faint" style={{ fontSize: 12 }}>{q.max_attempts ? `${q.attempts}/${q.max_attempts}` : "—"}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>{q.max_attempts ? `${q.attempts}/${q.max_attempts}` : q.attempts ? `${q.attempts}×` : "—"}</td>
                       <td className="faint" style={{ fontSize: 12 }}>
                         {q.status === "queued" && q.next_attempt_at ? timeAgo(q.next_attempt_at)
                           : q.status === "done" ? "delivered"
@@ -6081,7 +6081,7 @@ function AdminStat({ icon, label, value, tint }: { icon: IconName; label: string
 interface AdminDoc {
   id: string; slug: string; title: string; section: string; section_order: number;
   nav_order: number; icon: string; summary: string; body: string;
-  help_routes: string[]; published: boolean; required_plan: string;
+  help_routes: string[]; published: boolean; required_plan: string; parent_slug: string;
 }
 interface AdminSectionRow { id: string; name: string; order: number; icon: string; count: number; }
 
@@ -6138,6 +6138,7 @@ function SupportDocsAdmin() {
     return (
       <DocEditor
         doc={editing === "new" ? null : editing}
+        docs={docs || []}
         sections={sections}
         onCreateSection={createSection}
         onDone={() => { setEditing(null); void load(); }}
@@ -6177,26 +6178,43 @@ function SupportDocsAdmin() {
           <Card key={section} style={{ marginBottom: 12 }}>
             <div style={{ fontWeight: 700, marginBottom: 6 }}>{section}</div>
             <div className="stack" style={{ gap: 0 }}>
-              {items.sort((a, b) => a.nav_order - b.nav_order).map((d) => (
-                <div key={d.id} className="spread"
-                     style={{ padding: "9px 0", borderTop: "1px solid var(--border-soft)", alignItems: "center" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                      <span style={{ fontWeight: 600 }}>{d.title}</span>
-                      {!d.published && <Pill tone="warn">draft</Pill>}
-                      {d.required_plan && <Pill tone="info">{d.required_plan} plan</Pill>}
-                      {(d.help_routes || []).length > 0 && <Pill tone="info">contextual</Pill>}
+              {(() => {
+                const known = new Set(items.map((d) => d.slug));
+                const childrenOf = (slug: string) =>
+                  items.filter((d) => d.parent_slug === slug).sort((a, b) => a.nav_order - b.nav_order);
+                const tops = items
+                  .filter((d) => !d.parent_slug || !known.has(d.parent_slug))
+                  .sort((a, b) => a.nav_order - b.nav_order);
+                const rows: JSX.Element[] = [];
+                const walk = (d: AdminDoc, depth: number) => {
+                  rows.push(
+                    <div key={d.id} className="spread"
+                         style={{ padding: "9px 0", paddingLeft: depth * 20,
+                                  borderTop: "1px solid var(--border-soft)", alignItems: "center" }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                          {depth > 0 && <span className="faint" style={{ fontSize: 12 }}>↳</span>}
+                          <span style={{ fontWeight: 600 }}>{d.title}</span>
+                          {!d.published && <Pill tone="warn">draft</Pill>}
+                          {d.required_plan && <Pill tone="info">{d.required_plan} plan</Pill>}
+                          {childrenOf(d.slug).length > 0 && <Pill tone="info">{childrenOf(d.slug).length} sub-pages</Pill>}
+                          {(d.help_routes || []).length > 0 && <Pill tone="info">contextual</Pill>}
+                        </div>
+                        <div className="faint" style={{ fontSize: 12 }}>
+                          /{d.slug}{d.summary ? ` · ${d.summary}` : ""}
+                        </div>
+                      </div>
+                      <div className="row" style={{ gap: 6 }}>
+                        <button className="btn sm ghost" onClick={() => setEditing(d)}><Icon name="edit" size={13} /> Edit</button>
+                        <button className="btn sm ghost" onClick={() => remove(d)} title="Delete"><Icon name="trash" size={13} /></button>
+                      </div>
                     </div>
-                    <div className="faint" style={{ fontSize: 12 }}>
-                      /{d.slug}{d.summary ? ` · ${d.summary}` : ""}
-                    </div>
-                  </div>
-                  <div className="row" style={{ gap: 6 }}>
-                    <button className="btn sm ghost" onClick={() => setEditing(d)}><Icon name="edit" size={13} /> Edit</button>
-                    <button className="btn sm ghost" onClick={() => remove(d)} title="Delete"><Icon name="trash" size={13} /></button>
-                  </div>
-                </div>
-              ))}
+                  );
+                  childrenOf(d.slug).forEach((c) => walk(c, depth + 1));
+                };
+                tops.forEach((d) => walk(d, 0));
+                return rows;
+              })()}
             </div>
           </Card>
         ))
@@ -6374,15 +6392,15 @@ function SectionManager({ sections, reload }: { sections: AdminSectionRow[]; rel
   );
 }
 
-function DocEditor({ doc, sections, onCreateSection, onDone, onCancel }: {
-  doc: AdminDoc | null; sections: AdminSectionRow[];
+function DocEditor({ doc, docs, sections, onCreateSection, onDone, onCancel }: {
+  doc: AdminDoc | null; docs: AdminDoc[]; sections: AdminSectionRow[];
   onCreateSection: () => Promise<string | null>;
   onDone: () => void; onCancel: () => void;
 }) {
   const [f, setF] = useState<AdminDoc>(doc || {
     id: "", slug: "", title: "", section: sections[0]?.name || "General", section_order: 100,
     nav_order: 100, icon: "book", summary: "", body: "", help_routes: [], published: true,
-    required_plan: "",
+    required_plan: "", parent_slug: "",
   });
   const [body, setBody] = useState(toEditorHtml(doc?.body || ""));
   const [routes, setRoutes] = useState((doc?.help_routes || []).join(", "));
@@ -6399,6 +6417,7 @@ function DocEditor({ doc, sections, onCreateSection, onDone, onCancel }: {
       icon: f.icon || "book", summary: f.summary, body, published: f.published,
       help_routes: routes.split(",").map((r) => r.trim()).filter(Boolean),
       required_plan: f.required_plan || "",
+      parent_slug: f.parent_slug || "",
     };
     try {
       if (doc) await api.put(`/admin/support/docs/${doc.id}`, payload);
@@ -6438,6 +6457,14 @@ function DocEditor({ doc, sections, onCreateSection, onDone, onCancel }: {
               {sections.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}
               {!knownSection && f.section && <option value={f.section}>{f.section}</option>}
               <option value="__new__">+ New section…</option>
+            </select>
+          </label>
+          <label className="stack" style={{ gap: 5, minWidth: 180 }}>
+            <span className="faint" style={{ fontSize: 12 }}>Parent page (nests under)</span>
+            <select className="input" value={f.parent_slug || ""} onChange={(e) => set("parent_slug", e.target.value)}>
+              <option value="">— none (top level) —</option>
+              {docs.filter((d) => d.section === f.section && d.slug && d.slug !== f.slug && !d.parent_slug)
+                .map((d) => <option key={d.id} value={d.slug}>{d.title}</option>)}
             </select>
           </label>
           <label className="stack" style={{ gap: 5, width: 120 }}>

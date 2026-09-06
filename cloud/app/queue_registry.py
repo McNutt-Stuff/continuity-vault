@@ -71,7 +71,7 @@ def enqueue(db: Session, *, tenant_id: str, target: str, error: str,
     if q is None:
         q = QueueItem(tenant_id=tenant_id, node_id=node_id, collection_id=collection_id,
                       snapshot_id=snapshot_id, target=target, kind=kind_for_target(target),
-                      label=label or target_label(target), attempts=1, max_attempts=MAX_ATTEMPTS,
+                      label=label or target_label(target), attempts=1, max_attempts=0,
                       status="queued", next_attempt_at=_backoff(1), last_error=str(error)[:500])
         db.add(q)
         logger.info("queued %s for tenant=%s collection=%s (%s)",
@@ -84,11 +84,6 @@ def enqueue(db: Session, *, tenant_id: str, target: str, error: str,
         q.next_attempt_at = _backoff(q.attempts)
         if node_id and not q.node_id:
             q.node_id = node_id
-        if q.attempts >= q.max_attempts:
-            q.status = "failed"
-            q.next_attempt_at = None
-            logger.warning("queue item %s gave up after %d attempts (%s)",
-                           q.id, q.attempts, error)
     return q
 
 
@@ -119,9 +114,19 @@ def due_items(db: Session, limit: int = 25) -> list[QueueItem]:
 
 def run_due(db: Session) -> int:
     """Retry every due queued delivery by re-running the source backup to the
-    single failed destination. Success → done; failure → backoff (or failed after
-    MAX_ATTEMPTS). Returns the number of items that drained successfully."""
+    single failed destination. Success → done; failure → re-armed with backoff.
+
+    There is NO retry limit: an item keeps retrying (backoff capped at 1h) until it
+    succeeds and self-clears, or an admin cancels it. Any items previously parked as
+    ``failed`` (legacy cap) are revived so nothing stays stuck."""
     from .workers.sync_worker import run_backup
+    revived = db.query(QueueItem).filter(QueueItem.status == "failed").all()
+    for it in revived:
+        it.status = "queued"
+        it.next_attempt_at = _backoff(int(it.attempts or 1))
+    if revived:
+        db.commit()
+        logger.info("revived %d queue item(s) from legacy failed state", len(revived))
     drained = 0
     for item in due_items(db):
         coll = db.get(Collection, item.collection_id) if item.collection_id else None
@@ -147,19 +152,14 @@ def run_due(db: Session) -> int:
             # If the write reached the per-destination stage, ingest_objects has
             # already re-armed this item (bumped attempt + backoff). Only apply
             # backoff here when it's still 'delivering' (e.g. a source-fetch error
-            # before any destination was attempted).
+            # before any destination was attempted). Never give up — always re-queue.
             if item.status == "delivering":
                 item.attempts = int(item.attempts or 0) + 1
                 item.last_error = str(exc)[:500]
-                if item.attempts >= item.max_attempts:
-                    item.status = "failed"
-                    item.next_attempt_at = None
-                    logger.warning("queue item %s failed permanently: %s", item.id, exc)
-                else:
-                    item.status = "queued"
-                    item.next_attempt_at = _backoff(item.attempts)
-                    logger.info("queue item %s still unreachable (attempt %d): %s",
-                                item.id, item.attempts, exc)
+                item.status = "queued"
+                item.next_attempt_at = _backoff(item.attempts)
+                logger.info("queue item %s still unreachable (attempt %d): %s",
+                            item.id, item.attempts, exc)
             else:
                 logger.info("queue item %s still unreachable: %s", item.id, exc)
         db.commit()
@@ -193,7 +193,7 @@ def view(item: QueueItem) -> dict:
         "kind": item.kind, "target": item.target,
         "target_label": target_label(item.target), "label": item.label,
         "status": item.status, "attempts": int(item.attempts or 0),
-        "max_attempts": int(item.max_attempts or MAX_ATTEMPTS),
+        "max_attempts": int(item.max_attempts or 0),
         "next_attempt_at": item.next_attempt_at.isoformat() if item.next_attempt_at else None,
         "last_error": item.last_error or "",
         "created_at": item.created_at.isoformat() if item.created_at else None,
@@ -287,7 +287,7 @@ def _appliance_command_items(db: Session, node_id: str | None,
             "collection_id": None, "snapshot_id": None,
             "kind": "appliance_command", "target": "appliance",
             "target_label": name, "label": f"{name} · {_command_label(cmd.command_type)}",
-            "status": status, "attempts": int(cmd.sequence or 0), "max_attempts": 0,
+            "status": status, "attempts": 0, "max_attempts": 0,
             "next_attempt_at": None, "last_error": err,
             "created_at": cmd.created_at.isoformat() if cmd.created_at else None,
             "updated_at": None, "resolved_at": None, "online": online,

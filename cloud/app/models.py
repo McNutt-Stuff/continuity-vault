@@ -946,6 +946,9 @@ class SupportDoc(Base):
     section = Column(String, default="General")   # nav group heading
     section_order = Column(Integer, default=100)  # order of the section in the nav
     nav_order = Column(Integer, default=100)      # order of this page within its section
+    # Slug of the parent page for nested nav (section → page → sub-page). Empty =
+    # a top-level page in its section.
+    parent_slug = Column(String, default="", index=True)
     icon = Column(String, default="book")         # frontend Icon name for the nav
     summary = Column(Text, default="")            # one-line description (search/cards)
     body = Column(Text, default="")               # Markdown content

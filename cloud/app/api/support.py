@@ -74,6 +74,7 @@ def _doc_public(d: SupportDoc) -> dict:
     return {
         "slug": d.slug, "title": d.title, "section": d.section,
         "section_order": d.section_order, "nav_order": d.nav_order,
+        "parent_slug": d.parent_slug or "",
         "icon": d.icon or "book", "summary": d.summary or "", "body": d.body or "",
         "help_routes": d.help_routes or [],
         "required_plan": d.required_plan or "",
@@ -97,9 +98,19 @@ def _ensure_section(db: Session, name: str) -> None:
 
 
 def _build_tree(docs: list[SupportDoc], order_map: dict | None = None) -> list[dict]:
-    """Group docs into ordered sections for the nav (section order comes from the
-    section table when available, else the doc's own section_order)."""
+    """Group docs into ordered sections for the nav, with nested pages: a doc whose
+    ``parent_slug`` points to another doc in the SAME section becomes that page's
+    child (section → page → sub-page). Section order comes from the section table
+    when available, else the doc's own section_order."""
     order_map = order_map or {}
+    by_slug = {d.slug: d for d in docs}
+    nodes = {
+        d.slug: {"slug": d.slug, "title": d.title, "icon": d.icon or "book",
+                 "summary": d.summary or "", "nav_order": d.nav_order,
+                 "required_plan": d.required_plan or "", "parent_slug": d.parent_slug or "",
+                 "children": []}
+        for d in docs
+    }
     sections: dict[str, dict] = {}
     for d in docs:
         name = d.section or "General"
@@ -108,12 +119,22 @@ def _build_tree(docs: list[SupportDoc], order_map: dict | None = None) -> list[d
                                        "docs": []})
         if name not in order_map:
             s["order"] = min(s["order"], d.section_order)
-        s["docs"].append({"slug": d.slug, "title": d.title, "icon": d.icon or "book",
-                          "summary": d.summary or "", "nav_order": d.nav_order,
-                          "required_plan": d.required_plan or ""})
+        parent = (d.parent_slug or "").strip()
+        pdoc = by_slug.get(parent) if parent else None
+        # Nest only under a real parent in the same section (else treat as top-level).
+        if pdoc is not None and parent != d.slug and (pdoc.section or "General") == name:
+            nodes[parent]["children"].append(nodes[d.slug])
+        else:
+            s["docs"].append(nodes[d.slug])
     out = sorted(sections.values(), key=lambda s: (s["order"], s["section"]))
+
+    def _sort(items: list[dict]) -> None:
+        items.sort(key=lambda x: (x["nav_order"], x["title"]))
+        for it in items:
+            if it["children"]:
+                _sort(it["children"])
     for s in out:
-        s["docs"].sort(key=lambda x: (x["nav_order"], x["title"]))
+        _sort(s["docs"])
     return out
 
 
@@ -172,6 +193,7 @@ class DocIn(BaseModel):
     section: str = "General"
     section_order: int = 100
     nav_order: int = 100
+    parent_slug: str = ""
     icon: str = "book"
     summary: str = ""
     body: str = ""
@@ -196,6 +218,7 @@ def admin_create_doc(body: DocIn, principal: security.Principal = Depends(securi
     d = SupportDoc(
         slug=slug, title=body.title, section=body.section,
         section_order=body.section_order, nav_order=body.nav_order, icon=body.icon,
+        parent_slug=body.parent_slug,
         summary=body.summary, body=body.body, help_routes=body.help_routes,
         required_plan=body.required_plan,
         published=body.published)
@@ -224,6 +247,7 @@ def admin_update_doc(doc_id: str, body: DocIn,
     d.section = body.section
     d.section_order = body.section_order
     d.nav_order = body.nav_order
+    d.parent_slug = body.parent_slug
     d.icon = body.icon
     d.summary = body.summary
     d.body = body.body
@@ -277,7 +301,8 @@ def admin_seed_docs(principal: security.Principal = Depends(security.require_pla
 # Fields a baseline default controls; used to detect whether a doc still matches
 # the version we seeded (unedited) vs. an admin customization.
 _BASELINE_FIELDS = ("title", "section", "section_order", "nav_order",
-                    "icon", "summary", "body", "help_routes", "required_plan")
+                    "icon", "summary", "body", "help_routes", "required_plan",
+                    "parent_slug")
 
 
 def _hash_fields(get) -> str:

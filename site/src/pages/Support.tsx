@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { loadSupport, slugForRoute, SupportContent } from "../support";
+import { loadSupport, slugForRoute, SupportContent, DocNavItem } from "../support";
 import { renderDoc, planLabel } from "../md";
 import { site } from "../content";
 
@@ -10,6 +10,7 @@ export default function Support() {
   const nav = useNavigate();
   const [content, setContent] = useState<SupportContent | null>(null);
   const [q, setQ] = useState("");
+  const [openNav, setOpenNav] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let alive = true;
@@ -32,19 +33,32 @@ export default function Support() {
   const activeSlug = slug || content?.tree?.[0]?.docs?.[0]?.slug || "";
   const doc = content && activeSlug ? content.docs[activeSlug] : undefined;
 
+  // Slugs of the active page's ancestors — auto-expanded so the nav opens to it.
+  const activeTrail = useMemo(() => {
+    const trail = new Set<string>();
+    if (!content) return trail;
+    const walk = (nodes: any[], parents: string[]): boolean => {
+      for (const n of nodes) {
+        if (n.slug === activeSlug) { parents.forEach((p) => trail.add(p)); return true; }
+        if (n.children?.length && walk(n.children, [...parents, n.slug])) return true;
+      }
+      return false;
+    };
+    content.tree.forEach((s) => walk(s.docs, []));
+    return trail;
+  }, [content, activeSlug]);
+
   const filteredTree = useMemo(() => {
     if (!content) return [];
     const needle = q.trim().toLowerCase();
     if (!needle) return content.tree;
+    // Search flattens the hierarchy so a matching sub-page still surfaces.
+    const flatten = (nodes: any[]): any[] =>
+      nodes.flatMap((n) => [n, ...(n.children ? flatten(n.children) : [])]);
+    const match = (d: any) =>
+      d.title.toLowerCase().includes(needle) || (d.summary || "").toLowerCase().includes(needle);
     return content.tree
-      .map((s) => ({
-        ...s,
-        docs: s.docs.filter(
-          (d) =>
-            d.title.toLowerCase().includes(needle) ||
-            d.summary.toLowerCase().includes(needle)
-        ),
-      }))
+      .map((s) => ({ ...s, docs: flatten(s.docs).filter(match).map((d) => ({ ...d, children: [] })) }))
       .filter((s) => s.docs.length > 0);
   }, [content, q]);
 
@@ -71,6 +85,48 @@ export default function Support() {
 
   const empty = content.tree.length === 0;
 
+  function renderNav(d: DocNavItem, depth: number) {
+    const kids = d.children || [];
+    const hasKids = kids.length > 0;
+    const open = hasKids && (openNav.has(d.slug) || activeTrail.has(d.slug));
+    return (
+      <div key={d.slug} className="support-nav-node">
+        <div className="support-nav-row" style={{ paddingLeft: depth * 12 }}>
+          {hasKids ? (
+            <button
+              className="support-nav-caret"
+              aria-label={open ? "Collapse" : "Expand"}
+              onClick={() =>
+                setOpenNav((s) => {
+                  const n = new Set(s);
+                  n.has(d.slug) ? n.delete(d.slug) : n.add(d.slug);
+                  return n;
+                })
+              }
+            >
+              {open ? "▾" : "▸"}
+            </button>
+          ) : (
+            <span className="support-nav-caret-spacer" />
+          )}
+          <Link
+            to={`/support/${d.slug}`}
+            className={`support-nav-link ${d.slug === activeSlug ? "active" : ""}`}
+          >
+            {d.title}
+            {d.required_plan && (
+              <span className="plan-gate-badge" data-plan={d.required_plan}
+                    style={{ marginLeft: 6, fontSize: 9.5, padding: "1px 6px" }}>
+                {planLabel(d.required_plan)}
+              </span>
+            )}
+          </Link>
+        </div>
+        {hasKids && open && kids.map((c) => renderNav(c, depth + 1))}
+      </div>
+    );
+  }
+
   return (
     <div className="support-shell">
       <aside className="support-side">
@@ -89,21 +145,7 @@ export default function Support() {
           {filteredTree.map((s) => (
             <div key={s.section} className="support-nav-group">
               <div className="support-nav-title">{s.section}</div>
-              {s.docs.map((d) => (
-                <Link
-                  key={d.slug}
-                  to={`/support/${d.slug}`}
-                  className={`support-nav-link ${d.slug === activeSlug ? "active" : ""}`}
-                >
-                  {d.title}
-                  {d.required_plan && (
-                    <span className="plan-gate-badge" data-plan={d.required_plan}
-                          style={{ marginLeft: 6, fontSize: 9.5, padding: "1px 6px" }}>
-                      {planLabel(d.required_plan)}
-                    </span>
-                  )}
-                </Link>
-              ))}
+              {s.docs.map((d) => renderNav(d, 0))}
             </div>
           ))}
           {empty && <div className="muted" style={{ padding: "8px 4px" }}>No documentation yet.</div>}

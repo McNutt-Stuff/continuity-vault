@@ -215,6 +215,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE billing_charges ADD COLUMN description VARCHAR DEFAULT ''",
         "ALTER TABLE support_docs ADD COLUMN baseline_hash VARCHAR DEFAULT ''",
         "ALTER TABLE support_docs ADD COLUMN required_plan VARCHAR DEFAULT ''",
+        "ALTER TABLE support_docs ADD COLUMN parent_slug VARCHAR DEFAULT ''",
         "ALTER TABLE audit_events ADD COLUMN severity VARCHAR DEFAULT 'info'",
         "ALTER TABLE audit_events ADD COLUMN category VARCHAR DEFAULT 'activity'",
         "ALTER TABLE connector_accounts ADD COLUMN sync_cursor JSON",

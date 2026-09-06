@@ -12,6 +12,8 @@ export interface DocNavItem {
   summary: string;
   nav_order: number;
   required_plan?: string;
+  parent_slug?: string;
+  children?: DocNavItem[];
 }
 export interface DocSection {
   section: string;
@@ -27,6 +29,7 @@ export interface Doc {
   body: string;
   help_routes: string[];
   required_plan?: string;
+  parent_slug?: string;
   updated_at?: string | null;
 }
 export interface SupportContent {

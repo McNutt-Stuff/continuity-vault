@@ -32,13 +32,13 @@ DEFAULT_SUPPORT_SECTIONS = [
 
 
 def _doc(slug, title, section, section_order, nav_order, icon, summary, body,
-         help_routes=None, required_plan=""):
+         help_routes=None, required_plan="", parent_slug=""):
     return {
         "slug": slug, "title": title, "section": section,
         "section_order": section_order, "nav_order": nav_order, "icon": icon,
         "summary": summary, "body": body.strip() + "\n",
         "help_routes": help_routes or [], "required_plan": required_plan,
-        "published": True,
+        "parent_slug": parent_slug, "published": True,
     }
 
 
@@ -710,7 +710,7 @@ def _agent_connect(grant: str) -> list:
 
 
 def _source_doc(slug, title, icon, nav_order, tagline, backs_up, connect, mapping,
-                gotchas, required_plan="", extra=""):
+                gotchas, required_plan="", extra="", parent_slug="sources"):
     body = (
         f"# {title}\n\n{tagline}\n\n"
         f"## What it backs up\n{backs_up}\n\n"
@@ -719,7 +719,8 @@ def _source_doc(slug, title, icon, nav_order, tagline, backs_up, connect, mappin
         f"## Good to know\n{_bullets(gotchas)}\n{extra}"
     )
     return _doc(slug, title, "Sources & Connections", _SOURCES, nav_order, icon,
-                tagline, body, help_routes=[], required_plan=required_plan)
+                tagline, body, help_routes=[], required_plan=required_plan,
+                parent_slug=parent_slug)
 
 
 _SOURCE_PAGES = [
@@ -999,7 +1000,8 @@ _SOURCE_PAGES = [
             "::: plan business\n"
             "Integrations (network intelligence) are a Business-plan capability and require an "
             "on-prem appliance for LAN access.\n"
-            ":::\n")),
+            ":::\n"),
+        parent_slug="integrations"),
 ]
 
 DEFAULT_SUPPORT_DOCS.extend(_SOURCE_PAGES)
