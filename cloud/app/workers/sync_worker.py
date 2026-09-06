@@ -164,8 +164,9 @@ def _record_sync_error(db: Session, account: Optional[ConnectorAccount],
         db.commit()
     except Exception:
         db.rollback()
-    logger.error("sync failed: source=%s account=%s reauth=%s error=%s",
-                 collection.source_type, account.account_label, needs_auth, msg)
+    # The tenant-attributed audit event below is the canonical, richly-detailed log
+    # (account/type/error, customer, needs_reauth) that lands in Platform Logs — no
+    # separate context-less "sync failed" line (it duplicated this without tenant).
     try:
         audit.record(
             db, actor="sync-worker",

@@ -330,7 +330,20 @@ def _run(job_id: str, destinations: Optional[List[str]]) -> None:
                 logger.info("backup job %s cancelled", job_id)
                 return
             except Exception as exc:  # noqa: BLE001 - surfaced to the UI
-                logger.exception("backup job %s failed", job_id)
+                # Tenant-attributed so Platform Logs shows WHICH customer/source the
+                # failed job belongs to (a bare traceback carries no tenant/account).
+                import traceback as _tb
+                try:
+                    from .. import logsink
+                    logsink.emit(level="error", source="connector",
+                                 logger_name="cv.jobs",
+                                 message=f"backup job {job_id} failed: {str(exc)[:300]}",
+                                 tenant_id=job.tenant_id, resource=job.collection_id,
+                                 meta={"kind": job.kind, "collection_id": job.collection_id,
+                                       "source_type": getattr(collection, "source_type", ""),
+                                       "traceback": _tb.format_exc()[-1500:]})
+                except Exception:  # noqa: BLE001
+                    logger.exception("backup job %s failed", job_id)
                 job.status = "failed"
                 job.error = str(exc)[:400]
                 job.message = "Failed"

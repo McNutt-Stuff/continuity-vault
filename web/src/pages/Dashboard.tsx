@@ -14,6 +14,10 @@ interface StorageDest { id: string; label: string; kind: string; icon: string; p
 interface Overview {
   sources: { count: number; types: SourceType[] };
   objects: { total: number; breakdown: ObjectBucket[]; by_source: ObjectBucket[] };
+  activity_24h?: {
+    objects: number; bytes: number; source_count: number;
+    sources: { key: string; label: string; icon: string; color: string; objects: number; bytes: number }[];
+  };
   data: { protected_bytes: number; licensed_bytes: number; percent: number | null };
   storage: {
     vault_count: number; destinations: StorageDest[];
@@ -335,12 +339,56 @@ export default function Dashboard() {
           )}
         </Card>
 
-        <Card>
-          <div className="spread" style={{ marginBottom: 12 }}>
-            <h2>Protection &amp; storage</h2>
-            <a onClick={() => nav("/mappings")} style={{ cursor: "pointer", fontSize: 13 }}>Manage</a>
-          </div>
-          <div className="grid grid-2" style={{ gap: 12 }}>
+        {/* Right column: 24h activity above the protection/storage summary. */}
+        <div className="stack" style={{ gap: 16 }}>
+          <Card>
+            <div className="spread" style={{ marginBottom: 10 }}>
+              <h2>Activity in the past 24 hours</h2>
+              <span className="faint" style={{ fontSize: 11 }}>rolling · updates hourly</span>
+            </div>
+            {ov && ov.activity_24h && ov.activity_24h.objects > 0 ? (
+              <>
+                <div className="row" style={{ gap: 20, marginBottom: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 26, fontWeight: 700, lineHeight: 1.1 }}>{ov.activity_24h.objects.toLocaleString()}</div>
+                    <div className="faint" style={{ fontSize: 11.5 }}>object{ov.activity_24h.objects === 1 ? "" : "s"} backed up</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 26, fontWeight: 700, lineHeight: 1.1 }}>{bytes(ov.activity_24h.bytes)}</div>
+                    <div className="faint" style={{ fontSize: 11.5 }}>data protected</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 26, fontWeight: 700, lineHeight: 1.1 }}>{ov.activity_24h.source_count}</div>
+                    <div className="faint" style={{ fontSize: 11.5 }}>source{ov.activity_24h.source_count === 1 ? "" : "s"}</div>
+                  </div>
+                </div>
+                <div className="stack" style={{ gap: 4 }}>
+                  {ov.activity_24h.sources.map((s) => (
+                    <div key={s.key} className="row" style={{ gap: 10, alignItems: "center", padding: "5px 0" }}>
+                      <div className="result-icon" style={{ width: 28, height: 28, background: "var(--inset)" }}>
+                        <SourceIcon type={s.key} fallback="database" size={15} />
+                      </div>
+                      <div className="flex1" style={{ fontSize: 13, fontWeight: 600 }}>{s.label}</div>
+                      <div className="faint" style={{ fontSize: 12, textAlign: "right" }}>
+                        {s.objects.toLocaleString()} item{s.objects === 1 ? "" : "s"} · {bytes(s.bytes)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="muted" style={{ fontSize: 12.5 }}>
+                No new backups in the last 24 hours — everything already protected stays safe.
+              </div>
+            )}
+          </Card>
+
+          <Card>
+            <div className="spread" style={{ marginBottom: 12 }}>
+              <h2>Protection &amp; storage</h2>
+              <a onClick={() => nav("/mappings")} style={{ cursor: "pointer", fontSize: 13 }}>Manage</a>
+            </div>
+            <div className="grid grid-2" style={{ gap: 12 }}>
             <Fact icon="cloud" label="Arkive Cloud" value={ov ? bytes(ov.storage.usage.cloud) : "—"} />
             <Fact icon="server" label="Secure hardware" value={ov ? bytes(ov.storage.usage.appliance) : "—"} />
             {ov && ov.storage.usage.customer > 0 && (
@@ -363,7 +411,8 @@ export default function Dashboard() {
               </div>
             </div>
           )}
-        </Card>
+          </Card>
+        </div>
       </div>
       {pickerAccount && (
         <PhotoPickerModal accountId={pickerAccount} onClose={() => setPickerAccount(null)}

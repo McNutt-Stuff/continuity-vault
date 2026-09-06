@@ -237,10 +237,41 @@ def overview(scope: str = "me",
             "bytes": cd_bytes,
         }
 
+    # --- Activity in the past 24 hours (rolling) -----------------------------
+    # New/changed object versions indexed in the last 24h, per source. Uses
+    # SearchDocument (replicated to the control plane, so it's correct for both
+    # CP- and node-owned tenants) — one row per object version, created_at =
+    # ingest time.
+    day_ago = datetime.utcnow() - timedelta(hours=24)
+    activity_by_source: list = []
+    activity_objects = 0
+    activity_bytes = 0
+    if vault_ids:
+        for st, cnt, sz in (
+                db.query(SearchDocument.source_type, func.count(),
+                         func.coalesce(func.sum(SearchDocument.size_bytes), 0))
+                .filter(SearchDocument.tenant_id == tenant.id,
+                        SearchDocument.vault_id.in_(vault_ids),
+                        SearchDocument.created_at >= day_ago)
+                .group_by(SearchDocument.source_type).all()):
+            n = int(cnt)
+            b = int(sz or 0)
+            activity_objects += n
+            activity_bytes += b
+            m = _source_meta(st)
+            activity_by_source.append({"key": st, "label": m["displayName"],
+                                       "icon": m["icon"], "color": m["color"],
+                                       "objects": n, "bytes": b})
+        activity_by_source.sort(key=lambda x: -x["objects"])
+
     return {
         "sources": {"count": sum(type_counts.values()), "types": source_types},
         "objects": {"total": object_total, "breakdown": object_breakdown,
                     "by_source": object_by_source},
+        "activity_24h": {
+            "objects": activity_objects, "bytes": activity_bytes,
+            "source_count": len(activity_by_source), "sources": activity_by_source,
+        },
         "data": {"protected_bytes": protected_bytes, "licensed_bytes": licensed,
                  "percent": percent},
         "storage": {"vault_count": len(vaults), "destinations": destinations,

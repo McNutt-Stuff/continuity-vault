@@ -667,8 +667,17 @@ def _process_collection(db, c: Collection, now: datetime, default_minutes: int) 
             db.commit()
             return (1, 1, 1)
         except Exception as exc:  # noqa: BLE001 - isolate per-source failures
-            logger.exception("scheduled backup failed for collection %s (%s)",
-                             c.id, c.source_type)
+            # Tenant-attributed (run_backup already richly audited the source error;
+            # this stamps the scheduled-run wrapper with the customer/source too).
+            try:
+                from .. import logsink
+                logsink.emit(level="error", source="connector", logger_name="cv.scheduler",
+                             message=f"scheduled backup failed: {c.name} ({c.source_type}): {str(exc)[:200]}",
+                             tenant_id=c.tenant_id, resource=c.id,
+                             meta={"collection_id": c.id, "source_type": c.source_type})
+            except Exception:  # noqa: BLE001
+                logger.exception("scheduled backup failed for collection %s (%s)",
+                                 c.id, c.source_type)
             records = list(cap.records or [])
             db.rollback()
             # run_backup already recorded the error on the source; still stamp the run
