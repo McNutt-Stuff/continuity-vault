@@ -53,6 +53,12 @@ client/server-encrypted; storage holds only ciphertext.
   also `enqueue` a retry. VERIFY every write landed (byte-size check after write; the appliance vault and
   `LocalFsDestination` do this) — a truncated/failed write must raise, never be sealed as recoverable.
   Never mark a snapshot recoverable unless its bytes are confirmed written.
+- **Public docs ship WITH the code.** Any change to a connector/integration (new source, new capability,
+  changed setup/auth flow, new data captured) MUST create or update its Help Center page in the SAME change —
+  edit its `_source_doc(...)` in `cloud/app/support_defaults.py` plus the `_setup_instructions(...)` and
+  connect-dialog copy. Bundle any new server dependency in `cloud/requirements.txt` (installer-managed), never
+  a manual `pip install`. A feature without its docs update is incomplete. See
+  `.github/instructions/connectors.instructions.md` + `support-docs.instructions.md`.
 
 
 ## Deploy loop

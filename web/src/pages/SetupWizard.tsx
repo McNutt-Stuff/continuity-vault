@@ -233,7 +233,7 @@ function StepSources({ me, stepUp, onNext, onBack }:
     if (c.type === "icloud") {
       fields = [
         { name: "username", label: "Apple ID (email)", required: true },
-        { name: "token", label: "App-specific password", password: true, required: true },
+        { name: "token", label: "App-specific password", placeholder: "xxxx-xxxx-xxxx-xxxx", password: true, required: true },
         { name: "label", label: "Account label", defaultValue: `My ${c.displayName}` },
       ];
     } else if (c.type === "onepassword") {

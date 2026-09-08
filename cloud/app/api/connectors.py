@@ -91,10 +91,11 @@ def _setup_instructions(connector_type: str) -> list[str]:
         ]
     if connector_type == "icloud":
         return [
-            "At appleid.apple.com, generate an app-specific password.",
-            "Install 'pyicloud' on the server (pip install pyicloud).",
-            "Connect with your Apple ID and that app-specific password.",
-            "Note: accounts requiring interactive 2FA can't be synced automatically.",
+            "Sign in at appleid.apple.com → Sign-In & Security → App-Specific Passwords.",
+            "Click the + (or 'Generate an app-specific password'), name it 'Arkive', and copy it.",
+            "In Sources → iCloud, enter your Apple ID email and paste that app-specific password.",
+            "Pick what to back up (Photos, iCloud Drive, Contacts) and, for Drive, browse and select folders.",
+            "Note: your Apple ID must use an app-specific password — accounts that force an interactive 2FA prompt can't be synced automatically.",
         ]
     if connector_type == "evernote":
         return [
@@ -255,11 +256,21 @@ def list_account_folders(account_id: str, path: str = "",
     if not connector or not connector.capabilities().browsable:
         raise HTTPException(400, "this source doesn't support folder browsing")
     from ..workers.sync_worker import access_token_for_account
+    # OAuth sources browse with a (refreshed) access token; app-password sources
+    # (iCloud) need their full decrypted credential set instead.
+    config: dict = {}
+    try:
+        if account.encrypted_credentials:
+            config = credstore.decrypt(tenant.id, account.encrypted_credentials)
+    except Exception:
+        config = {}
     token = access_token_for_account(db, account)
-    if not token:
+    if token:
+        config["access_token"] = token
+    if not config:
         raise HTTPException(400, "reconnect this source to browse its folders")
     try:
-        folders = connector.list_folders({"access_token": token}, path or "")
+        folders = connector.list_folders(config, path or "")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"couldn't list folders: {exc}")
     return {"folders": folders}

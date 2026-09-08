@@ -562,6 +562,7 @@ class ICloudConnector(Connector):
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
             streaming=True,
+            browsable=True,
             searchable_fields=["album", "kind", "path"],
             facet_fields=["kind", "album"],
             filter_categories=[
@@ -584,12 +585,20 @@ class ICloudConnector(Connector):
             doc_types=["photo", "video", "image", "file", "person"],
         )
 
+    def list_folders(self, config, path=""):
+        creds = config or {}
+        user = creds.get("username") or creds.get("account_username") or ""
+        pw = creds.get("token") or creds.get("password") or ""
+        return live.icloud_list_folders(user, pw, path) if user and pw else []
+
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}
         if config.get("token"):
             yield from live.fetch_icloud(
                 config.get("username", ""), config["token"], _content_cap(),
-                options={"includeCategories": config.get("includeCategories")})
+                options={"includeCategories": config.get("includeCategories"),
+                         "roots": config.get("roots"),
+                         "sinceDate": config.get("sinceDate")})
             return
         items = [
             ("IMG_4821.HEIC", "image", 3_800_000, "Photos"),

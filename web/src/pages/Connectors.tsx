@@ -247,10 +247,12 @@ export default function Connectors() {
       } else if (c.type === "icloud") {
         result = await formDialog({
           title: `Connect ${c.displayName}`,
-          message: "Use an app-specific password from appleid.apple.com.",
+          message: "Apple requires an app-specific password (your normal Apple ID password won't work). "
+            + "At appleid.apple.com → Sign-In & Security → App-Specific Passwords, generate one named "
+            + "\"Arkive\", then paste it below with your Apple ID email.",
           fields: [
             { name: "username", label: "Apple ID (email)", required: true },
-            { name: "token", label: "App-specific password", password: true, required: true },
+            { name: "token", label: "App-specific password", placeholder: "xxxx-xxxx-xxxx-xxxx", password: true, required: true },
             { name: "label", label: "Account label" },
           ],
         });

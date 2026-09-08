@@ -798,18 +798,34 @@ _SOURCE_PAGES = [
     _source_doc(
         "source-icloud", "iCloud", "cloud", 62,
         "Back up iCloud photos, files and contacts with an app-specific password.",
-        "iCloud Photos, iCloud Drive files and your contacts. Because Apple has no OAuth for "
-        "this, you connect with an **app-specific password**.",
-        ["At **appleid.apple.com**, generate an **app-specific password**.",
-         "Open **Sources → iCloud** and enter your Apple ID and that app-specific password.",
-         "Choose which of photos / files / contacts to include.",
-         "The first backup starts once connected."],
+        "iCloud Photos, iCloud Drive files (whole folders, browsed and selected in the Data "
+        "Map) and your contacts. Because Apple has no OAuth for this, you connect with an "
+        "**app-specific password**. Every sync captures your entire library, Drive and address "
+        "book, so a single backup is a complete backfill.",
+        ["**Create an app-specific password.** Sign in at **appleid.apple.com** → "
+         "**Sign-In & Security** → **App-Specific Passwords**. Click **+** / **Generate "
+         "an app-specific password**, name it **Arkive**, confirm your Apple ID password, "
+         "and copy the generated `xxxx-xxxx-xxxx-xxxx` password.",
+         "Open **Sources → iCloud** and enter your **Apple ID email** and that **app-specific "
+         "password** (not your normal Apple ID password).",
+         "Choose which of **Photos**, **iCloud Drive** and **Contacts** to include.",
+         "For iCloud Drive, use the **folder navigator** to select the folders to back up — "
+         "leave it empty to capture the whole Drive.",
+         "The first backup starts once connected and pulls your full history."],
         ["**Images / Video & Audio** — iCloud Photos (`photo`, `video`).",
-         "**Files / Documents** — iCloud Drive content by type.",
+         "**Files / Documents** — iCloud Drive content by type, with its full folder path.",
          "**Contacts** — each contact as `person`."],
-        ["Use an app-specific password — never your main Apple ID password.",
-         "Accounts that force interactive 2FA on every login can't be synced unattended.",
-         "Pick photos / files / contacts independently in the Data Map."]),
+        ["You **must** use an app-specific password — your main Apple ID password will be "
+         "rejected, and Apple requires two-factor authentication to be enabled before you can "
+         "create one.",
+         "Accounts that force an interactive 2FA approval on every login can't be synced "
+         "unattended — an app-specific password avoids that prompt.",
+         "Every run is a full backfill (iCloud has no change feed), so re-running catches "
+         "everything added since; unchanged items are de-duplicated automatically.",
+         "Pick photos / files / contacts independently, and browse & select Drive folders, in "
+         "the Data Map.",
+         "If a password stops working (e.g. you changed your Apple ID password, which revokes "
+         "all app-specific passwords), generate a new one and reconnect."]),
     _source_doc(
         "source-endpoint-files", "Endpoint Files", "file", 64,
         "Back up folders on your computer, external drives and network shares.",

@@ -32,6 +32,26 @@ Rules:
 - Brand icon: add the type to `scripts/sync_source_icons.py` SOURCE_ICONS + the registries in
   `web/src/components/sourceIcons.ts` AND `cloud/app/source_icons.py`, then run the sync script.
 
+## Public docs are MANDATORY — update them in the SAME change (not optional)
+
+Whenever you ADD a connector/integration, or CHANGE one in a way that touches user-facing behavior
+(new capability like folder browsing/backfill, changed setup steps, new auth method, new `filter_categories`,
+new data it captures, renamed flow), you MUST create or update its public Help Center page in the SAME change:
+
+- Edit (or add) the source's `_source_doc(...)` entry in `cloud/app/support_defaults.py` — its `_SOURCE_PAGES`
+  at the bottom of the file. Keep the consistent shape: **what it backs up · how to connect · what's captured &
+  how it maps · good to know.** Spell out real setup steps (e.g. how to create an app-specific password / OAuth
+  app), which taxonomy kinds it emits, and gotchas (needs-reauth triggers, backfill behavior, limits).
+- Also update the operator setup steps returned by `api/connectors.py` `_setup_instructions(...)` and the
+  connect-dialog copy in `web/src/pages/Connectors.tsx` / `SetupWizard.tsx` when the connect flow changes.
+- If a server-side dependency is required (e.g. `pyicloud`), add it to `cloud/requirements.txt` (bundled by the
+  installer) — do NOT tell operators to `pip install` it by hand.
+
+A connector/integration change WITHOUT the matching docs update is incomplete. The edit only ships to the Help
+Center after an admin publishes via **Documentation → Review & publish updates** (unedited baseline pages are
+refreshed automatically; admin-customized pages are preserved). See `support-docs.instructions.md` for the full
+docs workflow.
+
 ## Logging & error detail — STANDARD (so a source can be triaged from the admin Platform Logs)
 
 Every connector/source failure MUST be reproducible from the control plane without shell access. Follow this

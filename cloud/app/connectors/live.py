@@ -1074,11 +1074,147 @@ def stream_drive(access_token: str, cursor=None, config: Optional[dict] = None,
 
 
 
+def _icloud_login(username: str, password: str):
+    """Authenticate to iCloud via pyicloud, raising a clear, actionable error.
+
+    Shared by the sync pull and the folder navigator so both fail identically
+    (needs an app-specific password; interactive-2FA accounts can't sync)."""
+    try:
+        from pyicloud import PyiCloudService  # optional dependency
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "pyicloud is not installed on this server — run 'pip install pyicloud' "
+            "so iCloud can be backed up.") from exc
+    try:
+        api = PyiCloudService(username, password)
+    except Exception as exc:  # noqa: BLE001
+        detail = (str(exc).strip() or exc.__class__.__name__)
+        logger.warning("iCloud auth failed for %s: %s", username, detail)
+        raise PermissionError(
+            f"iCloud authentication failed: {detail}. iCloud needs an app-specific "
+            f"password (appleid.apple.com → Sign-In & Security → App-Specific "
+            f"Passwords) and can't sign in to an account with interactive "
+            f"two-factor prompts.") from exc
+    if getattr(api, "requires_2fa", False) or getattr(api, "requires_2sa", False):
+        raise PermissionError(
+            "iCloud returned an interactive two-factor challenge, so it can't be "
+            "synced headlessly. Generate an app-specific password at "
+            "appleid.apple.com and reconnect with that.")
+    return api
+
+
+def _icloud_norm_roots(roots) -> List[str]:
+    return [("/" + r.strip("/")) for r in (roots or []) if r and r.strip("/")]
+
+
+def _icloud_root_ok(path: str, roots: List[str]) -> bool:
+    """True if a file at ``path`` falls inside one of the selected roots."""
+    if not roots:
+        return True
+    return any(path == r or path.startswith(r + "/") for r in roots)
+
+
+def _icloud_descend_ok(path: str, roots: List[str]) -> bool:
+    """True if a folder at ``path`` is on the way to, or inside, a selected root."""
+    if not roots:
+        return True
+    return any(path == r or path.startswith(r + "/") or r.startswith(path + "/")
+               for r in roots)
+
+
+def _icloud_walk_drive(node, prefix: str, content_cap: int, roots: List[str],
+                       since: Optional[datetime], counts: dict, depth: int = 0
+                       ) -> Iterable[SourceObject]:
+    """Recursively yield every file under an iCloud Drive folder, honouring the
+    selected roots and an optional ``since`` (backfill) floor."""
+    if depth > 40:
+        return
+    try:
+        names = node.dir() or []
+    except Exception as exc:  # noqa: BLE001
+        logger.info("iCloud Drive listing failed at %s: %s", prefix or "/", exc)
+        return
+    for name in names:
+        try:
+            child = node[name]
+        except Exception:
+            continue
+        ctype = (getattr(child, "type", "") or "").lower()
+        full = f"{prefix}/{name}"
+        if ctype in ("folder", "app_library"):
+            if _icloud_descend_ok(full, roots):
+                yield from _icloud_walk_drive(child, full, content_cap, roots,
+                                              since, counts, depth + 1)
+            continue
+        if not _icloud_root_ok(full, roots):
+            continue
+        when = _parse_dt(getattr(child, "date_modified", None)
+                         or getattr(child, "date_changed", None))
+        if since and when and when < since:
+            continue
+        size = int(getattr(child, "size", 0) or 0)
+        raw = b""
+        if 0 < size <= content_cap:
+            try:
+                with child.open(stream=True) as resp:
+                    raw = resp.raw.read(content_cap + 1)
+            except Exception:
+                raw = b""
+        _cat, _kind = classify_file(name)
+        content, backed = _capped(raw, content_cap) if raw else (
+            json.dumps({"_arkive": "content_exceeds_cap" if size > content_cap else "no_content",
+                        "bytes": size}).encode(), False)
+        folder_label = prefix.strip("/").replace("/", " · ")
+        labels = ["iCloud Drive"] + ([folder_label] if folder_label else [])
+        yield SourceObject(
+            object_id=f"icloud:drive:{full}",
+            doc_type=_kind, category=_cat, title=name,
+            content=content, preview=f"{size // 1000} KB · {full}",
+            meta={"path": full, "album": "iCloud Drive", "kind": _kind,
+                  "content_backed_up": backed},
+            labels=labels, size_bytes=size or None,  # type: ignore
+            modified_at=when)
+        counts["files"] += 1
+
+
+def icloud_list_folders(username: str, password: str, path: str = "") -> List[dict]:
+    """Immediate child folders of ``path`` in iCloud Drive ("" = root), powering
+    the Data Map folder navigator. Returns ``[{"path","name","hasMore"}]``."""
+    api = _icloud_login(username, password)
+    node = api.drive
+    parts = [p for p in (path or "").strip("/").split("/") if p]
+    for part in parts:
+        try:
+            node = node[part]
+        except Exception:
+            return []
+    base = "/" + "/".join(parts) if parts else ""
+    try:
+        names = node.dir() or []
+    except Exception as exc:  # noqa: BLE001
+        logger.info("iCloud folder listing failed at %s: %s", path or "/", exc)
+        return []
+    out: List[dict] = []
+    for name in names:
+        try:
+            child = node[name]
+        except Exception:
+            continue
+        if (getattr(child, "type", "") or "").lower() in ("folder", "app_library"):
+            out.append({"path": f"{base}/{name}", "name": name, "hasMore": True})
+    return sorted(out, key=lambda f: f["name"].lower())
+
+
 def fetch_icloud(username: str, password: str,
                  content_cap: int = _DEFAULT_CAP,
                  options: Optional[dict] = None) -> Iterable[SourceObject]:
-    """Best-effort iCloud pull via pyicloud: Photos, Drive files, and Contacts.
-    ``options.includeCategories`` (photos/files/contacts) filters what's captured.
+    """Full iCloud pull via pyicloud: Photos, iCloud Drive (recursively, folder-
+    scoped) and Contacts. Every run captures the entire library/drive/address
+    book (there is no delta API), so a single sync is a complete backfill; an
+    optional ``options['sinceDate']`` floors it to a date window instead.
+
+    ``options.includeCategories`` (photos/files/contacts) filters what's
+    captured; ``options.roots`` scopes iCloud Drive to selected folders.
     Interactive-2FA accounts can't be synced headlessly. Messages aren't exposed
     by any iCloud API and can't be captured."""
     options = options or {}
@@ -1087,30 +1223,19 @@ def fetch_icloud(username: str, password: str,
         inc = options.get("includeCategories") or []
         return not inc or cat in inc
 
-    try:
-        from pyicloud import PyiCloudService  # optional dependency
-    except Exception:
-        logger.info("pyicloud not installed; skipping iCloud live pull")
-        return
-    try:
-        api = PyiCloudService(username, password)
-    except Exception as exc:
-        # Surface as an auth failure so the sync worker flags the source
-        # needs-reauth and notifies — not a silent empty (healthy-looking) pull.
-        detail = (str(exc).strip() or exc.__class__.__name__)
-        logger.warning("iCloud auth failed: %s", detail)
-        raise PermissionError(
-            f"iCloud authentication failed: {detail}. iCloud needs an app-specific "
-            f"password (appleid.apple.com → Sign-In & Security) and can't sync an "
-            f"account with interactive two-factor enabled.") from exc
-    if getattr(api, "requires_2fa", False) or getattr(api, "requires_2sa", False):
-        logger.info("iCloud account requires interactive 2FA; cannot sync headlessly")
-        return
+    roots = _icloud_norm_roots(options.get("roots"))
+    since = _parse_dt(options.get("sinceDate")) if options.get("sinceDate") else None
+    api = _icloud_login(username, password)
+    counts = {"photos": 0, "files": 0, "contacts": 0}
 
-    # Photos
+    # Photos & videos (whole library — the master "all" collection).
     if want("photos"):
         try:
             for photo in api.photos.all:
+                when = _parse_dt(getattr(photo, "asset_date", None)
+                                 or getattr(photo, "created", None))
+                if since and when and when < since:
+                    continue
                 name = getattr(photo, "filename", None) or f"photo-{getattr(photo, 'id', '')}"
                 size = int(getattr(photo, "size", 0) or 0)
                 raw = b""
@@ -1129,8 +1254,8 @@ def fetch_icloud(username: str, password: str,
                     title=name, content=content, preview=f"{size // 1000} KB",
                     meta={"album": "Photos", "kind": kind, "content_backed_up": backed},
                     labels=["Photos"], size_bytes=size or None,  # type: ignore
-                    modified_at=_parse_dt(getattr(photo, "asset_date", None)
-                                          or getattr(photo, "created", None)))
+                    modified_at=when)
+                counts["photos"] += 1
         except Exception as exc:
             logger.info("iCloud Photos unavailable: %s", exc)
 
@@ -1149,38 +1274,20 @@ def fetch_icloud(username: str, password: str,
                     meta={"album": "Contacts", "kind": "contact", "content_backed_up": backed},
                     labels=["Contacts"],
                 )
+                counts["contacts"] += 1
         except Exception as exc:
             logger.info("iCloud contacts unavailable: %s", exc)
 
-    # Drive files
+    # iCloud Drive files — full recursive walk, scoped to the selected folders.
     if want("files"):
         try:
-            drive = api.drive
-            for name in drive.dir():
-                node = drive[name]
-                if getattr(node, "type", "") == "file":
-                    size = int(getattr(node, "size", 0) or 0)
-                    raw = b""
-                    if size <= content_cap:
-                        try:
-                            with node.open(stream=True) as resp:
-                                raw = resp.raw.read(content_cap + 1)
-                        except Exception:
-                            raw = b""
-                    _cat, _kind = classify_file(name)
-                    content, backed = _capped(raw, content_cap) if raw else (
-                        json.dumps({"_arkive": "no_content", "bytes": size}).encode(), False)
-                    yield SourceObject(
-                        object_id=f"icloud:drive:{name}",
-                        doc_type=_kind, category=_cat, title=name,
-                        content=content, preview=f"{size // 1000} KB",
-                        meta={"path": f"/{name}", "album": "iCloud Drive",
-                              "kind": _kind, "content_backed_up": backed},
-                        labels=["iCloud Drive"], size_bytes=size or None,  # type: ignore
-                        modified_at=_parse_dt(getattr(node, "date_modified", None)),
-                    )
+            yield from _icloud_walk_drive(api.drive, "", content_cap, roots, since, counts)
         except Exception as exc:
             logger.info("iCloud Drive unavailable: %s", exc)
+
+    logger.info("iCloud pull complete for %s: %d photo(s), %d file(s), %d contact(s)%s",
+                username, counts["photos"], counts["files"], counts["contacts"],
+                f" (since {since.date()})" if since else "")
 
 
 def _status(object_id: str, title: str, preview: str, label: str) -> SourceObject:

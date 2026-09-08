@@ -271,7 +271,7 @@ https://vault.arkive.life/api/connectors/oauth/callback
 | Outlook / OneDrive | Microsoft Entra ID → App registration; delegated `Mail.Read` / `Files.Read.All` + `offline_access` | `CV_MICROSOFT_CLIENT_ID`, `CV_MICROSOFT_CLIENT_SECRET` |
 | Dropbox | dropbox.com/developers → scoped app | `CV_DROPBOX_CLIENT_ID`, `CV_DROPBOX_CLIENT_SECRET` |
 | 1Password | 1Password Connect server + Connect token (enter host + token when connecting) | — |
-| iCloud | App-specific password + `pip install pyicloud` on the server | — |
+| iCloud | App-specific password from appleid.apple.com (pyicloud is bundled in the installer) | — |
 
 **What each connector pulls:** Gmail/Outlook = messages; OneDrive/Dropbox =
 files; 1Password = vault items (secret values encrypted, only metadata indexed);
