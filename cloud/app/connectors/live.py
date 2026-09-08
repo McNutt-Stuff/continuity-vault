@@ -153,6 +153,14 @@ def _gmail_message(c: httpx.Client, headers: dict, mid: str,
             logger.warning("gmail message %s skipped (HTTP 403 %s)", mid,
                            reason or "forbidden")
             return None
+        if r.status_code >= 500:
+            # Transient Gmail backendError (500/503) on ONE message must not abort
+            # the crawl: back off and retry, then skip that message.
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            logger.warning("gmail message %s skipped (HTTP %s)", mid, r.status_code)
+            return None
         r.raise_for_status()
         m = r.json()
         break
@@ -1116,6 +1124,33 @@ def _icloud_cookie_dir(username: str) -> str:
     return d
 
 
+def _icloud_reset_session(username: str) -> None:
+    """Delete any persisted iCloud session for a clean interactive sign-in.
+
+    A stale UNTRUSTED session token in the cookie dir lets pyicloud reach a
+    ``requires_2fa`` state WITHOUT running SRP's 2FA branch — so ``_auth_data``
+    stays empty, no code is ever pushed, and ``request_2fa_code()`` has no delivery
+    route (the symptom: request_2fa_code=False, auth_keys=[]). Wiping the session
+    forces a fresh SRP login, which populates the HSA2 boot data and PUSHES a
+    verification code to the trusted devices."""
+    d = _icloud_cookie_dir(username)
+    if not d:
+        return
+    try:
+        for name in os.listdir(d):
+            fp = os.path.join(d, name)
+            try:
+                if os.path.isfile(fp):
+                    os.remove(fp)
+            except OSError:
+                pass
+    except FileNotFoundError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.info("iCloud session reset for %s failed (non-fatal): %s",
+                    username, exc)
+
+
 def _icloud_service(username: str, password: str):
     """Instantiate PyiCloudService against a persistent cookie directory so a
     previously-trusted session is reused. May return an ``api`` whose
@@ -1165,6 +1200,10 @@ def icloud_start_session(username: str, password: str):
     ``(status, api)`` where status is ``"linked"`` when the persisted session is
     already trusted, ``"needs_2fa"`` when Apple wants a 6-digit code, or
     ``"needs_2sa"`` for the older two-step accounts (unsupported)."""
+    # Start from a clean session so Apple's SRP flow runs and actually PUSHES a
+    # fresh code — reusing a stale untrusted token leaves pyicloud with an empty
+    # _auth_data and no delivery route (request_2fa_code=False, auth_keys=[]).
+    _icloud_reset_session(username)
     api = _icloud_service(username, password)
     if getattr(api, "requires_2fa", False):
         if getattr(api, "security_key_names", None):
