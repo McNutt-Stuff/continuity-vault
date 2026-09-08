@@ -139,9 +139,12 @@ def _build_timeline(objs: list[_Obj]) -> dict:
         byte_series[i] += o.size
         totals_by_source[o.source_type] += 1
 
-    # Keep the eight biggest sources as their own bands; fold the rest into "Other".
+    # Give every source its own band (the bar chart scrolls); fold only the
+    # overflow beyond a generous cap into "Other" so a huge source list stays
+    # readable. 16 covers virtually every real footprint, so smaller sources
+    # (e.g. Facebook) show as their own bar instead of hiding inside "Other".
     ranked = sorted(totals_by_source.items(), key=lambda kv: -kv[1])
-    top = [s for s, _ in ranked[:8]]
+    top = [s for s, _ in ranked[:16]]
     series: list[dict] = []
     for s in top:
         m = _source_meta(s)
