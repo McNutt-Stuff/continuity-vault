@@ -336,10 +336,22 @@ def _ensure_perf_indexes() -> None:
         # audited action — without this it full-scans + sorts the whole ledger each write.
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_audit_events_created_at "
         "ON audit_events (created_at)",
-        # Unified search + billing/dashboard/org read one current row per object;
-        # this partial index serves both the facet GROUP BYs and the newest-first page.
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_search_documents_current "
-        "ON search_documents (tenant_id, vault_id, modified_at) WHERE is_current",
+        # Unified-search page + facet SAMPLE order newest-first. The old index
+        # (modified_at ASC) did NOT match the query's ORDER BY modified_at DESC
+        # NULLS LAST, so Postgres seq-scanned + sorted the whole tenant index
+        # (~1s each). This matching-order partial index turns both into a bounded
+        # ordered index scan (LIMIT) with no sort.
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_search_documents_current_ord "
+        "ON search_documents (tenant_id, vault_id, modified_at DESC NULLS LAST, created_at DESC) "
+        "WHERE is_current",
+        # Facet GROUP BYs (by source_type / doc_type / collection) + the total
+        # count: a narrow covering partial index so they run as index-only scans
+        # instead of seq-scanning the wide (JSON-bearing) rows.
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_search_documents_facet "
+        "ON search_documents (tenant_id, vault_id, source_type, doc_type, collection_id) "
+        "WHERE is_current",
+        # Superseded by ix_search_documents_current_ord (same leading columns).
+        "DROP INDEX CONCURRENTLY IF EXISTS ix_search_documents_current",
     ]
     for s in stmts:
         try:

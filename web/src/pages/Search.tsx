@@ -71,9 +71,10 @@ interface ContactView {
 interface Viewing {
   item: Recovered;
   kind: "text" | "image" | "binary" | "email" | "onepassword" | "pdf" | "audio" | "video"
-      | "note" | "calendar" | "imessage" | "social" | "contact";
+      | "note" | "calendar" | "imessage" | "social" | "contact" | "crm";
   text?: string; url?: string; email?: EmailView; onePassword?: OnePasswordView; note?: NoteView;
   calendar?: CalendarView; message?: ChatMsgView; social?: SocialView; contact?: ContactView;
+  crm?: CrossbeamView;
 }
 
 interface Result {
@@ -715,6 +716,16 @@ export default function Search() {
       }
       const text = await blob.text();
       const oversized = text.trimStart().startsWith("{") && text.includes("content_exceeds_cap");
+      // Crossbeam CRM records (account / contact / opportunity / overlap): render
+      // a structured CRM card rather than raw JSON.
+      if (!oversized && item.source_type === "crossbeam"
+          && ["account", "contact", "opportunity", "overlap"].includes(item.doc_type)) {
+        try {
+          setViewing({ item, kind: "crm", crm: parseCrossbeam(JSON.parse(text), item), url });
+          await loadRecovered();
+          return;
+        } catch { /* fall through */ }
+      }
       // Calendar events: render a formatted event card (title, when, where, who).
       // Any calendar source normalizes to doc_type "event"; also match known
       // calendar source types so every provider opens the same card.
@@ -1414,6 +1425,9 @@ export default function Search() {
               {viewing.kind === "contact" && viewing.contact && (
                 <ContactCard data={viewing.contact} title={viewing.item.title} />
               )}
+              {viewing.kind === "crm" && viewing.crm && (
+                <CrossbeamCard data={viewing.crm} title={viewing.item.title} />
+              )}
               {viewing.kind === "social" && viewing.social && (
                 <SocialCard data={viewing.social} title={viewing.item.title} />
               )}
@@ -2011,6 +2025,208 @@ function ContactCard({ data, title }: { data: ContactView; title: string }) {
           <div className="muted" style={{ padding: 8 }}>No contact details captured.</div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---- Crossbeam CRM record viewer (accounts / contacts / opportunities) ------
+interface CrmField { label: string; value: string; }
+interface CrmSection { heading: string; fields: CrmField[]; }
+interface CrossbeamView {
+  type: string; typeLabel: string; title: string; subtitle?: string;
+  domain?: string; owner?: { name?: string; email?: string };
+  populations: string[]; partner?: string; sections: CrmSection[]; all: CrmField[];
+}
+
+function cbCrmDict(raw: any): Record<string, any> {
+  const crm = raw?.crm_data;
+  if (Array.isArray(crm)) {
+    const out: Record<string, any> = {};
+    for (const f of crm) if (f && f.field_name != null) out[String(f.field_name)] = f.field_value;
+    return out;
+  }
+  return crm && typeof crm === "object" ? crm : {};
+}
+function cbFmt(v: any): string {
+  if (v === null || v === undefined || v === "") return "";
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  if (typeof v === "number") return v.toLocaleString();
+  const s = String(v);
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+  return s;
+}
+function cbMoney(v: any): string {
+  const n = typeof v === "number" ? v : parseFloat(String(v).replace(/[^0-9.-]/g, ""));
+  if (isNaN(n)) return cbFmt(v);
+  return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+}
+function cbPick(d: Record<string, any>, ...keys: string[]): any {
+  const norm: Record<string, any> = {};
+  for (const k of Object.keys(d || {})) norm[k.toLowerCase().replace(/[^a-z0-9]/g, "")] = d[k];
+  for (const k of keys) {
+    const v = norm[k.toLowerCase().replace(/[^a-z0-9]/g, "")];
+    if (v !== undefined && v !== null && v !== "") return v;
+  }
+  return undefined;
+}
+function cbSection(heading: string, d: Record<string, any>,
+                   specs: [string, string, ((v: any) => string)?][]): CrmSection {
+  const fields: CrmField[] = [];
+  for (const [label, key, fmt] of specs) {
+    const v = cbPick(d, key);
+    if (v !== undefined && v !== null && v !== "") fields.push({ label, value: (fmt || cbFmt)(v) });
+  }
+  return { heading, fields };
+}
+
+function parseCrossbeam(raw: any, item: Recovered): CrossbeamView {
+  const type = item.doc_type || raw?.record_type || "record";
+  const typeLabel = ({ account: "Account", contact: "Contact", opportunity: "Opportunity", overlap: "Overlap" } as Record<string, string>)[type] || "Record";
+  const crm = cbCrmDict(raw);
+  const flat: Record<string, any> = Object.keys(crm).length ? crm : (raw && typeof raw === "object" ? raw : {});
+  const populations: string[] = (raw?.populations || []).map((p: any) => (p && typeof p === "object" ? p.name : p)).filter(Boolean);
+  const ownerObj = raw?.owner;
+  const owner = ownerObj ? { name: ownerObj.owner_name || ownerObj.name, email: ownerObj.owner_email } : undefined;
+  const sections: CrmSection[] = [];
+  let title: any = item.title; let subtitle: string | undefined; let domain: string | undefined; let partner: string | undefined;
+
+  if (type === "account") {
+    title = raw?.record_name || cbPick(crm, "Account Name", "Name") || item.title;
+    domain = raw?.record_website || cbPick(crm, "Account Website", "Website");
+    subtitle = [cbPick(crm, "Industry"), cbPick(crm, "Account Segment", "Segment")].filter(Boolean).join(" · ") || undefined;
+    sections.push(cbSection("Company", crm, [["Industry", "Industry"], ["Segment", "Account Segment"], ["Type", "Account Type"], ["Employees", "Employees"], ["ARR", "ARR", cbMoney], ["Active customer", "Active Customer"], ["Partner status", "Partner Status"], ["Priority", "Priority"]]));
+    sections.push(cbSection("Location", crm, [["Street", "Street"], ["City", "City"], ["State / Province", "State/Province"], ["ZIP / Postal", "Zip/Postal Code"], ["Country", "Country"]]));
+    sections.push(cbSection("Ownership & territory", crm, [["Territory", "Territory Name"], ["Focus / target", "Focus or Target Account?"]]));
+    sections.push(cbSection("Lifecycle", crm, [["Created", "Account Created At"], ["Acquired", "Customer Acquisition Date"]]));
+  } else if (type === "contact") {
+    title = cbPick(flat, "Contact Name", "Name") || [cbPick(flat, "First Name"), cbPick(flat, "Last Name")].filter(Boolean).join(" ") || item.title;
+    subtitle = cbPick(flat, "Contact Title", "Title") || undefined;
+    sections.push(cbSection("Contact", flat, [["Title", "Contact Title"], ["Email", "Contact Email"], ["Phone", "Contact Phone"], ["Account", "Account Name"]]));
+    sections.push(cbSection("Activity", flat, [["Created", "Contact Created At"], ["Last activity", "Contact Last Activity At"]]));
+  } else if (type === "opportunity") {
+    const deal = raw?.deal && typeof raw.deal === "object" ? raw.deal : {};
+    title = cbPick(flat, "Name", "Opportunity Name", "Deal Name") || cbPick(deal, "name", "deal_name") || raw?.record_name || item.title;
+    partner = raw?.partner_name || cbPick(raw?.partner_account || {}, "name");
+    const amount = cbPick(flat, "Amount") ?? cbPick(deal, "amount", "value");
+    const stage = cbPick(flat, "Sales Stage", "Current Stage", "Stage") ?? cbPick(deal, "stage", "stage_name");
+    const close = cbPick(flat, "Close Date") ?? cbPick(deal, "close_date", "closedate");
+    subtitle = [stage != null ? cbFmt(stage) : null, amount != null ? cbMoney(amount) : null].filter(Boolean).join(" · ") || undefined;
+    const acct = cbPick(flat, "Account Name") || raw?.record_name;
+    sections.push({ heading: "Deal", fields: [
+      ...(stage != null ? [{ label: "Stage", value: cbFmt(stage) }] : []),
+      ...(amount != null ? [{ label: "Amount", value: cbMoney(amount) }] : []),
+      ...(close ? [{ label: "Close date", value: cbFmt(close) }] : []),
+      ...(cbPick(flat, "Opportunity Type", "Type") ? [{ label: "Type", value: cbFmt(cbPick(flat, "Opportunity Type", "Type")) }] : []),
+      ...(acct ? [{ label: "Account", value: cbFmt(acct) }] : []),
+      ...(partner ? [{ label: "Partner", value: String(partner) }] : []),
+    ] });
+    domain = raw?.record_domain || raw?.record_website;
+  } else if (type === "overlap") {
+    const record = raw?.record && typeof raw.record === "object" ? raw.record : raw;
+    title = record?.record_name || record?.company_name || record?.name || item.title;
+    partner = raw?.partner_name || cbPick(raw?.partner || {}, "name");
+    subtitle = partner ? `Overlap with ${partner}` : undefined;
+    domain = record?.domain || record?.record_website;
+    sections.push(cbSection("Overlap", raw, [["Partner", "partner_name"], ["Population", "population_name"]]));
+  }
+
+  const all: CrmField[] = [];
+  for (const [k, v] of Object.entries(flat)) {
+    if (v == null || v === "" || typeof v === "object") continue;
+    if (/id$|^record type|deleted/i.test(k)) continue;
+    all.push({ label: k, value: /arr|amount|revenue/i.test(k) ? cbMoney(v) : cbFmt(v) });
+  }
+
+  return { type, typeLabel, title: String(title || typeLabel), subtitle, domain, owner, populations, partner, sections: sections.filter((s) => s.fields.length), all };
+}
+
+const CRM_TYPE_TINT: Record<string, string> = { account: "#4f7cff", contact: "#2dbe60", opportunity: "#f5a623", overlap: "#c56cf0" };
+const CRM_TYPE_ICON: Record<string, IconName> = { account: "database", contact: "user", opportunity: "insights", overlap: "link" };
+
+function CrossbeamCard({ data, title }: { data: CrossbeamView; title: string }) {
+  const [showAll, setShowAll] = useState(false);
+  const tint = CRM_TYPE_TINT[data.type] || "#4f7cff";
+  const cleanDomain = (data.domain || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const href = data.domain ? (data.domain.startsWith("http") ? data.domain : `https://${data.domain}`) : undefined;
+  return (
+    <div style={{ maxHeight: "64vh", overflow: "auto" }}>
+      <div className="row" style={{ gap: 12, alignItems: "center", marginBottom: 14 }}>
+        <div style={{ width: 46, height: 46, borderRadius: 12, display: "grid", placeItems: "center", background: `${tint}22`, color: tint, flexShrink: 0 }}>
+          <Icon name={CRM_TYPE_ICON[data.type] || "database"} size={22} />
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ fontWeight: 700, fontSize: 17, overflowWrap: "anywhere" }}>{data.title || title}</div>
+            <span className="pill" style={{ borderColor: tint, color: tint }}>{data.typeLabel}</span>
+          </div>
+          {data.subtitle && <div className="faint" style={{ fontSize: 12.5 }}>{data.subtitle}</div>}
+          {href && <a href={href} target="_blank" rel="noreferrer" style={{ color: "var(--accent,#4f7cff)", fontSize: 12.5 }}>{cleanDomain}</a>}
+        </div>
+      </div>
+
+      {(data.owner?.name || data.partner) && (
+        <div className="row" style={{ gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
+          {data.owner?.name && (
+            <div className="row" style={{ gap: 6, alignItems: "center" }}>
+              <Icon name="user" size={13} />
+              <span style={{ fontSize: 13 }}>{data.owner.name}</span>
+              {data.owner.email && <a href={`mailto:${data.owner.email}`} className="faint" style={{ fontSize: 12 }}>{data.owner.email}</a>}
+            </div>
+          )}
+          {data.partner && (
+            <div className="row" style={{ gap: 6, alignItems: "center" }}>
+              <Icon name="link" size={13} />
+              <span style={{ fontSize: 13 }}>Partner: {data.partner}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {data.populations.length > 0 && (
+        <div className="row" style={{ gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+          {data.populations.map((p, i) => <span key={i} className="pill" style={{ fontSize: 11 }}>{p}</span>)}
+        </div>
+      )}
+
+      <div style={{ display: "grid", gap: 14 }}>
+        {data.sections.map((s, i) => (
+          <div key={i}>
+            <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>{s.heading}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 8 }}>
+              {s.fields.map((f, j) => (
+                <div key={j} style={{ border: "1px solid var(--border,#22304a)", borderRadius: 8, padding: "8px 10px" }}>
+                  <div className="faint" style={{ fontSize: 10.5 }}>{f.label}</div>
+                  <div style={{ fontSize: 13, overflowWrap: "anywhere" }}>{f.value}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {data.all.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <button className="btn ghost sm" onClick={() => setShowAll((v) => !v)}>
+            {showAll ? "▾" : "▸"} {showAll ? "Hide" : "Show"} all captured fields ({data.all.length})
+          </button>
+          {showAll && (
+            <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: 6 }}>
+              {data.all.map((f, i) => (
+                <div key={i} style={{ fontSize: 12, overflowWrap: "anywhere" }}>
+                  <span className="faint">{f.label}: </span><span>{f.value}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {data.sections.length === 0 && data.all.length === 0 && (
+        <div className="muted" style={{ padding: 8 }}>No structured detail captured for this record.</div>
+      )}
     </div>
   );
 }

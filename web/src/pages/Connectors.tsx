@@ -94,6 +94,7 @@ export default function Connectors() {
   const [photoPicker, setPhotoPicker] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
+  const [icloudConnect, setIcloudConnect] = useState<CatalogItem | null>(null);
 
   async function load() {
     try {
@@ -234,42 +235,9 @@ export default function Connectors() {
     }
     if (c.mode === "token") {
       if (c.type === "icloud") {
-        // Apple's app-specific passwords don't work for iCloud Photos/Drive — sign
-        // in with the real Apple ID password, then a one-time 6-digit 2FA code.
-        const creds = await formDialog({
-          title: `Connect ${c.displayName}`,
-          message: "Sign in with your Apple ID and your real Apple ID password (an app-specific "
-            + "password will NOT work for iCloud Photos/Drive). Apple will then ask you to approve "
-            + "the sign-in on a trusted device and show a 6-digit code.",
-          fields: [
-            { name: "username", label: "Apple ID (email)", required: true },
-            { name: "password", label: "Apple ID password", password: true, required: true },
-            { name: "label", label: "Account label" },
-          ],
-        });
-        if (!creds || !creds.username || !creds.password) return;
-        const label = creds.label?.trim() || creds.username;
-        try {
-          const start = await api.post<{ status: string; pending?: string }>(
-            `/connectors/icloud/start`,
-            { account_label: label, username: creds.username, password: creds.password });
-          if (start.status === "needs_2fa" && start.pending) {
-            const code = await promptDialog({
-              title: "Two-factor verification",
-              message: "Enter the 6-digit code Apple just showed on your trusted device.",
-              placeholder: "123456",
-            });
-            if (!code) return;
-            await api.post(`/connectors/icloud/verify`, { pending: start.pending, code: code.trim() });
-          } else if (start.status !== "linked") {
-            await notify({ title: "Couldn't connect", message: "Unexpected response from iCloud.", tone: "danger" });
-            return;
-          }
-          flash(`${c.displayName} connected`);
-          await load();
-        } catch (e) {
-          await notify({ title: "Couldn't connect", message: (e as ApiError).message, tone: "danger" });
-        }
+        // iCloud needs a real password + a one-time 2FA code — handled in a single
+        // self-contained modal (authenticating → code entry) rather than chained dialogs.
+        setIcloudConnect(c);
         return;
       }
       let result: Record<string, string> | null;
@@ -755,6 +723,14 @@ export default function Connectors() {
         </div>
       )}
 
+      {icloudConnect && (
+        <ICloudConnectModal
+          displayName={icloudConnect.displayName}
+          onClose={() => setIcloudConnect(null)}
+          onLinked={async () => { setIcloudConnect(null); flash(`${icloudConnect.displayName} connected`); await load(); }}
+        />
+      )}
+
       {setup && (
         <Card style={{ marginBottom: 16, borderColor: "var(--warn)" }}>
           <div className="spread" style={{ marginBottom: 8 }}>
@@ -929,5 +905,133 @@ export default function Connectors() {
                           onStarted={() => flash("Photo import started — see Activity")} />
       )}
     </>
+  );
+}
+
+// iCloud sign-in in a SINGLE window: collect the Apple ID + real password, show
+// an "authenticating…" state while Apple pushes a request to the trusted devices,
+// then swap to the 6-digit code entry inline (no chained dialogs).
+function ICloudConnectModal({ displayName, onClose, onLinked }:
+  { displayName: string; onClose: () => void; onLinked: () => Promise<void> | void }) {
+  type Phase = "form" | "authenticating" | "code" | "verifying";
+  const [phase, setPhase] = useState<Phase>("form");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [label, setLabel] = useState("");
+  const [code, setCode] = useState("");
+  const [pending, setPending] = useState("");
+  const [err, setErr] = useState("");
+  const busy = phase === "authenticating" || phase === "verifying";
+
+  async function start() {
+    if (!username.trim() || !password) { setErr("Enter your Apple ID and password."); return; }
+    setErr(""); setPhase("authenticating");
+    try {
+      const r = await api.post<{ status: string; pending?: string }>(`/connectors/icloud/start`,
+        { account_label: label.trim() || username.trim(), username: username.trim(), password });
+      if (r.status === "linked") { await onLinked(); return; }
+      if (r.status === "needs_2fa" && r.pending) { setPending(r.pending); setCode(""); setPhase("code"); return; }
+      setErr("Unexpected response from iCloud."); setPhase("form");
+    } catch (e) { setErr((e as ApiError).message || "Sign-in failed"); setPhase("form"); }
+  }
+
+  async function verify() {
+    const digits = code.replace(/\D/g, "");
+    if (digits.length !== 6) { setErr("Enter the 6-digit code from your Apple device."); return; }
+    setErr(""); setPhase("verifying");
+    try {
+      await api.post(`/connectors/icloud/verify`, { pending, code: digits });
+      await onLinked();
+    } catch (e) { setErr((e as ApiError).message || "That code wasn't accepted"); setPhase("code"); }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={() => { if (!busy) onClose(); }}>
+      <div className="modal-panel" style={{ width: "min(460px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread">
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <div className="result-icon" style={{ background: "var(--inset)", width: 30, height: 30 }}>
+              <BrandIcon name="icloud" size={17} />
+            </div>
+            <h3 style={{ margin: 0 }}>Connect {displayName}</h3>
+          </div>
+          <button className="btn ghost sm" disabled={busy} onClick={onClose}>Close</button>
+        </div>
+
+        <div className="modal-body" style={{ marginTop: 12 }}>
+          {phase === "form" && (
+            <div className="stack" style={{ gap: 10 }}>
+              <div className="faint" style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                Sign in with your Apple ID and your <b>real Apple ID password</b>. An app-specific
+                password will <b>not</b> work for iCloud Photos/Drive.
+              </div>
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="faint" style={{ fontSize: 11.5 }}>Apple ID (email)</span>
+                <input className="input" autoFocus value={username} placeholder="you@icloud.com"
+                       onChange={(e) => setUsername(e.target.value)}
+                       onKeyDown={(e) => e.key === "Enter" && void start()} />
+              </label>
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="faint" style={{ fontSize: 11.5 }}>Apple ID password</span>
+                <input className="input" type="password" value={password}
+                       onChange={(e) => setPassword(e.target.value)}
+                       onKeyDown={(e) => e.key === "Enter" && void start()} />
+              </label>
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="faint" style={{ fontSize: 11.5 }}>Account label (optional)</span>
+                <input className="input" value={label} placeholder="My iCloud"
+                       onChange={(e) => setLabel(e.target.value)}
+                       onKeyDown={(e) => e.key === "Enter" && void start()} />
+              </label>
+              {err && <div style={{ color: "var(--danger)", fontSize: 12.5 }}>{err}</div>}
+              <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+                <button className="btn ghost sm" onClick={onClose}>Cancel</button>
+                <button className="btn primary" onClick={() => void start()}>Continue</button>
+              </div>
+            </div>
+          )}
+
+          {phase === "authenticating" && (
+            <div className="row" style={{ gap: 12, alignItems: "center", padding: "20px 4px" }}>
+              <span className="spinner" />
+              <div className="stack" style={{ gap: 2 }}>
+                <div style={{ fontWeight: 600 }}>Authenticating with iCloud…</div>
+                <div className="faint" style={{ fontSize: 12 }}>Apple is sending a sign-in request to your trusted devices.</div>
+              </div>
+            </div>
+          )}
+
+          {phase === "code" && (
+            <div className="stack" style={{ gap: 10 }}>
+              <div className="faint" style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                A sign-in request was sent to your trusted Apple devices. Approve it — every device shows the
+                {" "}<b>same</b> 6-digit code for this sign-in. Enter that code below.
+              </div>
+              <input className="input" autoFocus inputMode="numeric" maxLength={6} placeholder="123456"
+                     value={code}
+                     onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                     onKeyDown={(e) => e.key === "Enter" && void verify()}
+                     style={{ fontSize: 22, letterSpacing: 6, textAlign: "center" }} />
+              {err && <div style={{ color: "var(--danger)", fontSize: 12.5 }}>{err}</div>}
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+                <button className="btn ghost sm" onClick={() => { setErr(""); setCode(""); setPhase("form"); }}>Start over</button>
+                <button className="btn primary" disabled={code.replace(/\D/g, "").length !== 6} onClick={() => void verify()}>Verify</button>
+              </div>
+              <div className="faint" style={{ fontSize: 11 }}>
+                Seeing a different code on each device usually means more than one sign-in was requested —
+                use <b>Start over</b> to trigger a single fresh code.
+              </div>
+            </div>
+          )}
+
+          {phase === "verifying" && (
+            <div className="row" style={{ gap: 12, alignItems: "center", padding: "20px 4px" }}>
+              <span className="spinner" />
+              <div style={{ fontWeight: 600 }}>Verifying code…</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }

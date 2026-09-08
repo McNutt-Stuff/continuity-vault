@@ -1152,7 +1152,8 @@ def icloud_start_session(username: str, password: str):
 def icloud_verify_2fa(api, code: str) -> bool:
     """Validate a 6-digit 2FA code and persist the trusted session so subsequent
     headless syncs reuse it without another challenge."""
-    if not api.validate_2fa_code((code or "").strip()):
+    digits = re.sub(r"\D", "", code or "")
+    if not api.validate_2fa_code(digits):
         return False
     try:
         if not api.is_trusted_session:
@@ -2441,9 +2442,33 @@ def _cb_first_owner(rec: dict, crm: dict) -> Optional[str]:
     return None
 
 
+def _cb_crm_dict(rec: dict) -> dict:
+    """Crossbeam ``crm_data`` is a LIST of ``{field_name, field_value}`` — flatten
+    it to a plain ``{name: value}`` dict (also passes an already-dict crm_data
+    through). Without this every account field (industry, ARR, city…) is dropped."""
+    crm = (rec or {}).get("crm_data")
+    if isinstance(crm, dict):
+        return crm
+    out: dict = {}
+    if isinstance(crm, list):
+        for f in crm:
+            if isinstance(f, dict):
+                k = f.get("field_name") or f.get("name") or f.get("label")
+                if k is not None:
+                    out[str(k)] = f.get("field_value", f.get("value"))
+    return out
+
+
+def _cb_hash(*parts) -> str:
+    """Stable content hash over DURABLE fields only, so re-syncing the same record
+    (whose raw JSON carries volatile timestamps) doesn't create a new version."""
+    raw = "|".join("" if p is None else str(p) for p in parts)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 def _cb_account(rec: dict, content_cap: int) -> SourceObject:
     """Map a Crossbeam account record (with its crm_data detail) to an Account."""
-    crm = rec.get("crm_data") if isinstance(rec.get("crm_data"), dict) else {}
+    crm = _cb_crm_dict(rec)
     name = (_cb_str(rec.get("record_name")) or _cb_pick(crm, "Account Name", "Name")
             or _cb_str(rec.get("record_website")) or "Account")
     domain = _cb_str(rec.get("record_website")) or _cb_pick(crm, "Account Website", "Website", "domain")
@@ -2473,10 +2498,15 @@ def _cb_account(rec: dict, content_cap: int) -> SourceObject:
                          (domain, meta.get("industry"), meta.get("segment"),
                           meta.get("population"), owner_name) if v)[:200]
     content, _ = _capped(json.dumps(rec).encode(), content_cap)
+    chash = _cb_hash("account", rid, name, domain, meta.get("industry"), meta.get("segment"),
+                     meta.get("type"), meta.get("employees"), meta.get("arr"), meta.get("phone"),
+                     meta.get("city"), meta.get("state"), meta.get("country"),
+                     meta.get("lead_stage"), meta.get("territory"), owner_name, ",".join(pops))
     return SourceObject(
         object_id=f"crossbeam:account:{rid}", doc_type="account", category="crm",
         title=str(name), content=content, preview=preview, meta=meta,
-        labels=["Accounts"] + pops[:3], modified_at=_parse_dt(rec.get("updated_at")))
+        labels=["Accounts"] + pops[:3], content_hash=chash,
+        modified_at=_parse_dt(rec.get("updated_at")))
 
 
 def _cb_classify(items: list) -> Optional[str]:
@@ -2510,10 +2540,11 @@ def _cb_contact_item(it: dict, acct_name, acct_id, content_cap) -> Optional[Sour
     meta = {k: v for k, v in meta.items() if v not in (None, "", [])}
     preview = " · ".join(str(v) for v in (meta.get("title"), email, acct_name) if v)[:200]
     content, _ = _capped(json.dumps(it).encode(), content_cap)
+    chash = _cb_hash("contact", cid, name, email, meta.get("title"), meta.get("phone"), acct_name)
     return SourceObject(
         object_id=f"crossbeam:contact:{cid}", doc_type="contact", category="crm",
         title=str(name).strip(), content=content, preview=preview, meta=meta,
-        labels=["Contacts"] + ([acct_name] if acct_name else []),
+        labels=["Contacts"] + ([acct_name] if acct_name else []), content_hash=chash,
         modified_at=_parse_dt(_cb_pick(it, "Contact Last Activity At", "Contact Created At")))
 
 
@@ -2537,36 +2568,46 @@ def _cb_opportunity_item(it: dict, acct_name, acct_id, content_cap) -> Optional[
     meta = {k: v for k, v in meta.items() if v not in (None, "", [])}
     preview = " · ".join(str(v) for v in (acct_name, stage, amount) if v)[:200]
     content, _ = _capped(json.dumps(it).encode(), content_cap)
+    chash = _cb_hash("opp", oid, name, stage, amount, meta.get("close_date"),
+                     meta.get("type"), meta.get("products"), acct_name)
     return SourceObject(
         object_id=f"crossbeam:opportunity:{oid}", doc_type="opportunity", category="crm",
         title=str(name), content=content, preview=preview, meta=meta,
-        labels=["Opportunities"] + ([acct_name] if acct_name else []),
+        labels=["Opportunities"] + ([acct_name] if acct_name else []), content_hash=chash,
         modified_at=_parse_dt(_cb_pick(it, "Close Date", "Open Date")))
 
 
 def _cb_account_children(rec: dict, acct_name, acct_id, options, content_cap):
-    """Yield the contacts and opportunities nested inside an account's crm_data,
-    each linked to the account. Robust to the exact array key names — arrays are
-    classified by their item fields, so it's a no-op when none are present."""
-    crm = rec.get("crm_data") if isinstance(rec.get("crm_data"), dict) else {}
+    """Yield the contacts and opportunities nested inside an account (if any),
+    each linked to the account. Robust to shape: scans list-valued crm_data fields
+    AND top-level record arrays, classifying each by its item fields — a safe
+    no-op for plain accounts (crm_data is usually flat field/value pairs)."""
     seen: set = set()
-    for container in (crm, rec):
-        for v in container.values():
-            if not isinstance(v, list) or not v or not isinstance(v[0], dict):
-                continue
-            kind = _cb_classify(v)
-            if kind == "contact" and _want(options, "contacts"):
-                for it in v:
-                    obj = _cb_contact_item(it, acct_name, acct_id, content_cap)
-                    if obj and obj.object_id not in seen:
-                        seen.add(obj.object_id)
-                        yield obj
-            elif kind == "opportunity" and _want(options, "opportunities"):
-                for it in v:
-                    obj = _cb_opportunity_item(it, acct_name, acct_id, content_cap)
-                    if obj and obj.object_id not in seen:
-                        seen.add(obj.object_id)
-                        yield obj
+    candidates: list = []
+    raw = rec.get("crm_data")
+    if isinstance(raw, list):
+        for f in raw:
+            if isinstance(f, dict) and isinstance(f.get("field_value"), list):
+                candidates.append(f["field_value"])
+    elif isinstance(raw, dict):
+        candidates.extend(v for v in raw.values() if isinstance(v, list))
+    candidates.extend(v for v in rec.values() if isinstance(v, list))
+    for v in candidates:
+        if not v or not isinstance(v[0], dict):
+            continue
+        kind = _cb_classify(v)
+        if kind == "contact" and _want(options, "contacts"):
+            for it in v:
+                obj = _cb_contact_item(it, acct_name, acct_id, content_cap)
+                if obj and obj.object_id not in seen:
+                    seen.add(obj.object_id)
+                    yield obj
+        elif kind == "opportunity" and _want(options, "opportunities"):
+            for it in v:
+                obj = _cb_opportunity_item(it, acct_name, acct_id, content_cap)
+                if obj and obj.object_id not in seen:
+                    seen.add(obj.object_id)
+                    yield obj
 
 
 def _cb_opportunity(rec: dict, content_cap: int) -> SourceObject:
@@ -2611,10 +2652,12 @@ def _cb_opportunity(rec: dict, content_cap: int) -> SourceObject:
     preview = " · ".join(str(v) for v in (account, partner, stage, amount) if v)[:200]
     content, _ = _capped(json.dumps(rec).encode(), content_cap)
     labels = ["Opportunities"] + ([account] if account else []) + ([partner] if partner else [])
+    chash = _cb_hash("opp-signal", rid, account, partner, deal_name, stage, amount,
+                     meta.get("close_date"))
     return SourceObject(
         object_id=f"crossbeam:opportunity:{rid}",
         doc_type="opportunity", category="crm", title=title,
-        content=content, preview=preview, meta=meta, labels=labels,
+        content=content, preview=preview, meta=meta, labels=labels, content_hash=chash,
         modified_at=_parse_dt(rec.get("triggered_at") or rec.get("updated_at")))
 
 
@@ -2671,7 +2714,7 @@ def fetch_crossbeam(config: dict, content_cap: int = _DEFAULT_CAP,
         want_opps = _want(options, "opportunities")
         if want_acct or want_contacts or want_opps:
             for rec in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/records/accounts", headers):
-                crm = rec.get("crm_data") if isinstance(rec.get("crm_data"), dict) else {}
+                crm = _cb_crm_dict(rec)
                 acct_name = _cb_str(rec.get("record_name")) or _cb_pick(crm, "Account Name", "Name")
                 acct_id = (rec.get("record_id") or _cb_pick(crm, "Account ID")
                            or rec.get("crossbeam_record_id"))
@@ -2694,21 +2737,28 @@ def fetch_crossbeam(config: dict, content_cap: int = _DEFAULT_CAP,
                                            headers, optional=True):
                     partner = ov.get("partner_name") or (ov.get("partner") or {}).get("name")
                     rec = ov.get("record") if isinstance(ov.get("record"), dict) else ov
-                    name = (rec.get("company_name") or rec.get("name")
-                            or rec.get("full_name") or "Overlap")
-                    oid = ov.get("id") or ov.get("uuid") or f"{name}:{partner}"
+                    ocrm = _cb_crm_dict(rec)
+                    name = (rec.get("record_name") or rec.get("company_name") or rec.get("name")
+                            or rec.get("full_name") or _cb_pick(ocrm, "Account Name", "Name")
+                            or _cb_name(rec) or "Overlap")
+                    # Unique per (record, partner) — the old fallback collapsed every
+                    # overlap onto one id (e.g. crossbeam:overlap:Overlap:Netskope).
+                    pid = ov.get("partner_id") or (ov.get("partner") or {}).get("id") or partner
+                    rid = (rec.get("crossbeam_record_id") or rec.get("record_id")
+                           or ov.get("id") or ov.get("uuid") or name)
+                    oid = f"{rid}:{pid}"
+                    domain = rec.get("domain") or rec.get("record_website") or _cb_pick(ocrm, "Account Website", "Website")
+                    pop = ov.get("population_name") or ov.get("population")
                     title = f"{name} ↔ {partner}" if partner else str(name)
                     yield SourceObject(
                         object_id=f"crossbeam:overlap:{oid}",
                         doc_type="overlap", category="crm", title=title,
                         content=json.dumps(ov).encode(),
-                        preview=" · ".join(str(v) for v in
-                                           (partner, rec.get("domain"),
-                                            ov.get("population_name")) if v)[:200],
+                        preview=" · ".join(str(v) for v in (partner, domain, pop) if v)[:200],
                         meta={"record_type": "overlap", "partner": partner,
-                              "population": ov.get("population_name"),
-                              "domain": rec.get("domain"), "kind": "overlap"},
+                              "population": pop, "domain": domain, "kind": "overlap"},
                         labels=["Overlaps", path.title()],
+                        content_hash=_cb_hash("overlap", oid, partner, name, domain, pop),
                         modified_at=_parse_dt(ov.get("updated_at")))
 
         if _want(options, "reports"):
