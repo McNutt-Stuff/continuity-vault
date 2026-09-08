@@ -214,7 +214,7 @@ def _sync_fleet_secrets(s, bundle: dict) -> None:
     have_signer = ""
     try:
         from .. import fleet
-        have_signer = fleet.signer_key_id()
+        have_signer = fleet.signer_fingerprint()
     except Exception:  # noqa: BLE001
         have_signer = ""
     if want_kek == have_kek and want_sess == have_sess and want_signer == have_signer:

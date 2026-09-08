@@ -11,6 +11,7 @@ time so they can verify every command locally (spec 5.1).
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -78,6 +79,17 @@ def signer_key_id() -> str:
     return fleet_signer().key_id
 
 
+def signer_fingerprint() -> str:
+    """Fingerprint of the signer's PUBLIC KEY MATERIAL. The cosmetic ``key_id`` is
+    the fixed label 'cloud-control-plane' on every box, so it CANNOT tell two
+    different signing keys apart — a node compared key_ids, always 'matched', and
+    so never adopted the control plane's key while still signing appliance
+    commands with its own (rejected). This hashes the actual public keys so a
+    real key difference is detected."""
+    s = fleet_signer()
+    return hashlib.sha256(bytes(s.classical_pub) + bytes(s.pq_pub)).hexdigest()[:16]
+
+
 def export_signer_secret() -> dict:
     """The FULL private fleet-signer bundle, for distribution to customer-tenant
     nodes so every box signs appliance commands with the SAME key. Without this a
@@ -98,13 +110,18 @@ def export_signer_secret() -> dict:
 def import_signer_secret(bundle: dict) -> bool:
     """Adopt the control plane's fleet signer (persist to the local signer path +
     reset the cached signer so the next sign/verify uses it). Returns True if it
-    changed. Idempotent — a no-op once the node already holds the CP's key."""
+    changed. Compares PUBLIC-KEY FINGERPRINTS (not the fixed 'cloud-control-plane'
+    key_id label), so a node actually adopts the CP's key instead of falsely
+    concluding it already matches. Idempotent once the node holds the CP's key."""
     global _FLEET_SIGNER
-    if not bundle or not bundle.get("keyId"):
+    if not bundle or not bundle.get("classicalPub") or not bundle.get("pqPub"):
         return False
     try:
-        if fleet_signer().key_id == bundle["keyId"]:
-            return False
+        incoming_fp = hashlib.sha256(
+            base64.b64decode(bundle["classicalPub"]) + base64.b64decode(bundle["pqPub"])
+        ).hexdigest()[:16]
+        if signer_fingerprint() == incoming_fp:
+            return False  # already hold this exact key
     except Exception:  # noqa: BLE001
         pass
     _SIGNER_PATH.write_text(json.dumps(bundle))

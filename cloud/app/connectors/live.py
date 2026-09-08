@@ -129,11 +129,35 @@ def _gmail_message(c: httpx.Client, headers: dict, mid: str,
                    cap: int = _DEFAULT_CAP) -> Optional[SourceObject]:
     # format=raw returns the full RFC822 message (body + attachments) plus
     # labelIds/snippet — the actual content we back up, not just metadata.
-    r = c.get(f"{GMAIL}/messages/{mid}", headers=headers, params={"format": "raw"})
-    if r.status_code == 404:
-        return None  # deleted between listing and fetch
-    r.raise_for_status()
-    m = r.json()
+    import time
+    m = None
+    for attempt in range(3):
+        r = c.get(f"{GMAIL}/messages/{mid}", headers=headers, params={"format": "raw"})
+        if r.status_code == 404:
+            return None  # deleted between listing and fetch
+        if r.status_code == 403:
+            # A 403 on ONE message must not abort the whole (back)fill. Gmail's
+            # per-user rate limit surfaces as a 403 (rate/quota reason) — back off
+            # and retry; a genuinely restricted message (confidential mode, admin
+            # policy) is skipped. Only true auth failures are 401 (raised below).
+            reason = ""
+            try:
+                reason = (((r.json().get("error") or {}).get("errors") or [{}])[0]
+                          .get("reason", ""))
+            except Exception:  # noqa: BLE001
+                reason = ""
+            if reason in ("rateLimitExceeded", "userRateLimitExceeded",
+                          "quotaExceeded") and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            logger.warning("gmail message %s skipped (HTTP 403 %s)", mid,
+                           reason or "forbidden")
+            return None
+        r.raise_for_status()
+        m = r.json()
+        break
+    if m is None:
+        return None
     raw_b64 = m.get("raw", "")
     raw = base64.urlsafe_b64decode(raw_b64 + "===") if raw_b64 else b""
     parsed = message_from_bytes(raw) if raw else None
@@ -1170,10 +1194,16 @@ def icloud_start_session(username: str, password: str):
             n_devices = len(api.trusted_devices or [])
         except Exception:  # noqa: BLE001
             n_devices = -1
-        logger.info("iCloud 2FA for %s: request_2fa_code=%s method=%s devices=%s "
-                    "trusted_session=%s", username, delivered,
+        try:
+            from importlib.metadata import version as _pkgver
+            pyv = _pkgver("pyicloud")
+        except Exception:  # noqa: BLE001
+            pyv = "?"
+        auth_keys = sorted((getattr(api, "_auth_data", {}) or {}).keys())[:25]
+        logger.info("iCloud 2FA for %s: pyicloud=%s request_2fa_code=%s method=%s "
+                    "devices=%s trusted_session=%s auth_keys=%s", username, pyv, delivered,
                     getattr(api, "two_factor_delivery_method", "?"), n_devices,
-                    getattr(api, "is_trusted_session", None))
+                    getattr(api, "is_trusted_session", None), auth_keys)
         return "needs_2fa", api
     if getattr(api, "requires_2sa", False):
         return "needs_2sa", api

@@ -92,7 +92,7 @@ def _fleet_crypto_secrets() -> dict:
     return {"kek": kek, "session_secret": sess,
             "signer": fleet.export_signer_secret(),
             "kek_fp": _fp(kek), "session_fp": _fp(sess),
-            "signer_fp": fleet.signer_key_id()}
+            "signer_fp": fleet.signer_fingerprint()}
 
 
 class FleetIdent(BaseModel):
@@ -256,7 +256,7 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         # on a mismatch, so it self-aligns without a hand-set CV_KEK_SECRET.
         "fleet_key_fp": _fp(os.environ.get("CV_KEK_SECRET", "dev-kek")),
         "session_key_fp": _fp(get_settings().session_secret),
-        "signer_fp": fleet.signer_key_id(),
+        "signer_fp": fleet.signer_fingerprint(),
     }
 
 
