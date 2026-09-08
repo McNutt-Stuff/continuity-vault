@@ -207,17 +207,12 @@ def ensure_backfill_running(db: Session, collection: Collection) -> Optional[Syn
                         collection.name, collection.source_type, completed)
         else:
             return None
-    # Back-compat (first-ever pass only): a legacy account whose delta cursor is
-    # already established (old full backup completed) is treated as fully
-    # backfilled — don't re-crawl it. Never applies to a re-scan reset (which has
-    # a prior completion timestamp).
-    if (acct.backfill_cursor is None and acct.backfill_completed_at is None
-            and acct.backfill_started_at is None):
-        old = acct.sync_cursor if isinstance(acct.sync_cursor, dict) else {}
-        if old.get("history_id") and not old.get("has_more"):
-            acct.backfill_done = True
-            db.commit()
-            return None
+    # NOTE: no "already backfilled" heuristic here. A dual-track source's RECENT
+    # track records a delta watermark (e.g. Gmail's historyId) on its very first
+    # run WITHOUT ingesting any history, so inferring "done" from the presence of
+    # a delta cursor wrongly skipped the deep crawl and left old mail uncaptured.
+    # The backfill crawl is idempotent (content-hash dedup no-ops already-captured
+    # items), so we always run it to completion at least once.
     # One backfill batch at a time per source, paced between batches so the deep
     # crawl balances with the recent track and respects provider rate limits.
     recent = (db.query(SyncJob)

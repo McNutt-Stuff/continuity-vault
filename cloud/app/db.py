@@ -228,6 +228,13 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE connector_accounts ADD COLUMN backfill_completed_at TIMESTAMP",
         "ALTER TABLE connector_accounts ADD COLUMN backfill_count INTEGER DEFAULT 0",
         "ALTER TABLE connector_accounts ADD COLUMN fail_count INTEGER DEFAULT 0",
+        # Repair accounts a since-removed heuristic wrongly flagged backfill_done
+        # (a dual-track source's recent watermark was mistaken for full-history
+        # coverage) — reset those that never actually ran a backfill so the deep
+        # crawl runs. Idempotent: a real backfill has a count/started/completed.
+        "UPDATE connector_accounts SET backfill_done = false "
+        "WHERE backfill_done = true AND COALESCE(backfill_count, 0) = 0 "
+        "AND backfill_started_at IS NULL AND backfill_completed_at IS NULL",
         "ALTER TABLE source_configs ADD COLUMN backfill_enabled BOOLEAN DEFAULT false",
         "ALTER TABLE integration_instances ADD COLUMN provision_state VARCHAR DEFAULT 'idle'",
         "ALTER TABLE integration_instances ADD COLUMN provision_message TEXT",
