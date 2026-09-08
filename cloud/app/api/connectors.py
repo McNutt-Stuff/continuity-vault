@@ -94,7 +94,7 @@ def _setup_instructions(connector_type: str) -> list[str]:
         return [
             "Use your Apple ID email and your REAL Apple ID password — Apple does NOT accept an app-specific password for iCloud Photos/Drive.",
             "In Sources → iCloud, enter your Apple ID and password and click Connect.",
-            "Apple shows a 6-digit verification code on a trusted device (iPhone/Mac) — enter it when prompted.",
+            "Apple sends a 6-digit code by text to your trusted phone (or shows it on a trusted device) — enter it when prompted.",
             "Pick what to back up (Photos, iCloud Drive, Contacts); for Drive, browse and select folders.",
             "Note: Apple expires the trusted session about every 2 months — reconnect and re-verify when that happens.",
         ]

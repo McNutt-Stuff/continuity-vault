@@ -804,8 +804,9 @@ _SOURCE_PAGES = [
         ["Open **Sources → iCloud** and enter your **Apple ID email** and your **real Apple ID "
          "password**. (An **app-specific password does not work** for iCloud Photos/Drive — "
          "Apple only accepts your main password here.)",
-         "Apple shows a **6-digit verification code** on one of your trusted devices (iPhone, "
-         "iPad or Mac) — type it in when Arkive prompts you.",
+         "Apple sends a **6-digit verification code** — check your **text messages** (Apple "
+         "texts the code to your trusted phone number), or the sign-in prompt on a trusted "
+         "device (iPhone, iPad or Mac) — type it in when Arkive prompts you.",
          "Choose which of **Photos**, **iCloud Drive** and **Contacts** to include.",
          "For iCloud Drive, use the **folder navigator** to pick the folders to back up — "
          "leave it empty to capture the whole Drive.",

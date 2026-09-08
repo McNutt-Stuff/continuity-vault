@@ -249,7 +249,7 @@ function StepSources({ me, stepUp, onNext, onBack }:
         if (start.status === "needs_2fa" && start.pending) {
           const code = await promptDialog({
             title: "Two-factor verification",
-            message: "Enter the 6-digit code Apple just showed on your trusted device.",
+            message: "Enter the 6-digit code Apple just sent by text (or showed on your trusted device).",
             placeholder: "123456",
           });
           if (!code) return;

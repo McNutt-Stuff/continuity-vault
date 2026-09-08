@@ -996,7 +996,7 @@ function ICloudConnectModal({ displayName, onClose, onLinked }:
               <span className="spinner" />
               <div className="stack" style={{ gap: 2 }}>
                 <div style={{ fontWeight: 600 }}>Authenticating with iCloud…</div>
-                <div className="faint" style={{ fontSize: 12 }}>Apple is sending a sign-in request to your trusted devices.</div>
+                <div className="faint" style={{ fontSize: 12 }}>Apple is sending a verification code to your phone or trusted devices.</div>
               </div>
             </div>
           )}
@@ -1004,8 +1004,8 @@ function ICloudConnectModal({ displayName, onClose, onLinked }:
           {phase === "code" && (
             <div className="stack" style={{ gap: 10 }}>
               <div className="faint" style={{ fontSize: 12.5, lineHeight: 1.5 }}>
-                A sign-in request was sent to your trusted Apple devices. Approve it — every device shows the
-                {" "}<b>same</b> 6-digit code for this sign-in. Enter that code below.
+                Apple sent a 6-digit verification code — check your <b>text messages</b> (or the
+                sign-in prompt on your trusted Apple devices). Enter that code below.
               </div>
               <input className="input" autoFocus inputMode="numeric" maxLength={6} placeholder="123456"
                      value={code}
