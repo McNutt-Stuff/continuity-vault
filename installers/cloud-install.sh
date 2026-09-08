@@ -225,7 +225,10 @@ build_site() {
 
 validate_app() {
   # Import the app in a throwaway environment so import/route errors surface
-  # here with a full traceback, before the service is started.
+  # here with a full traceback, before the service is started. Also import the
+  # connector deps that the app loads LAZILY (pyicloud) — otherwise a failed/
+  # skipped dependency install passes this check and the break only shows up when
+  # a user tries to connect that source.
   cd "$INSTALL_DIR/cloud"
   CV_DATABASE_URL="sqlite:////tmp/cv_probe.db" \
   CV_SEED_DEMO_DATA=false \
@@ -233,7 +236,7 @@ validate_app() {
   CV_OBJECT_STORE=/tmp/cv_probe_obj \
   CV_FLEET_SIGNER=/tmp/cv_probe_signer.json \
   OQS_INSTALL_PATH="$OQS_PREFIX" \
-    "$INSTALL_DIR/.venv/bin/python" -c "import app.main; print('app import OK:', len(app.main.app.routes), 'routes')"
+    "$INSTALL_DIR/.venv/bin/python" -c "import app.main; import pyicloud; print('app import OK:', len(app.main.app.routes), 'routes; pyicloud', __import__('importlib.metadata', fromlist=['version']).version('pyicloud'))"
   rm -rf /tmp/cv_probe.db /tmp/cv_probe_keys /tmp/cv_probe_obj /tmp/cv_probe_signer.json
 }
 
