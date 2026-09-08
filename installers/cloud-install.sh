@@ -169,7 +169,10 @@ setup_node_control() {
   # admin node console can restart/stop services and stream logs (scoped, no pw).
   local f=/etc/sudoers.d/cv-cloud
   : > "$f"
-  for u in cv-cloud postgresql caddy cv-node-heartbeat.timer cv-backup.timer cv-backup.service cv-node-update.timer cv-cloud-update.timer; do
+  # NOTE: include the *.service update units, not just their timers — the admin
+  # "Update" button (sysinfo.control) runs `systemctl start cv-node-update.service`
+  # (or cv-cloud-update.service on the CP), so those must be whitelisted too.
+  for u in cv-cloud postgresql caddy cv-node-heartbeat.timer cv-backup.timer cv-backup.service cv-node-update.timer cv-node-update.service cv-cloud-update.timer cv-cloud-update.service; do
     for a in start stop restart enable disable; do
       echo "${CV_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl ${a} ${u}" >> "$f"
     done

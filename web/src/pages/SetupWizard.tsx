@@ -6,7 +6,7 @@ import { Icon, IconName } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { DestIcon } from "../components/DestIcon";
-import { notify, formDialog } from "../components/dialog";
+import { notify, formDialog, promptDialog } from "../components/dialog";
 import { AddStorageModal, ProviderSpec } from "./CloudStorage";
 
 // ---- Shared types (loose; the wizard reuses the platform's own endpoints) --
@@ -229,14 +229,42 @@ function StepSources({ me, stepUp, onNext, onBack }:
       return;
     }
     // Token-based sources (iCloud, 1Password Connect, generic token).
-    let fields: { name: string; label: string; password?: boolean; required?: boolean; placeholder?: string; defaultValue?: string }[];
     if (c.type === "icloud") {
-      fields = [
-        { name: "username", label: "Apple ID (email)", required: true },
-        { name: "token", label: "App-specific password", placeholder: "xxxx-xxxx-xxxx-xxxx", password: true, required: true },
-        { name: "label", label: "Account label", defaultValue: `My ${c.displayName}` },
-      ];
-    } else if (c.type === "onepassword") {
+      // Real Apple ID password + one-time 2FA code (app-specific passwords don't work for Photos/Drive).
+      const creds = await formDialog({
+        title: `Connect ${c.displayName}`, confirmLabel: "Connect",
+        message: "Sign in with your Apple ID and your real Apple ID password (an app-specific password "
+          + "will NOT work for iCloud Photos/Drive). Apple will show a 6-digit code on a trusted device.",
+        fields: [
+          { name: "username", label: "Apple ID (email)", required: true },
+          { name: "password", label: "Apple ID password", password: true, required: true },
+          { name: "label", label: "Account label", defaultValue: `My ${c.displayName}` },
+        ],
+      });
+      if (!creds || !creds.username || !creds.password) return;
+      try {
+        const start = await api.post<{ status: string; pending?: string }>(
+          `/connectors/icloud/start`,
+          { account_label: creds.label?.trim() || creds.username, username: creds.username, password: creds.password });
+        if (start.status === "needs_2fa" && start.pending) {
+          const code = await promptDialog({
+            title: "Two-factor verification",
+            message: "Enter the 6-digit code Apple just showed on your trusted device.",
+            placeholder: "123456",
+          });
+          if (!code) return;
+          await api.post(`/connectors/icloud/verify`, { pending: start.pending, code: code.trim() });
+        } else if (start.status !== "linked") {
+          await notify({ title: "Couldn't connect", message: "Unexpected response from iCloud.", tone: "danger" });
+          return;
+        }
+        await load();
+        await notify({ title: "Connected", message: `${c.displayName} is linked.`, tone: "ok" });
+      } catch (e) { await notify({ title: "Couldn't connect", message: (e as ApiError).message, tone: "danger" }); }
+      return;
+    }
+    let fields: { name: string; label: string; password?: boolean; required?: boolean; placeholder?: string; defaultValue?: string }[];
+    if (c.type === "onepassword") {
       fields = [
         { name: "host", label: "Connect server URL", placeholder: "https://connect.example.com", required: true },
         { name: "token", label: "Connect token", password: true, required: true },

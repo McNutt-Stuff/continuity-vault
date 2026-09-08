@@ -233,6 +233,45 @@ export default function Connectors() {
       return;
     }
     if (c.mode === "token") {
+      if (c.type === "icloud") {
+        // Apple's app-specific passwords don't work for iCloud Photos/Drive — sign
+        // in with the real Apple ID password, then a one-time 6-digit 2FA code.
+        const creds = await formDialog({
+          title: `Connect ${c.displayName}`,
+          message: "Sign in with your Apple ID and your real Apple ID password (an app-specific "
+            + "password will NOT work for iCloud Photos/Drive). Apple will then ask you to approve "
+            + "the sign-in on a trusted device and show a 6-digit code.",
+          fields: [
+            { name: "username", label: "Apple ID (email)", required: true },
+            { name: "password", label: "Apple ID password", password: true, required: true },
+            { name: "label", label: "Account label" },
+          ],
+        });
+        if (!creds || !creds.username || !creds.password) return;
+        const label = creds.label?.trim() || creds.username;
+        try {
+          const start = await api.post<{ status: string; pending?: string }>(
+            `/connectors/icloud/start`,
+            { account_label: label, username: creds.username, password: creds.password });
+          if (start.status === "needs_2fa" && start.pending) {
+            const code = await promptDialog({
+              title: "Two-factor verification",
+              message: "Enter the 6-digit code Apple just showed on your trusted device.",
+              placeholder: "123456",
+            });
+            if (!code) return;
+            await api.post(`/connectors/icloud/verify`, { pending: start.pending, code: code.trim() });
+          } else if (start.status !== "linked") {
+            await notify({ title: "Couldn't connect", message: "Unexpected response from iCloud.", tone: "danger" });
+            return;
+          }
+          flash(`${c.displayName} connected`);
+          await load();
+        } catch (e) {
+          await notify({ title: "Couldn't connect", message: (e as ApiError).message, tone: "danger" });
+        }
+        return;
+      }
       let result: Record<string, string> | null;
       if (c.type === "onepassword") {
         result = await formDialog({
@@ -242,18 +281,6 @@ export default function Connectors() {
             { name: "host", label: "Connect server URL (host)", placeholder: "https://connect.example.com", required: true },
             { name: "token", label: "Connect token", password: true, required: true },
             { name: "label", label: "Account label", defaultValue: `My ${c.displayName}` },
-          ],
-        });
-      } else if (c.type === "icloud") {
-        result = await formDialog({
-          title: `Connect ${c.displayName}`,
-          message: "Apple requires an app-specific password (your normal Apple ID password won't work). "
-            + "At appleid.apple.com → Sign-In & Security → App-Specific Passwords, generate one named "
-            + "\"Arkive\", then paste it below with your Apple ID email.",
-          fields: [
-            { name: "username", label: "Apple ID (email)", required: true },
-            { name: "token", label: "App-specific password", placeholder: "xxxx-xxxx-xxxx-xxxx", password: true, required: true },
-            { name: "label", label: "Account label" },
           ],
         });
       } else {

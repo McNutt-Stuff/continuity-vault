@@ -797,35 +797,33 @@ _SOURCE_PAGES = [
          "Browsable folder selection; large drives back-fill over time."]),
     _source_doc(
         "source-icloud", "iCloud", "cloud", 62,
-        "Back up iCloud photos, files and contacts with an app-specific password.",
+        "Back up iCloud photos, files and contacts by signing in with your Apple ID.",
         "iCloud Photos, iCloud Drive files (whole folders, browsed and selected in the Data "
-        "Map) and your contacts. Because Apple has no OAuth for this, you connect with an "
-        "**app-specific password**. Every sync captures your entire library, Drive and address "
+        "Map) and your contacts. Every sync captures your entire library, Drive and address "
         "book, so a single backup is a complete backfill.",
-        ["**Create an app-specific password.** Sign in at **appleid.apple.com** → "
-         "**Sign-In & Security** → **App-Specific Passwords**. Click **+** / **Generate "
-         "an app-specific password**, name it **Arkive**, confirm your Apple ID password, "
-         "and copy the generated `xxxx-xxxx-xxxx-xxxx` password.",
-         "Open **Sources → iCloud** and enter your **Apple ID email** and that **app-specific "
-         "password** (not your normal Apple ID password).",
+        ["Open **Sources → iCloud** and enter your **Apple ID email** and your **real Apple ID "
+         "password**. (An **app-specific password does not work** for iCloud Photos/Drive — "
+         "Apple only accepts your main password here.)",
+         "Apple shows a **6-digit verification code** on one of your trusted devices (iPhone, "
+         "iPad or Mac) — type it in when Arkive prompts you.",
          "Choose which of **Photos**, **iCloud Drive** and **Contacts** to include.",
-         "For iCloud Drive, use the **folder navigator** to select the folders to back up — "
+         "For iCloud Drive, use the **folder navigator** to pick the folders to back up — "
          "leave it empty to capture the whole Drive.",
          "The first backup starts once connected and pulls your full history."],
         ["**Images / Video & Audio** — iCloud Photos (`photo`, `video`).",
          "**Files / Documents** — iCloud Drive content by type, with its full folder path.",
          "**Contacts** — each contact as `person`."],
-        ["You **must** use an app-specific password — your main Apple ID password will be "
-         "rejected, and Apple requires two-factor authentication to be enabled before you can "
-         "create one.",
-         "Accounts that force an interactive 2FA approval on every login can't be synced "
-         "unattended — an app-specific password avoids that prompt.",
+        ["Sign in with your **real Apple ID password**, not an app-specific password — Apple's "
+         "app-specific passwords are rejected by the iCloud Photos/Drive service.",
+         "After you enter the 6-digit code, Arkive keeps a **trusted session** and syncs "
+         "unattended. Apple expires that session about **every 2 months** — when it does, the "
+         "source shows *needs reconnect*; just reconnect and enter a fresh code.",
          "Every run is a full backfill (iCloud has no change feed), so re-running catches "
          "everything added since; unchanged items are de-duplicated automatically.",
          "Pick photos / files / contacts independently, and browse & select Drive folders, in "
          "the Data Map.",
-         "If a password stops working (e.g. you changed your Apple ID password, which revokes "
-         "all app-specific passwords), generate a new one and reconnect."]),
+         "iMessage and other Messages content isn't exposed by any iCloud API and can't be "
+         "captured here."]),
     _source_doc(
         "source-endpoint-files", "Endpoint Files", "file", 64,
         "Back up folders on your computer, external drives and network shares.",

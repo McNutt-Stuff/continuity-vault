@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
@@ -1074,33 +1075,91 @@ def stream_drive(access_token: str, cursor=None, config: Optional[dict] = None,
 
 
 
-def _icloud_login(username: str, password: str):
-    """Authenticate to iCloud via pyicloud, raising a clear, actionable error.
+_ICLOUD_COOKIE_ROOT = os.path.join(
+    os.path.dirname(os.environ.get("CV_KEY_STORE", "./cv_keystore").rstrip("/")) or ".",
+    "icloud-sessions")
 
-    Shared by the sync pull and the folder navigator so both fail identically
-    (needs an app-specific password; interactive-2FA accounts can't sync)."""
+
+def _icloud_cookie_dir(username: str) -> str:
+    """Stable, per-Apple-ID cookie directory so a trusted 2FA session persists
+    across syncs (and process restarts) instead of re-challenging every run."""
+    key = hashlib.sha256((username or "").strip().lower().encode()).hexdigest()[:20]
+    d = os.path.join(_ICLOUD_COOKIE_ROOT, key)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        return ""  # let pyicloud fall back to its default cookie location
+    return d
+
+
+def _icloud_service(username: str, password: str):
+    """Instantiate PyiCloudService against a persistent cookie directory so a
+    previously-trusted session is reused. May return an ``api`` whose
+    ``requires_2fa`` is True (caller decides whether it can prompt for a code)."""
     try:
         from pyicloud import PyiCloudService  # optional dependency
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            "pyicloud is not installed on this server — run 'pip install pyicloud' "
-            "so iCloud can be backed up.") from exc
+            "pyicloud is not installed on this server — it ships in "
+            "cloud/requirements.txt; redeploy so iCloud can be backed up.") from exc
+    user = (username or "").strip()
+    pw = (password or "").strip()
+    cookie_dir = _icloud_cookie_dir(user)
     try:
-        api = PyiCloudService(username, password)
+        if cookie_dir:
+            return PyiCloudService(user, pw, cookie_directory=cookie_dir)
+        return PyiCloudService(user, pw)
     except Exception as exc:  # noqa: BLE001
         detail = (str(exc).strip() or exc.__class__.__name__)
-        logger.warning("iCloud auth failed for %s: %s", username, detail)
+        logger.warning("iCloud sign-in failed for %s: %s", user, detail)
+        # NOTE: Apple app-specific passwords are NOT accepted by the iCloud web
+        # services (Photos / Drive) that pyicloud uses — only the real Apple ID
+        # password works, followed by a one-time two-factor approval.
         raise PermissionError(
-            f"iCloud authentication failed: {detail}. iCloud needs an app-specific "
-            f"password (appleid.apple.com → Sign-In & Security → App-Specific "
-            f"Passwords) and can't sign in to an account with interactive "
-            f"two-factor prompts.") from exc
+            f"iCloud sign-in failed: {detail}. Use your Apple ID and your real "
+            f"Apple ID password — an app-specific password is NOT accepted for "
+            f"iCloud Photos/Drive. Reconnect and approve the two-factor prompt on "
+            f"a trusted Apple device, then enter the 6-digit code.") from exc
+
+
+def _icloud_login(username: str, password: str):
+    """A signed-in, TRUSTED iCloud session for headless pull/browse. Reuses the
+    persisted session cookie; if Apple now requires a fresh two-factor code
+    (trusted sessions expire ~every 2 months) this raises a needs-reauth error so
+    the source is flagged and the operator can reconnect + re-verify."""
+    api = _icloud_service(username, password)
     if getattr(api, "requires_2fa", False) or getattr(api, "requires_2sa", False):
         raise PermissionError(
-            "iCloud returned an interactive two-factor challenge, so it can't be "
-            "synced headlessly. Generate an app-specific password at "
-            "appleid.apple.com and reconnect with that.")
+            "iCloud needs a new two-factor verification — Apple expires the trusted "
+            "session roughly every two months. Reconnect the iCloud source and "
+            "enter the 6-digit code shown on your trusted Apple device.")
     return api
+
+
+def icloud_start_session(username: str, password: str):
+    """Begin an interactive iCloud sign-in for the connect flow. Returns
+    ``(status, api)`` where status is ``"linked"`` when the persisted session is
+    already trusted, ``"needs_2fa"`` when Apple wants a 6-digit code, or
+    ``"needs_2sa"`` for the older two-step accounts (unsupported)."""
+    api = _icloud_service(username, password)
+    if getattr(api, "requires_2fa", False):
+        return "needs_2fa", api
+    if getattr(api, "requires_2sa", False):
+        return "needs_2sa", api
+    return "linked", api
+
+
+def icloud_verify_2fa(api, code: str) -> bool:
+    """Validate a 6-digit 2FA code and persist the trusted session so subsequent
+    headless syncs reuse it without another challenge."""
+    if not api.validate_2fa_code((code or "").strip()):
+        return False
+    try:
+        if not api.is_trusted_session:
+            api.trust_session()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("iCloud trust_session after 2FA failed (non-fatal): %s", exc)
+    return True
 
 
 def _icloud_norm_roots(roots) -> List[str]:

@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -91,11 +92,11 @@ def _setup_instructions(connector_type: str) -> list[str]:
         ]
     if connector_type == "icloud":
         return [
-            "Sign in at appleid.apple.com → Sign-In & Security → App-Specific Passwords.",
-            "Click the + (or 'Generate an app-specific password'), name it 'Arkive', and copy it.",
-            "In Sources → iCloud, enter your Apple ID email and paste that app-specific password.",
-            "Pick what to back up (Photos, iCloud Drive, Contacts) and, for Drive, browse and select folders.",
-            "Note: your Apple ID must use an app-specific password — accounts that force an interactive 2FA prompt can't be synced automatically.",
+            "Use your Apple ID email and your REAL Apple ID password — Apple does NOT accept an app-specific password for iCloud Photos/Drive.",
+            "In Sources → iCloud, enter your Apple ID and password and click Connect.",
+            "Apple shows a 6-digit verification code on a trusted device (iPhone/Mac) — enter it when prompted.",
+            "Pick what to back up (Photos, iCloud Drive, Contacts); for Drive, browse and select folders.",
+            "Note: Apple expires the trusted session about every 2 months — reconnect and re-verify when that happens.",
         ]
     if connector_type == "evernote":
         return [
@@ -427,6 +428,105 @@ def link_with_token(connector_type: str, body: TokenLinkRequest,
                  detail={"type": connector_type})
     return {"id": account.id, "connector_type": connector_type,
             "account_label": account.account_label, "auth_status": account.auth_status}
+
+
+# --- iCloud interactive sign-in (real Apple ID password + one-time 2FA code) --
+# Apple's app-specific passwords are NOT accepted by the iCloud web services
+# (Photos/Drive) that pyicloud uses. The user signs in with their real password;
+# Apple then requires a 6-digit code from a trusted device, after which pyicloud
+# persists a trusted session (reused headlessly for ~2 months). The in-progress
+# PyiCloudService lives in this short-lived registry between the two requests.
+_ICLOUD_PENDING: dict[str, dict] = {}
+_ICLOUD_PENDING_TTL = 600
+
+
+def _icloud_prune_pending() -> None:
+    now = time.time()
+    for k in [k for k, v in _ICLOUD_PENDING.items() if now - v["ts"] > _ICLOUD_PENDING_TTL]:
+        _ICLOUD_PENDING.pop(k, None)
+
+
+def _create_icloud_account(db: Session, tenant: Tenant, principal: security.Principal,
+                           label: str, username: str, password: str) -> ConnectorAccount:
+    creds = {"token": password, "username": username, "host": None}
+    account = ConnectorAccount(
+        tenant_id=tenant.id, owner_user_id=principal.user_id, connector_type="icloud",
+        account_label=(label or "iCloud"), account_username=(username or None),
+        auth_status="linked", encrypted_credentials=credstore.encrypt(tenant.id, creds),
+        scopes=[])
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    audit.record(db, actor=principal.user_id, action="connector.linked",
+                 tenant_id=tenant.id, resource=account.id, detail={"type": "icloud"})
+    return account
+
+
+class ICloudStartRequest(BaseModel):
+    account_label: str | None = None
+    username: str
+    password: str
+
+
+@router.post("/icloud/start")
+def icloud_start(body: ICloudStartRequest,
+                 principal: security.Principal = Depends(security.require_passkey),
+                 tenant: Tenant = Depends(security.get_tenant),
+                 db: Session = Depends(get_db)):
+    """Begin an iCloud sign-in with the real Apple ID password. Returns
+    ``{"status":"linked",...}`` when the persisted session is already trusted, or
+    ``{"status":"needs_2fa","pending":...}`` to collect a 6-digit code."""
+    from ..connectors import live
+    _icloud_prune_pending()
+    try:
+        status, api = live.icloud_start_session(body.username, body.password)
+    except PermissionError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"iCloud sign-in failed: {exc}")
+    if status == "needs_2sa":
+        raise HTTPException(400, "This Apple ID uses the older two-step verification. "
+                                 "Switch to two-factor authentication in your Apple ID "
+                                 "settings, then reconnect.")
+    if status == "linked":
+        account = _create_icloud_account(db, tenant, principal,
+                                         body.account_label or body.username,
+                                         body.username, body.password)
+        return {"status": "linked", "id": account.id}
+    pending = uuid.uuid4().hex
+    _ICLOUD_PENDING[pending] = {
+        "api": api, "username": body.username, "password": body.password,
+        "tid": tenant.id, "uid": principal.user_id,
+        "label": body.account_label or body.username, "ts": time.time()}
+    return {"status": "needs_2fa", "pending": pending}
+
+
+class ICloudVerifyRequest(BaseModel):
+    pending: str
+    code: str
+
+
+@router.post("/icloud/verify")
+def icloud_verify(body: ICloudVerifyRequest,
+                  principal: security.Principal = Depends(security.require_passkey),
+                  tenant: Tenant = Depends(security.get_tenant),
+                  db: Session = Depends(get_db)):
+    """Complete iCloud sign-in with the 6-digit code and store the trusted session."""
+    from ..connectors import live
+    _icloud_prune_pending()
+    p = _ICLOUD_PENDING.get(body.pending)
+    if not p or p["tid"] != tenant.id or p["uid"] != principal.user_id:
+        raise HTTPException(400, "verification session expired — start again")
+    try:
+        ok = live.icloud_verify_2fa(p["api"], body.code)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"couldn't verify the code: {exc}")
+    if not ok:
+        raise HTTPException(400, "that code wasn't accepted — check it and try again")
+    account = _create_icloud_account(db, tenant, principal, p["label"],
+                                     p["username"], p["password"])
+    _ICLOUD_PENDING.pop(body.pending, None)
+    return {"status": "linked", "id": account.id}
 
 
 @router.get("/accounts")

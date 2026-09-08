@@ -93,7 +93,8 @@ ensure_control_perms() {
   id -u "$user" >/dev/null 2>&1 || return 0
   { : > "$f"; } 2>/dev/null || return 0
   local unit act
-  for unit in cv-cloud postgresql caddy cv-node-heartbeat.timer cv-node-update.timer cv-cloud-update.timer; do
+  # Include the *.service update units (admin "Update" starts the service, not the timer).
+  for unit in cv-cloud postgresql caddy cv-node-heartbeat.timer cv-node-update.timer cv-node-update.service cv-cloud-update.timer cv-cloud-update.service; do
     for act in start stop restart enable disable; do
       echo "${user} ALL=(root) NOPASSWD: /usr/bin/systemctl ${act} ${unit}" >> "$f"
     done
