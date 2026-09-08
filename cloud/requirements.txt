@@ -31,8 +31,11 @@ webauthn>=2.1.0,<3
 # 2.7.0+ is REQUIRED: 2.6.x can't complete Apple's HSA2 trusted-device BRIDGE, so
 # both device-code and SMS verification are rejected. Its deps (protobuf>=6.32,
 # pydantic>=2.13.4, cryptography>=44) are aligned with the google/FastAPI floors
-# bumped above so pip resolves one consistent set.
-pyicloud>=2.7.0,<3
+# bumped above so pip resolves one consistent set. The [cli] extra is REQUIRED:
+# `import pyicloud` transitively imports its Notes service, which imports `rich`
+# at module load, but `rich`/`typer` ship only in the extras (packaging bug) — so
+# the base install imports-errors ("No module named 'rich'") without [cli].
+pyicloud[cli]>=2.7.0,<3
 # Post-quantum primitives (ML-KEM / ML-DSA / SLH-DSA) via liboqs.
 # Optional: the prototype runs without it using a clearly-flagged fallback.
 # The Open Quantum Safe Python binding is `liboqs-python` (imports as `oqs`) and
