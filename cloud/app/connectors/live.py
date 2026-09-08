@@ -1143,6 +1143,21 @@ def icloud_start_session(username: str, password: str):
     ``"needs_2sa"`` for the older two-step accounts (unsupported)."""
     api = _icloud_service(username, password)
     if getattr(api, "requires_2fa", False):
+        # pyicloud 2.x (HSA2 accounts): the verification code is NOT delivered on
+        # login — request_2fa_code() actively triggers Apple to push it, so the
+        # code the user then enters matches THIS challenge (all trusted devices
+        # show the same code). Without this the entered code is always rejected.
+        if getattr(api, "security_key_names", None):
+            raise PermissionError(
+                "This Apple ID signs in with a hardware security key (FIDO2), which "
+                "Arkive can't complete in the browser. Use an Apple ID that verifies "
+                "with a trusted-device code instead.")
+        try:
+            api.request_2fa_code()
+            logger.info("iCloud 2FA code requested for %s", username)
+        except Exception as exc:  # noqa: BLE001 — some versions auto-deliver
+            logger.info("iCloud request_2fa_code unavailable/failed (%s) — a code "
+                        "may have been sent on login instead", exc)
         return "needs_2fa", api
     if getattr(api, "requires_2sa", False):
         return "needs_2sa", api

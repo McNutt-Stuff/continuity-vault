@@ -144,13 +144,43 @@ def _scrub_for_hash(obj):
     return obj
 
 
+def _field_signature(f: dict) -> tuple:
+    """Order-independent signature of ONE 1Password field: (section, label, type,
+    purpose, value). The live TOTP code is masked (it rotates every 30s)."""
+    if not isinstance(f, dict):
+        return ("", "", "", "", str(f))
+    section = f.get("section")
+    sec = (str(section.get("label") or section.get("id") or "")
+           if isinstance(section, dict) else str(section or ""))
+    label = str(f.get("label") or f.get("id") or "")
+    ftype = str(f.get("type", ""))
+    purpose = str(f.get("purpose", ""))
+    value = "<otp>" if (ftype == "OTP" or f.get("id") == "one-time password") \
+        else str(f.get("value", ""))
+    return (sec, label, ftype, purpose, value)
+
+
+def _content_signature(detail: dict) -> str:
+    """Canonical, ORDER-INDEPENDENT view of an item's meaningful content — the
+    fields/urls a user actually sets — so re-syncing an unchanged item hashes the
+    same. 1Password's `op` CLI returns the fields/urls arrays in a NONDETERMINISTIC
+    order (same bytes, different order → different hash was the churn); sorting
+    them, and hashing only title/category/fields/urls (never version/timestamps/
+    password-strength/autofill stats), makes an item re-version ONLY on a real edit."""
+    fields = sorted(_field_signature(f) for f in (detail.get("fields") or []))
+    urls = sorted(str(u.get("href", "")) for u in (detail.get("urls") or [])
+                  if isinstance(u, dict) and u.get("href"))
+    payload = {"title": str(detail.get("title", "")),
+               "category": str(detail.get("category", "")),
+               "fields": fields, "urls": urls}
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
 def _stable_content_hash(item_id: str, detail: dict) -> str:
-    """Content-based dedup key immune to 1Password's timestamp/version churn: hash
-    the scrubbed item content, NOT its updated_at — so an item that 1Password
-    re-touched without a real edit keeps the same hash and never re-versions."""
-    scrubbed = _scrub_for_hash(detail)
-    blob = json.dumps(scrubbed, sort_keys=True, ensure_ascii=False,
-                      separators=(",", ":")).encode("utf-8")
+    """Content-based dedup key immune to 1Password's timestamp/version churn AND
+    the CLI's nondeterministic field ordering: hash the order-independent content
+    signature so an item only re-versions when its actual content changes."""
+    blob = _content_signature(detail).encode("utf-8")
     return hashlib.sha256(f"onepassword:{item_id}:".encode() + blob).hexdigest()
 
 

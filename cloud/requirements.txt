@@ -18,7 +18,9 @@ httpx>=0.27.0
 psycopg[binary]>=3.1.0
 webauthn>=2.1.0,<3
 # iCloud connector (unofficial API): enables Photos / Drive / Contacts sync.
-pyicloud>=1.0.0
+# Pin the maintained 2.x (SRP) line — 1.x's auth flow is broken against current
+# Apple, and 2.x delivers the 2FA code via api.request_2fa_code() (see live.py).
+pyicloud>=2.0.2,<3
 # Post-quantum primitives (ML-KEM / ML-DSA / SLH-DSA) via liboqs.
 # Optional: the prototype runs without it using a clearly-flagged fallback.
 # The Open Quantum Safe Python binding is `liboqs-python` (imports as `oqs`) and
