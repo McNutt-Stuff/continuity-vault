@@ -1211,24 +1211,13 @@ def icloud_start_session(username: str, password: str):
                 "This Apple ID signs in with a hardware security key (FIDO2), which "
                 "Arkive can't complete in the browser. Use an Apple ID that verifies "
                 "with a trusted-device code instead.")
-        # Ask pyicloud to deliver the code. During auth it already TRIES this
-        # (and may have silently failed), so calling it explicitly re-attempts;
-        # it returns True when a code was sent (trusted-device bridge or SMS).
-        delivered = False
-        try:
-            delivered = bool(api.request_2fa_code())
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("iCloud request_2fa_code raised for %s: %s", username, exc)
-        if not delivered:
-            # No HSA2 bridge/SMS route fired — fall back to the classic trusted-
-            # device path: Apple's "Sign in requested" prompt that appears from
-            # the login itself, validated via the legacy trusted-device endpoint.
-            fn = getattr(api, "use_existing_trusted_device_code", None)
-            if callable(fn):
-                try:
-                    fn()
-                except Exception as exc:  # noqa: BLE001
-                    logger.info("iCloud use_existing_trusted_device_code failed: %s", exc)
+        # DO NOT call api.request_2fa_code() here. pyicloud's SRP login already
+        # pushed a code to the trusted devices (its internal _request_2fa_code hits
+        # /verify/trusteddevice during auth). Calling the PUBLIC request_2fa_code()
+        # re-initiates the trusted-device BRIDGE, which mints a NEW challenge and
+        # INVALIDATES the code already on the user's device — so the code they type
+        # gets rejected. The pushed code validates via the legacy trusted-device
+        # endpoint (icloud_verify_2fa → validate_2fa_code with no bridge state).
         try:
             n_devices = len(api.trusted_devices or [])
         except Exception:  # noqa: BLE001
@@ -1239,8 +1228,8 @@ def icloud_start_session(username: str, password: str):
         except Exception:  # noqa: BLE001
             pyv = "?"
         auth_keys = sorted((getattr(api, "_auth_data", {}) or {}).keys())[:25]
-        logger.info("iCloud 2FA for %s: pyicloud=%s request_2fa_code=%s method=%s "
-                    "devices=%s trusted_session=%s auth_keys=%s", username, pyv, delivered,
+        logger.info("iCloud 2FA pushed for %s: pyicloud=%s method=%s devices=%s "
+                    "trusted_session=%s auth_keys=%s", username, pyv,
                     getattr(api, "two_factor_delivery_method", "?"), n_devices,
                     getattr(api, "is_trusted_session", None), auth_keys)
         return "needs_2fa", api
@@ -1253,13 +1242,22 @@ def icloud_verify_2fa(api, code: str) -> bool:
     """Validate a 6-digit 2FA code and persist the trusted session so subsequent
     headless syncs reuse it without another challenge."""
     digits = re.sub(r"\D", "", code or "")
-    if not api.validate_2fa_code(digits):
+    method = getattr(api, "two_factor_delivery_method", "?")
+    try:
+        ok = bool(api.validate_2fa_code(digits))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("iCloud validate_2fa_code raised (method=%s): %s", method, exc)
+        raise
+    if not ok:
+        logger.warning("iCloud 2FA code rejected (method=%s, %d digits)",
+                       method, len(digits))
         return False
     try:
         if not api.is_trusted_session:
             api.trust_session()
     except Exception as exc:  # noqa: BLE001
         logger.info("iCloud trust_session after 2FA failed (non-fatal): %s", exc)
+    logger.info("iCloud 2FA verified; trusted session persisted (method=%s)", method)
     return True
 
 
