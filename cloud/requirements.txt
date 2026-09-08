@@ -20,10 +20,10 @@ webauthn>=2.1.0,<3
 # iCloud connector (unofficial API): enables Photos / Drive / Contacts sync.
 # Pin the maintained 2.x (SRP) line — 1.x's auth flow is broken against current
 # Apple, and 2.x delivers the 2FA code via api.request_2fa_code() (see live.py).
-# 2.7.0+ is REQUIRED: earlier 2.x (2.6.5) can't bootstrap Apple's trusted-device
-# HSA2 bridge, so both device-code and SMS verification are rejected. The floor
-# bump forces pip to upgrade on deploy (2.6.5 no longer satisfies the constraint).
-pyicloud>=2.7.0,<3
+# NOTE: 2.7.0 pulls heavy deps (protobuf>=6.32, pydantic>=2.13.4, tzlocal==5.3.1)
+# that can conflict with the cloud stack (google-* / FastAPI) and break the whole
+# install — keep on the 2.6.x line until that's resolved in an isolated env.
+pyicloud>=2.6.0,<2.7
 # Post-quantum primitives (ML-KEM / ML-DSA / SLH-DSA) via liboqs.
 # Optional: the prototype runs without it using a clearly-flagged fallback.
 # The Open Quantum Safe Python binding is `liboqs-python` (imports as `oqs`) and
