@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { Card, bytes, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
+import { SourceIcon } from "../components/SourceIcon";
 
 interface TimelineSeries { key: string; label: string; icon: string; color: string; values: number[]; }
 interface Timeline {
@@ -122,20 +123,22 @@ export default function Insights() {
       )}
 
       <Card className="insights-hero" style={{ marginBottom: 22, padding: 0, overflow: "hidden" }}>
-        <div style={{ padding: "16px 18px 6px" }}>
-          <div className="row" style={{ gap: 8, alignItems: "center" }}>
-            <Icon name="insights" size={16} />
-            <h3 style={{ margin: 0, fontSize: 15 }}>Footprint over time</h3>
-          </div>
-          <div className="faint" style={{ fontSize: 12 }}>
-            How your protected life has grown — woven by source and volume.
-          </div>
-        </div>
         {hasTimeline
           ? <FootprintTimeline tl={tl!} />
-          : <div className="muted" style={{ padding: "40px 18px 48px", textAlign: "center" }}>
-              As Arkive protects more of your data, your footprint timeline will appear here.
-            </div>}
+          : <>
+              <div style={{ padding: "16px 18px 6px" }}>
+                <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                  <Icon name="insights" size={16} />
+                  <h3 style={{ margin: 0, fontSize: 15 }}>Footprint over time</h3>
+                </div>
+                <div className="faint" style={{ fontSize: 12 }}>
+                  How your protected life has grown — woven by source and volume.
+                </div>
+              </div>
+              <div className="muted" style={{ padding: "40px 18px 48px", textAlign: "center" }}>
+                As Arkive protects more of your data, your footprint timeline will appear here.
+              </div>
+            </>}
       </Card>
 
       <div className="spread" style={{ marginBottom: 10 }}>
@@ -193,116 +196,175 @@ function StatChip({ icon, label, value, tint }: { icon: IconName; label: string;
   );
 }
 
-// --- The hero visualization: a stacked-area footprint woven by source, with a
-// cumulative growth curve overlaid and an interactive per-period breakdown. ----
+// --- The hero visualization: a per-source bar chart across time. Each source
+// gets its own bar per period, crowned with its brand icon; a smoothed trend
+// line rides over the per-period totals. The chart scrolls horizontally and a
+// time-range dropdown (top-right) reframes the window. -----------------------
+type RangeOpt = { label: string; n: number };
+
+function smoothPath(pts: [number, number][]): string {
+  if (pts.length === 0) return "";
+  if (pts.length === 1) return `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+  let d = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
+    const cx = (x0 + x1) / 2;
+    d += ` C${cx.toFixed(1)},${y0.toFixed(1)} ${cx.toFixed(1)},${y1.toFixed(1)} ${x1.toFixed(1)},${y1.toFixed(1)}`;
+  }
+  return d;
+}
+
 function FootprintTimeline({ tl }: { tl: Timeline }) {
   const n = tl.points.length;
+
+  const rangeOpts: RangeOpt[] = useMemo(() => {
+    const base: RangeOpt[] = tl.granularity === "month"
+      ? [{ label: "6 months", n: 6 }, { label: "1 year", n: 12 }, { label: "2 years", n: 24 }]
+      : [{ label: "5 years", n: 5 }, { label: "10 years", n: 10 }];
+    const opts = base.filter((o) => o.n < n);
+    opts.push({ label: "All time", n: Infinity });
+    return opts;
+  }, [tl.granularity, n]);
+
+  const [range, setRange] = useState<number>(() => rangeOpts[0]?.n ?? Infinity);
   const [hover, setHover] = useState<number | null>(null);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  const VBW = 1000, VBH = 340;
-  const padL = 44, padR = 44, padT = 18, padB = 46;
-  const plotW = VBW - padL - padR, plotH = VBH - padT - padB;
+  const count = range === Infinity ? n : Math.min(range, n);
+  const start = Math.max(0, n - count);
+  const vIdx = useMemo(() => Array.from({ length: count }, (_, k) => start + k), [count, start]);
 
-  const geom = useMemo(() => {
-    const stackTotals = tl.points.map((_, i) => tl.series.reduce((s, sv) => s + (sv.values[i] || 0), 0));
-    const maxStack = Math.max(1, ...stackTotals);
-    const maxCum = Math.max(1, ...(tl.cumulative.length ? tl.cumulative : [1]));
-    const x = (i: number) => n <= 1 ? padL + plotW / 2 : padL + (i * plotW) / (n - 1);
-    const yStack = (v: number) => padT + plotH * (1 - v / maxStack);
-    const yCum = (v: number) => padT + plotH * (1 - v / maxCum);
+  // Snap to the most recent period whenever the window changes.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollLeft = el.scrollWidth;
+  }, [range, n]);
 
-    // Build stacked bands bottom→top.
-    const bands: { color: string; key: string; d: string }[] = [];
-    const bottoms = tl.points.map(() => 0);
-    for (const sv of tl.series) {
-      const tops = tl.points.map((_, i) => bottoms[i] + (sv.values[i] || 0));
-      const topPts = tops.map((v, i) => `${x(i).toFixed(1)},${yStack(v).toFixed(1)}`);
-      const botPts = bottoms.map((v, i) => `${x(i).toFixed(1)},${yStack(v).toFixed(1)}`).reverse();
-      bands.push({ color: sv.color, key: sv.key, d: `M${topPts.join(" L")} L${botPts.join(" L")} Z` });
-      for (let i = 0; i < n; i++) bottoms[i] = tops[i];
-    }
-    const cumLine = tl.cumulative.map((v, i) => `${x(i).toFixed(1)},${yCum(v).toFixed(1)}`).join(" ");
-    return { x, yStack, yCum, bands, cumLine, stackTotals, maxStack, maxCum };
-  }, [tl, n]);
+  // Geometry.
+  const numS = Math.max(1, tl.series.length);
+  const BAR_W = 15, BAR_GAP = 4, GROUP_GAP = 26, PAD_L = 16, PAD_R = 22;
+  const ICON_H = 22, BARS_H = 230, TOP_PAD = 16, AXIS_H = 36;
+  const plotH = TOP_PAD + ICON_H + BARS_H;
+  const groupInnerW = numS * BAR_W + Math.max(0, numS - 1) * BAR_GAP;
+  const groupW = groupInnerW + GROUP_GAP;
+  const totalW = PAD_L + PAD_R + count * groupW;
 
-  // Sparse x labels: first, last, and evenly-spaced middles.
-  const labelIdx = useMemo(() => {
-    if (n <= 6) return tl.points.map((_, i) => i);
-    const want = 6, step = (n - 1) / (want - 1);
-    return Array.from({ length: want }, (_, k) => Math.round(k * step));
-  }, [n, tl.points]);
+  const maxVal = Math.max(1, ...tl.series.flatMap((s) => vIdx.map((i) => s.values[i] || 0)));
+  const totals = vIdx.map((i) => tl.series.reduce((a, s) => a + (s.values[i] || 0), 0));
+  const maxTotal = Math.max(1, ...totals);
 
-  const active = hover ?? n - 1;
+  const baseY = plotH;                              // bottom of the bars (svg coords)
+  const groupCenter = (k: number) => PAD_L + k * groupW + groupW / 2;
+  const trendY = (v: number) => baseY - (v / maxTotal) * BARS_H;
+  const trendPath = useMemo(
+    () => smoothPath(totals.map((v, k) => [groupCenter(k), trendY(v)] as [number, number])),
+    [totals, groupW, maxTotal, count]);
+
+  // Only thin out labels when groups are too narrow to fit them.
+  const labelEvery = groupW < 46 ? Math.ceil(46 / groupW) : 1;
+
+  const active = hover ?? (n - 1);
+  const activeTotal = tl.series.reduce((a, s) => a + (s.values[active] || 0), 0);
   const activeBreak = tl.series
-    .map((s) => ({ label: s.label, color: s.color, icon: s.icon, value: s.values[active] || 0 }))
+    .map((s) => ({ label: s.label, color: s.color, key: s.key, icon: s.icon, value: s.values[active] || 0 }))
     .filter((s) => s.value > 0)
     .sort((a, b) => b.value - a.value);
 
-  function onMove(e: React.MouseEvent) {
-    const el = wrapRef.current;
-    if (!el || n === 0) return;
-    const r = el.getBoundingClientRect();
-    const rel = (e.clientX - r.left) / r.width;   // 0..1 across the element
-    const px = rel * VBW;
-    const i = n <= 1 ? 0 : Math.round(((px - padL) / plotW) * (n - 1));
-    setHover(Math.max(0, Math.min(n - 1, i)));
-  }
-
   return (
     <div>
-      <div ref={wrapRef} style={{ position: "relative", width: "100%" }}
-           onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
-        <svg viewBox={`0 0 ${VBW} ${VBH}`} width="100%" style={{ display: "block" }}>
-          <defs>
-            <linearGradient id="cumFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#ffffff" stopOpacity="0.10" />
-              <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-            </linearGradient>
-          </defs>
-          {/* horizontal gridlines */}
-          {[0, 0.25, 0.5, 0.75, 1].map((f) => (
-            <line key={f} x1={padL} x2={VBW - padR} y1={padT + plotH * f} y2={padT + plotH * f}
-                  stroke="var(--border-soft,#22304a)" strokeWidth={1} opacity={0.5} />
+      <div className="fp-head">
+        <div className="stack" style={{ gap: 2 }}>
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <Icon name="insights" size={16} />
+            <h3 style={{ margin: 0, fontSize: 15 }}>Footprint over time</h3>
+          </div>
+          <div className="faint" style={{ fontSize: 12 }}>
+            Objects protected each period, by source — with the overall trend.
+          </div>
+        </div>
+        <select className="fp-range" value={String(range)}
+                onChange={(e) => setRange(Number(e.target.value))} aria-label="Time range">
+          {rangeOpts.map((o) => (
+            <option key={o.label} value={String(o.n)}>{o.label}</option>
           ))}
-          {/* stacked source bands */}
-          {geom.bands.map((b) => (
-            <path key={b.key} d={b.d} fill={b.color} fillOpacity={0.82} stroke={b.color}
-                  strokeOpacity={0.9} strokeWidth={0.6} />
-          ))}
-          {/* cumulative growth curve */}
-          <polyline points={geom.cumLine} fill="none" stroke="#ffffff" strokeOpacity={0.85}
-                    strokeWidth={2.2} strokeLinejoin="round" strokeLinecap="round" />
-          {/* active period guide */}
-          {n > 0 && (
-            <line x1={geom.x(active)} x2={geom.x(active)} y1={padT} y2={padT + plotH}
-                  stroke="#fff" strokeOpacity={0.55} strokeWidth={1} strokeDasharray="3 3" />
-          )}
-          {n > 0 && (
-            <circle cx={geom.x(active)} cy={geom.yCum(tl.cumulative[active] || 0)} r={4}
-                    fill="#fff" />
-          )}
-          {/* x labels */}
-          {labelIdx.map((i) => (
-            <text key={i} x={geom.x(i)} y={VBH - 16} textAnchor="middle"
-                  fontSize={12} fill="var(--text-faint,#8a93a6)">{fmtPoint(tl.points[i], tl.granularity)}</text>
-          ))}
-        </svg>
+        </select>
+      </div>
+
+      <div className="fp-scroll" ref={scrollRef} onMouseLeave={() => setHover(null)}>
+        <div className="fp-track" style={{ width: totalW, height: plotH + AXIS_H, position: "relative" }}>
+          {/* gridlines (behind bars) */}
+          <svg className="fp-layer" width={totalW} height={plotH}
+               viewBox={`0 0 ${totalW} ${plotH}`} style={{ zIndex: 0 }}>
+            {[0, 0.25, 0.5, 0.75, 1].map((f) => (
+              <line key={f} x1={PAD_L} x2={totalW - PAD_R} y1={baseY - BARS_H * f} y2={baseY - BARS_H * f}
+                    stroke="var(--border-soft,#22304a)" strokeWidth={1} opacity={0.4} />
+            ))}
+          </svg>
+
+          {/* per-source bars + icons + labels */}
+          <div className="fp-groups" style={{ paddingLeft: PAD_L, paddingRight: PAD_R, position: "relative", zIndex: 1 }}>
+            {vIdx.map((gi, k) => {
+              const showLabel = k % labelEvery === 0 || k === count - 1;
+              return (
+                <div key={gi} className="fp-group"
+                     style={{ width: groupW, opacity: hover == null || hover === gi ? 1 : 0.4 }}
+                     onMouseEnter={() => setHover(gi)}>
+                  <div className="fp-group-plot" style={{ height: plotH, gap: BAR_GAP }}>
+                    {tl.series.map((s) => {
+                      const v = s.values[gi] || 0;
+                      const h = v > 0 ? Math.max(3, (v / maxVal) * BARS_H) : 0;
+                      return (
+                        <div key={s.key} className="fp-col" style={{ width: BAR_W }}
+                             title={`${s.label}: ${v.toLocaleString()}`}>
+                          {v > 0 && (
+                            <SourceIcon type={s.key} fallback={asIcon(s.icon)} size={15}
+                                        style={{ marginBottom: 3, opacity: 0.95 }} />
+                          )}
+                          <div className="fp-bar" style={{
+                            height: h, width: BAR_W, background: s.color,
+                            boxShadow: gi === active && v > 0 ? "0 0 0 1.5px rgba(255,255,255,.5)" : undefined,
+                          }} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="fp-xlabel" style={{ height: AXIS_H, width: groupW }}>
+                    {showLabel ? fmtPoint(tl.points[gi], tl.granularity) : ""}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* trend line over per-period totals (in front) */}
+          <svg className="fp-layer" width={totalW} height={plotH}
+               viewBox={`0 0 ${totalW} ${plotH}`} style={{ zIndex: 2, pointerEvents: "none" }}>
+            <path d={trendPath} fill="none" stroke="#ffffff" strokeOpacity={0.92} strokeWidth={2.2}
+                  strokeLinejoin="round" strokeLinecap="round" />
+            {totals.map((v, k) => {
+              const on = vIdx[k] === active;
+              return (
+                <circle key={k} cx={groupCenter(k)} cy={trendY(v)} r={on ? 4.5 : 2.6}
+                        fill="#ffffff" fillOpacity={on ? 1 : 0.75} />
+              );
+            })}
+          </svg>
+        </div>
       </div>
 
       {/* per-period breakdown + legend */}
-      <div style={{ padding: "6px 18px 16px" }}>
+      <div style={{ padding: "10px 18px 16px" }}>
         <div className="row" style={{ gap: 8, alignItems: "baseline", flexWrap: "wrap", marginBottom: 6 }}>
           <span style={{ fontWeight: 700, fontSize: 14 }}>{fmtPoint(tl.points[active], tl.granularity, true)}</span>
           <span className="faint" style={{ fontSize: 12 }}>
-            {geom.stackTotals[active].toLocaleString()} new · {(tl.cumulative[active] || 0).toLocaleString()} total by then · {bytes(tl.bytes[active] || 0)} added
+            {activeTotal.toLocaleString()} new · {(tl.cumulative[active] || 0).toLocaleString()} total by then · {bytes(tl.bytes[active] || 0)} added
           </span>
         </div>
         <div className="row" style={{ gap: 14, flexWrap: "wrap" }}>
           {activeBreak.length === 0 && <span className="faint" style={{ fontSize: 12 }}>No new items in this period.</span>}
           {activeBreak.map((s) => (
             <div key={s.label} className="row" style={{ gap: 6, alignItems: "center" }}>
-              <span style={{ width: 10, height: 10, borderRadius: 3, background: s.color, display: "inline-block" }} />
+              <SourceIcon type={s.key} fallback={asIcon(s.icon)} size={14} />
               <span style={{ fontSize: 12.5 }}>{s.label}</span>
               <span className="faint" style={{ fontSize: 12 }}>{s.value.toLocaleString()}</span>
             </div>
