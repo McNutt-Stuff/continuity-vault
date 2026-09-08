@@ -975,13 +975,18 @@ class CrossbeamConnector(Connector):
         return ConnectorCapabilities(
             streaming=True,  # record sets can be large → bounded ingest
             # Order matters: the preview shows the first few of these, so lead with
-            # the useful identity fields, not the redundant record_type.
-            searchable_fields=["domain", "population", "owner", "industry", "stage",
-                               "partner", "amount", "record_type"],
-            facet_fields=["population", "partner", "industry", "record_type"],
+            # the useful identity/detail fields, not the redundant record_type.
+            searchable_fields=["domain", "account", "account_domain", "population",
+                               "owner", "partner", "industry", "segment", "type",
+                               "stage", "amount", "close_date", "arr", "employees",
+                               "products", "email", "title", "phone", "city", "state",
+                               "country", "lead_stage", "territory", "event_type",
+                               "record_type"],
+            facet_fields=["population", "partner", "industry", "segment", "type",
+                          "stage", "record_type"],
             filter_categories=[
                 {"id": "accounts", "label": "Accounts"},
-                {"id": "leads", "label": "Leads"},
+                {"id": "contacts", "label": "Contacts"},
                 {"id": "opportunities", "label": "Opportunities & deals"},
                 {"id": "partners", "label": "Partners"},
                 {"id": "populations", "label": "Populations"},
@@ -999,7 +1004,7 @@ class CrossbeamConnector(Connector):
             scopes=["openid", "read:partnerships", "read:reports",
                     "read:populations", "offline_access"],
             icon="insights", color="#4b3bd6",
-            doc_types=["account", "lead", "opportunity", "partner", "population",
+            doc_types=["account", "contact", "opportunity", "partner", "population",
                        "overlap", "report"],
         )
 
@@ -1016,11 +1021,12 @@ class CrossbeamConnector(Connector):
             ("account", "Acme Corporation", "accounts",
              {"record_type": "account", "domain": "acme.com", "industry": "Manufacturing",
               "owner": "Dana Lee", "kind": "account"}),
-            ("lead", "Jordan Rivera — Globex", "leads",
-             {"record_type": "lead", "domain": "globex.com", "owner": "Sam Poe", "kind": "lead"}),
+            ("contact", "Jordan Rivera", "contacts",
+             {"record_type": "contact", "account": "Globex", "email": "jordan@globex.com",
+              "title": "VP Sales", "owner": "Sam Poe", "kind": "contact"}),
             ("opportunity", "Initech — Platform expansion", "opportunities",
-             {"record_type": "opportunity", "stage": "Negotiation", "amount": 84000,
-              "domain": "initech.com", "kind": "opportunity"}),
+             {"record_type": "opportunity", "account": "Initech", "partner": "Hooli",
+              "stage": "Negotiation", "amount": 84000, "kind": "opportunity"}),
             ("partner", "Hooli (Partner)", "partners",
              {"record_type": "partner", "domain": "hooli.com", "kind": "partner"}),
             ("population", "Customers", "populations",

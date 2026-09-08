@@ -2139,7 +2139,8 @@ def _crossbeam_paged(c: httpx.Client, url: str, headers: dict,
     """Yield items from a Crossbeam list endpoint, following ``pagination.next_href``.
 
     Auth failures (401) always raise (needs-reauth). ``optional`` endpoints that
-    a plan doesn't include (403/404) are skipped rather than failing the backup."""
+    a plan doesn't include (403/404) — or that are transiently down (5xx, e.g. a
+    502 Bad Gateway from Crossbeam) — are skipped rather than failing the backup."""
     next_url: Optional[str] = url
     pages = 0
     while next_url and pages < cap_pages:
@@ -2148,9 +2149,9 @@ def _crossbeam_paged(c: httpx.Client, url: str, headers: dict,
         if r.status_code == 401:
             _raise_api("Crossbeam", r, url)
         if r.status_code >= 400:
-            if optional and r.status_code in (403, 404):
-                logger.debug("crossbeam optional endpoint %s unavailable (HTTP %s)",
-                             url, r.status_code)
+            if optional and (r.status_code in (403, 404) or r.status_code >= 500):
+                logger.warning("crossbeam optional endpoint %s unavailable (HTTP %s) — skipping",
+                               url, r.status_code)
                 return
             _raise_api("Crossbeam", r, url)
         body = r.json()
@@ -2226,48 +2227,229 @@ def _cb_populations(*objs: dict) -> list:
     return out
 
 
-def _crossbeam_record(rec: dict, kind: str, label: str, content_cap: int) -> SourceObject:
-    """Map a Crossbeam account/lead/opportunity record to a CRM SourceObject."""
-    data = rec.get("record") if isinstance(rec.get("record"), dict) else rec
-    owner = data.get("owner")
-    owner_name = (owner.get("owner_name") or owner.get("name")) if isinstance(owner, dict) else _cb_str(owner)
-    pops = _cb_populations(data, rec)
-    domain = (_cb_str(data.get("domain")) or _cb_str(data.get("website"))
-              or _cb_str(data.get("company_domain")) or _cb_str(data.get("email")))
-    partner = _cb_str(rec.get("partner_name") or data.get("partner_name"))
-    fallback = {"Accounts": "Account", "Leads": "Lead",
-                "Opportunities": "Opportunity"}.get(label, label.rstrip("s") or label)
-    name = _cb_name(data) or domain or partner or fallback
-    # Stable id (records carry a distinct id) — keep the same key order so existing
-    # objects don't re-ingest as duplicates.
-    rid = (rec.get("id") or rec.get("uuid") or data.get("id")
-           or rec.get("record_id") or data.get("record_id") or name)
+def _cb_pick(obj, *cands):
+    """First present scalar value for any of the candidate keys (case/format
+    insensitive), unwrapping the common {value|name|label:…} nesting."""
+    if not isinstance(obj, dict):
+        return None
+    norm = {}
+    for k, v in obj.items():
+        nk = re.sub(r"[^a-z0-9]", "", str(k).lower())
+        norm.setdefault(nk, v)
+    for cand in cands:
+        v = norm.get(re.sub(r"[^a-z0-9]", "", cand.lower()))
+        if isinstance(v, dict):
+            v = v.get("value") or v.get("name") or v.get("label")
+        if isinstance(v, (str, int, float, bool)) and str(v).strip() not in ("", "None", "null"):
+            return v
+    return None
+
+
+def _cb_owner_name(rec: dict) -> Optional[str]:
+    owner = rec.get("owner")
+    if isinstance(owner, dict):
+        return _cb_str(owner.get("owner_name") or owner.get("name") or owner.get("owner_email"))
+    return _cb_str(owner)
+
+
+def _cb_probe(kind: str, rec: dict, detail_key: str) -> None:
+    """One-time KEY-ONLY schema probe (never values/PII) so record + detail shapes
+    can be diagnosed from Platform Logs."""
+    if kind in _CROSSBEAM_LOGGED_SHAPES:
+        return
+    _CROSSBEAM_LOGGED_SHAPES.add(kind)
+    detail = rec.get(detail_key)
+    logger.info("crossbeam %s keys=%s %s_keys=%s", kind, sorted(rec.keys())[:25],
+                detail_key, sorted(detail.keys())[:40] if isinstance(detail, dict) else None)
+
+
+def _cb_first_owner(rec: dict, crm: dict) -> Optional[str]:
+    n = _cb_owner_name(rec)
+    if n:
+        return n
+    for src in (crm, rec):
+        owners = src.get("Account Owners") or src.get("account_owners") or src.get("owners")
+        if isinstance(owners, list) and owners:
+            o = owners[0]
+            return _cb_str(o.get("name") or o.get("owner_name")) if isinstance(o, dict) else _cb_str(o)
+    return None
+
+
+def _cb_account(rec: dict, content_cap: int) -> SourceObject:
+    """Map a Crossbeam account record (with its crm_data detail) to an Account."""
+    crm = rec.get("crm_data") if isinstance(rec.get("crm_data"), dict) else {}
+    name = (_cb_str(rec.get("record_name")) or _cb_pick(crm, "Account Name", "Name")
+            or _cb_str(rec.get("record_website")) or "Account")
+    domain = _cb_str(rec.get("record_website")) or _cb_pick(crm, "Account Website", "Website", "domain")
+    owner_name = _cb_first_owner(rec, crm)
+    pops = _cb_populations(rec)
+    _cb_probe("account", rec, "crm_data")
+    rid = rec.get("record_id") or _cb_pick(crm, "Account ID") or rec.get("crossbeam_record_id") or name
     meta = {
-        "record_type": kind, "kind": kind,
         "domain": domain,
-        "owner": owner_name,
-        "industry": _cb_str(data.get("industry")),
-        "stage": _cb_str(data.get("stage") or data.get("stage_name") or data.get("deal_stage")),
-        "amount": data.get("amount") or data.get("deal_amount") or data.get("value"),
-        "partner": partner,
         "population": ", ".join(pops) if pops else None,
+        "owner": owner_name,
+        "industry": _cb_pick(crm, "Industry"),
+        "segment": _cb_pick(crm, "Account Segment", "Segment"),
+        "type": _cb_pick(crm, "Account Type", "Type"),
+        "employees": _cb_pick(crm, "Employees", "Number of Employees"),
+        "arr": _cb_pick(crm, "ARR", "Annual Revenue", "Revenue"),
+        "phone": _cb_pick(crm, "Account Phone", "Phone"),
+        "city": _cb_pick(crm, "City", "Billing City"),
+        "state": _cb_pick(crm, "State/Province", "State", "Billing State"),
+        "country": _cb_pick(crm, "Country", "Billing Country"),
+        "lead_stage": _cb_pick(crm, "Lead Stage"),
+        "territory": _cb_pick(crm, "Territory Name"),
+        "record_type": "account",
     }
     meta = {k: v for k, v in meta.items() if v not in (None, "", [])}
-    # One-time schema probe (KEY NAMES ONLY — never values/PII) so an unexpected
-    # record shape can be diagnosed from Platform Logs.
-    if kind not in _CROSSBEAM_LOGGED_SHAPES:
-        _CROSSBEAM_LOGGED_SHAPES.add(kind)
-        logger.info("crossbeam %s record keys=%s name_resolved=%s",
-                    kind, sorted(data.keys())[:30], name != fallback)
     preview = " · ".join(str(v) for v in
-                         (domain, meta.get("stage"), meta.get("population"), owner_name) if v)[:200]
+                         (domain, meta.get("industry"), meta.get("segment"),
+                          meta.get("population"), owner_name) if v)[:200]
     content, _ = _capped(json.dumps(rec).encode(), content_cap)
     return SourceObject(
-        object_id=f"crossbeam:{kind}:{rid}",
-        doc_type=kind, category="crm", title=str(name),
-        content=content, preview=preview, meta=meta,
-        labels=[label] + pops[:3],
-        modified_at=_parse_dt(rec.get("updated_at") or data.get("updated_at")))
+        object_id=f"crossbeam:account:{rid}", doc_type="account", category="crm",
+        title=str(name), content=content, preview=preview, meta=meta,
+        labels=["Accounts"] + pops[:3], modified_at=_parse_dt(rec.get("updated_at")))
+
+
+def _cb_classify(items: list) -> Optional[str]:
+    """Classify a nested array (contacts vs opportunities vs owners) by item keys."""
+    keys: set = set()
+    for it in items[:6]:
+        if isinstance(it, dict):
+            keys |= {re.sub(r"[^a-z0-9]", "", str(k).lower()) for k in it}
+    if keys & {"opportunityid", "salesstage", "closedate", "currentstage", "dealname", "dealstage"} \
+            or ("amount" in keys and keys & {"stage", "salesstage", "closedate", "opportunitytype"}):
+        return "opportunity"
+    if keys & {"contactid", "contactemail", "contacttitle", "contactname"}:
+        return "contact"
+    return None
+
+
+def _cb_contact_item(it: dict, acct_name, acct_id, content_cap) -> Optional[SourceObject]:
+    """A contact nested under an account, linked back to it."""
+    name = (_cb_pick(it, "Contact Name", "Name")
+            or " ".join(str(x) for x in (_cb_pick(it, "First Name"), _cb_pick(it, "Last Name")) if x).strip()
+            or _cb_pick(it, "Contact Email", "Email"))
+    if not name:
+        return None
+    email = _cb_pick(it, "Contact Email", "Email")
+    cid = _cb_pick(it, "Contact ID") or email or f"{acct_id}:{name}"
+    meta = {
+        "account": acct_name, "account_id": _cb_pick(it, "Account ID") or acct_id,
+        "email": email, "title": _cb_pick(it, "Contact Title", "Title"),
+        "phone": _cb_pick(it, "Contact Phone", "Phone"), "record_type": "contact",
+    }
+    meta = {k: v for k, v in meta.items() if v not in (None, "", [])}
+    preview = " · ".join(str(v) for v in (meta.get("title"), email, acct_name) if v)[:200]
+    content, _ = _capped(json.dumps(it).encode(), content_cap)
+    return SourceObject(
+        object_id=f"crossbeam:contact:{cid}", doc_type="contact", category="crm",
+        title=str(name).strip(), content=content, preview=preview, meta=meta,
+        labels=["Contacts"] + ([acct_name] if acct_name else []),
+        modified_at=_parse_dt(_cb_pick(it, "Contact Last Activity At", "Contact Created At")))
+
+
+def _cb_opportunity_item(it: dict, acct_name, acct_id, content_cap) -> Optional[SourceObject]:
+    """An opportunity nested under an account, linked back to it and keyed by its
+    own Opportunity ID (so multiple opps per account stay distinct)."""
+    name = (_cb_pick(it, "Name", "Opportunity Name", "Deal Name")
+            or (f"{acct_name} — Opportunity" if acct_name else "Opportunity"))
+    oid = _cb_pick(it, "Opportunity ID", "Deal ID") or f"{acct_id}:{name}"
+    amount = _cb_pick(it, "Amount")
+    stage = _cb_pick(it, "Sales Stage", "Current Stage", "Deal Stage", "Stage")
+    close_date = _cb_pick(it, "Close Date")
+    meta = {
+        "account": acct_name, "account_id": _cb_pick(it, "Account ID") or acct_id,
+        "stage": stage, "amount": amount,
+        "close_date": _cb_str(str(close_date)) if close_date else None,
+        "type": _cb_pick(it, "Opportunity Type", "Type"),
+        "products": _cb_pick(it, "Products", "Product"),
+        "record_type": "opportunity",
+    }
+    meta = {k: v for k, v in meta.items() if v not in (None, "", [])}
+    preview = " · ".join(str(v) for v in (acct_name, stage, amount) if v)[:200]
+    content, _ = _capped(json.dumps(it).encode(), content_cap)
+    return SourceObject(
+        object_id=f"crossbeam:opportunity:{oid}", doc_type="opportunity", category="crm",
+        title=str(name), content=content, preview=preview, meta=meta,
+        labels=["Opportunities"] + ([acct_name] if acct_name else []),
+        modified_at=_parse_dt(_cb_pick(it, "Close Date", "Open Date")))
+
+
+def _cb_account_children(rec: dict, acct_name, acct_id, options, content_cap):
+    """Yield the contacts and opportunities nested inside an account's crm_data,
+    each linked to the account. Robust to the exact array key names — arrays are
+    classified by their item fields, so it's a no-op when none are present."""
+    crm = rec.get("crm_data") if isinstance(rec.get("crm_data"), dict) else {}
+    seen: set = set()
+    for container in (crm, rec):
+        for v in container.values():
+            if not isinstance(v, list) or not v or not isinstance(v[0], dict):
+                continue
+            kind = _cb_classify(v)
+            if kind == "contact" and _want(options, "contacts"):
+                for it in v:
+                    obj = _cb_contact_item(it, acct_name, acct_id, content_cap)
+                    if obj and obj.object_id not in seen:
+                        seen.add(obj.object_id)
+                        yield obj
+            elif kind == "opportunity" and _want(options, "opportunities"):
+                for it in v:
+                    obj = _cb_opportunity_item(it, acct_name, acct_id, content_cap)
+                    if obj and obj.object_id not in seen:
+                        seen.add(obj.object_id)
+                        yield obj
+
+
+def _cb_opportunity(rec: dict, content_cap: int) -> SourceObject:
+    """Map an own-deal signal into an Opportunity — linked to its account and the
+    partner on the deal, keyed UNIQUELY per deal so multiple opps on one account
+    don't collide."""
+    deal = rec.get("deal") if isinstance(rec.get("deal"), dict) else {}
+    account = _cb_str(rec.get("record_name")) or _cb_name(rec)
+    acct_domain = _cb_str(rec.get("record_domain")) or _cb_str(rec.get("record_website"))
+    pa = rec.get("partner_account")
+    partner = (_cb_str(rec.get("partner_name"))
+               or _cb_str(pa.get("name") if isinstance(pa, dict) else pa))
+    deal_name = _cb_pick(deal, "name", "deal_name", "opportunity_name")
+    stage = _cb_pick(deal, "stage", "stage_name", "deal_stage")
+    amount = _cb_pick(deal, "amount", "value", "deal_amount")
+    close_date = _cb_pick(deal, "close_date", "closedate", "expected_close_date")
+    pops = _cb_populations(rec)
+    _cb_probe("opportunity", rec, "deal")
+    # Proper title: the deal's own name, else the account + partner it's between.
+    if deal_name:
+        title = str(deal_name)
+    elif account and partner:
+        title = f"{account} · {partner}"
+    elif account:
+        title = f"{account} — Opportunity"
+    else:
+        title = "Opportunity"
+    # Unique per opportunity (a signal), NOT per account.
+    rid = (rec.get("signal_id") or rec.get("event_id")
+           or f"{rec.get('record_id')}:{rec.get('partner_id')}:{_cb_pick(deal, 'id', 'deal_id') or ''}")
+    meta = {
+        "account": account, "account_domain": acct_domain, "partner": partner,
+        "stage": _cb_str(str(stage)) if stage is not None else None,
+        "amount": amount,
+        "close_date": _cb_str(str(close_date)) if close_date else None,
+        "deal_name": _cb_str(str(deal_name)) if deal_name else None,
+        "event_type": _cb_str(rec.get("event_type")),
+        "population": ", ".join(pops) if pops else None,
+        "record_type": "opportunity",
+    }
+    meta = {k: v for k, v in meta.items() if v not in (None, "", [])}
+    preview = " · ".join(str(v) for v in (account, partner, stage, amount) if v)[:200]
+    content, _ = _capped(json.dumps(rec).encode(), content_cap)
+    labels = ["Opportunities"] + ([account] if account else []) + ([partner] if partner else [])
+    return SourceObject(
+        object_id=f"crossbeam:opportunity:{rid}",
+        doc_type="opportunity", category="crm", title=title,
+        content=content, preview=preview, meta=meta, labels=labels,
+        modified_at=_parse_dt(rec.get("triggered_at") or rec.get("updated_at")))
 
 
 def fetch_crossbeam(config: dict, content_cap: int = _DEFAULT_CAP,
@@ -2318,19 +2500,27 @@ def fetch_crossbeam(config: dict, content_cap: int = _DEFAULT_CAP,
                           "size": size, "kind": "population"},
                     labels=["Populations"], modified_at=_parse_dt(pop.get("updated_at")))
 
-        if _want(options, "accounts"):
+        want_acct = _want(options, "accounts")
+        want_contacts = _want(options, "contacts")
+        want_opps = _want(options, "opportunities")
+        if want_acct or want_contacts or want_opps:
             for rec in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/records/accounts", headers):
-                yield _crossbeam_record(rec, "account", "Accounts", content_cap)
+                crm = rec.get("crm_data") if isinstance(rec.get("crm_data"), dict) else {}
+                acct_name = _cb_str(rec.get("record_name")) or _cb_pick(crm, "Account Name", "Name")
+                acct_id = (rec.get("record_id") or _cb_pick(crm, "Account ID")
+                           or rec.get("crossbeam_record_id"))
+                if want_acct:
+                    yield _cb_account(rec, content_cap)
+                # Contacts + opportunities live nested inside the account's crm_data,
+                # each linked back to it (a single account has many opportunities).
+                if want_contacts or want_opps:
+                    yield from _cb_account_children(rec, acct_name, acct_id, options, content_cap)
 
-        if _want(options, "leads"):
-            for rec in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/records/leads", headers):
-                yield _crossbeam_record(rec, "lead", "Leads", content_cap)
-
-        if _want(options, "opportunities"):
-            # Own open deals — an enterprise signal; skip cleanly if not licensed.
+        if want_opps:
+            # Partner-influenced deals (own-deals signals) — enterprise; skip if unlicensed.
             for rec in _crossbeam_paged(c, f"{CROSSBEAM_API}/v1/signals/own-deals",
                                         headers, optional=True):
-                yield _crossbeam_record(rec, "opportunity", "Opportunities", content_cap)
+                yield _cb_opportunity(rec, content_cap)
 
         if _want(options, "overlaps"):
             for path in ("accounts", "leads"):

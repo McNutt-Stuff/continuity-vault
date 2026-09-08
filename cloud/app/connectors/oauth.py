@@ -17,7 +17,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -248,7 +248,10 @@ def authorize_url(connector_type: str, state: str) -> str:
         "state": state,
         **spec.extra_auth_params,
     }
-    return f"{spec.authorize_url}?{urlencode(params)}"
+    # Encode spaces as %20 (quote), not + (quote_plus). LinkedIn's OAuth rejects
+    # a '+' in the scope param and shows "Bummer, something went wrong"; %20 is
+    # accepted by every provider.
+    return f"{spec.authorize_url}?{urlencode(params, quote_via=quote)}"
 
 
 def exchange_code(connector_type: str, code: str) -> dict:
