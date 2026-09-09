@@ -45,6 +45,7 @@ from ..models import (
     LogEntry,
     Node,
     PricingConfig,
+    Rule,
     SearchDocument,
     ServiceObject,
     SnapshotReceipt,
@@ -79,6 +80,9 @@ _PULL_ORDER = [
     ("connector_accounts", ConnectorAccount),
     ("customer_storages", CustomerStorage),
     ("collections", Collection),
+    # Rules federate to nodes so ingestion evaluates them locally (they own no
+    # runtime fields, so nothing to exclude).
+    ("rules", Rule),
 ]
 
 # Fields owned by the NODE, never overwritten by a pull (the node produces these

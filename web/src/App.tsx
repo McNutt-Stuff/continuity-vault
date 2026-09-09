@@ -13,6 +13,7 @@ import Insights from "./pages/Insights";
 import Integrations from "./pages/Integrations";
 import Connectors from "./pages/Connectors";
 import Mappings from "./pages/Mappings";
+import Rules from "./pages/Rules";
 import Appliances from "./pages/Appliances";
 import CloudStorage from "./pages/CloudStorage";
 import Snapshots from "./pages/Snapshots";
@@ -35,6 +36,7 @@ const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
   { to: "/devices", label: "Devices", icon: "user", group: "Data sources" },
   { to: "/integrations", label: "Integrations", icon: "puzzle", group: "Data sources" },
   { to: "/mappings", label: "Data Map", icon: "database", group: "Protection" },
+  { to: "/rules", label: "Rules", icon: "shield", group: "Protection" },
   { to: "/snapshots", label: "Recovery Points", icon: "clock", group: "Protection" },
   { to: "/activity", label: "Activity", icon: "activity", group: "Protection" },
   { to: "/cloud-storage", label: "Cloud Storage", icon: "cloud", group: "Storage" },
@@ -74,6 +76,7 @@ export default function App() {
             {me.features?.insights_enabled !== false && <Route path="/insights" element={<Insights />} />}
             <Route path="/connectors" element={<Connectors />} />
             <Route path="/mappings" element={<Mappings />} />
+            {me.features?.rules_enabled === true && <Route path="/rules" element={<Rules />} />}
             <Route path="/activity" element={<ActivityPage />} />
             <Route path="/snapshots" element={<Snapshots />} />
             <Route path="/appliances" element={<Appliances />} />
@@ -111,6 +114,8 @@ function Sidebar() {
     if (n.to === "/cloud-storage" && me?.features?.cloud_storage_enabled === false) return false;
     if (n.to === "/integrations" && me?.features?.integrations_enabled === false) return false;
     if (n.to === "/insights" && me?.features?.insights_enabled === false) return false;
+    // Rules is OFF by default — only show when explicitly enabled for the tenant.
+    if (n.to === "/rules" && me?.features?.rules_enabled !== true) return false;
     const req = NAV_REQUIRES[n.to];
     if (!req || !options || options.length === 0) return true;  // unconfigured → show all
     return options.includes(req);

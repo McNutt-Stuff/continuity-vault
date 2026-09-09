@@ -28,6 +28,7 @@ from .api import (
     photos,
     recovery,
     restore,
+    rules,
     search,
     site,
     snapshots,
@@ -80,6 +81,7 @@ app.include_router(billing.router, prefix=API)
 app.include_router(billing.admin_router, prefix=API)
 app.include_router(connectors.router, prefix=API)
 app.include_router(collections.router, prefix=API)
+app.include_router(rules.router, prefix=API)
 app.include_router(search.router, prefix=API)
 app.include_router(snapshots.router, prefix=API)
 app.include_router(storage_instances.router, prefix=API)

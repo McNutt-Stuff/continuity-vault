@@ -19,6 +19,9 @@ FLAGS: dict[str, bool] = {
     "insights_enabled": True,  # show the Insights page (digital-footprint findings)?
     "cloud_storage_enabled": True,  # show/allow Cloud Storage (bring-your-own buckets)?
     "integrations_enabled": True,   # show/allow Integrations (network intelligence)?
+    # Rules engine (compliance): declarative ingestion rules. OFF by default — an
+    # admin enables it per tenant/user; hidden entirely until then.
+    "rules_enabled": False,
 }
 
 # Human labels for the admin UI.
@@ -27,6 +30,7 @@ LABELS = {
     "insights_enabled": "Digital-footprint Insights",
     "cloud_storage_enabled": "Cloud Storage (bring-your-own)",
     "integrations_enabled": "Integrations (network intelligence)",
+    "rules_enabled": "Rules engine (compliance)",
 }
 
 

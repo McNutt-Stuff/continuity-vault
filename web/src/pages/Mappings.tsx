@@ -7,6 +7,8 @@ import { DestIcon } from "../components/DestIcon";
 import { JobKindBadge } from "../components/JobKindBadge";
 import { confirmDialog, notify } from "../components/dialog";
 import { FolderPicker, FolderNode } from "../components/FolderPicker";
+import { useAuth } from "../auth";
+import { Link } from "react-router-dom";
 
 interface Account { id: string; connector_type: string; account_label: string; account_username?: string | null; }
 interface Agent { id: string; name: string; hostname: string; collectors: string[]; enabled_collectors?: string[] }
@@ -55,6 +57,7 @@ interface Activity {
 }
 
 export default function Mappings() {
+  const { me } = useAuth();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
@@ -790,6 +793,11 @@ export default function Mappings() {
                     </button>
                   )}
                   <button className="btn sm ghost" onClick={() => remove(m)}>Remove</button>
+                  {me?.features?.rules_enabled === true && (
+                    <Link className="btn sm ghost" to={`/rules?collection=${m.id}`} title="Compliance rules applied to this source">
+                      <Icon name="shield" size={13} /> Rules
+                    </Link>
+                  )}
                 </>
               )}
             </div>

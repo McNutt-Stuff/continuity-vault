@@ -33,6 +33,7 @@ from cv_crypto.provider import hexdigest
 from cv_crypto.signing import HybridSigner
 
 from .. import audit, credstore, fleet, keybroker, node_config
+from .. import features, rules_engine
 from ..connectors import get_connector
 from ..connectors import oauth
 from ..models import (
@@ -41,8 +42,10 @@ from ..models import (
     Collection,
     ConnectorAccount,
     ObjectVersion,
+    Rule,
     SearchDocument,
     SnapshotReceipt,
+    Tenant,
     Vault,
 )
 from ..storage import build_destination
@@ -553,6 +556,49 @@ def _persist_stream_cursor(account: ConnectorAccount, mode: str,
             account.sync_cursor = new_cursor
 
 
+def _load_collection_rules(db: Session, collection: Collection):
+    """Enabled rules that apply to this collection (scoped by collection id and/or
+    source type), ordered so lower priority runs first. Empty scope = applies to
+    everything for the tenant. Rules take precedence over the basic Data Map logic."""
+    rules = (db.query(Rule)
+             .filter(Rule.tenant_id == collection.tenant_id, Rule.enabled.is_(True))
+             .order_by(Rule.priority.asc(), Rule.created_at.asc()).all())
+    out = []
+    for r in rules:
+        colls = r.collection_ids or []
+        srcs = r.source_types or []
+        if colls and collection.id not in colls:
+            continue
+        if srcs and collection.source_type not in srcs:
+            continue
+        out.append(r)
+    return out
+
+
+def _apply_rule_outcome(labels: List[str], meta: dict, preview: str, outcome):
+    """Fold a rule outcome into the index fields: add labels, mark restricted,
+    obfuscate the preview/metadata, and record which rules matched (``_rules``) so
+    it's queryable and visible in search."""
+    if not outcome or not outcome.applied:
+        return labels, meta, preview
+    new_labels = list(labels or [])
+    for lbl in outcome.add_labels:
+        if lbl not in new_labels:
+            new_labels.append(lbl)
+    if outcome.restricted and "Restricted" not in new_labels:
+        new_labels.append("Restricted")
+    new_meta = dict(meta or {})
+    new_preview = preview
+    if outcome.obfuscate:
+        new_preview = rules_engine.mask(preview)
+        new_meta = {k: (v if str(k).startswith("_") else rules_engine.mask(str(v)))
+                    for k, v in new_meta.items()}
+    new_meta["_rules"] = outcome.rule_names
+    if outcome.restricted:
+        new_meta["_restricted"] = True
+    return new_labels, new_meta, new_preview
+
+
 def ingest_objects(db: Session, collection: Collection, source_objects,
                    destinations: Optional[List[str]] = None,
                    searchable_fields: Optional[List[str]] = None,
@@ -576,6 +622,16 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     for k in source_keys:
         if k and k != "*" and k not in display_keys:
             display_keys.append(k)
+
+    # Rules engine (compliance) — evaluated per object below, TAKING PRECEDENCE
+    # over the basic Data Map logic. Only loaded when the tenant has the feature
+    # enabled; empty otherwise so ingestion is unchanged for everyone else.
+    tenant = db.get(Tenant, collection.tenant_id)
+    rules: list = []
+    rule_plan = "business"
+    if tenant is not None and features.resolve(None, tenant, "rules_enabled"):
+        rule_plan = (tenant.plan or "personal")
+        rules = _load_collection_rules(db, collection)
 
     root_key = keybroker.release_vault_root_key(vault.id)
     hierarchy = EnvelopeKeyHierarchy(root_key)
@@ -617,11 +673,29 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
 
     stored = 0
     deduped = 0
+    discarded = 0
     for idx, src in enumerate(src_list):
         # Prefer a client-supplied plaintext hash (agents encrypt with a fresh
         # nonce each run, so the ciphertext hash is never stable); otherwise hash
         # the content directly (connector plaintext is stable).
         content_hash = src.content_hash or hashlib.sha256(src.content or b"").hexdigest()
+        # Evaluate compliance rules once per object (precedence over basic logic).
+        outcome = None
+        if rules:
+            outcome = rules_engine.evaluate(
+                rules,
+                rules_engine.object_fields(
+                    doc_type=src.doc_type, category=src.category,
+                    title=src.title or "", source_type=collection.source_type,
+                    labels=src.labels, meta=src.meta),
+                plan=rule_plan)
+            if outcome.applied:
+                audit.record(db, actor="rules-engine", action="rule.matched",
+                             tenant_id=collection.tenant_id, resource=src.object_id,
+                             detail={"object": src.object_id, "source": collection.source_type,
+                                     "rules": outcome.rule_names,
+                                     "actions": sorted({a for m in outcome.matched
+                                                        for a in m.get("actions", [])})})
         prev = current_versions.get(src.object_id)
         if prev is None:
             pd = prior_docs.get(src.object_id)
@@ -661,8 +735,14 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                 d_meta = _discrete_metadata(src.meta, display_keys)
                 d_preview = _compose_preview(d_meta)
                 d_title = str(src.title) if src.title is not None else ""
+                d_labels = src.labels or []
+                # Keep rule marks (labels/restricted/obfuscation/_rules) fresh on
+                # unchanged objects too, so editing a rule re-applies on re-sync.
+                if outcome is not None:
+                    d_labels, d_meta, d_preview = _apply_rule_outcome(
+                        d_labels, d_meta, d_preview, outcome)
                 d_blob = " ".join(
-                    str(x) for x in [src.title, *(src.labels or []), *_flatten_values(d_meta)]
+                    str(x) for x in [src.title, *d_labels, *_flatten_values(d_meta)]
                     if x is not None).strip()
                 db.query(SearchDocument).filter(
                     SearchDocument.tenant_id == collection.tenant_id,
@@ -676,9 +756,15 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                     SearchDocument.meta: d_meta,
                     SearchDocument.doc_type: src.doc_type,
                     SearchDocument.category: src.category,
-                    SearchDocument.labels: src.labels or [],
+                    SearchDocument.labels: d_labels,
                     SearchDocument.search_blob: d_blob,
                 }, synchronize_session=False)
+            continue
+
+        # Rules: DISCARD takes precedence — don't version, store, or index this
+        # object (it isn't backed up at all).
+        if outcome is not None and outcome.discard:
+            discarded += 1
             continue
 
         # New object, or content changed → record a new immutable version.
@@ -697,6 +783,10 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
             _encrypt_content_units(snapshot_key, src.content, src.object_id, chunk_size))
         total_bytes += len(src.content)
         stored += 1
+        # Rules: NO_INDEX stores the content (recoverable) but keeps it out of the
+        # search index. Skip building a SearchDocument entirely.
+        if outcome is not None and outcome.no_index:
+            continue
         # Index only discrete, connector-declared metadata — no body/content. The
         # preview is a composed "Field: value" summary of that metadata (empty for
         # zero-knowledge vaults, which index the title only).
@@ -704,13 +794,19 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
             discrete_meta: dict = {}
             preview = ""
             search_blob = ""
+            index_labels: list = []
         else:
             discrete_meta = _discrete_metadata(src.meta, display_keys)
             preview = _compose_preview(discrete_meta)
+            index_labels = src.labels or []
+            # Fold in any matching rules (labels, restricted, obfuscation, _rules).
+            if outcome is not None:
+                index_labels, discrete_meta, preview = _apply_rule_outcome(
+                    index_labels, discrete_meta, preview, outcome)
             # Coerce every part to str — some connectors (e.g. Gmail) can surface
             # non-str header objects, which would break the join.
             search_blob = " ".join(
-                str(x) for x in [src.title, *(src.labels or []), *_flatten_values(discrete_meta)]
+                str(x) for x in [src.title, *index_labels, *_flatten_values(discrete_meta)]
                 if x is not None
             ).strip()
         index_rows.append(
@@ -726,7 +822,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                 title=str(src.title) if src.title is not None else "",
                 preview=preview,
                 meta=discrete_meta,
-                labels=[] if zero_knowledge else (src.labels or []),
+                labels=[] if zero_knowledge else index_labels,
                 search_blob=search_blob,
                 size_bytes=src.size_bytes,
                 modified_at=src.modified_at,

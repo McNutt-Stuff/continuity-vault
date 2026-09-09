@@ -356,6 +356,56 @@ immediate backup.
 """,
         help_routes=["/mappings"]),
 
+    _doc(
+        "rules", "Rules engine", "Sources & Connections", _SOURCES, 45, "shield",
+        "Declarative compliance rules that label, restrict, obfuscate, or discard data as it's ingested.",
+        """
+# Rules engine
+
+**Rules** add a deeper layer of logic on top of the Data Map. Each rule is
+evaluated **the moment data is ingested** — before it's indexed — and decides how
+that item is handled. This is the foundation of Arkive's compliance controls.
+
+> Rules are an add‑on capability. If you don't see a **Rules** item in the
+> sidebar, it isn't enabled for your account — contact your administrator.
+
+## How a rule works
+A rule reads **IF … THEN …**:
+
+- **IF** one or more **conditions** match — on *any* attribute the source
+  captures (sender, subject, folder, path, file type, tags, and more). Combine
+  conditions with **match ALL** (AND) or **match ANY** (OR).
+- **THEN** one or more **actions** run:
+  - **Add label / tag** — classify the item (e.g. label everything from a person
+    "Family", or tag credentials "Restricted").
+  - **Mark restricted** — flags the item and adds a Restricted marker in search.
+  - **Obfuscate preview** — redacts the searchable preview so sensitive values
+    aren't shown, while the encrypted content is still recoverable.
+  - **Don't index (store only)** — backs the item up but keeps it out of search.
+  - **Discard** — does not back the item up at all.
+
+Examples: *If **From** contains "rob.mcnutt" then add label "Rob"* · *If
+**anything** contains "password" then mark Restricted and obfuscate*.
+
+## Scope, order and precedence
+- A rule applies to the whole account, or only to the **Data Map sources** you
+  select. Open a source's **Rules** link in the Data Map to see the rules on it.
+- Rules run in **priority** order (lowest first); a **Discard** stops the rest.
+- **Rules take precedence** over the basic Data Map settings.
+
+## Plans
+Rules degrade gracefully by plan — labelling is available everywhere, while
+restrict/obfuscate and index/discard controls unlock on higher tiers. A rule (or
+an individual action) above your plan is simply skipped.
+
+## Seeing what applied
+Every match is recorded. Search results show the labels a rule added, a
+**Restricted** marker, and a **rules applied** badge; the **Test** panel in the
+rule editor lets you check exactly which rules match a sample item before you
+rely on them. Rule matches are also written to the audit log.
+""",
+        help_routes=["/rules"], required_plan="business"),
+
     # ---------------------------------------------------------------- Storage & recovery
     _doc(
         "cloud-storage", "Choosing storage", "Storage & Recovery", _STORAGE, 10, "cloud",

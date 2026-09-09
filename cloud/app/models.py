@@ -181,6 +181,43 @@ class Collection(Base):
     vault = relationship("Vault", back_populates="collections")
 
 
+class Rule(Base):
+    """A declarative ingestion rule: IF (conditions, AND/OR) THEN (actions).
+
+    Evaluated on data ingestion — BEFORE a SearchDocument is written — so rules
+    can label, tag as restricted, obfuscate previews, decide indexing, or discard
+    an object. Rules take precedence over the basic Data Map logic. Federated: the
+    control plane owns rules; customer-tenant nodes pull them and evaluate locally
+    during their own ingestion. Gated by the ``rules_enabled`` feature flag and,
+    per action, by the tenant's plan (``min_plan``)."""
+
+    __tablename__ = "rules"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, default="")
+    enabled = Column(Boolean, default=True, index=True)
+    # Lower runs first; ties broken by created_at. Order matters (an early discard
+    # short-circuits later rules for that object).
+    priority = Column(Integer, default=100)
+    # "all" (AND) or "any" (OR) across the conditions list.
+    match = Column(String, default="all")
+    # [{"field": "from", "op": "contains", "value": "rob"}], field can be a bare
+    # attribute (doc_type, title, source_type, from, label, category) or "meta.<k>".
+    conditions = Column(JSON, default=list)
+    # [{"type": "label", "value": "Rob"}, {"type": "restrict"}, ...]. Types:
+    # label | tag | restrict | obfuscate | discard | no_index | index.
+    actions = Column(JSON, default=list)
+    # Scope: which Data Map collections (empty = all) and/or source types (empty =
+    # all) this rule applies to.
+    collection_ids = Column(JSON, default=list)
+    source_types = Column(JSON, default=list)
+    # Lowest plan entitled to this rule: personal | family | business.
+    min_plan = Column(String, default="personal")
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
 class ConnectorAccount(Base):
     """A linked source account (OAuth/API) for a sync worker (spec: connectors
     for 1Password, Gmail, Outlook.com, OneDrive, Dropbox, iCloud)."""
