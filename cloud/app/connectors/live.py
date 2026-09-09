@@ -1516,14 +1516,13 @@ def fetch_icloud(username: str, password: str,
         except Exception as exc:
             logger.info("iCloud contacts unavailable: %s", exc)
 
-    # iCloud Drive files — full recursive walk, scoped to the selected folders.
-    # Files are chosen by FOLDER (roots), so don't also date-filter them: a
-    # `since` date is for the time-based photo library, and applying it here
-    # silently drops older files in the folders the user explicitly picked.
+    # iCloud Drive files — recursive walk, scoped to the selected folders and
+    # filtered by each file's own modified date against `since` (Back up history
+    # from), same as photos.
     if want("files"):
         try:
             yield from _icloud_walk_drive(api.drive, "", content_cap, rec_roots,
-                                          flat_roots, None, counts)
+                                          flat_roots, since, counts)
         except Exception as exc:
             logger.info("iCloud Drive unavailable: %s", exc)
 
