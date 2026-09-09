@@ -325,9 +325,17 @@ def connect(connector_type: str, body: ConnectRequest,
 def oauth_callback(code: str | None = Query(default=None),
                    state: str | None = Query(default=None),
                    error: str | None = Query(default=None),
+                   error_description: str | None = Query(default=None),
                    db: Session = Depends(get_db)):
     portal = settings.rp_origin.rstrip("/")
     if error or not code or not state:
+        if error:
+            # Surface the provider's exact OAuth rejection (e.g. LinkedIn
+            # 'unauthorized_scope_error' = the app is missing the OpenID Connect
+            # product) to Platform Logs instead of a generic redirect.
+            ctype = (oauth.read_state(state) or {}).get("type", "?") if state else "?"
+            logger.warning("OAuth callback error for %s: %s — %s", ctype, error,
+                           error_description or "(no description)")
         return RedirectResponse(f"{portal}/connectors?error={error or 'cancelled'}")
     data = oauth.read_state(state)
     if not data:
