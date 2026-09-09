@@ -1517,10 +1517,13 @@ def fetch_icloud(username: str, password: str,
             logger.info("iCloud contacts unavailable: %s", exc)
 
     # iCloud Drive files — full recursive walk, scoped to the selected folders.
+    # Files are chosen by FOLDER (roots), so don't also date-filter them: a
+    # `since` date is for the time-based photo library, and applying it here
+    # silently drops older files in the folders the user explicitly picked.
     if want("files"):
         try:
             yield from _icloud_walk_drive(api.drive, "", content_cap, rec_roots,
-                                          flat_roots, since, counts)
+                                          flat_roots, None, counts)
         except Exception as exc:
             logger.info("iCloud Drive unavailable: %s", exc)
 
@@ -2009,6 +2012,16 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                                           me.get("localizedLastName")]))
                 or "LinkedIn member")
 
+        # LinkedIn's picture URL carries a rotating signed token, so the raw JSON
+        # differs every run — hash only the STABLE identity so we don't mint a new
+        # version (and a fresh "date") on each sync.
+        _li_stable = json.dumps({"sub": sub, "name": name, "email": userinfo.get("email"),
+                                 "headline": me.get("localizedHeadline"),
+                                 "vanity": me.get("vanityName")}, sort_keys=True)
+
+        def _li_hash(kind: str) -> str:
+            return hashlib.sha256(f"linkedin:{kind}:{_li_stable}".encode()).hexdigest()
+
         # PROFILE — the member's identity card.
         if _want(options, "profile") and (userinfo or me):
             merged = {**me, **userinfo}
@@ -2021,7 +2034,7 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                       "headline": me.get("localizedHeadline"),
                       "vanity_name": me.get("vanityName"),
                       "locale": userinfo.get("locale"), "kind": "profile"},
-                labels=["Profile"])
+                labels=["Profile"], content_hash=_li_hash("profile"))
 
         # RÉSUMÉ — a consolidated professional document. Work history / education
         # / skills need r_basicprofile (partner); without it we still capture the
@@ -2044,7 +2057,7 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                 content=json.dumps(resume).encode(),
                 preview=resume.get("headline") or name,
                 meta={"headline": resume.get("headline"), "kind": "resume"},
-                labels=["Resume"])
+                labels=["Resume"], content_hash=_li_hash("resume"))
 
         # POSTS / ARTICLES — needs Community Management / member-social access.
         if person_urn and _want(options, "posts"):
