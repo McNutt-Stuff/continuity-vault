@@ -295,53 +295,7 @@ export default function Connectors() {
     }
   }
 
-  async function backup(a: Account) {
-    const vault = vaults[0];
-    if (!vault) return notify({ message: "No vault is available to store this backup.", tone: "warn" });
-    // Prefer an existing Data Map mapping for this source so the sync routes to
-    // the destinations configured there; only create a cloud-default mapping when
-    // the source has not been mapped yet (routing is managed in the Data Map).
-    let collId: string | null = null;
-    try {
-      const mappings = await api.get<Array<{ id: string; connector_account_id: string | null }>>("/collections");
-      const existing = mappings.find((m) => m.connector_account_id === a.id);
-      if (existing) collId = existing.id;
-    } catch { /* fall back to creating one */ }
-    if (!collId) {
-      const coll = await api.post<{ id: string }>("/collections", {
-        vault_id: vault.id,
-        name: a.account_label,
-        source_type: a.connector_type,
-        connector_account_id: a.id,
-        destinations: ["cv-cloud"],
-      });
-      collId = coll.id;
-    }
-    try {
-      const res = await api.post<{ job_id?: string; object_count?: number }>(
-        `/collections/${collId}/backup`, {});
-      if (res.job_id) flash(`Backup started for ${a.account_label} — see Activity for progress`);
-      else flash(`Backed up ${res.object_count ?? 0} objects from ${a.account_label}`);
-    } catch (e) {
-      await notify({ title: "Backup failed", message: (e as ApiError).message, tone: "danger" });
-    }
-    await load();
-  }
-
   // --- Agent-collected sources (Collections bound to a desktop agent) --------
-  async function agentBackup(s: AgentSource) {
-    try {
-      await api.post(`/collections/${s.id}/sync`, {});
-      flash(`Collection queued on the agent for ${s.name}`);
-      await load();
-    } catch (e) {
-      const err = e as ApiError;
-      await notify({
-        title: "Couldn't collect", tone: "danger",
-        message: err.status === 409 ? "The desktop agent for this source is offline." : err.message,
-      });
-    }
-  }
 
   async function renameAgentSource(s: AgentSource) {
     const name = await promptDialog({
@@ -821,7 +775,7 @@ export default function Connectors() {
                     ? <button className="btn sm primary" onClick={() => reconnect(a)}><Icon name="key" size={13} /> Reconnect</button>
                     : (a.connector_type === "google_photos"
                         ? <button className="btn sm primary" onClick={() => setPhotoPicker(a.id)}>Add photos</button>
-                        : <button className="btn sm primary" onClick={() => backup(a)}>Back up now</button>)}
+                        : null)}
                   <Menu items={([
                     { label: "Rename source", icon: "edit", onClick: () => rename(a) },
                     ...(c?.mode === "oauth" && !a.needs_reauth ? [{ label: "Re-authorize", icon: "key", onClick: () => reconnect(a) }] : []),
@@ -882,7 +836,6 @@ export default function Connectors() {
                   </div>
                   <Pill tone="info">Desktop agent</Pill>
                   <Pill tone={online ? "ok" : "warn"} dot>{online ? "Online" : "Offline"}</Pill>
-                  <button className="btn sm primary" onClick={() => agentBackup(s)}>Back up now</button>
                   <Menu items={([
                     { label: "Rename source", icon: "edit", onClick: () => renameAgentSource(s) },
                     { label: "Agent settings", icon: "gear", onClick: () => window.location.assign("/devices") },
