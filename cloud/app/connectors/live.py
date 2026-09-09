@@ -1456,7 +1456,44 @@ def fetch_icloud(username: str, password: str,
     counts = {"photos": 0, "files": 0, "contacts": 0}
     photos_empty = 0
 
-    # Photos & videos (whole library — the master "all" collection).
+    # ORDER MATTERS: contacts + Drive files are cheap and finish fast; Photos can
+    # take a very long time (downloading full bytes for a large library). Emit the
+    # fast/important sources FIRST so they're captured even if a big photo crawl is
+    # interrupted or times out before it finishes.
+
+    # Contacts
+    if want("contacts"):
+        try:
+            # pyicloud 2.7: contacts.all is a PROPERTY (a list), not a method.
+            people = api.contacts.all
+            for person in (people() if callable(people) else (people or [])):
+                cid = person.get("contactId") or person.get("phones", [{}])[0].get("field", "")
+                name = " ".join(filter(None, [person.get("firstName"), person.get("lastName")])) or "Contact"
+                content = json.dumps(person).encode()
+                content, backed = _capped(content, content_cap)
+                yield SourceObject(
+                    object_id=f"icloud:contact:{cid}",
+                    doc_type="person", category="contact", title=name,
+                    content=content, preview=name,
+                    meta={"album": "Contacts", "kind": "contact", "content_backed_up": backed},
+                    labels=["Contacts"],
+                )
+                counts["contacts"] += 1
+        except Exception as exc:
+            logger.info("iCloud contacts unavailable: %s", exc)
+
+    # iCloud Drive files — recursive walk, scoped to the selected folders and
+    # filtered by each file's own modified date against `since` (Back up history
+    # from), same as photos.
+    if want("files"):
+        try:
+            yield from _icloud_walk_drive(api.drive, "", content_cap, rec_roots,
+                                          flat_roots, since, counts)
+        except Exception as exc:
+            logger.info("iCloud Drive unavailable: %s", exc)
+
+    # Photos & videos (whole library — the master "all" collection). LAST because
+    # it's the slowest (full-resolution downloads).
     if want("photos"):
         try:
             for photo in api.photos.all:
@@ -1494,37 +1531,6 @@ def fetch_icloud(username: str, password: str,
                 counts["photos"] += 1
         except Exception as exc:
             logger.info("iCloud Photos unavailable: %s", exc)
-
-    # Contacts
-    if want("contacts"):
-        try:
-            # pyicloud 2.7: contacts.all is a PROPERTY (a list), not a method.
-            people = api.contacts.all
-            for person in (people() if callable(people) else (people or [])):
-                cid = person.get("contactId") or person.get("phones", [{}])[0].get("field", "")
-                name = " ".join(filter(None, [person.get("firstName"), person.get("lastName")])) or "Contact"
-                content = json.dumps(person).encode()
-                content, backed = _capped(content, content_cap)
-                yield SourceObject(
-                    object_id=f"icloud:contact:{cid}",
-                    doc_type="person", category="contact", title=name,
-                    content=content, preview=name,
-                    meta={"album": "Contacts", "kind": "contact", "content_backed_up": backed},
-                    labels=["Contacts"],
-                )
-                counts["contacts"] += 1
-        except Exception as exc:
-            logger.info("iCloud contacts unavailable: %s", exc)
-
-    # iCloud Drive files — recursive walk, scoped to the selected folders and
-    # filtered by each file's own modified date against `since` (Back up history
-    # from), same as photos.
-    if want("files"):
-        try:
-            yield from _icloud_walk_drive(api.drive, "", content_cap, rec_roots,
-                                          flat_roots, since, counts)
-        except Exception as exc:
-            logger.info("iCloud Drive unavailable: %s", exc)
 
     logger.info("iCloud pull complete for %s: %d photo(s) [%d index-only], %d file(s), "
                 "%d contact(s)%s", username, counts["photos"], photos_empty,
