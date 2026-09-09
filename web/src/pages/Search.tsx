@@ -1073,12 +1073,12 @@ export default function Search() {
             {/* Add-filter modal — sidebar menu (left) + fields (right) */}
             {filterModalOpen && (() => {
               const sections = [
-                cats.length > 0 && { id: "type" as const, label: "Type", icon: "grid", badge: types.size },
-                srcs.length > 0 && { id: "source" as const, label: "Source", icon: "database", badge: sources.size },
-                attrKeys.length > 0 && { id: "attrs" as const, label: "Attributes", icon: "tag", badge: attrs.length },
-                labelFacets.length > 0 && { id: "label" as const, label: "Label", icon: "bookmark", badge: labels.size },
-                { id: "date" as const, label: "Date range", icon: "calendar", badge: hasDate ? 1 : 0 },
-              ].filter(Boolean) as { id: typeof filterTab; label: string; icon: string; badge: number }[];
+                cats.length > 0 && { id: "type" as const, label: "Type", icon: "grid" as IconName, badge: types.size },
+                srcs.length > 0 && { id: "source" as const, label: "Source", icon: "database" as IconName, badge: sources.size },
+                attrKeys.length > 0 && { id: "attrs" as const, label: "Attributes", icon: "info" as IconName, badge: attrs.length },
+                labelFacets.length > 0 && { id: "label" as const, label: "Label", icon: "note" as IconName, badge: labels.size },
+                { id: "date" as const, label: "Date range", icon: "calendar" as IconName, badge: hasDate ? 1 : 0 },
+              ].filter(Boolean) as { id: typeof filterTab; label: string; icon: IconName; badge: number }[];
               const effTab = sections.some((s) => s.id === filterTab) ? filterTab : (sections[0]?.id ?? "date");
               return (
               <div className="modal-backdrop" onClick={() => setFilterModalOpen(false)}>
