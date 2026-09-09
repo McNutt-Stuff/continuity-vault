@@ -563,6 +563,7 @@ class ICloudConnector(Connector):
         return ConnectorCapabilities(
             streaming=True,
             browsable=True,
+            historical=True,
             searchable_fields=["album", "kind", "path"],
             facet_fields=["kind", "album"],
             filter_categories=[

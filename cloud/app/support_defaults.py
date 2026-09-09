@@ -825,6 +825,8 @@ _SOURCE_PAGES = [
          "everything added since; unchanged items are de-duplicated automatically.",
          "Pick photos / files / contacts independently, and browse & select Drive folders, in "
          "the Data Map.",
+         "Set **“Back up history from”** in the Data Map to a date to skip everything older "
+         "than that (by photo/file date) instead of capturing your whole history.",
          "iMessage and other Messages content isn't exposed by any iCloud API and can't be "
          "captured here."]),
     _source_doc(
