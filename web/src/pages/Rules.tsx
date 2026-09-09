@@ -88,7 +88,7 @@ export default function Rules() {
 
   async function remove(r: Rule) {
     if (!r.id) { setSel(null); return; }
-    if (!(await confirmDialog({ title: "Delete rule", message: `Delete “${r.name}”? This can't be undone.`, confirmLabel: "Delete", danger: true }))) return;
+    if (!(await confirmDialog({ title: "Delete rule", message: `Delete “${r.name}”? This can't be undone.`, confirmLabel: "Delete", tone: "danger" }))) return;
     try { await api.del(`/rules/${r.id}`); if (sel?.id === r.id) setSel(null); await load(); }
     catch (e) { await notify({ title: "Couldn't delete", message: (e as Error).message, tone: "danger" }); }
   }
@@ -266,7 +266,7 @@ function RuleEditor({ rule, opts, planRank, onChange, onSave, onDelete, saving, 
                   <input className="input sm" value={a.value || ""} placeholder="label / tag value"
                          onChange={(e) => setAct(i, { value: e.target.value })} />
                 )}
-                {locked && <Pill tone="warn" title="Not included in your plan"><Icon name="lock" size={10} /> {m?.min_plan}</Pill>}
+                {locked && <span title="Not included in your plan"><Pill tone="warn"><Icon name="lock" size={10} /> {m?.min_plan}</Pill></span>}
                 <button className="btn ghost sm" onClick={() => onChange("actions", rule.actions.filter((_, j) => j !== i))}
                         disabled={rule.actions.length <= 1} title="Remove"><Icon name="x" size={13} /></button>
               </div>

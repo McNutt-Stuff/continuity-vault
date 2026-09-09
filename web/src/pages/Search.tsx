@@ -1348,9 +1348,11 @@ export default function Search() {
                   {r.sensitivity === "restricted" && <Pill tone="danger">restricted</Pill>}
                   {Boolean(r.meta?._restricted) && <Pill tone="danger"><Icon name="lock" size={10} /> Restricted</Pill>}
                   {Array.isArray(r.meta?._rules) && (r.meta._rules as string[]).length > 0 && (
-                    <Pill tone="info" title={`Rules applied: ${(r.meta._rules as string[]).join(", ")}`}>
-                      <Icon name="shield" size={10} /> {(r.meta._rules as string[]).length} rule{(r.meta._rules as string[]).length === 1 ? "" : "s"}
-                    </Pill>
+                    <span title={`Rules applied: ${(r.meta._rules as string[]).join(", ")}`}>
+                      <Pill tone="info">
+                        <Icon name="shield" size={10} /> {(r.meta._rules as string[]).length} rule{(r.meta._rules as string[]).length === 1 ? "" : "s"}
+                      </Pill>
+                    </span>
                   )}
                   {(r.version_count ?? 0) > 1 && (
                     <button className="btn sm ghost" style={{ padding: "1px 8px", fontSize: 11 }}
