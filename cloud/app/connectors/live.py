@@ -1454,6 +1454,7 @@ def fetch_icloud(username: str, password: str,
     since = _parse_dt(options.get("sinceDate")) if options.get("sinceDate") else None
     api = _icloud_login(username, password)
     counts = {"photos": 0, "files": 0, "contacts": 0}
+    photos_empty = 0
 
     # Photos & videos (whole library — the master "all" collection).
     if want("photos"):
@@ -1468,7 +1469,15 @@ def fetch_icloud(username: str, password: str,
                 raw = b""
                 if 0 < size <= content_cap:
                     try:
-                        raw = _icloud_read_download(photo.download(), content_cap)
+                        dl = photo.download()
+                        raw = _icloud_read_download(dl, content_cap)
+                        if not raw:
+                            photos_empty += 1
+                            if photos_empty <= 3:
+                                logger.warning(
+                                    "iCloud photo %s stored index-only: download()"
+                                    " returned %s, %d bytes (size=%d)", name,
+                                    type(dl).__name__, len(raw), size)
                     except Exception as exc:  # noqa: BLE001
                         logger.info("iCloud photo download failed for %s: %s", name, exc)
                         raw = b""
@@ -1489,7 +1498,9 @@ def fetch_icloud(username: str, password: str,
     # Contacts
     if want("contacts"):
         try:
-            for person in (api.contacts.all() or []):
+            # pyicloud 2.7: contacts.all is a PROPERTY (a list), not a method.
+            people = api.contacts.all
+            for person in (people() if callable(people) else (people or [])):
                 cid = person.get("contactId") or person.get("phones", [{}])[0].get("field", "")
                 name = " ".join(filter(None, [person.get("firstName"), person.get("lastName")])) or "Contact"
                 content = json.dumps(person).encode()
@@ -1513,8 +1524,9 @@ def fetch_icloud(username: str, password: str,
         except Exception as exc:
             logger.info("iCloud Drive unavailable: %s", exc)
 
-    logger.info("iCloud pull complete for %s: %d photo(s), %d file(s), %d contact(s)%s",
-                username, counts["photos"], counts["files"], counts["contacts"],
+    logger.info("iCloud pull complete for %s: %d photo(s) [%d index-only], %d file(s), "
+                "%d contact(s)%s", username, counts["photos"], photos_empty,
+                counts["files"], counts["contacts"],
                 f" (since {since.date()})" if since else "")
 
 
