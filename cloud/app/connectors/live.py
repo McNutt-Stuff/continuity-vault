@@ -1460,14 +1460,6 @@ def fetch_icloud(username: str, password: str,
     if want("photos"):
         try:
             for photo in api.photos.all:
-                # "All Photos" is newest-first by ADDED date. added_date >= capture
-                # date, so once a photo was added before `since` every remaining one
-                # is older too — stop here instead of walking the whole library each
-                # run (the slow "runs forever, captures nothing" symptom).
-                if since:
-                    added = _parse_dt(getattr(photo, "added_date", None))
-                    if added and added < since:
-                        break
                 when = _parse_dt(getattr(photo, "asset_date", None)
                                  or getattr(photo, "created", None))
                 if since and when and when < since:
