@@ -14,7 +14,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -31,6 +31,26 @@ _STORE = Path(os.environ.get("CV_RECOVERED_STORE", "/var/lib/continuity-vault/re
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _heic_to_jpeg(data: bytes) -> bytes | None:
+    """Decode HEIC/HEIF bytes to JPEG for browser preview — browsers can't render
+    HEIC natively and the JS decoder (heic2any) fails on many modern iPhone HEICs.
+    Returns None if the decoder isn't installed or the bytes aren't decodable."""
+    try:
+        import io
+        import pillow_heif  # bundles libheif (manylinux/cp314 wheels)
+        from PIL import Image
+        pillow_heif.register_heif_opener()
+        img = Image.open(io.BytesIO(data))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=90)
+        return out.getvalue()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("HEIC preview conversion failed: %s", exc)
+        return None
 
 
 def _path(item_id: str) -> Path:
@@ -141,6 +161,7 @@ def list_recovered(principal: security.Principal = Depends(security.get_principa
 
 @router.get("/{item_id}/content")
 def view_content(item_id: str,
+                 preview: bool = Query(default=False),
                  principal: security.Principal = Depends(security.require_passkey),
                  tenant: Tenant = Depends(security.get_tenant),
                  db: Session = Depends(get_db)):
@@ -169,6 +190,15 @@ def view_content(item_id: str,
     ascii_name = (title.encode("ascii", "ignore").decode().replace('"', "").replace("\\", "").strip()
                   or "file")
     disp = f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(title)}"
+    # HEIC/HEIF can't render in the browser — convert to JPEG for preview.
+    is_heic = ((item.mime or "").lower() in ("image/heic", "image/heif")
+               or title.lower().endswith((".heic", ".heif")))
+    if preview and is_heic:
+        jpeg = _heic_to_jpeg(data)
+        if jpeg is not None:
+            return Response(content=jpeg, media_type="image/jpeg",
+                            headers={"Content-Disposition":
+                                     f'inline; filename="{ascii_name}.jpg"'})
     return Response(content=data, media_type=item.mime or "application/octet-stream",
                     headers={"Content-Disposition": disp})
 

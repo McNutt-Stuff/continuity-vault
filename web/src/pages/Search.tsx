@@ -688,9 +688,21 @@ export default function Search() {
       const looksImage = mime.startsWith("image/") || item.doc_type === "image"
         || /\.(hei[cf]|jpe?g|png|gif|webp|bmp|tiff?|avif)$/i.test(item.title || "");
       if (looksImage) {
-        // Browsers can't decode HEIC/HEIF natively — convert to JPEG on the fly.
+        // Browsers can't decode HEIC/HEIF. Prefer the server's JPEG conversion
+        // (reliable, uses libheif); fall back to the in-browser heic2any decoder.
         const isHeic = /hei[cf]/i.test(mime) || /\.hei[cf]$/i.test(item.title || "");
         if (isHeic) {
+          try {
+            const jres = await fetch(`/api/recovered/${item.id}/content?preview=1`, {
+              headers: { Authorization: `Bearer ${getToken() ?? ""}` },
+            });
+            if (jres.ok && (jres.headers.get("content-type") || "").startsWith("image/jpeg")) {
+              const jblob = await jres.blob();
+              setViewing({ item, kind: "image", url: URL.createObjectURL(jblob) });
+              await loadRecovered();
+              return;
+            }
+          } catch { /* fall through to heic2any */ }
           try {
             const heic2any = (await import("heic2any")).default;
             const out = await heic2any({ blob, toType: "image/jpeg", quality: 0.9 });

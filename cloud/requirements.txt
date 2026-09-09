@@ -25,6 +25,10 @@ protobuf>=6.33.5,<7
 httpx>=0.27.0
 psycopg[binary]>=3.1.0
 webauthn>=2.1.0,<3
+# HEIC/HEIF decode for browser preview (Apple photos) — pillow-heif bundles
+# libheif in its wheel, so no system package is needed.
+Pillow>=11.0.0
+pillow-heif>=1.0.0
 # iCloud connector (unofficial API): enables Photos / Drive / Contacts sync.
 # Pin the maintained 2.x (SRP) line — 1.x's auth flow is broken against current
 # Apple, and 2.x delivers the 2FA code via api.request_2fa_code() (see live.py).
