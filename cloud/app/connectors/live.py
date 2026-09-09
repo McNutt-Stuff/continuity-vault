@@ -2072,8 +2072,11 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                             meta={"created": (post.get("created") or {}).get("time"),
                                   "kind": "post"}, labels=["Posts"],
                             modified_at=_parse_dt((post.get("created") or {}).get("time")))
-            except Exception:
-                pass
+                else:
+                    logger.info("LinkedIn posts unavailable: HTTP %s — needs the "
+                                "Community Management API (partner access)", rp.status_code)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("LinkedIn posts fetch error: %s", exc)
 
         # MESSAGES — LinkedIn's Messaging API is partner-only; best-effort.
         if person_urn and _want(options, "messages"):
@@ -2092,8 +2095,11 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                             meta={"created": msg.get("createdAt"), "kind": "message"},
                             labels=["Messages"],
                             modified_at=_parse_dt(msg.get("createdAt")))
-            except Exception:
-                pass
+                else:
+                    logger.info("LinkedIn messages unavailable: HTTP %s — the Messaging "
+                                "API is partner-only", r.status_code)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("LinkedIn messages fetch error: %s", exc)
 
         # CONNECTIONS — count (r_1st_connections_size) + full list (r_network,
         # partner). Both best-effort.
@@ -2112,8 +2118,10 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                             content=json.dumps(d).encode(),
                             preview=f"{n} first-degree connections",
                             meta={"count": n, "kind": "connections"}, labels=["Connections"])
-            except Exception:
-                pass
+                else:
+                    logger.info("LinkedIn connection count unavailable: HTTP %s", r.status_code)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("LinkedIn connection count error: %s", exc)
             try:
                 r = c.get("https://api.linkedin.com/v2/connections", headers=api_hdr,
                           params={"q": "viewer", "start": 0, "count": 100})
@@ -2126,8 +2134,12 @@ def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                             doc_type="contact", category="contact", title=cname,
                             content=json.dumps(conn).encode(), preview=cname,
                             meta={"kind": "connection"}, labels=["Connections"])
-            except Exception:
-                pass
+                else:
+                    logger.info("LinkedIn connections list unavailable: HTTP %s — the full "
+                                "connection list needs partner access (LinkedIn no longer "
+                                "exposes it to standard apps)", r.status_code)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("LinkedIn connections list error: %s", exc)
 
 
 # --------------------------------------------------------------------------- #

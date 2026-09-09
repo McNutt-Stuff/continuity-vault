@@ -865,9 +865,9 @@ class LinkedInConnector(Connector):
             filter_categories=[
                 {"id": "profile", "label": "Profile"},
                 {"id": "resume", "label": "Résumé"},
-                {"id": "posts", "label": "Posts & articles"},
-                {"id": "messages", "label": "Messages"},
-                {"id": "connections", "label": "Connections"},
+                {"id": "posts", "label": "Posts & articles (needs LinkedIn partner access)"},
+                {"id": "messages", "label": "Messages (needs LinkedIn partner access)"},
+                {"id": "connections", "label": "Connections (count only)"},
             ],
         )
 
