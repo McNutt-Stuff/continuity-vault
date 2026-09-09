@@ -539,6 +539,7 @@ export default function Search() {
   const [attrKey, setAttrKey] = useState("");             // modal builder: chosen attribute key
   const [attrDraft, setAttrDraft] = useState("");         // modal builder: value being typed
   const [filterModalOpen, setFilterModalOpen] = useState(false);
+  const [filterTab, setFilterTab] = useState<"type" | "source" | "attrs" | "label" | "date">("type");
   const [sortBy, setSortBy] = useState<"date" | "captured">("date");
   const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
   const [dateFrom, setDateFrom] = useState("");
@@ -682,7 +683,11 @@ export default function Search() {
       const blob = await res.blob();
       const mime = item.mime || blob.type;
       const url = URL.createObjectURL(blob);
-      if (mime.startsWith("image/")) {
+      // Detect images by mime, doc_type, OR filename — iCloud (and other) photos
+      // are stored without a mime, so mime is often "application/octet-stream".
+      const looksImage = mime.startsWith("image/") || item.doc_type === "image"
+        || /\.(hei[cf]|jpe?g|png|gif|webp|bmp|tiff?|avif)$/i.test(item.title || "");
+      if (looksImage) {
         // Browsers can't decode HEIC/HEIF natively — convert to JPEG on the fly.
         const isHeic = /hei[cf]/i.test(mime) || /\.hei[cf]$/i.test(item.title || "");
         if (isHeic) {
@@ -1065,18 +1070,38 @@ export default function Search() {
               ))}
             </div>
 
-            {/* Add-filter modal */}
-            {filterModalOpen && (
+            {/* Add-filter modal — sidebar menu (left) + fields (right) */}
+            {filterModalOpen && (() => {
+              const sections = [
+                cats.length > 0 && { id: "type" as const, label: "Type", icon: "grid", badge: types.size },
+                srcs.length > 0 && { id: "source" as const, label: "Source", icon: "database", badge: sources.size },
+                attrKeys.length > 0 && { id: "attrs" as const, label: "Attributes", icon: "tag", badge: attrs.length },
+                labelFacets.length > 0 && { id: "label" as const, label: "Label", icon: "bookmark", badge: labels.size },
+                { id: "date" as const, label: "Date range", icon: "calendar", badge: hasDate ? 1 : 0 },
+              ].filter(Boolean) as { id: typeof filterTab; label: string; icon: string; badge: number }[];
+              const effTab = sections.some((s) => s.id === filterTab) ? filterTab : (sections[0]?.id ?? "date");
+              return (
               <div className="modal-backdrop" onClick={() => setFilterModalOpen(false)}>
-                <div className="modal-panel" style={{ maxWidth: 620 }} onClick={(e) => e.stopPropagation()}>
+                <div className="modal-panel fs-filter-panel" style={{ maxWidth: 820 }} onClick={(e) => e.stopPropagation()}>
                   <div className="modal-head spread">
                     <h3 style={{ margin: 0 }}><Icon name="grid" size={16} /> Filters</h3>
                     <button className="btn ghost sm" onClick={() => setFilterModalOpen(false)}><Icon name="x" size={15} /></button>
                   </div>
-                  <div className="modal-body" style={{ maxHeight: "64vh", overflowY: "auto" }}>
+                  <div className="fs-filter-body">
+                    <nav className="fs-filter-nav">
+                      {sections.map((s) => (
+                        <button key={s.id} className={`fs-navitem ${effTab === s.id ? "active" : ""}`}
+                                onClick={() => setFilterTab(s.id)}>
+                          <Icon name={s.icon} size={14} />
+                          <span className="fs-navitem-label">{s.label}</span>
+                          {s.badge > 0 && <span className="fs-navbadge">{s.badge}</span>}
+                        </button>
+                      ))}
+                    </nav>
+                    <div className="fs-filter-content">
                     {/* Type */}
-                    {cats.length > 0 && (
-                      <div style={{ marginBottom: 16 }}>
+                    {effTab === "type" && cats.length > 0 && (
+                      <div>
                         <div className="fs-modal-sec">
                           <span>Type</span>
                           <span>
@@ -1094,8 +1119,8 @@ export default function Search() {
                       </div>
                     )}
                     {/* Source */}
-                    {srcs.length > 0 && (
-                      <div style={{ marginBottom: 16 }}>
+                    {effTab === "source" && srcs.length > 0 && (
+                      <div>
                         <div className="fs-modal-sec">
                           <span>Source</span>
                           <span>
@@ -1103,7 +1128,7 @@ export default function Search() {
                             <button className="fs-linkbtn" onClick={() => setSources(new Set())}>None</button>
                           </span>
                         </div>
-                        <div style={{ border: "1px solid var(--border-soft)", borderRadius: 8, maxHeight: 220, overflowY: "auto" }}>
+                        <div style={{ border: "1px solid var(--border-soft)", borderRadius: 8, maxHeight: "48vh", overflowY: "auto" }}>
                           {srcs.map(([st, n]) => {
                             const accts = srcAccounts[st] || [];
                             const ids = accts.map((a) => a.id);
@@ -1137,8 +1162,8 @@ export default function Search() {
                       </div>
                     )}
                     {/* Attribute (chained) */}
-                    {attrKeys.length > 0 && (
-                      <div style={{ marginBottom: 16 }}>
+                    {effTab === "attrs" && attrKeys.length > 0 && (
+                      <div>
                         <div className="fs-modal-sec"><span>Attributes</span></div>
                         {attrs.length > 0 && (
                           <div className="row" style={{ gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
@@ -1177,8 +1202,8 @@ export default function Search() {
                       </div>
                     )}
                     {/* Label */}
-                    {labelFacets.length > 0 && (
-                      <div style={{ marginBottom: 16 }}>
+                    {effTab === "label" && labelFacets.length > 0 && (
+                      <div>
                         <div className="fs-modal-sec">
                           <span>Label</span>
                           <span>
@@ -1186,7 +1211,7 @@ export default function Search() {
                             <button className="fs-linkbtn" onClick={() => setLabels(new Set())}>None</button>
                           </span>
                         </div>
-                        <div className="row" style={{ gap: 6, flexWrap: "wrap", maxHeight: 160, overflowY: "auto" }}>
+                        <div className="row" style={{ gap: 6, flexWrap: "wrap", maxHeight: "48vh", overflowY: "auto" }}>
                           {labelFacets.map(([l, n]) => (
                             <button key={l} className={`chip ${labels.has(l) ? "active" : ""}`} onClick={() => toggleLabelSel(l)}>
                               {l} <span className="faint">{n}</span>
@@ -1196,6 +1221,7 @@ export default function Search() {
                       </div>
                     )}
                     {/* Date range */}
+                    {effTab === "date" && (
                     <div>
                       <div className="fs-modal-sec"><span>Date range</span></div>
                       <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
@@ -1217,6 +1243,8 @@ export default function Search() {
                         {hasDate && <button className="btn ghost sm" onClick={() => { setDateFrom(""); setDateTo(""); }}>Clear dates</button>}
                       </div>
                     </div>
+                    )}
+                    </div>
                   </div>
                   <div className="modal-foot spread">
                     <button className="btn ghost sm" onClick={clearAll}>Clear all filters</button>
@@ -1226,7 +1254,8 @@ export default function Search() {
                   </div>
                 </div>
               </div>
-            )}
+              );
+            })()}
           </>
         );
       })()}

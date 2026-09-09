@@ -43,6 +43,12 @@ def guess_mime(title: str, doc_type: str) -> str:
         return "message/rfc822"
     if doc_type in ("secret", "login", "note", "password", "identity"):
         return "application/json"
+    # Python's mimetypes doesn't know Apple's HEIC/HEIF (or a few modern formats),
+    # so register them — otherwise iCloud photos fall back to octet-stream and the
+    # viewer can't tell they're images.
+    for ext, mt in ((".heic", "image/heic"), (".heif", "image/heif"),
+                    (".avif", "image/avif"), (".webp", "image/webp")):
+        mimetypes.add_type(mt, ext)
     mt, _ = mimetypes.guess_type(title or "")
     return mt or "application/octet-stream"
 
