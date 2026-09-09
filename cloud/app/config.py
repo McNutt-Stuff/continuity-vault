@@ -73,7 +73,8 @@ class Settings(BaseSettings):
     recovered_ttl_seconds: int = 1800  # 30 min
 
     # Authentication.
-    allow_signup: bool = True
+    # Self-service sign-up is OFF: only trusted, pre-created accounts sign in.
+    allow_signup: bool = False
     email_code_ttl_seconds: int = 600
     smtp_host: str | None = None
     smtp_port: int = 587

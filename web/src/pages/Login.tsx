@@ -2,14 +2,12 @@ import { useState } from "react";
 import { useAuth } from "../auth";
 import { Icon } from "../components/Icon";
 
-type Stage = "email" | "signup" | "code";
+type Stage = "email" | "code";
 
 export default function Login() {
-  const { loginStart, loginWithPasskey, signup, requestEmailCode, verifyEmailCode, sessionExpired } = useAuth();
+  const { loginStart, loginWithPasskey, requestEmailCode, verifyEmailCode, sessionExpired } = useAuth();
   const [stage, setStage] = useState<Stage>("email");
   const [email, setEmail] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [orgName, setOrgName] = useState("");
   const [code, setCode] = useState("");
   const [codePurpose, setCodePurpose] = useState<"login" | "verify">("login");
   const [devCode, setDevCode] = useState<string | null>(null);
@@ -40,25 +38,10 @@ export default function Login() {
         setStage("code");
         setBusy(false);
       } else {
-        setStage("signup");
+        // Self-service sign-up is disabled — only pre-created accounts can sign in.
+        setErr("We couldn't find an account for that email. Please contact your administrator to be invited.");
         setBusy(false);
       }
-    } catch (e) {
-      fail(e);
-    }
-  }
-
-  async function onSignup() {
-    setErr("");
-    setBusy(true);
-    try {
-      const addr = email.trim().toLowerCase();
-      const r = await signup(addr, displayName.trim(), orgName.trim());
-      setCodePurpose("verify");
-      setDevCode(r.dev_code ?? null);
-      setDelivery(r.delivery ?? null);
-      setStage("code");
-      setBusy(false);
     } catch (e) {
       fail(e);
     }
@@ -129,30 +112,6 @@ export default function Login() {
             <div className="faint" style={{ fontSize: 12, textAlign: "center" }}>
               Passwordless — secured by passkeys (Touch ID, Windows Hello, or a security key).
             </div>
-          </>
-        )}
-
-        {stage === "signup" && (
-          <>
-            <div className="lock-banner" style={{ marginBottom: 14 }}>
-              <Icon name="user" />
-              <div>
-                <div style={{ fontWeight: 600 }}>Create your Arkive organization</div>
-                <div className="faint" style={{ fontSize: 12 }}>We'll email a code to verify {email}.</div>
-              </div>
-            </div>
-            <div className="field">
-              <label>Your name</label>
-              <input className="input" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Alex Rivera" />
-            </div>
-            <div className="field">
-              <label>Organization name</label>
-              <input className="input" value={orgName} onChange={(e) => setOrgName(e.target.value)} placeholder="Northwind Family Office" />
-            </div>
-            <button className="btn primary" style={{ width: "100%" }} onClick={onSignup} disabled={busy || !displayName || !orgName}>
-              Create account & send code
-            </button>
-            <button className="btn ghost sm" style={{ marginTop: 10 }} onClick={() => setStage("email")}>Back</button>
           </>
         )}
 
