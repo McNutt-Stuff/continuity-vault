@@ -1277,30 +1277,54 @@ def icloud_verify_2fa(api, code: str) -> bool:
     return True
 
 
-def _icloud_norm_roots(roots) -> List[str]:
-    return [("/" + r.strip("/")) for r in (roots or []) if r and r.strip("/")]
+def _icloud_parse_roots(roots) -> tuple[List[str], List[str]]:
+    """Split the folder-picker selection into (recursive_roots, flat_folders).
+
+    - ``ROOT_SENTINEL`` ("__root__") → the Drive ROOT's top-level files only.
+    - ``FLAT_PREFIX`` ("flat:<path>") → that folder's immediate files only.
+    - "<path>" → that folder, recursively.
+    Paths are normalised to a leading "/"; the Drive root is "". An empty
+    selection yields ``([], [])`` which the walk treats as 'the whole Drive'."""
+    rec: List[str] = []
+    flat: List[str] = []
+    for r in roots or []:
+        if not r:
+            continue
+        if r == ROOT_SENTINEL:
+            flat.append("")
+        elif r.startswith(FLAT_PREFIX):
+            p = r[len(FLAT_PREFIX):].strip("/")
+            flat.append("/" + p if p else "")
+        else:
+            rec.append("/" + r.strip("/"))
+    return rec, flat
 
 
-def _icloud_root_ok(path: str, roots: List[str]) -> bool:
-    """True if a file at ``path`` falls inside one of the selected roots."""
-    if not roots:
+def _icloud_file_ok(prefix: str, full: str, rec: List[str], flat: List[str]) -> bool:
+    """True if a file at ``full`` (inside folder ``prefix``) should be captured."""
+    if not rec and not flat:
+        return True  # whole Drive
+    if any(full == r or full.startswith(r + "/") for r in rec):
         return True
-    return any(path == r or path.startswith(r + "/") for r in roots)
+    return prefix in flat  # immediate file of a flat-selected folder (root = "")
 
 
-def _icloud_descend_ok(path: str, roots: List[str]) -> bool:
-    """True if a folder at ``path`` is on the way to, or inside, a selected root."""
-    if not roots:
+def _icloud_descend_ok(full: str, rec: List[str], flat: List[str]) -> bool:
+    """True if a folder at ``full`` is on the way to, or inside, a selection."""
+    if not rec and not flat:
         return True
-    return any(path == r or path.startswith(r + "/") or r.startswith(path + "/")
-               for r in roots)
+    if any(full == r or full.startswith(r + "/") or r.startswith(full + "/") for r in rec):
+        return True
+    # ``full`` is a flat-selected folder, or an ancestor we must pass to reach one.
+    return any(f == full or f.startswith(full + "/") for f in flat)
 
 
-def _icloud_walk_drive(node, prefix: str, content_cap: int, roots: List[str],
-                       since: Optional[datetime], counts: dict, depth: int = 0
-                       ) -> Iterable[SourceObject]:
-    """Recursively yield every file under an iCloud Drive folder, honouring the
-    selected roots and an optional ``since`` (backfill) floor."""
+def _icloud_walk_drive(node, prefix: str, content_cap: int, rec: List[str],
+                       flat: List[str], since: Optional[datetime], counts: dict,
+                       depth: int = 0) -> Iterable[SourceObject]:
+    """Recursively yield files under an iCloud Drive folder, honouring the
+    selected roots (recursive folders, flat folders, and the Drive-root sentinel)
+    and an optional ``since`` (backfill) floor."""
     if depth > 40:
         return
     try:
@@ -1316,11 +1340,11 @@ def _icloud_walk_drive(node, prefix: str, content_cap: int, roots: List[str],
         ctype = (getattr(child, "type", "") or "").lower()
         full = f"{prefix}/{name}"
         if ctype in ("folder", "app_library"):
-            if _icloud_descend_ok(full, roots):
-                yield from _icloud_walk_drive(child, full, content_cap, roots,
+            if _icloud_descend_ok(full, rec, flat):
+                yield from _icloud_walk_drive(child, full, content_cap, rec, flat,
                                               since, counts, depth + 1)
             continue
-        if not _icloud_root_ok(full, roots):
+        if not _icloud_file_ok(prefix, full, rec, flat):
             continue
         when = _parse_dt(getattr(child, "date_modified", None)
                          or getattr(child, "date_changed", None))
@@ -1397,7 +1421,8 @@ def fetch_icloud(username: str, password: str,
         inc = options.get("includeCategories") or []
         return not inc or cat in inc
 
-    roots = _icloud_norm_roots(options.get("roots"))
+    roots = _icloud_parse_roots(options.get("roots"))
+    rec_roots, flat_roots = roots
     since = _parse_dt(options.get("sinceDate")) if options.get("sinceDate") else None
     api = _icloud_login(username, password)
     counts = {"photos": 0, "files": 0, "contacts": 0}
@@ -1455,7 +1480,8 @@ def fetch_icloud(username: str, password: str,
     # iCloud Drive files — full recursive walk, scoped to the selected folders.
     if want("files"):
         try:
-            yield from _icloud_walk_drive(api.drive, "", content_cap, roots, since, counts)
+            yield from _icloud_walk_drive(api.drive, "", content_cap, rec_roots,
+                                          flat_roots, since, counts)
         except Exception as exc:
             logger.info("iCloud Drive unavailable: %s", exc)
 

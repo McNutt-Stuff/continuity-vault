@@ -809,7 +809,9 @@ _SOURCE_PAGES = [
          "device (iPhone, iPad or Mac) — type it in when Arkive prompts you.",
          "Choose which of **Photos**, **iCloud Drive** and **Contacts** to include.",
          "For iCloud Drive, use the **folder navigator** to pick the folders to back up — "
-         "leave it empty to capture the whole Drive.",
+         "leave it empty to capture the whole Drive, or pick **“Files in the root folder”** "
+         "for just the top level. **Photos** and **Contacts** are separate toggles under "
+         "**“What to back up”**, not folders.",
          "The first backup starts once connected and pulls your full history."],
         ["**Images / Video & Audio** — iCloud Photos (`photo`, `video`).",
          "**Files / Documents** — iCloud Drive content by type, with its full folder path.",

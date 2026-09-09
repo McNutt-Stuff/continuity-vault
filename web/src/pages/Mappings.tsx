@@ -810,9 +810,14 @@ export default function Mappings() {
       {cloudPicker && (
         <FolderPicker
           title={`Choose folders — ${cloudPicker.label}`}
-          note="Only the folders you select are backed up. Nothing selected = everything. Pick “Files in the root folder” or tick “files only” to include a folder’s top-level files without every subfolder."
+          note={
+            (cloudPicker.sourceType === "icloud"
+              ? "This picks iCloud Drive folders. Photos and Contacts are backed up separately — toggle them under “What to back up”. "
+              : "") +
+            "Only the folders you select are backed up. Nothing selected = everything. Pick “Files in the root folder” or tick “files only” to include a folder’s top-level files without every subfolder."
+          }
           initialSelected={cloudPicker.initial.roots || []}
-          allowFilesOnly={["dropbox", "onedrive", "google_drive"].includes(cloudPicker.sourceType)}
+          allowFilesOnly={["dropbox", "onedrive", "google_drive", "icloud"].includes(cloudPicker.sourceType)}
           loadingLabel="loading your folders…"
           emptyLabel="No subfolders here. Selecting nothing backs up the whole account."
           loadRoots={async () => {
@@ -820,7 +825,7 @@ export default function Mappings() {
               `/connectors/accounts/${cloudPicker.accountId}/folders`).then((r) => r.folders);
             // File-storage sources have an addressable root: offer its top-level
             // files as a selectable item ("__root__"), separate from subfolders.
-            const ROOT_TYPES = ["dropbox", "onedrive", "google_drive"];
+            const ROOT_TYPES = ["dropbox", "onedrive", "google_drive", "icloud"];
             if (!ROOT_TYPES.includes(cloudPicker.sourceType)) return folders;
             return [{ path: "__root__", name: "Files in the root folder (not subfolders)", hasMore: false }, ...folders];
           }}
