@@ -1354,9 +1354,14 @@ def _icloud_walk_drive(node, prefix: str, content_cap: int, rec: List[str],
         raw = b""
         if 0 < size <= content_cap:
             try:
-                with child.open(stream=True) as resp:
-                    raw = resp.raw.read(content_cap + 1)
-            except Exception:
+                opened = child.open(stream=True)
+                if hasattr(opened, "__enter__"):
+                    with opened as resp:
+                        raw = _icloud_read_download(resp, content_cap)
+                else:
+                    raw = _icloud_read_download(opened, content_cap)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("iCloud Drive download failed at %s: %s", full, exc)
                 raw = b""
         _cat, _kind = classify_file(name)
         content, backed = _capped(raw, content_cap) if raw else (
@@ -1403,6 +1408,29 @@ def icloud_list_folders(username: str, password: str, path: str = "") -> List[di
     return sorted(out, key=lambda f: f["name"].lower())
 
 
+def _icloud_read_download(dl, cap: int) -> bytes:
+    """Normalise pyicloud's download return into bytes (capped).
+
+    pyicloud 2.7 returns the file's RAW BYTES from ``PhotoAsset.download()``;
+    older/other paths return a streamed ``requests.Response`` (read via ``.raw``)
+    or expose ``.content``. Handling all three keeps photo/file content actually
+    getting stored instead of silently falling back to a ``no_content`` marker."""
+    if dl is None:
+        return b""
+    if isinstance(dl, (bytes, bytearray)):
+        return bytes(dl[:cap + 1])
+    raw = getattr(dl, "raw", None)
+    if raw is not None:
+        try:
+            return raw.read(cap + 1)
+        except Exception:  # noqa: BLE001
+            pass
+    content = getattr(dl, "content", None)
+    if isinstance(content, (bytes, bytearray)):
+        return bytes(content[:cap + 1])
+    return b""
+
+
 def fetch_icloud(username: str, password: str,
                  content_cap: int = _DEFAULT_CAP,
                  options: Optional[dict] = None) -> Iterable[SourceObject]:
@@ -1440,9 +1468,9 @@ def fetch_icloud(username: str, password: str,
                 raw = b""
                 if 0 < size <= content_cap:
                     try:
-                        resp = photo.download()
-                        raw = resp.raw.read(content_cap + 1) if resp else b""
-                    except Exception:
+                        raw = _icloud_read_download(photo.download(), content_cap)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.info("iCloud photo download failed for %s: %s", name, exc)
                         raw = b""
                 content, backed = _capped(raw, content_cap) if raw else (
                     json.dumps({"_arkive": "no_content", "bytes": size}).encode(), False)
