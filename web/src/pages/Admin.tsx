@@ -453,8 +453,9 @@ function DeployNodeModal({ onClose, onLaunched }: { onClose: () => void; onLaunc
   const [svcs, setSvcs] = useState<any[]>([]);
   const [clusters, setClusters] = useState<any[]>([]);
   const [profiles, setProfiles] = useState<any[]>([]);
+  const [keypairs, setKeypairs] = useState<any[]>([]);
   const [cat, setCat] = useState<any | null>(null);
-  const [form, setForm] = useState({ service_object_id: "", name: "", role: "customer-tenant", region: "", size: "", disk_gb: "", cluster_id: "", config_profile_id: "" });
+  const [form, setForm] = useState({ service_object_id: "", name: "", role: "customer-tenant", region: "", size: "", disk_gb: "", cluster_id: "", config_profile_id: "", ssh_config_object_id: "" });
   const [fqdn, setFqdn] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
   const [conflict, setConflict] = useState("");
@@ -465,6 +466,7 @@ function DeployNodeModal({ onClose, onLaunched }: { onClose: () => void; onLaunc
     api.get<any[]>("/admin/provisioning/services").then(setSvcs).catch(() => {});
     api.get<any>("/admin/topology").then((t) => setClusters(t.clusters || [])).catch(() => {});
     api.get<any>("/admin/config-profiles").then((r) => setProfiles((r.profiles || []).filter((x: any) => x.target === "node"))).catch(() => {});
+    api.get<any[]>("/admin/config-objects").then((objs) => setKeypairs((objs || []).filter((o) => o.kind === "ssh-keypair" || Object.keys(o.keys || {}).some((k) => /ssh_public_key|public_key/i.test(k))))).catch(() => {});
   }, []);
 
   const svc = svcs.find((s) => s.id === form.service_object_id);
@@ -509,6 +511,7 @@ function DeployNodeModal({ onClose, onLaunched }: { onClose: () => void; onLaunc
         region: form.region.trim() || null, size: form.size || null,
         disk_gb: form.disk_gb ? parseInt(form.disk_gb, 10) : null,
         cluster_id: form.cluster_id || null, config_profile_id: form.config_profile_id || null,
+        ssh_config_object_id: form.ssh_config_object_id || null,
       });
       onLaunched(r.id);
     } catch (e) { setErr((e as Error).message || "Could not start the deployment"); }
@@ -580,6 +583,13 @@ function DeployNodeModal({ onClose, onLaunched }: { onClose: () => void; onLaunc
                     <option value="">— none —</option>
                     {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
+                </Field>
+                <Field label="SSH key pair">
+                  <select className="input sm" value={form.ssh_config_object_id} onChange={(e) => setForm({ ...form, ssh_config_object_id: e.target.value })}>
+                    <option value="">— none (no SSH access) —</option>
+                    {keypairs.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}
+                  </select>
+                  {keypairs.length === 0 && <div className="faint" style={{ fontSize: 10.5, marginTop: 3 }}>Add one under Configuration objects → SSH key pair.</div>}
                 </Field>
               </div>
               {err && <div className="pill danger" style={{ marginTop: 10 }}>{err}</div>}
@@ -5238,12 +5248,14 @@ const CONFIG_KIND_PRESETS: Record<string, string[]> = {
   oauth: ["client_id", "client_secret"],
   ses: ["aws_access_key_id", "aws_secret_access_key", "region", "from_email"],
   "api-key": ["api_key"],
+  "ssh-keypair": ["ssh_public_key"],
   generic: [""],
 };
 const CONFIG_KIND_OPTIONS: { value: string; label: string }[] = [
   { value: "oauth", label: "OAuth (client id / secret)" },
   { value: "ses", label: "AWS SES" },
   { value: "api-key", label: "API key" },
+  { value: "ssh-keypair", label: "SSH key pair (public key only)" },
   { value: "generic", label: "Generic key / value" },
 ];
 const isSecretKey = (k: string) => /secret|password|token|private/i.test(k);
@@ -5273,6 +5285,10 @@ function ConfigObjectsAdmin() {
   function setRow(i: number, patch: Partial<DraftRow>) {
     if (!draft) return;
     const rows = [...draft.rows]; rows[i] = { ...rows[i], ...patch }; setDraft({ ...draft, rows });
+  }
+  async function extractPublicKey(text: string): Promise<string> {
+    const r = await api.post<{ public_key: string }>("/admin/config-objects/extract-public-key", { material: text });
+    return r.public_key;
   }
   async function saveDraft() {
     if (!draft) return;
@@ -5346,6 +5362,11 @@ function ConfigObjectsAdmin() {
                       </select>}
                 </Field>
               </div>
+              {draft.kind === "ssh-keypair" && (
+                <div className="row" style={{ gap: 7, marginBottom: 10, color: "var(--text-dim)", fontSize: 11.5, alignItems: "flex-start" }}>
+                  <Icon name="lock" size={12} /> <span>Upload your key pair (.pem or .pub). Only the <b>public key</b> is stored — the private key is used solely to derive it and is never saved.</span>
+                </div>
+              )}
               <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 6 }}>Keys</div>
               <div className="stack" style={{ gap: 6 }}>
                 {draft.rows.map((r, i) => (
@@ -5355,13 +5376,19 @@ function ConfigObjectsAdmin() {
                     <input className="input sm flex1" type={r.secret ? "password" : "text"}
                            value={r.value} placeholder={r.secret && r.set ? "•••••• leave blank to keep" : "value"}
                            onChange={(e) => setRow(i, { value: e.target.value })} />
-                    {/(private_key|\.pem|pem|key_material)/i.test(r.key) && (
+                    {/(ssh_public_key|public_key)/i.test(r.key) ? (
+                      <label className="btn ghost sm" style={{ cursor: "pointer", whiteSpace: "nowrap" }} title="Upload a key pair (.pem / .pub) — only the public key is stored">
+                        <Icon name="key" size={12} /> Upload key pair
+                        <input type="file" accept=".pem,.pub,.key,.txt" style={{ display: "none" }}
+                               onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; const text = await f.text(); try { const pub = await extractPublicKey(text); setRow(i, { value: pub }); flash("Public key extracted"); } catch (er) { await notify({ message: (er as Error).message || "Could not read the key", tone: "danger" }); } e.currentTarget.value = ""; }} />
+                      </label>
+                    ) : /(private_key|\.pem|pem|key_material)/i.test(r.key) ? (
                       <label className="btn ghost sm" style={{ cursor: "pointer", whiteSpace: "nowrap" }} title="Upload a .pem file">
                         <Icon name="file" size={12} /> .pem
                         <input type="file" accept=".pem,.key,.txt" style={{ display: "none" }}
                                onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; const text = await f.text(); setRow(i, { value: text }); e.currentTarget.value = ""; }} />
                       </label>
-                    )}
+                    ) : null}
                     <button className="btn ghost sm" onClick={() => setDraft({ ...draft, rows: draft.rows.filter((_, j) => j !== i) })}>✕</button>
                   </div>
                 ))}

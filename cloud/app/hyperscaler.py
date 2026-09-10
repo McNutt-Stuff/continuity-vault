@@ -267,22 +267,28 @@ def _aws_deploy(config: dict, opts: dict, name: str, role: str, userdata: str,
 
 
 def _aws_ensure_keypair(session, config: dict, progress: Progress) -> str:
-    """When an EC2 key pair name isn't given but a .pem private key is uploaded,
-    import its public key as a managed key pair and return its name (idempotent)."""
-    pem = (config.get("ssh_private_key") or "").strip()
-    if not pem:
+    """Ensure an EC2 key pair exists for the public key we were given (from the
+    selected key-pair config object; else a legacy uploaded private key) and return
+    its name. The private key is never stored — only the public key is imported. The
+    key pair is named by the public key's fingerprint so distinct keys don't clash."""
+    pub = (config.get("ssh_public_key") or "").strip()
+    if not pub:
+        pem = (config.get("ssh_private_key") or "").strip()  # legacy fallback
+        if pem:
+            try:
+                pub = _openssh_public_from_pem(pem)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not parse ssh key: %s", exc)
+                return ""
+    if not pub:
         return ""
-    try:
-        pub = _openssh_public_from_pem(pem)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("could not parse ssh_private_key .pem: %s", exc)
-        return ""
-    kn = "arkive-provision"
+    import hashlib
+    kn = "arkive-" + hashlib.sha256(pub.encode()).hexdigest()[:12]
     ec2 = session.client("ec2")
     try:
         ec2.import_key_pair(KeyName=kn, PublicKeyMaterial=pub.encode())
         progress(f"Imported SSH key pair '{kn}'.")
-    except Exception as exc:  # noqa: BLE001 — already-exists is fine
+    except Exception as exc:  # noqa: BLE001 — an already-imported (same) key is fine
         if "Duplicate" not in str(exc):
             logger.warning("import_key_pair failed: %s", exc)
     return kn

@@ -146,6 +146,7 @@ class DeployNodeBody(BaseModel):
     disk_gb: int | None = None
     cluster_id: str | None = None
     config_profile_id: str | None = None
+    ssh_config_object_id: str | None = None
 
 
 @router.post("/deploy-node")
@@ -163,7 +164,8 @@ def deploy_node(body: DeployNodeBody,
         status="pending", message="Queued",
         params={"name": body.name.strip(), "role": body.role,
                 "region": body.region, "size": body.size, "disk_gb": body.disk_gb,
-                "config_profile_id": body.config_profile_id},
+                "config_profile_id": body.config_profile_id,
+                "ssh_config_object_id": body.ssh_config_object_id},
         cluster_id=body.cluster_id, created_by=principal.user_id, log=[])
     db.add(job)
     db.commit()
@@ -273,7 +275,7 @@ def _run_deploy(job_id: str) -> None:
             job.status = "provisioning"
             progress("Starting deployment…")
             res = hyperscaler.deploy_node(
-                provider=job.provider, config=svc["config"], opts=job.params or {},
+                provider=job.provider, config=_deploy_config(db, svc, job), opts=job.params or {},
                 cp_url=cp_url, fleet_secret=fleet_secret, progress=progress,
                 progress_token=job.id)
             job.result = res
@@ -313,6 +315,27 @@ def _fleet_secret() -> str:
         return fs() or ""
     except Exception:  # noqa: BLE001
         return (settings.node_secret or "")
+
+
+def _deploy_config(db: Session, svc: dict, job: ProvisioningJob) -> dict:
+    """The service's config plus the PUBLIC key from the selected key-pair config
+    object. The private key is never stored — only the public key reaches the VM."""
+    cfg = dict((svc or {}).get("config", {}) or {})
+    oid = (job.params or {}).get("ssh_config_object_id")
+    if oid:
+        from ..models import ConfigObject
+        from .. import credstore
+        ko = db.get(ConfigObject, oid)
+        if ko and ko.encrypted_values:
+            try:
+                kv = credstore.decrypt("platform", ko.encrypted_values) or {}
+                pub = (kv.get("ssh_public_key") or kv.get("public_key") or "").strip()
+                if pub:
+                    cfg["ssh_public_key"] = pub
+            except Exception:  # noqa: BLE001
+                logger.warning("could not read key-pair config object %s", oid)
+    return cfg
+
 
 
 def _ensure_node(db: Session, job: ProvisioningJob, res: dict) -> Node:

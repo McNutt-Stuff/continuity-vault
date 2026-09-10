@@ -2555,6 +2555,30 @@ def delete_config_object(oid: str,
     return {"ok": True}
 
 
+class ExtractKeyBody(BaseModel):
+    material: str = ""
+
+
+@router.post("/config-objects/extract-public-key")
+def extract_public_key(body: ExtractKeyBody,
+                       _p: security.Principal = Depends(security.require_platform_admin)):
+    """Derive an OpenSSH PUBLIC key from an uploaded key-pair file (a private .pem
+    or an existing public key). The private key is used ONLY to derive the public
+    key and is never stored. Returns {public_key, type}."""
+    from .. import hyperscaler
+    raw = (body.material or "").strip()
+    if not raw:
+        raise HTTPException(400, "no key material provided")
+    # Already a public key (OpenSSH / SK) — pass through the first line only.
+    if raw.startswith(("ssh-", "ecdsa-", "sk-")):
+        return {"public_key": raw.splitlines()[0].strip(), "type": "public"}
+    try:
+        pub = hyperscaler._openssh_public_from_pem(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"could not read the key — upload a private .pem or a public key ({exc})")
+    return {"public_key": pub, "type": "derived"}
+
+
 def _source_slots() -> list[dict]:
     """Every OAuth platform integration that can link to a Config Object, enriched
     with its brand icon/colour + default family/category for the admin Sources page.
@@ -2718,9 +2742,10 @@ _SERVICE_KINDS: dict = {
     "hyperscaler-aws": {
         "label": "Hyperscaler Auto-Provision (AWS)",
         "category": "provisioning",
-        "credential_keys": ["aws_access_key_id", "aws_secret_access_key", "ssh_private_key"],
+        "credential_keys": ["aws_access_key_id", "aws_secret_access_key"],
         "settings": ["region", "instance_type", "ami_id", "subnet_id",
-                     "security_group_id", "key_name", "hosted_zone_id", "domain_suffix"],
+                     "security_group_id", "key_name", "ssh_public_key",
+                     "hosted_zone_id", "domain_suffix"],
         "setting_defaults": {"region": "us-east-1", "instance_type": "t3.large"},
         "required": ["region"],
     },
@@ -2728,7 +2753,7 @@ _SERVICE_KINDS: dict = {
         "label": "Hyperscaler Auto-Provision (Azure)",
         "category": "provisioning",
         "credential_keys": ["tenant_id", "client_id", "client_secret",
-                            "subscription_id", "admin_password", "ssh_private_key"],
+                            "subscription_id", "admin_password"],
         "settings": ["location", "resource_group", "vm_size", "vnet", "subnet",
                      "admin_username", "ssh_public_key", "dns_zone",
                      "dns_resource_group", "domain_suffix"],
