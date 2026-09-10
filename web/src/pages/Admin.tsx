@@ -280,9 +280,15 @@ function TopologyAdmin() {
             <div key={c.id} className="card" style={{ background: "var(--inset)" }}>
               <div className="spread">
                 <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                  {c.platform === "mixed"
+                    ? <span title="Nodes span multiple cloud platforms" style={{ color: "var(--warn)", display: "inline-flex" }}><Icon name="alert" size={17} /></span>
+                    : <CloudIcon provider={c.platform} size={18} />}
                   <div style={{ fontWeight: 700 }}>{c.name}</div>
                   <Pill tone="info">{c.code}</Pill>
                   <Pill tone={c.status === "active" ? "ok" : "warn"} dot>{c.status}</Pill>
+                  {c.health && <Pill tone={c.health === "ok" ? "ok" : c.health === "critical" ? "danger" : "warn"} dot>
+                    {c.health === "ok" ? "Healthy" : c.health === "critical" ? "Critical" : "Attention"}</Pill>}
+                  {c.platform === "mixed" && <Pill tone="warn">mixed platforms</Pill>}
                   {c.global_sync_enabled && <Pill tone="info">global sync</Pill>}
                 </div>
                 <div className="row" style={{ gap: 6 }}>
@@ -311,6 +317,19 @@ function TopologyAdmin() {
                     <MiniBar label="MEM" v={c.summary.mem_pct} />
                     <MiniBar label="DISK" v={c.summary.disk_pct} />
                   </div>
+                </div>
+              )}
+              {/* Operator warnings (mixed platforms, offline nodes, high usage, no CP) */}
+              {(c.warnings || []).length > 0 && (
+                <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8,
+                  border: `1px solid ${c.health === "critical" ? "var(--danger)" : "var(--warn)"}`,
+                  background: "var(--inset)" }}>
+                  {c.warnings.map((w: string, i: number) => (
+                    <div key={i} className="row" style={{ gap: 7, alignItems: "flex-start", fontSize: 12, padding: "2px 0",
+                      color: c.health === "critical" ? "var(--danger)" : "var(--text-dim)" }}>
+                      <Icon name="alert" size={12} /> <span>{w}</span>
+                    </div>
+                  ))}
                 </div>
               )}
               {c.regions?.length > 0 && (

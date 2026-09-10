@@ -20,6 +20,18 @@ router = APIRouter(prefix="/admin", tags=["topology"],
                    dependencies=[Depends(security.require_platform_admin)])
 
 
+def _norm_provider(cloud: dict | None) -> str:
+    """Normalise a node's IMDS provider to aws|azure|gcp, else '' (on-prem/unknown)."""
+    p = ((cloud or {}).get("provider", "") or "").lower()
+    if "aws" in p or "amazon" in p:
+        return "aws"
+    if "azure" in p or "microsoft" in p:
+        return "azure"
+    if "gcp" in p or "google" in p:
+        return "gcp"
+    return ""
+
+
 def _cluster_view(db: Session, c: Cluster) -> dict:
     from .admin import _node_view
     node_rows = db.query(Node).filter(Node.cluster_id == c.id).all()
@@ -41,11 +53,40 @@ def _cluster_view(db: Session, c: Cluster) -> dict:
         used += int(stg.get("used") or 0)
         total += int(stg.get("total") or 0)
 
+    # Cloud platform of the cluster: single provider if consistent, else "mixed".
+    providers = sorted({p for p in (_norm_provider(n.get("cloud")) for n in nodes) if p})
+    platform = providers[0] if len(providers) == 1 else ("mixed" if len(providers) > 1 else "")
+
+    # Health rollup + operator warnings.
+    offline = len(nodes) - online
+    warnings: list[str] = []
+    if node_rows and cp is None:
+        warnings.append("No control-plane node is assigned to this cluster.")
+    if len(providers) > 1:
+        warnings.append("Nodes span multiple cloud platforms (" +
+                        ", ".join(p.upper() for p in providers) +
+                        "). A cluster should run on a single platform.")
+    if offline and nodes:
+        warnings.append(f"{offline} node(s) offline.")
+    for key, label in (("cpu_pct", "CPU"), ("mem_pct", "Memory"), ("disk_pct", "Disk")):
+        w = _worst(key)
+        if w is not None and w >= 90:
+            warnings.append(f"{label} utilisation is high ({w:.0f}%).")
+    if total and (used / total) >= 0.9:
+        warnings.append("Cluster storage is over 90% full.")
+
+    if node_rows and (cp is None or online == 0):
+        health = "critical"
+    elif warnings:
+        health = "warn"
+    else:
+        health = "ok"
+
     compact = [{
         "id": n["id"], "name": n["name"], "role": n["role"], "status": n["status"],
         "is_self": n["is_self"], "endpoint": n["endpoint"], "online": n["online"],
         "version": n["version"], "tenants": n["tenants"], "health": n["health"],
-        "cloud": n.get("cloud") or {},
+        "cloud": n.get("cloud") or {}, "platform": _norm_provider(n.get("cloud")),
     } for n in nodes]
 
     return {
@@ -55,6 +96,8 @@ def _cluster_view(db: Session, c: Cluster) -> dict:
         "control_plane": ({"id": cp["id"], "name": cp["name"]} if cp else None),
         "node_count": len(nodes),
         "customer_node_count": sum(1 for n in nodes if n["role"] == "customer-tenant"),
+        "platform": platform, "platforms": providers,
+        "health": health, "warnings": warnings,
         "nodes": compact,
         "regions": [{"code": r.code, "name": r.name} for r in regions],
         "summary": {
@@ -62,6 +105,7 @@ def _cluster_view(db: Session, c: Cluster) -> dict:
             "cpu_pct": _worst("cpu_pct"), "mem_pct": _worst("mem_pct"),
             "disk_pct": _worst("disk_pct"),
             "storage_used": used, "storage_total": total,
+            "health": health,
         },
         "created_at": c.created_at.isoformat() if c.created_at else None,
     }
