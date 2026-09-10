@@ -316,6 +316,52 @@ def _azure_dns_upsert(config: dict, name_relative: str, ip: str, progress: Progr
 
 
 # --------------------------------------------------------------------------- #
+# Teardown — terminate a VM we provisioned (best-effort; the box may be gone)  #
+# --------------------------------------------------------------------------- #
+
+def terminate_node(*, provider: str, config: dict, instance_id: str,
+                   progress: Progress | None = None) -> dict:
+    """Terminate the cloud VM for a purged node. Best-effort — a non-graceful
+    de-provision may already have removed it. Returns {terminated, detail}."""
+    def _p(m: str) -> None:
+        if progress:
+            progress(m)
+    provider = (provider or "").lower()
+    if not instance_id:
+        return {"terminated": False, "detail": "no instance id on record"}
+    try:
+        if provider == "aws":
+            session = _aws_clients(config, config.get("region") or "us-east-1")
+            _p(f"Terminating EC2 instance {instance_id}…")
+            session.client("ec2").terminate_instances(InstanceIds=[instance_id])
+            return {"terminated": True, "detail": instance_id}
+        if provider == "azure":
+            from azure.mgmt.compute import ComputeManagementClient
+            from azure.mgmt.network import NetworkManagementClient
+            cred = _azure_cred(config)
+            sub = config["subscription_id"].strip()
+            # instance_id is the full VM resource id: .../resourceGroups/<rg>/.../virtualMachines/<name>
+            m = re.search(r"/resourceGroups/([^/]+)/.*/virtualMachines/([^/]+)", instance_id or "")
+            rg, vm = (m.group(1), m.group(2)) if m else (config.get("resource_group"), "")
+            if not rg or not vm:
+                return {"terminated": False, "detail": "could not resolve the VM resource id"}
+            _p(f"Deleting virtual machine {vm}…")
+            ComputeManagementClient(cred, sub).virtual_machines.begin_delete(rg, vm).result()
+            net = NetworkManagementClient(cred, sub)
+            for suffix, fn in ((f"{vm}-nic", net.network_interfaces),
+                               (f"{vm}-ip", net.public_ip_addresses)):
+                try:
+                    fn.begin_delete(rg, suffix).result()
+                except Exception:  # noqa: BLE001 — leftover network resources are non-fatal
+                    pass
+            return {"terminated": True, "detail": vm}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("terminate_node failed: %s", exc)
+        return {"terminated": False, "detail": str(exc)[:200]}
+    return {"terminated": False, "detail": f"unsupported provider '{provider}'"}
+
+
+# --------------------------------------------------------------------------- #
 # IAM / access-policy guidance for the credentials each service object needs  #
 # --------------------------------------------------------------------------- #
 

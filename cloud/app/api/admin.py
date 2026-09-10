@@ -1748,6 +1748,78 @@ def delete_node(nid: str,
     return {"ok": True}
 
 
+@router.get("/nodes/{nid}/purge-info")
+def node_purge_info(nid: str, db: Session = Depends(get_db)):
+    """What purging this node record will affect (warnings for the confirm dialog)."""
+    from ..models import ProvisioningJob
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    tenants = db.query(func.count(Tenant.id)).filter(Tenant.node_id == nid).scalar() or 0
+    job = (db.query(ProvisioningJob)
+           .filter(ProvisioningJob.node_id == nid, ProvisioningJob.kind == "deploy_node")
+           .order_by(ProvisioningJob.created_at.desc()).first())
+    inst = ((job.result or {}).get("instance_id") if job else "") or ""
+    return {
+        "id": n.id, "name": n.name, "is_self": bool(n.is_self),
+        "tenants": int(tenants),
+        "auto_provisioned": bool(job),
+        "provider": (job.provider if job else (n.cloud or {}).get("provider", "")),
+        "instance_id": inst,
+        "can_terminate_vm": bool(job and inst and job.service_object_id),
+    }
+
+
+class NodePurge(BaseModel):
+    terminate_vm: bool = False
+
+
+@router.post("/nodes/{nid}/purge")
+def purge_node(nid: str, body: NodePurge | None = None,
+               principal: security.Principal = Depends(security.require_platform_admin),
+               db: Session = Depends(get_db)):
+    """Permanently remove a node RECORD from the platform (for a node removed /
+    non-gracefully de-provisioned). Detaches assigned tenants (they fall back to
+    the control plane), clears metrics + provisioning links, and — if requested and
+    the node was auto-provisioned — best-effort terminates the cloud VM."""
+    from ..models import NodeMetric, ProvisioningJob
+    from .. import hyperscaler, services
+    body = body or NodePurge()
+    n = db.get(Node, nid)
+    if not n:
+        raise HTTPException(404, "node not found")
+    if n.is_self:
+        raise HTTPException(400, "cannot purge the current (control-plane) node")
+
+    result: dict = {"vm": None}
+    # Optional: tear down the cloud VM we provisioned for this node.
+    job = (db.query(ProvisioningJob)
+           .filter(ProvisioningJob.node_id == nid, ProvisioningJob.kind == "deploy_node")
+           .order_by(ProvisioningJob.created_at.desc()).first())
+    if body.terminate_vm and job is not None:
+        svc = services.resolve_service(db, job.service_object_id)
+        inst = (job.result or {}).get("instance_id") or ""
+        if svc and inst:
+            result["vm"] = hyperscaler.terminate_node(
+                provider=job.provider, config=svc.get("config", {}), instance_id=inst)
+
+    # Detach tenants (they fall back to the control plane) + clear links.
+    detached = (db.query(Tenant).filter(Tenant.node_id == nid)
+                .update({Tenant.node_id: None}, synchronize_session=False))
+    db.query(NodeMetric).filter(NodeMetric.node_id == nid).delete(synchronize_session=False)
+    db.query(ProvisioningJob).filter(ProvisioningJob.node_id == nid)\
+        .update({ProvisioningJob.node_id: None}, synchronize_session=False)
+    name = n.name
+    db.delete(n)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.node_purged",
+                 category="admin", severity="warning",
+                 detail={"name": name, "tenants_detached": int(detached or 0),
+                         "terminated_vm": bool((result.get("vm") or {}).get("terminated"))})
+    result.update({"ok": True, "tenants_detached": int(detached or 0)})
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # Node telemetry drill-down: live metrics, history, logs, keys, controls,     #
 # per-tenant usage. Self node runs locally; remote nodes are fleet-proxied.   #

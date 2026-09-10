@@ -2070,9 +2070,30 @@ function Nodes() {
     try { await api.put(`/admin/nodes/${n.id}`, patch); flash("Services updated"); await load(); } catch { flash("Failed"); }
   }
   async function removeNode(n: any) {
-    if (n.is_self) { void notify({ title: "Not allowed", message: "You can't remove the current node.", tone: "warn" }); return; }
-    if (!await confirmDialog({ title: "Remove node?", message: `Remove ${n.name} from the fleet.`, tone: "danger", confirmLabel: "Remove" })) return;
-    try { await api.del(`/admin/nodes/${n.id}`); flash("Node removed"); await load(); } catch { flash("Failed"); }
+    if (n.is_self) { void notify({ title: "Not allowed", message: "You can't purge the current node.", tone: "warn" }); return; }
+    let info: any = null;
+    try { info = await api.get<any>(`/admin/nodes/${n.id}/purge-info`); } catch { /* ignore */ }
+    const warnings: string[] = [];
+    if (info?.tenants) warnings.push(`${info.tenants} tenant(s) assigned here will fall back to the control plane.`);
+    const base = `This permanently removes the node record from the platform.${warnings.length ? " " + warnings.join(" ") : ""} This cannot be undone.`;
+    let terminate = false;
+    if (info?.can_terminate_vm) {
+      const r = await formDialog({
+        title: `Purge ${n.name}?`, tone: "danger", confirmLabel: "Purge node", message: base,
+        fields: [{ name: "vm", label: `Auto-provisioned cloud VM (${(info.provider || "").toUpperCase()} · ${info.instance_id})`, defaultValue: "keep", options: [
+          { label: "Leave the VM alone (already de-provisioned)", value: "keep" },
+          { label: "Also terminate the cloud VM", value: "terminate" }] }],
+      });
+      if (!r) return;
+      terminate = r.vm === "terminate";
+    } else if (!await confirmDialog({ title: `Purge ${n.name}?`, tone: "danger", confirmLabel: "Purge node", message: base })) {
+      return;
+    }
+    try {
+      const res = await api.post<any>(`/admin/nodes/${n.id}/purge`, { terminate_vm: terminate });
+      flash(terminate && res?.vm?.terminated ? "Node purged · VM terminated" : "Node purged");
+      await load();
+    } catch { flash("Purge failed"); }
   }
 
   async function newInstaller() {
@@ -2434,7 +2455,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
             <a className="btn sm ghost" href={`/admin/logs?node_id=${node.id}`} title="View this node's logs">
               <Icon name="note" size={13} /> Logs
             </a>
-            {!node.is_self && <button className="btn danger sm" onClick={async () => { await onRemove(node); onBack(); }}>Remove</button>}
+            {!node.is_self && <button className="btn danger sm" onClick={async () => { await onRemove(node); onBack(); }}>Purge</button>}
           </div>
         </div>
       </div>
