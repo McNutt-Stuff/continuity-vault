@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, Me } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, Loading } from "../components/ui";
@@ -46,7 +47,10 @@ export default function Settings() {
   const [toast, setToast] = useState("");
   const [theme, setThemeState] = useState<Theme>(getTheme());
   const [loaded, setLoaded] = useState(false);
-  const [tab, setTab] = useState<SettingsTab>("personal");
+  const [params] = useSearchParams();
+  const paramTab = params.get("tab") as SettingsTab | null;
+  const [tab, setTab] = useState<SettingsTab>(
+    paramTab && SETTINGS_TABS.some((t) => t.key === paramTab) ? paramTab : "personal");
 
   useEffect(() => {
     api.get<Tenant>("/tenant").then(setTenant).catch(() => {}).finally(() => setLoaded(true));

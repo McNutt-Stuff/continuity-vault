@@ -855,8 +855,8 @@ def build_recovery_key_missing(db, user: User) -> dict | None:
         "title": "Set up your Vault Recovery Key",
         "body_html": "".join(parts),
         "text": ("Create a Vault Recovery Key so you can regain access if you ever lose all your "
-                 f"passkeys. Set it up in Settings → Security: {_portal_url()}/settings"),
-        "cta": {"label": "Create my recovery key", "url": f"{_portal_url()}/settings"},
+                 f"passkeys. Set it up in Settings → Security: {_portal_url()}/settings?tab=security"),
+        "cta": {"label": "Create my recovery key", "url": f"{_portal_url()}/settings?tab=security"},
         "preheader": "A last-resort way back into your vault if all passkeys are lost",
     }
 

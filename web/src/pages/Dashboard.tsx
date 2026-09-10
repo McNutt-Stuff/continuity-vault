@@ -140,7 +140,7 @@ export default function Dashboard() {
       </div>
 
       {me?.recovery_key?.needs_prompt && (
-        <Card style={{ marginBottom: 16, borderColor: "var(--warn)", cursor: "pointer" }} onClick={() => nav("/settings")}>
+        <Card style={{ marginBottom: 16, borderColor: "var(--warn)", cursor: "pointer" }} onClick={() => nav("/settings?tab=security")}>
           <div className="row" style={{ gap: 12, alignItems: "center" }}>
             <div className="result-icon" style={{ background: "var(--inset)", color: "var(--warn)" }}>
               <Icon name="key" size={18} />
