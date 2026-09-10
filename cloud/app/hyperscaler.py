@@ -32,6 +32,51 @@ def provider_of(kind: str) -> str:
     return {"hyperscaler-aws": "aws", "hyperscaler-azure": "azure"}.get(kind or "", "")
 
 
+# Node naming convention: <clustercode>-<roleabbr><NNN>-<letter>.<domain-suffix>
+# e.g. nam1-ct001-a.arkive.life  (nam1 = cluster, ct = customer-tenant, 001 = seq, a = instance).
+ROLE_ABBR = {"control-plane": "cp", "customer-tenant": "ct", "public-web": "pw",
+             "storage": "st", "edge": "ed"}
+
+# Instance-size presets shown as a picker (friendly tier → provider machine type).
+SIZE_PRESETS = {
+    "aws": [
+        {"value": "t3.large", "label": "Small · 2 vCPU / 8 GB"},
+        {"value": "t3.xlarge", "label": "Medium · 4 vCPU / 16 GB"},
+        {"value": "m5.xlarge", "label": "Large · 4 vCPU / 16 GB"},
+        {"value": "m5.2xlarge", "label": "X-Large · 8 vCPU / 32 GB"},
+        {"value": "m5.4xlarge", "label": "2X-Large · 16 vCPU / 64 GB"},
+    ],
+    "azure": [
+        {"value": "Standard_D2s_v5", "label": "Small · 2 vCPU / 8 GB"},
+        {"value": "Standard_D4s_v5", "label": "Medium · 4 vCPU / 16 GB"},
+        {"value": "Standard_D8s_v5", "label": "X-Large · 8 vCPU / 32 GB"},
+        {"value": "Standard_D16s_v5", "label": "2X-Large · 16 vCPU / 64 GB"},
+    ],
+}
+# Sensible defaults by node role (X-Large customer nodes, small web).
+DEFAULT_SIZE_BY_ROLE = {
+    "aws": {"customer-tenant": "m5.2xlarge", "public-web": "t3.large", "control-plane": "m5.xlarge"},
+    "azure": {"customer-tenant": "Standard_D8s_v5", "public-web": "Standard_D2s_v5", "control-plane": "Standard_D4s_v5"},
+}
+DISK_PRESETS = [
+    {"gb": 100, "label": "100 GB"}, {"gb": 250, "label": "250 GB"},
+    {"gb": 500, "label": "500 GB"}, {"gb": 1000, "label": "1 TB — Customer Node"},
+    {"gb": 2000, "label": "2 TB"}, {"gb": 4000, "label": "4 TB"},
+]
+DEFAULT_DISK_BY_ROLE = {"customer-tenant": 1000, "public-web": 100, "control-plane": 200}
+
+
+def catalog(provider: str) -> dict:
+    provider = (provider or "").lower()
+    return {
+        "provider": provider,
+        "sizes": SIZE_PRESETS.get(provider, []),
+        "default_size_by_role": DEFAULT_SIZE_BY_ROLE.get(provider, {}),
+        "disk_presets": DISK_PRESETS,
+        "default_disk_by_role": DEFAULT_DISK_BY_ROLE,
+    }
+
+
 def _slug(s: str) -> str:
     s = re.sub(r"[^a-z0-9-]+", "-", (s or "").lower()).strip("-")
     return s or "node"
@@ -128,6 +173,7 @@ def _aws_deploy(config: dict, opts: dict, name: str, role: str, userdata: str,
     ec2 = session.client("ec2")
     ami = (config.get("ami_id") or "").strip() or _aws_latest_ubuntu(ec2)
     itype = (opts.get("size") or config.get("instance_type") or "t3.large").strip()
+    disk_gb = int(opts.get("disk_gb") or 0)
     progress(f"Launching {itype} EC2 instance from {ami} in {region}…")
     run_kw: dict = {
         "ImageId": ami, "InstanceType": itype, "MinCount": 1, "MaxCount": 1,
@@ -136,6 +182,13 @@ def _aws_deploy(config: dict, opts: dict, name: str, role: str, userdata: str,
             {"Key": "Name", "Value": name}, {"Key": "arkive:role", "Value": role},
             {"Key": "arkive:managed", "Value": "true"}]}],
     }
+    if disk_gb > 0:
+        try:
+            root = ec2.describe_images(ImageIds=[ami])["Images"][0].get("RootDeviceName", "/dev/sda1")
+        except Exception:  # noqa: BLE001
+            root = "/dev/sda1"
+        run_kw["BlockDeviceMappings"] = [{"DeviceName": root, "Ebs": {
+            "VolumeSize": disk_gb, "VolumeType": "gp3", "DeleteOnTermination": True}}]
     if config.get("subnet_id"):
         run_kw["SubnetId"] = config["subnet_id"].strip()
     if config.get("security_group_id"):
@@ -229,13 +282,18 @@ def _azure_deploy(config: dict, opts: dict, name: str, role: str, userdata: str,
         os_profile["admin_password"] = admin_pw
 
     vm_size = (opts.get("size") or config.get("vm_size") or "Standard_D2s_v5").strip()
+    disk_gb = int(opts.get("disk_gb") or 0)
+    storage_profile: dict = {"image_reference": {
+        "publisher": "Canonical", "offer": "0001-com-ubuntu-server-jammy",
+        "sku": "22_04-lts-gen2", "version": "latest"}}
+    if disk_gb > 0:
+        storage_profile["os_disk"] = {"create_option": "FromImage", "disk_size_gb": disk_gb,
+                                      "managed_disk": {"storage_account_type": "Premium_LRS"}}
     progress(f"Creating virtual machine ({vm_size}) in {loc}…")
     vm = comp.virtual_machines.begin_create_or_update(rg, name, {
         "location": loc,
         "hardware_profile": {"vm_size": vm_size},
-        "storage_profile": {"image_reference": {
-            "publisher": "Canonical", "offer": "0001-com-ubuntu-server-jammy",
-            "sku": "22_04-lts-gen2", "version": "latest"}},
+        "storage_profile": storage_profile,
         "os_profile": os_profile,
         "network_profile": {"network_interfaces": [{"id": nic.id}]},
     }).result()

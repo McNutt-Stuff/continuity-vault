@@ -431,7 +431,11 @@ function AutoProvisionAdmin() {
   const [svcs, setSvcs] = useState<any[]>([]);
   const [jobs, setJobs] = useState<any[]>([]);
   const [clusters, setClusters] = useState<any[]>([]);
-  const [form, setForm] = useState({ service_object_id: "", name: "", role: "customer-tenant", region: "", size: "", cluster_id: "" });
+  const [profiles, setProfiles] = useState<any[]>([]);
+  const [cat, setCat] = useState<any | null>(null);
+  const [form, setForm] = useState({ service_object_id: "", name: "", role: "customer-tenant", region: "", size: "", disk_gb: "", cluster_id: "", config_profile_id: "" });
+  const [fqdn, setFqdn] = useState("");
+  const [nameEdited, setNameEdited] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [iam, setIam] = useState<any>(null);
@@ -440,9 +444,9 @@ function AutoProvisionAdmin() {
   useEffect(() => {
     api.get<any[]>("/admin/provisioning/services").then(setSvcs).catch(() => {});
     api.get<any>("/admin/topology").then((t) => setClusters(t.clusters || [])).catch(() => {});
+    api.get<any[]>("/admin/config-profiles").then((p) => setProfiles((p || []).filter((x) => (x.kind || x.target) === "node"))).catch(() => {});
     void loadJobs();
   }, []);
-  // Poll while any job is in flight.
   useEffect(() => {
     const active = jobs.some((j) => ["pending", "provisioning", "bootstrapping"].includes(j.status));
     if (!active) return;
@@ -452,15 +456,42 @@ function AutoProvisionAdmin() {
 
   const svc = svcs.find((s) => s.id === form.service_object_id);
 
+  // Load the provider's size/disk catalog + apply role defaults when the service or role changes.
+  useEffect(() => {
+    if (!svc?.provider) { setCat(null); return; }
+    api.get<any>(`/admin/provisioning/catalog?provider=${svc.provider}`).then((c) => {
+      setCat(c);
+      setForm((f) => ({
+        ...f,
+        size: f.size || (c.default_size_by_role?.[f.role] || c.sizes?.[0]?.value || ""),
+        disk_gb: f.disk_gb || String(c.default_disk_by_role?.[f.role] || ""),
+      }));
+    }).catch(() => setCat(null));
+  }, [svc?.provider]);
+
+  // Re-apply size/disk defaults for the chosen role.
+  useEffect(() => {
+    if (!cat) return;
+    setForm((f) => ({ ...f, size: cat.default_size_by_role?.[f.role] || f.size, disk_gb: String(cat.default_disk_by_role?.[f.role] || f.disk_gb) }));
+  }, [form.role, cat]);
+
+  // Auto-suggest the node name/FQDN (unless the admin edited it) following the convention.
+  useEffect(() => {
+    if (nameEdited || !form.service_object_id) return;
+    const q = new URLSearchParams({ role: form.role, cluster_id: form.cluster_id || "", service_object_id: form.service_object_id });
+    api.get<any>(`/admin/provisioning/suggest-name?${q}`).then((r) => { setForm((f) => ({ ...f, name: r.name })); setFqdn(r.fqdn); }).catch(() => {});
+  }, [form.role, form.cluster_id, form.service_object_id, nameEdited]);
+
   async function deploy() {
     setErr(""); setBusy(true);
     try {
       await api.post("/admin/provisioning/deploy-node", {
         service_object_id: form.service_object_id, name: form.name.trim(), role: form.role,
-        region: form.region.trim() || null, size: form.size.trim() || null,
-        cluster_id: form.cluster_id || null,
+        region: form.region.trim() || null, size: form.size || null,
+        disk_gb: form.disk_gb ? parseInt(form.disk_gb, 10) : null,
+        cluster_id: form.cluster_id || null, config_profile_id: form.config_profile_id || null,
       });
-      setForm({ ...form, name: "" });
+      setForm({ ...form, name: "" }); setNameEdited(false);
       await loadJobs();
     } catch (e) { setErr((e as Error).message || "Could not start the deployment"); }
     finally { setBusy(false); }
@@ -493,7 +524,10 @@ function AutoProvisionAdmin() {
                   {svcs.map((s) => <option key={s.id} value={s.id} disabled={!s.configured}>{s.name} ({s.provider.toUpperCase()}){s.configured ? "" : " — not configured"}</option>)}
                 </select>
               </Field>
-              <Field label="Node name"><input className="input sm" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. nam-east-cust-2" /></Field>
+              <Field label="Node name">
+                <input className="input sm" value={form.name} onChange={(e) => { setForm({ ...form, name: e.target.value }); setNameEdited(true); }} placeholder="auto-suggested" />
+                {fqdn && !nameEdited && <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>{fqdn}</div>}
+              </Field>
               <Field label="Role">
                 <select className="input sm" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
                   <option value="customer-tenant">Customer node</option>
@@ -506,8 +540,28 @@ function AutoProvisionAdmin() {
                   {clusters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </Field>
+              <Field label="Node size">
+                <select className="input sm" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })}>
+                  {(cat?.sizes || []).length === 0 && <option value="">choose a service first</option>}
+                  {(cat?.sizes || []).map((s: any) => <option key={s.value} value={s.value}>{s.label} — {s.value}</option>)}
+                </select>
+              </Field>
+              <Field label="Disk size (GB)">
+                <div className="row" style={{ gap: 8 }}>
+                  <input className="input sm" type="number" min={30} style={{ width: 110 }} value={form.disk_gb} onChange={(e) => setForm({ ...form, disk_gb: e.target.value })} />
+                  <select className="input sm" value="" onChange={(e) => e.target.value && setForm({ ...form, disk_gb: e.target.value })}>
+                    <option value="">Presets…</option>
+                    {(cat?.disk_presets || []).map((d: any) => <option key={d.gb} value={d.gb}>{d.label}</option>)}
+                  </select>
+                </div>
+              </Field>
               <Field label={`Region ${svc ? `(default ${svc.region || "—"})` : ""}`}><input className="input sm" value={form.region} onChange={(e) => setForm({ ...form, region: e.target.value })} placeholder="leave blank for default" /></Field>
-              <Field label="Instance size (optional)"><input className="input sm" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })} placeholder="e.g. t3.large / Standard_D2s_v5" /></Field>
+              <Field label="Configuration profile">
+                <select className="input sm" value={form.config_profile_id} onChange={(e) => setForm({ ...form, config_profile_id: e.target.value })}>
+                  <option value="">— none —</option>
+                  {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </Field>
             </div>
             {err && <div className="pill danger" style={{ marginTop: 10 }}>{err}</div>}
             <div className="row" style={{ marginTop: 12, gap: 8 }}>

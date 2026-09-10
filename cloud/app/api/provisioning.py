@@ -9,6 +9,7 @@ the credentials for each provider require.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 
@@ -76,13 +77,45 @@ def iam_guidance(provider: str):
     return g
 
 
+@router.get("/catalog")
+def catalog(provider: str):
+    """Instance-size + disk presets for the deploy form (per provider)."""
+    return hyperscaler.catalog(provider)
+
+
+@router.get("/suggest-name")
+def suggest_name(role: str = "customer-tenant", cluster_id: str = "",
+                 service_object_id: str = "", db: Session = Depends(get_db)):
+    """Suggest the next node name + FQDN following the platform convention
+    ``<clustercode>-<roleabbr><NNN>-<letter>.<domain-suffix>`` (e.g.
+    nam1-ct001-a.arkive.life)."""
+    cluster = db.get(Cluster, cluster_id) if cluster_id else None
+    ccode = re.sub(r"[^a-z0-9]", "", ((cluster.code if cluster else "") or "nam1").lower()) or "nam1"
+    abbr = hyperscaler.ROLE_ABBR.get(role, "nd")
+    prefix = f"{ccode}-{abbr}"
+    nums: list[int] = []
+    for (nm,) in db.query(Node.name).filter(Node.name.like(f"{prefix}%")).all():
+        m = re.match(rf"^{re.escape(prefix)}(\d+)-[a-z]$", nm or "")
+        if m:
+            nums.append(int(m.group(1)))
+    nxt = (max(nums) + 1) if nums else 1
+    name = f"{prefix}{nxt:03d}-a"
+    suffix = ""
+    if service_object_id:
+        svc = services.resolve_service(db, service_object_id)
+        suffix = ((svc or {}).get("config", {}) or {}).get("domain_suffix", "").strip().lstrip(".")
+    return {"name": name, "fqdn": f"{name}.{suffix}" if suffix else name, "domain_suffix": suffix}
+
+
 class DeployNodeBody(BaseModel):
     service_object_id: str
     name: str
     role: str = "customer-tenant"
     region: str | None = None
     size: str | None = None
+    disk_gb: int | None = None
     cluster_id: str | None = None
+    config_profile_id: str | None = None
 
 
 @router.post("/deploy-node")
@@ -99,7 +132,8 @@ def deploy_node(body: DeployNodeBody,
         kind="deploy_node", provider=provider, service_object_id=svc.id,
         status="pending", message="Queued",
         params={"name": body.name.strip(), "role": body.role,
-                "region": body.region, "size": body.size},
+                "region": body.region, "size": body.size, "disk_gb": body.disk_gb,
+                "config_profile_id": body.config_profile_id},
         cluster_id=body.cluster_id, created_by=principal.user_id, log=[])
     db.add(job)
     db.commit()
@@ -215,6 +249,9 @@ def _ensure_node(db: Session, job: ProvisioningJob, res: dict) -> Node:
     node.cloud = {"provider": job.provider, "region": res.get("region") or ""}
     if job.cluster_id:
         node.cluster_id = job.cluster_id
+    profile_id = (job.params or {}).get("config_profile_id")
+    if profile_id:
+        node.config_profile_id = profile_id
     db.commit()
     db.refresh(node)
     return node
