@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from .. import audit, features, rules_engine, security
 from ..db import get_db
-from ..models import Collection, Rule, Tenant
+from ..models import Collection, Rule, Tenant, User
 
 router = APIRouter(prefix="/rules", tags=["rules"])
 logger = logging.getLogger("cv.rules")
@@ -26,9 +26,12 @@ _VALID_OPS = {o["id"] for o in rules_engine.OPERATORS}
 _VALID_PLANS = set(rules_engine.PLAN_RANK)
 
 
-def _require_enabled(tenant: Tenant) -> None:
-    """403 unless the tenant has the rules feature turned on."""
-    if not features.resolve(None, tenant, "rules_enabled"):
+def _require_enabled(db: Session, principal, tenant: Tenant) -> None:
+    """404 unless rules are enabled for this account. Honours the USER-level flag
+    too — personal/shared accounts can only be enabled per user (tenant flags
+    aren't exposed for shared tenants)."""
+    user = db.get(User, principal.user_id) if principal else None
+    if not features.resolve(user, tenant, "rules_enabled"):
         raise HTTPException(404, "not found")  # hide the feature entirely when off
 
 
@@ -95,7 +98,7 @@ def options(principal: security.Principal = Depends(security.get_principal),
             db: Session = Depends(get_db)):
     """Builder metadata: operators, action types (+ the plan each needs), field
     suggestions, the tenant's plan, and its collections to scope rules to."""
-    _require_enabled(tenant)
+    _require_enabled(db, principal, tenant)
     colls = (db.query(Collection)
              .filter(Collection.tenant_id == tenant.id)
              .order_by(Collection.name.asc()).all())
@@ -115,7 +118,7 @@ def list_rules(collection: str | None = Query(default=None),
                principal: security.Principal = Depends(security.get_principal),
                tenant: Tenant = Depends(security.get_tenant),
                db: Session = Depends(get_db)):
-    _require_enabled(tenant)
+    _require_enabled(db, principal, tenant)
     rows = (db.query(Rule)
             .filter(Rule.tenant_id == tenant.id)
             .order_by(Rule.priority.asc(), Rule.created_at.asc()).all())
@@ -129,7 +132,7 @@ def create_rule(body: RuleBody,
                 principal: security.Principal = Depends(security.get_principal),
                 tenant: Tenant = Depends(security.get_tenant),
                 db: Session = Depends(get_db)):
-    _require_enabled(tenant)
+    _require_enabled(db, principal, tenant)
     _validate(body)
     r = Rule(
         tenant_id=tenant.id, name=body.name.strip(), description=body.description or "",
@@ -151,7 +154,7 @@ def update_rule(rule_id: str, body: RuleBody,
                 principal: security.Principal = Depends(security.get_principal),
                 tenant: Tenant = Depends(security.get_tenant),
                 db: Session = Depends(get_db)):
-    _require_enabled(tenant)
+    _require_enabled(db, principal, tenant)
     _validate(body)
     r = db.get(Rule, rule_id)
     if not r or r.tenant_id != tenant.id:
@@ -178,7 +181,7 @@ def toggle_rule(rule_id: str,
                 principal: security.Principal = Depends(security.get_principal),
                 tenant: Tenant = Depends(security.get_tenant),
                 db: Session = Depends(get_db)):
-    _require_enabled(tenant)
+    _require_enabled(db, principal, tenant)
     r = db.get(Rule, rule_id)
     if not r or r.tenant_id != tenant.id:
         raise HTTPException(404, "rule not found")
@@ -195,7 +198,7 @@ def delete_rule(rule_id: str,
                 principal: security.Principal = Depends(security.get_principal),
                 tenant: Tenant = Depends(security.get_tenant),
                 db: Session = Depends(get_db)):
-    _require_enabled(tenant)
+    _require_enabled(db, principal, tenant)
     r = db.get(Rule, rule_id)
     if not r or r.tenant_id != tenant.id:
         raise HTTPException(404, "rule not found")
@@ -225,7 +228,7 @@ def preview(body: PreviewBody,
             db: Session = Depends(get_db)):
     """Evaluate a sample object against the tenant's rules and report exactly which
     rules match and what they'd do — the 'check rule evaluation results' surface."""
-    _require_enabled(tenant)
+    _require_enabled(db, principal, tenant)
     rows = (db.query(Rule)
             .filter(Rule.tenant_id == tenant.id, Rule.enabled.is_(True))
             .order_by(Rule.priority.asc(), Rule.created_at.asc()).all())

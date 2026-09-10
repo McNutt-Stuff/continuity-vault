@@ -46,6 +46,7 @@ from ..models import (
     SearchDocument,
     SnapshotReceipt,
     Tenant,
+    User,
     Vault,
 )
 from ..storage import build_destination
@@ -627,9 +628,12 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     # over the basic Data Map logic. Only loaded when the tenant has the feature
     # enabled; empty otherwise so ingestion is unchanged for everyone else.
     tenant = db.get(Tenant, collection.tenant_id)
+    # Honour the OWNER user's flag too — personal/shared accounts can only enable
+    # rules per user (tenant flags aren't exposed for shared tenants).
+    rule_owner = db.get(User, vault.owner_user_id) if vault.owner_user_id else None
     rules: list = []
     rule_plan = "business"
-    if tenant is not None and features.resolve(None, tenant, "rules_enabled"):
+    if tenant is not None and features.resolve(rule_owner, tenant, "rules_enabled"):
         rule_plan = (tenant.plan or "personal")
         rules = _load_collection_rules(db, collection)
 
