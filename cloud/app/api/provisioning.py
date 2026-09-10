@@ -160,6 +160,42 @@ def get_job(jid: str, db: Session = Depends(get_db)):
     return _job_view(db, j)
 
 
+@router.post("/jobs/{jid}/abort")
+def abort_job(jid: str,
+              principal: security.Principal = Depends(security.require_platform_admin),
+              db: Session = Depends(get_db)):
+    """Abort a failed / stuck deployment: best-effort terminate the cloud VM and
+    delete the platform node record + its provisioning link."""
+    j = db.get(ProvisioningJob, jid)
+    if j is None:
+        raise HTTPException(404, "job not found")
+    from ..models import Tenant
+    vm = None
+    svc = services.resolve_service(db, j.service_object_id) if j.service_object_id else None
+    inst = (j.result or {}).get("instance_id") or ""
+    if svc and inst:
+        vm = hyperscaler.terminate_node(provider=j.provider, config=svc.get("config", {}),
+                                        instance_id=inst)
+    if j.node_id:
+        node = db.get(Node, j.node_id)
+        if node is not None and not node.is_self:
+            db.query(Tenant).filter(Tenant.node_id == node.id)\
+                .update({Tenant.node_id: None}, synchronize_session=False)
+            db.delete(node)
+    j.status = "aborted"
+    j.node_id = None
+    j.message = ("Aborted — cloud VM terminated" if (vm or {}).get("terminated")
+                 else "Aborted by administrator")
+    log = list(j.log or [])
+    log.append({"ts": _now().isoformat(), "msg": j.message})
+    j.log = log[-100:]
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="provisioning.aborted",
+                 resource=j.id, severity="warning",
+                 detail={"terminated_vm": bool((vm or {}).get("terminated"))})
+    return {"ok": True, "vm": vm}
+
+
 # --------------------------------------------------------------------------- #
 # Background deploy worker                                                     #
 # --------------------------------------------------------------------------- #
@@ -194,7 +230,8 @@ def _run_deploy(job_id: str) -> None:
             progress("Starting deployment…")
             res = hyperscaler.deploy_node(
                 provider=job.provider, config=svc["config"], opts=job.params or {},
-                cp_url=cp_url, fleet_secret=fleet_secret, progress=progress)
+                cp_url=cp_url, fleet_secret=fleet_secret, progress=progress,
+                progress_token=job.id)
             job.result = res
             db.commit()
 

@@ -183,6 +183,35 @@ def _effective_settings(db: Session, node: Node) -> tuple[dict, list[str]]:
     return merged, applied
 
 
+class ProvisionProgress(BaseModel):
+    token: str
+    message: str = ""
+    status: str = ""
+
+
+@public_router.post("/nodes/provision-progress")
+def provision_progress(body: ProvisionProgress, db: Session = Depends(get_db)):
+    """A booting auto-provisioned VM reports bootstrap milestones (token = the
+    ProvisioningJob id) so the admin auto-provision page shows live progress and
+    can tell success from a stuck/failed install. Opaque token; log-only."""
+    from datetime import datetime, timezone
+    from ..models import ProvisioningJob
+    job = db.get(ProvisioningJob, body.token) if body.token else None
+    if job is None or (job.status or "") in ("online", "aborted"):
+        return {"ok": True}  # unknown or already-finished job
+    msg = (body.message or "").strip()[:300]
+    if msg:
+        log = list(job.log or [])
+        log.append({"ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                    "msg": "[vm] " + msg})
+        job.log = log[-100:]
+        job.message = msg
+    if (body.status or "") == "error":
+        job.status = "error"
+    db.commit()
+    return {"ok": True}
+
+
 @public_router.post("/nodes/heartbeat")
 def node_heartbeat(body: NodeHeartbeat,
                    authorization: str = Header(default=""),

@@ -82,25 +82,38 @@ def _slug(s: str) -> str:
     return s or "node"
 
 
-def build_userdata(*, role: str, name: str, fqdn: str, cp_url: str, secret: str) -> str:
+def build_userdata(*, role: str, name: str, fqdn: str, cp_url: str, secret: str,
+                   progress_token: str = "") -> str:
     """cloud-init user-data: install the node from the control plane bundle and
-    let it register itself (heartbeat). The node adopts the fleet's shared
-    KEK/session/signer from the control plane automatically, so only the fleet
-    node secret is injected here."""
+    let it register itself (heartbeat). Reports milestones back to the control
+    plane (``progress_token``) so the auto-provision UI shows live bootstrap
+    progress and can tell success from a stuck/failed install."""
     cp = (cp_url or "").rstrip("/")
-    return (
-        "#!/bin/bash\n"
-        "set -e\n"
-        "export DEBIAN_FRONTEND=noninteractive\n"
-        f"export CV_NODE_ROLE={role}\n"
-        f"export CV_NODE_NAME={name}\n"
-        f"export CV_DOMAIN={fqdn}\n"
-        f"export CV_CONTROL_PLANE_URL={cp}\n"
-        f"export CV_NODE_SECRET={secret}\n"
-        "curl -fsSL --retry 5 --retry-delay 10 "
-        f"{cp}/api/nodes/bootstrap -o /tmp/arkive-node.sh\n"
-        "bash /tmp/arkive-node.sh >>/var/log/arkive-bootstrap.log 2>&1\n"
-    )
+    report = ('report() { [ -z "$TOKEN" ] && return 0; curl -fsS -X POST "' + cp +
+              '/api/nodes/provision-progress" -H "Content-Type: application/json" '
+              '-d "{\\"token\\":\\"$TOKEN\\",\\"message\\":\\"$1\\"}" >/dev/null 2>&1 || true; }')
+    lines = [
+        "#!/bin/bash", "set -e", "export DEBIAN_FRONTEND=noninteractive",
+        f"export CV_NODE_ROLE={role}", f"export CV_NODE_NAME={name}",
+        f"export CV_DOMAIN={fqdn}", f"export CV_CONTROL_PLANE_URL={cp}",
+        f"export CV_NODE_SECRET={secret}", f'TOKEN="{progress_token}"',
+        report,
+        "trap 'report \"Bootstrap FAILED on the VM — see /var/log/arkive-bootstrap.log\"' ERR",
+        'report "VM booted — downloading the installer"',
+        f"curl -fsSL --retry 5 --retry-delay 10 {cp}/api/nodes/bootstrap -o /tmp/arkive-node.sh",
+        'report "Installer downloaded — installing node software (a few minutes)"',
+        "bash /tmp/arkive-node.sh >>/var/log/arkive-bootstrap.log 2>&1",
+        'report "Install complete — registering with the control plane"',
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _openssh_public_from_pem(pem: str) -> str:
+    """Derive an OpenSSH public key from an uploaded .pem private key."""
+    from cryptography.hazmat.primitives import serialization
+    key = serialization.load_pem_private_key(pem.encode(), password=None)
+    return key.public_key().public_bytes(
+        serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
 
 
 # --------------------------------------------------------------------------- #
@@ -108,7 +121,7 @@ def build_userdata(*, role: str, name: str, fqdn: str, cp_url: str, secret: str)
 # --------------------------------------------------------------------------- #
 
 def deploy_node(*, provider: str, config: dict, opts: dict, cp_url: str,
-                fleet_secret: str, progress: Progress) -> dict:
+                fleet_secret: str, progress: Progress, progress_token: str = "") -> dict:
     """Launch a VM node + publish its DNS record. Returns
     ``{instance_id, public_ip, dns_name, fqdn, region, node_name, role}``."""
     provider = (provider or "").lower()
@@ -117,7 +130,7 @@ def deploy_node(*, provider: str, config: dict, opts: dict, cp_url: str,
     suffix = (config.get("domain_suffix") or "").strip().lstrip(".")
     fqdn = f"{name}.{suffix}" if suffix else name
     userdata = build_userdata(role=role, name=name, fqdn=fqdn, cp_url=cp_url,
-                              secret=fleet_secret)
+                              secret=fleet_secret, progress_token=progress_token)
     if provider == "aws":
         vm = _aws_deploy(config, opts, name, role, userdata, progress)
     elif provider == "azure":
@@ -193,8 +206,9 @@ def _aws_deploy(config: dict, opts: dict, name: str, role: str, userdata: str,
         run_kw["SubnetId"] = config["subnet_id"].strip()
     if config.get("security_group_id"):
         run_kw["SecurityGroupIds"] = [config["security_group_id"].strip()]
-    if config.get("key_name"):
-        run_kw["KeyName"] = config["key_name"].strip()
+    key_name = (config.get("key_name") or "").strip() or _aws_ensure_keypair(session, config, progress)
+    if key_name:
+        run_kw["KeyName"] = key_name
     r = ec2.run_instances(**run_kw)
     iid = r["Instances"][0]["InstanceId"]
     progress(f"Instance {iid} launching — waiting for it to start…")
@@ -204,6 +218,28 @@ def _aws_deploy(config: dict, opts: dict, name: str, role: str, userdata: str,
     pub = inst.get("PublicIpAddress", "") or ""
     progress(f"Instance running at {pub or '(no public IP)'}.")
     return {"instance_id": iid, "public_ip": pub, "region": region}
+
+
+def _aws_ensure_keypair(session, config: dict, progress: Progress) -> str:
+    """When an EC2 key pair name isn't given but a .pem private key is uploaded,
+    import its public key as a managed key pair and return its name (idempotent)."""
+    pem = (config.get("ssh_private_key") or "").strip()
+    if not pem:
+        return ""
+    try:
+        pub = _openssh_public_from_pem(pem)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not parse ssh_private_key .pem: %s", exc)
+        return ""
+    kn = "arkive-provision"
+    ec2 = session.client("ec2")
+    try:
+        ec2.import_key_pair(KeyName=kn, PublicKeyMaterial=pub.encode())
+        progress(f"Imported SSH key pair '{kn}'.")
+    except Exception as exc:  # noqa: BLE001 — already-exists is fine
+        if "Duplicate" not in str(exc):
+            logger.warning("import_key_pair failed: %s", exc)
+    return kn
 
 
 def _aws_dns_upsert(config: dict, fqdn: str, ip: str, progress: Progress) -> str:
@@ -252,8 +288,14 @@ def _azure_deploy(config: dict, opts: dict, name: str, role: str, userdata: str,
     admin = (config.get("admin_username") or "arkive").strip()
     ssh_key = (config.get("ssh_public_key") or "").strip()
     admin_pw = (config.get("admin_password") or "").strip()
+    pem = (config.get("ssh_private_key") or "").strip()
+    if not ssh_key and pem:
+        try:
+            ssh_key = _openssh_public_from_pem(pem)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"could not derive a public key from the uploaded .pem: {exc}")
     if not ssh_key and not admin_pw:
-        raise ValueError("Azure ssh_public_key or admin_password is required")
+        raise ValueError("Azure ssh_public_key, an uploaded .pem, or admin_password is required")
 
     net = NetworkManagementClient(cred, sub)
     comp = ComputeManagementClient(cred, sub)
@@ -371,7 +413,8 @@ _AWS_POLICY = {
         {"Sid": "ArkiveCompute", "Effect": "Allow", "Action": [
             "ec2:RunInstances", "ec2:TerminateInstances", "ec2:DescribeInstances",
             "ec2:DescribeInstanceStatus", "ec2:DescribeImages", "ec2:CreateTags",
-            "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups"], "Resource": "*"},
+            "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups",
+            "ec2:ImportKeyPair", "ec2:DescribeKeyPairs"], "Resource": "*"},
         {"Sid": "ArkiveDns", "Effect": "Allow", "Action": [
             "route53:ChangeResourceRecordSets", "route53:ListResourceRecordSets",
             "route53:GetHostedZone", "route53:ListHostedZones"], "Resource": "*"},
@@ -392,6 +435,9 @@ IAM_GUIDANCE = {
             "The security group you configure must allow inbound 80/443 so the "
             "node can obtain TLS and be reachable.",
             "Route53 actions can be scoped to your specific hosted zone ARN.",
+            "SSH key: set an existing EC2 key-pair name, or upload a .pem private "
+            "key on the service object — its public key is imported as a managed "
+            "key pair (needs ec2:ImportKeyPair).",
         ],
     },
     "azure": {

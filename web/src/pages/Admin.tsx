@@ -501,6 +501,13 @@ function AutoProvisionAdmin() {
     try { setIam(await api.get(`/admin/provisioning/iam/${provider}`)); } catch { /* ignore */ }
   }
 
+  async function abort(j: any) {
+    if (!await confirmDialog({ title: `Abort ${j.node_name || "deployment"}?`, tone: "danger", confirmLabel: "Abort & delete VM",
+      message: "This terminates the cloud VM (if it still exists) and removes the node record. Use it for a failed or stuck install." })) return;
+    try { const r = await api.post<any>(`/admin/provisioning/jobs/${j.id}/abort`, {}); await loadJobs(); void notify({ message: r?.vm?.terminated ? "Aborted — cloud VM terminated." : "Deployment aborted.", tone: "info" }); }
+    catch (e) { void notify({ message: (e as Error).message || "Abort failed", tone: "warn" }); }
+  }
+
   const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "info"> = {
     online: "ok", error: "danger", bootstrapping: "warn", provisioning: "info", pending: "info",
   };
@@ -597,7 +604,12 @@ function AutoProvisionAdmin() {
         </div>
         {jobs.length === 0 && <div className="muted" style={{ fontSize: 12.5 }}>No deployments yet.</div>}
         <div className="stack" style={{ gap: 10 }}>
-          {jobs.map((j) => (
+          {jobs.map((j) => {
+            const started = new Date((j.created_at || "") + (String(j.created_at || "").endsWith("Z") ? "" : "Z")).getTime();
+            const elapsedMin = started ? Math.floor((Date.now() - started) / 60000) : 0;
+            const inFlight = ["pending", "provisioning", "bootstrapping"].includes(j.status);
+            const stuck = j.status === "bootstrapping" && elapsedMin >= 8 && !j.node_online;
+            return (
             <div key={j.id} className="card" style={{ background: "var(--inset)" }}>
               <div className="spread">
                 <div className="row" style={{ gap: 8, alignItems: "center" }}>
@@ -606,23 +618,35 @@ function AutoProvisionAdmin() {
                   <span className="faint" style={{ fontSize: 12 }}>· {j.provider?.toUpperCase()}</span>
                   <Pill tone={STATUS_TONE[j.status] || "info"} dot>{j.status}</Pill>
                   {j.node_online && <Pill tone="ok">online</Pill>}
+                  {inFlight && <span className="faint" style={{ fontSize: 11 }}>{elapsedMin}m elapsed</span>}
                 </div>
-                <span className="faint" style={{ fontSize: 11 }}>{timeAgo(j.created_at)}</span>
+                <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                  {(inFlight || j.status === "error") && (
+                    <button className="btn danger sm" onClick={() => abort(j)}><Icon name="x" size={12} /> Abort</button>
+                  )}
+                  <span className="faint" style={{ fontSize: 11 }}>{timeAgo(j.created_at)}</span>
+                </div>
               </div>
               <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>{j.message}</div>
+              {stuck && (
+                <div className="row" style={{ gap: 7, marginTop: 6, color: "var(--warn)", fontSize: 12, alignItems: "flex-start" }}>
+                  <Icon name="alert" size={12} /> <span>Taking longer than expected ({elapsedMin}m) — the install may be stuck. Check the log, or abort to tear it down.</span>
+                </div>
+              )}
               {(j.result?.public_ip || j.result?.dns_name) && (
                 <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
                   {j.result.dns_name ? `${j.result.dns_name} · ` : ""}{j.result.public_ip || ""}{j.result.instance_id ? ` · ${j.result.instance_id}` : ""}
                 </div>
               )}
               {(j.log || []).length > 0 && (
-                <details style={{ marginTop: 6 }}>
+                <details style={{ marginTop: 6 }} open={inFlight}>
                   <summary className="faint" style={{ fontSize: 11.5, cursor: "pointer" }}>Progress log</summary>
                   <pre className="terminal-log" style={{ marginTop: 6, maxHeight: 200, overflow: "auto" }}>{(j.log || []).map((l: any) => `${l.msg}`).join("\n")}</pre>
                 </details>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       </Card>
     </>
@@ -4970,6 +4994,13 @@ function ConfigObjectsAdmin() {
                   <input className="input sm flex1" type={r.secret ? "password" : "text"}
                          value={r.value} placeholder={r.secret && r.set ? "•••••• leave blank to keep" : "value"}
                          onChange={(e) => { const rows = [...draft.rows]; rows[i] = { ...r, value: e.target.value }; setDraft({ ...draft, rows }); }} />
+                  {/(private_key|\.pem|pem|key_material)/i.test(r.key) && (
+                    <label className="btn ghost sm" style={{ cursor: "pointer", whiteSpace: "nowrap" }} title="Upload a .pem file">
+                      <Icon name="file" size={12} /> .pem
+                      <input type="file" accept=".pem,.key,.txt" style={{ display: "none" }}
+                             onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; const text = await f.text(); const rows = [...draft.rows]; rows[i] = { ...r, value: text }; setDraft({ ...draft, rows }); e.currentTarget.value = ""; }} />
+                    </label>
+                  )}
                   <button className="btn ghost sm" onClick={() => setDraft({ ...draft, rows: draft.rows.filter((_, j) => j !== i) })}>✕</button>
                 </div>
               ))}
