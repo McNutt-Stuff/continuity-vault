@@ -7,6 +7,7 @@ import { api, getToken } from "../api";
 import { Card, Pill, Stat, bytes, timeAgo, fmtAbsolute, userTimezone } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
+import { SourceIcon } from "../components/SourceIcon";
 import { DestIcon } from "../components/DestIcon";
 import { FilterBar } from "../components/FilterBar";
 import { promptDialog, formDialog, confirmDialog, notify } from "../components/dialog";
@@ -1894,7 +1895,7 @@ function Nodes() {
                   <div className="spread" style={{ marginBottom: 10 }}>
                     <div className="row" style={{ gap: 9 }}>
                       <div className="result-icon" style={{ width: 30, height: 30, background: "var(--inset)", color: n.online ? "#35d0a5" : "#8a94a7" }}>
-                        <Icon name="server" size={16} />
+                        <CloudIcon provider={n.cloud?.provider} size={17} />
                       </div>
                       <div>
                         <div style={{ fontWeight: 700, fontSize: 13.5 }}>{n.name}{n.is_self && <span className="faint" style={{ fontWeight: 400, fontSize: 10 }}> · this</span>}</div>
@@ -1930,6 +1931,22 @@ function Nodes() {
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
+}
+
+// The brand slug of the cloud a node runs on, from its IMDS-detected provider
+// (aws | azure | gcp), else null for on-prem / bare-metal / unknown.
+function cloudBrand(provider?: string): string | null {
+  const p = (provider || "").toLowerCase();
+  if (p.includes("aws") || p.includes("amazon")) return "aws";
+  if (p.includes("azure") || p.includes("microsoft")) return "azure";
+  if (p.includes("gcp") || p.includes("google")) return "gcp";
+  return null;
+}
+
+// Node platform icon: the cloud provider's brand when known, else a server glyph.
+function CloudIcon({ provider, size = 16 }: { provider?: string; size?: number }) {
+  const b = cloudBrand(provider);
+  return b ? <SourceIcon type={b} fallback="server" size={size} /> : <Icon name="server" size={size} />;
 }
 
 function uptimeShort(s?: number | null): string {
@@ -2148,7 +2165,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
         <div className="spread">
           <div className="row" style={{ gap: 12 }}>
             <div className="result-icon" style={{ width: 40, height: 40, background: "var(--inset)", color: node.online ? "#35d0a5" : "#8a94a7" }}>
-              <Icon name="server" size={20} />
+              <CloudIcon provider={node.cloud?.provider} size={22} />
             </div>
             <div>
               <h3 style={{ margin: 0 }}>{node.name} {node.is_self && <span className="faint" style={{ fontWeight: 400, fontSize: 12 }}>· this node</span>}</h3>
@@ -2168,7 +2185,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
         </div>
         {(node.cloud?.provider && node.cloud.provider !== "unknown") && (
           <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-            <Pill tone="info"><Icon name="database" size={11} /> {String(node.cloud.provider).toUpperCase()}{node.cloud.region ? ` · ${node.cloud.region}` : ""}</Pill>
+            <Pill tone="info"><CloudIcon provider={node.cloud.provider} size={12} /> {String(node.cloud.provider).toUpperCase()}{node.cloud.region ? ` · ${node.cloud.region}` : ""}</Pill>
             {node.cloud.instance_type && <span className="faint" style={{ fontSize: 11.5 }}>{node.cloud.instance_type}</span>}
             {live?.hostname && <span className="faint" style={{ fontSize: 11.5 }}>{live.hostname}</span>}
             {live?.os && <span className="faint" style={{ fontSize: 11.5 }}>{live.os}</span>}
