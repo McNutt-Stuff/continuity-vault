@@ -810,6 +810,7 @@ class Node(Base):
     region = Column(String, default="")
     role = Column(String, default="control-plane")  # control-plane | customer-tenant | public-web | storage | worker | edge
     endpoint = Column(String, default="")            # base URL / address
+    public_ip = Column(String, default="")           # last-known public IP (set by auto-provision)
     status = Column(String, default="active")        # active | draining | offline | maintenance
     is_self = Column(Boolean, default=False)         # the running instance
     version = Column(String, default="")

@@ -453,6 +453,59 @@ def terminate_node(*, provider: str, config: dict, instance_id: str,
     return {"terminated": False, "detail": f"unsupported provider '{provider}'"}
 
 
+def remove_dns(*, provider: str, config: dict, fqdn: str, ip: str = "",
+               name_relative: str = "", progress: Progress | None = None) -> dict:
+    """Delete the A record published for a node (called when a deploy is aborted so
+    a same-name re-deploy can't collide with a stale record). Best-effort — a
+    missing zone/record is not an error. Returns {removed, detail}."""
+    def _p(m: str) -> None:
+        if progress:
+            progress(m)
+    provider = (provider or "").lower()
+    fqdn = (fqdn or "").strip().rstrip(".")
+    if not fqdn:
+        return {"removed": False, "detail": "no fqdn on record"}
+    try:
+        if provider == "aws":
+            zid = (config.get("hosted_zone_id") or "").strip()
+            if not zid:
+                return {"removed": False, "detail": "no hosted zone configured"}
+            session = _aws_clients(config, config.get("region") or "us-east-1")
+            r53 = session.client("route53")
+            # DELETE needs the record set to match exactly, so read it back first.
+            recs = r53.list_resource_record_sets(
+                HostedZoneId=zid, StartRecordName=fqdn, StartRecordType="A",
+                MaxItems="1").get("ResourceRecordSets", [])
+            match = next((r for r in recs
+                          if r.get("Name", "").rstrip(".") == fqdn and r.get("Type") == "A"), None)
+            if not match:
+                return {"removed": False, "detail": "record not found"}
+            _p(f"Removing Route53 record {fqdn}…")
+            r53.change_resource_record_sets(HostedZoneId=zid, ChangeBatch={"Changes": [
+                {"Action": "DELETE", "ResourceRecordSet": match}]})
+            return {"removed": True, "detail": fqdn}
+        if provider == "azure":
+            from azure.mgmt.dns import DnsManagementClient
+            zone = (config.get("dns_zone") or "").strip()
+            rg = (config.get("dns_resource_group") or config.get("resource_group") or "").strip()
+            rel = (name_relative or "").strip()
+            if not rel and zone and fqdn.endswith("." + zone):
+                rel = fqdn[: -len("." + zone)]
+            if not rel:
+                rel = fqdn.split(".")[0]
+            if not zone or not rg or not rel:
+                return {"removed": False, "detail": "no dns zone configured"}
+            cred = _azure_cred(config)
+            dns = DnsManagementClient(cred, config["subscription_id"].strip())
+            _p(f"Removing Azure DNS record {rel}.{zone}…")
+            dns.record_sets.delete(rg, zone, rel, "A")
+            return {"removed": True, "detail": f"{rel}.{zone}"}
+    except Exception as exc:  # noqa: BLE001 — DNS cleanup is best-effort
+        logger.warning("remove_dns failed: %s", exc)
+        return {"removed": False, "detail": str(exc)[:200]}
+    return {"removed": False, "detail": f"unsupported provider '{provider}'"}
+
+
 # --------------------------------------------------------------------------- #
 # IAM / access-policy guidance for the credentials each service object needs  #
 # --------------------------------------------------------------------------- #

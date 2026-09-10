@@ -107,6 +107,36 @@ def suggest_name(role: str = "customer-tenant", cluster_id: str = "",
     return {"name": name, "fqdn": f"{name}.{suffix}" if suffix else name, "domain_suffix": suffix}
 
 
+@router.get("/check-name")
+def check_name(name: str = "", role: str = "customer-tenant", service_object_id: str = "",
+               db: Session = Depends(get_db)):
+    """Live validation for the deploy form: flag a node-name / FQDN conflict with an
+    existing node or an in-flight deployment so the operator catches it before launch."""
+    slug = hyperscaler._slug((name or "").strip())
+    suffix = ""
+    if service_object_id:
+        svc = services.resolve_service(db, service_object_id)
+        suffix = ((svc or {}).get("config", {}) or {}).get("domain_suffix", "").strip().lstrip(".")
+    fqdn = f"{slug}.{suffix}" if (slug and suffix) else slug
+    if not slug:
+        return {"ok": True, "conflict": False, "fqdn": fqdn, "reason": ""}
+    conflict, reason = False, ""
+    existing = db.query(Node).filter(Node.name.ilike(slug)).first()
+    if existing:
+        conflict, reason = True, f"A node named “{slug}” already exists."
+    elif fqdn:
+        ep = db.query(Node).filter(Node.endpoint.ilike(f"%{fqdn}%")).first()
+        if ep:
+            conflict, reason = True, f"{fqdn} is already used by node “{ep.name}”."
+    if not conflict:
+        for jj in (db.query(ProvisioningJob)
+                   .filter(ProvisioningJob.status.in_(["pending", "provisioning", "bootstrapping"])).all()):
+            if hyperscaler._slug((jj.params or {}).get("name") or "") == slug:
+                conflict, reason = True, "A deployment for this name is already in progress."
+                break
+    return {"ok": True, "conflict": conflict, "fqdn": fqdn, "reason": reason}
+
+
 class DeployNodeBody(BaseModel):
     service_object_id: str
     name: str
@@ -172,10 +202,19 @@ def abort_job(jid: str,
     from ..models import Tenant
     vm = None
     svc = services.resolve_service(db, j.service_object_id) if j.service_object_id else None
-    inst = (j.result or {}).get("instance_id") or ""
+    res = j.result or {}
+    inst = res.get("instance_id") or ""
     if svc and inst:
         vm = hyperscaler.terminate_node(provider=j.provider, config=svc.get("config", {}),
                                         instance_id=inst)
+    # Prune the DNS A record we published so a same-name re-deploy can't collide
+    # with a stale record pointing at a now-dead box.
+    dns = None
+    fqdn = res.get("fqdn") or res.get("dns_name") or ""
+    if svc and fqdn:
+        dns = hyperscaler.remove_dns(provider=j.provider, config=svc.get("config", {}),
+                                     fqdn=fqdn, ip=res.get("public_ip") or "",
+                                     name_relative=res.get("node_name") or "")
     if j.node_id:
         node = db.get(Node, j.node_id)
         if node is not None and not node.is_self:
@@ -184,16 +223,21 @@ def abort_job(jid: str,
             db.delete(node)
     j.status = "aborted"
     j.node_id = None
-    j.message = ("Aborted — cloud VM terminated" if (vm or {}).get("terminated")
-                 else "Aborted by administrator")
+    parts = []
+    if (vm or {}).get("terminated"):
+        parts.append("cloud VM terminated")
+    if (dns or {}).get("removed"):
+        parts.append("DNS record removed")
+    j.message = ("Aborted — " + ", ".join(parts)) if parts else "Aborted by administrator"
     log = list(j.log or [])
     log.append({"ts": _now().isoformat(), "msg": j.message})
     j.log = log[-100:]
     db.commit()
     audit.record(db, actor=principal.user_id, action="provisioning.aborted",
                  resource=j.id, severity="warning",
-                 detail={"terminated_vm": bool((vm or {}).get("terminated"))})
-    return {"ok": True, "vm": vm}
+                 detail={"terminated_vm": bool((vm or {}).get("terminated")),
+                         "dns_removed": bool((dns or {}).get("removed"))})
+    return {"ok": True, "vm": vm, "dns": dns}
 
 
 # --------------------------------------------------------------------------- #
@@ -283,7 +327,9 @@ def _ensure_node(db: Session, job: ProvisioningJob, res: dict) -> Node:
         db.add(node)
     node.endpoint = endpoint or node.endpoint
     node.region = res.get("region") or node.region
-    node.cloud = {"provider": job.provider, "region": res.get("region") or ""}
+    node.public_ip = res.get("public_ip") or node.public_ip
+    node.cloud = {"provider": job.provider, "region": res.get("region") or "",
+                  "public_ip": res.get("public_ip") or ""}
     if job.cluster_id:
         node.cluster_id = job.cluster_id
     profile_id = (job.params or {}).get("config_profile_id")

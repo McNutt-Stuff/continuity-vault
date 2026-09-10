@@ -1538,6 +1538,7 @@ def _node_view(db: Session, n: Node) -> dict:
         "endpoint": n.endpoint, "status": n.status, "is_self": bool(n.is_self),
         "version": n.version, "online": online, "telemetry": tel,
         "cloud": n.cloud or {},
+        "public_ip": n.public_ip or (n.cloud or {}).get("public_ip") or "",
         # The self/control-plane node IS the reference build, so it's never "behind";
         # fleet nodes are compared to the bundle the control plane serves.
         "production_version": node_prod,

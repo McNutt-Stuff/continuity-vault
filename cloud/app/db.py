@@ -290,6 +290,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE purge_requests ADD COLUMN IF NOT EXISTS keep_source BOOLEAN DEFAULT false",
         "ALTER TABLE purge_requests ADD COLUMN IF NOT EXISTS collection_id VARCHAR",
         "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS last_log_push_at TIMESTAMP",
+        "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS public_ip VARCHAR DEFAULT ''",
         "ALTER TABLE nodes ADD COLUMN version_updated_at TIMESTAMP",
         # Cluster/Region topology (scalable multi-cluster placement). clusters +
         # regions are NEW tables (create_all); these add the linking columns to the

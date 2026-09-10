@@ -161,7 +161,6 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "website", label: "Website", icon: "grid", group: "Configurations" },
   { key: "nodes", label: "Nodes", icon: "server", group: "Infrastructure" },
   { key: "topology", label: "Topology", icon: "grid", group: "Infrastructure" },
-  { key: "auto-provision", label: "Auto-Provision", icon: "sparkle", group: "Infrastructure" },
   { key: "storage-usage", label: "Arkive Cloud", icon: "database", group: "Infrastructure" },
   { key: "backups", label: "Backups", icon: "shield", group: "Infrastructure" },
   { key: "fleet", label: "Appliance fleet", icon: "server", group: "Infrastructure" },
@@ -188,7 +187,6 @@ export default function Admin() {
       {s === "billing" && <BillingAdmin />}
       {s === "nodes" && <Nodes />}
       {s === "topology" && <TopologyAdmin />}
-      {s === "auto-provision" && <AutoProvisionAdmin />}
       {s === "storage-usage" && <StorageUsageAdmin />}
       {s === "backups" && <BackupsAdmin />}
       {s === "config-objects" && <ConfigObjectsAdmin />}
@@ -429,234 +427,316 @@ function TopologyAdmin() {
   );
 }
 
-function AutoProvisionAdmin() {
+// Cloud IAM/access-policy guidance panel (shown on the Service objects page under
+// the Hyperscaler Auto-Provision section).
+function IamPanel({ iam, onClose }: { iam: any; onClose: () => void }) {
+  return (
+    <Card style={{ marginTop: 10 }}>
+      <div className="spread"><h4 style={{ margin: 0 }}>{iam.title}</h4><button className="btn ghost sm" onClick={onClose}><Icon name="x" size={13} /></button></div>
+      <div className="faint" style={{ fontSize: 12.5, margin: "6px 0 10px" }}>{iam.summary}</div>
+      <div className="faint" style={{ fontSize: 12 }}>Credentials to provide: <b>{(iam.credentials || []).join(", ")}</b></div>
+      {iam.policy && <pre className="terminal-log" style={{ marginTop: 10, maxHeight: 320, overflow: "auto" }}>{JSON.stringify(iam.policy, null, 2)}</pre>}
+      {iam.roles && <ul className="faint" style={{ fontSize: 12.5, marginTop: 10, paddingLeft: 18 }}>{iam.roles.map((r: any, i: number) => <li key={i}><b>{r.role}</b> — {r.scope}</li>)}</ul>}
+      {iam.notes && <ul className="faint" style={{ fontSize: 12, marginTop: 8, paddingLeft: 18 }}>{iam.notes.map((n: string, i: number) => <li key={i}>{n}</li>)}</ul>}
+    </Card>
+  );
+}
+
+const DEPLOY_STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "info"> = {
+  online: "ok", error: "danger", aborted: "danger", bootstrapping: "warn", provisioning: "info", pending: "info",
+};
+
+// Deploy-a-node modal (invoked from the Nodes page's "Add node" menu). Launches a
+// cloud VM that installs + registers itself; on launch the caller navigates to the
+// deployment detail view.
+function DeployNodeModal({ onClose, onLaunched }: { onClose: () => void; onLaunched: (jobId: string) => void }) {
   const [svcs, setSvcs] = useState<any[]>([]);
-  const [jobs, setJobs] = useState<any[]>([]);
   const [clusters, setClusters] = useState<any[]>([]);
   const [profiles, setProfiles] = useState<any[]>([]);
   const [cat, setCat] = useState<any | null>(null);
   const [form, setForm] = useState({ service_object_id: "", name: "", role: "customer-tenant", region: "", size: "", disk_gb: "", cluster_id: "", config_profile_id: "" });
   const [fqdn, setFqdn] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
+  const [conflict, setConflict] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [iam, setIam] = useState<any>(null);
 
-  const loadJobs = () => api.get<any[]>("/admin/provisioning/jobs").then(setJobs).catch(() => {});
   useEffect(() => {
     api.get<any[]>("/admin/provisioning/services").then(setSvcs).catch(() => {});
     api.get<any>("/admin/topology").then((t) => setClusters(t.clusters || [])).catch(() => {});
     api.get<any>("/admin/config-profiles").then((r) => setProfiles((r.profiles || []).filter((x: any) => x.target === "node"))).catch(() => {});
-    void loadJobs();
   }, []);
-  useEffect(() => {
-    const active = jobs.some((j) => ["pending", "provisioning", "bootstrapping"].includes(j.status));
-    if (!active) return;
-    const t = setInterval(loadJobs, 5000);
-    return () => clearInterval(t);
-  }, [jobs]);
 
   const svc = svcs.find((s) => s.id === form.service_object_id);
 
-  // Load the provider's size/disk catalog + apply role defaults when the service or role changes.
   useEffect(() => {
     if (!svc?.provider) { setCat(null); return; }
     api.get<any>(`/admin/provisioning/catalog?provider=${svc.provider}`).then((c) => {
       setCat(c);
-      setForm((f) => ({
-        ...f,
-        region: "",
-        size: f.size || (c.default_size_by_role?.[f.role] || c.sizes?.[0]?.value || ""),
-        disk_gb: f.disk_gb || String(c.default_disk_by_role?.[f.role] || ""),
-      }));
+      setForm((f) => ({ ...f, region: "", size: f.size || (c.default_size_by_role?.[f.role] || c.sizes?.[0]?.value || ""), disk_gb: f.disk_gb || String(c.default_disk_by_role?.[f.role] || "") }));
     }).catch(() => setCat(null));
   }, [svc?.provider]);
 
-  // Re-apply size/disk defaults for the chosen role.
   useEffect(() => {
     if (!cat) return;
     setForm((f) => ({ ...f, size: cat.default_size_by_role?.[f.role] || f.size, disk_gb: String(cat.default_disk_by_role?.[f.role] || f.disk_gb) }));
   }, [form.role, cat]);
 
-  // Auto-suggest the node name/FQDN (unless the admin edited it) following the convention.
   useEffect(() => {
     if (nameEdited || !form.service_object_id) return;
     const q = new URLSearchParams({ role: form.role, cluster_id: form.cluster_id || "", service_object_id: form.service_object_id });
     api.get<any>(`/admin/provisioning/suggest-name?${q}`).then((r) => { setForm((f) => ({ ...f, name: r.name })); setFqdn(r.fqdn); }).catch(() => {});
   }, [form.role, form.cluster_id, form.service_object_id, nameEdited]);
 
+  // Live FQDN / name conflict detection as the operator fills the form.
+  useEffect(() => {
+    const nm = form.name.trim();
+    if (!nm) { setConflict(""); return; }
+    const q = new URLSearchParams({ name: nm, role: form.role, service_object_id: form.service_object_id || "" });
+    const t = setTimeout(() => {
+      api.get<any>(`/admin/provisioning/check-name?${q}`)
+        .then((r) => { if (r.fqdn) setFqdn(r.fqdn); setConflict(r.conflict ? (r.reason || "This name is already in use.") : ""); })
+        .catch(() => {});
+    }, 350);
+    return () => clearTimeout(t);
+  }, [form.name, form.role, form.service_object_id]);
+
   async function deploy() {
     setErr(""); setBusy(true);
     try {
-      await api.post("/admin/provisioning/deploy-node", {
+      const r = await api.post<{ id: string }>("/admin/provisioning/deploy-node", {
         service_object_id: form.service_object_id, name: form.name.trim(), role: form.role,
         region: form.region.trim() || null, size: form.size || null,
         disk_gb: form.disk_gb ? parseInt(form.disk_gb, 10) : null,
         cluster_id: form.cluster_id || null, config_profile_id: form.config_profile_id || null,
       });
-      setForm({ ...form, name: "" }); setNameEdited(false);
-      await loadJobs();
+      onLaunched(r.id);
     } catch (e) { setErr((e as Error).message || "Could not start the deployment"); }
     finally { setBusy(false); }
   }
 
-  async function showIam(provider: string) {
-    try { setIam(await api.get(`/admin/provisioning/iam/${provider}`)); } catch { /* ignore */ }
-  }
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="spread">
+          <div>
+            <h3 style={{ margin: 0 }}>Deploy a new node</h3>
+            <div className="faint" style={{ fontSize: 12 }}>Launch a VM in AWS or Azure — it installs, registers and comes online automatically.</div>
+          </div>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div className="modal-body">
+          {svcs.length === 0 ? (
+            <div className="muted" style={{ fontSize: 12.5 }}>No Hyperscaler Auto-Provision service objects yet. Create one under <b>Service objects</b>.</div>
+          ) : (
+            <>
+              <div className="grid grid-2" style={{ gap: 12 }}>
+                <Field label="Provider / service">
+                  <select className="input sm" value={form.service_object_id} onChange={(e) => setForm({ ...form, service_object_id: e.target.value })}>
+                    <option value="">— choose —</option>
+                    {svcs.map((s) => <option key={s.id} value={s.id} disabled={!s.configured}>{s.name} ({s.provider.toUpperCase()}){s.configured ? "" : " — not configured"}</option>)}
+                  </select>
+                </Field>
+                <Field label="Node name">
+                  <input className="input sm" value={form.name} onChange={(e) => { setForm({ ...form, name: e.target.value }); setNameEdited(true); }} placeholder="auto-suggested" />
+                  {fqdn && !conflict && <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>{fqdn}</div>}
+                  {conflict && <div className="row" style={{ gap: 6, marginTop: 4, color: "var(--warn)", fontSize: 11.5, alignItems: "flex-start" }}><Icon name="alert" size={12} /> <span>{conflict}</span></div>}
+                </Field>
+                <Field label="Role">
+                  <select className="input sm" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+                    <option value="customer-tenant">Customer node</option>
+                    <option value="public-web">Public web</option>
+                  </select>
+                </Field>
+                <Field label="Cluster">
+                  <select className="input sm" value={form.cluster_id} onChange={(e) => setForm({ ...form, cluster_id: e.target.value })}>
+                    <option value="">— unassigned —</option>
+                    {clusters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </Field>
+                <Field label="Node size">
+                  <select className="input sm" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })}>
+                    {(cat?.sizes || []).length === 0 && <option value="">choose a service first</option>}
+                    {(cat?.sizes || []).map((s: any) => <option key={s.value} value={s.value}>{s.label} — {s.value}</option>)}
+                  </select>
+                </Field>
+                <Field label="Disk size (GB)">
+                  <div className="row" style={{ gap: 8 }}>
+                    <input className="input sm" type="number" min={30} style={{ width: 110 }} value={form.disk_gb} onChange={(e) => setForm({ ...form, disk_gb: e.target.value })} />
+                    <select className="input sm" value="" onChange={(e) => e.target.value && setForm({ ...form, disk_gb: e.target.value })}>
+                      <option value="">Presets…</option>
+                      {(cat?.disk_presets || []).map((d: any) => <option key={d.gb} value={d.gb}>{d.label}</option>)}
+                    </select>
+                  </div>
+                </Field>
+                <Field label={`Region ${svc ? `(default ${svc.region || "—"})` : ""}`}>
+                  <select className="input sm" value={form.region} onChange={(e) => setForm({ ...form, region: e.target.value })}>
+                    <option value="">{svc?.region ? `Service default (${svc.region})` : "Provider default"}</option>
+                    {(cat?.regions || []).map((r: any) => <option key={r.value} value={r.value}>{r.label} — {r.value}</option>)}
+                  </select>
+                </Field>
+                <Field label="Configuration profile">
+                  <select className="input sm" value={form.config_profile_id} onChange={(e) => setForm({ ...form, config_profile_id: e.target.value })}>
+                    <option value="">— none —</option>
+                    {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                </Field>
+              </div>
+              {err && <div className="pill danger" style={{ marginTop: 10 }}>{err}</div>}
+              {svc && !svc.configured && <div className="faint" style={{ fontSize: 12, marginTop: 8 }}>Configure this service's credentials first (Service objects).</div>}
+            </>
+          )}
+        </div>
+        <div className="modal-foot">
+          <button className="btn ghost sm" onClick={onClose}>Cancel</button>
+          <button className="btn primary sm" disabled={busy || !form.service_object_id || !form.name.trim() || !svc?.configured || !!conflict} onClick={deploy}>
+            <Icon name="sparkle" size={14} /> {busy ? "Starting…" : "Deploy node"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-  async function abort(j: any) {
-    if (!await confirmDialog({ title: `Abort ${j.node_name || "deployment"}?`, tone: "danger", confirmLabel: "Abort & delete VM",
-      message: "This terminates the cloud VM (if it still exists) and removes the node record. Use it for a failed or stuck install." })) return;
-    try { const r = await api.post<any>(`/admin/provisioning/jobs/${j.id}/abort`, {}); await loadJobs(); void notify({ message: r?.vm?.terminated ? "Aborted — cloud VM terminated." : "Deployment aborted.", tone: "info" }); }
+// Recent cloud deployments, shown on the Nodes page. Rows open the deployment detail.
+function DeploymentsPanel({ onOpen, reloadKey }: { onOpen: (jobId: string) => void; reloadKey?: number }) {
+  const [jobs, setJobs] = useState<any[]>([]);
+  const load = () => api.get<any[]>("/admin/provisioning/jobs").then(setJobs).catch(() => {});
+  useEffect(() => { void load(); }, [reloadKey]);
+  useEffect(() => {
+    const active = jobs.some((j) => ["pending", "provisioning", "bootstrapping"].includes(j.status));
+    if (!active) return;
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, [jobs]);
+  if (jobs.length === 0) return null;
+  return (
+    <Card style={{ marginBottom: 18 }}>
+      <div className="spread" style={{ marginBottom: 8 }}>
+        <h3 style={{ margin: 0, fontSize: 15 }}>Recent deployments</h3>
+        <button className="btn ghost sm" onClick={load}><Icon name="repeat" size={13} /> Refresh</button>
+      </div>
+      <table className="table">
+        <thead><tr><th>Node</th><th>Provider</th><th>Status</th><th>Address</th><th>When</th><th></th></tr></thead>
+        <tbody>
+          {jobs.map((j) => {
+            const inFlight = ["pending", "provisioning", "bootstrapping"].includes(j.status);
+            return (
+              <tr key={j.id} style={{ cursor: "pointer" }} onClick={() => onOpen(j.id)}>
+                <td style={{ fontWeight: 600 }}>{j.node_name || "node"}</td>
+                <td><Pill tone="info"><CloudIcon provider={j.provider} size={12} /> {(j.provider || "").toUpperCase()}</Pill></td>
+                <td><Pill tone={DEPLOY_STATUS_TONE[j.status] || "info"} dot>{j.status}</Pill>{j.node_online && <> <Pill tone="ok">online</Pill></>}</td>
+                <td className="faint" style={{ fontSize: 11.5 }}>{j.result?.public_ip || j.result?.dns_name || "—"}</td>
+                <td className="faint" style={{ fontSize: 11.5, whiteSpace: "nowrap" }}>{timeAgo(j.created_at)}</td>
+                <td style={{ textAlign: "right" }}><button className="btn ghost sm" onClick={(e) => { e.stopPropagation(); onOpen(j.id); }}>{inFlight ? "Watch" : "View"}</button></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </Card>
+  );
+}
+
+// Per-deployment detail (limited tabs) — the node object's deployment view, opened
+// under the Nodes page when a deploy is launched or a deployment row is clicked.
+function DeploymentDetail({ jobId, onBack, onOpenNode }: { jobId: string; onBack: () => void; onOpenNode: (nodeId: string) => void }) {
+  const [job, setJob] = useState<any>(null);
+  const [tab, setTab] = useState<"overview" | "log">("overview");
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
+  const load = () => api.get<any>(`/admin/provisioning/jobs/${jobId}`).then(setJob).catch(() => {});
+  useEffect(() => { void load(); }, [jobId]);
+  useEffect(() => {
+    if (!job || !["pending", "provisioning", "bootstrapping"].includes(job.status)) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [job]);
+
+  async function abort() {
+    if (!await confirmDialog({ title: `Abort ${job?.node_name || "deployment"}?`, tone: "danger", confirmLabel: "Abort & clean up",
+      message: "This terminates the cloud VM (if any), removes its DNS record and deletes the node record. Use it for a failed or stuck install." })) return;
+    try { const r = await api.post<any>(`/admin/provisioning/jobs/${jobId}/abort`, {}); await load(); flash(r?.vm?.terminated ? "Aborted — cloud VM terminated" : "Deployment aborted"); }
     catch (e) { void notify({ message: (e as Error).message || "Abort failed", tone: "warn" }); }
   }
 
-  const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "info"> = {
-    online: "ok", error: "danger", bootstrapping: "warn", provisioning: "info", pending: "info",
-  };
-
+  if (!job) return (
+    <Card><button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 10 }}>← Nodes</button>
+      <div className="muted">Loading deployment…</div></Card>
+  );
+  const p = job.params || {}; const res = job.result || {};
+  const inFlight = ["pending", "provisioning", "bootstrapping"].includes(job.status);
+  const TABS: { key: "overview" | "log"; label: string; icon: IconName }[] = [
+    { key: "overview", label: "Deployment", icon: "grid" },
+    { key: "log", label: "Progress log", icon: "note" },
+  ];
+  const kv: [string, string][] = [
+    ["Public IP", res.public_ip || "—"],
+    ["FQDN", res.dns_name || res.fqdn || "—"],
+    ["Provider", (job.provider || "").toUpperCase()],
+    ["Region", res.region || p.region || "provider default"],
+    ["Size", p.size || "—"],
+    ["Disk", p.disk_gb ? `${p.disk_gb} GB` : "—"],
+    ["Instance id", res.instance_id || "—"],
+    ["Role", p.role || "customer-tenant"],
+  ];
   return (
     <>
-      <Card style={{ marginBottom: 16 }}>
-        <h2 style={{ margin: "0 0 4px" }}>Auto-provision a node</h2>
-        <div className="faint" style={{ fontSize: 12.5, marginBottom: 14 }}>
-          Launch a VM in AWS or Azure, run the bootstrap so it installs + registers itself, publish DNS,
-          and bring it online — one click. Configure credentials under <b>Service objects → Hyperscaler Auto-Provision</b>.
+      <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
+        <button className="btn ghost sm" onClick={onBack}>← Nodes</button>
+        <div className="row" style={{ gap: 8 }}>
+          {job.node_id && <button className="btn sm" onClick={() => onOpenNode(job.node_id)}><Icon name="server" size={13} /> Open node</button>}
+          {(inFlight || job.status === "error") && <button className="btn danger sm" onClick={abort}><Icon name="x" size={12} /> Abort</button>}
         </div>
-        {svcs.length === 0 ? (
-          <div className="muted" style={{ fontSize: 12.5 }}>No Hyperscaler Auto-Provision service objects yet. Create one under Service objects.</div>
-        ) : (
-          <>
-            <div className="grid grid-2" style={{ gap: 12 }}>
-              <Field label="Provider / service">
-                <select className="input sm" value={form.service_object_id} onChange={(e) => setForm({ ...form, service_object_id: e.target.value })}>
-                  <option value="">— choose —</option>
-                  {svcs.map((s) => <option key={s.id} value={s.id} disabled={!s.configured}>{s.name} ({s.provider.toUpperCase()}){s.configured ? "" : " — not configured"}</option>)}
-                </select>
-              </Field>
-              <Field label="Node name">
-                <input className="input sm" value={form.name} onChange={(e) => { setForm({ ...form, name: e.target.value }); setNameEdited(true); }} placeholder="auto-suggested" />
-                {fqdn && !nameEdited && <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>{fqdn}</div>}
-              </Field>
-              <Field label="Role">
-                <select className="input sm" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
-                  <option value="customer-tenant">Customer node</option>
-                  <option value="public-web">Public web</option>
-                </select>
-              </Field>
-              <Field label="Cluster">
-                <select className="input sm" value={form.cluster_id} onChange={(e) => setForm({ ...form, cluster_id: e.target.value })}>
-                  <option value="">— unassigned —</option>
-                  {clusters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </Field>
-              <Field label="Node size">
-                <select className="input sm" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })}>
-                  {(cat?.sizes || []).length === 0 && <option value="">choose a service first</option>}
-                  {(cat?.sizes || []).map((s: any) => <option key={s.value} value={s.value}>{s.label} — {s.value}</option>)}
-                </select>
-              </Field>
-              <Field label="Disk size (GB)">
-                <div className="row" style={{ gap: 8 }}>
-                  <input className="input sm" type="number" min={30} style={{ width: 110 }} value={form.disk_gb} onChange={(e) => setForm({ ...form, disk_gb: e.target.value })} />
-                  <select className="input sm" value="" onChange={(e) => e.target.value && setForm({ ...form, disk_gb: e.target.value })}>
-                    <option value="">Presets…</option>
-                    {(cat?.disk_presets || []).map((d: any) => <option key={d.gb} value={d.gb}>{d.label}</option>)}
-                  </select>
-                </div>
-              </Field>
-              <Field label={`Region ${svc ? `(default ${svc.region || "—"})` : ""}`}>
-                <select className="input sm" value={form.region} onChange={(e) => setForm({ ...form, region: e.target.value })}>
-                  <option value="">{svc?.region ? `Service default (${svc.region})` : "Provider default"}</option>
-                  {(cat?.regions || []).map((r: any) => <option key={r.value} value={r.value}>{r.label} — {r.value}</option>)}
-                </select>
-              </Field>
-              <Field label="Configuration profile">
-                <select className="input sm" value={form.config_profile_id} onChange={(e) => setForm({ ...form, config_profile_id: e.target.value })}>
-                  <option value="">— none —</option>
-                  {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-              </Field>
+      </div>
+
+      <Card style={{ marginBottom: 14 }}>
+        <div className="spread">
+          <div className="row" style={{ gap: 12 }}>
+            <div className="result-icon" style={{ width: 40, height: 40, background: "var(--inset)" }}><CloudIcon provider={job.provider} size={22} /></div>
+            <div>
+              <h3 style={{ margin: 0 }}>{job.node_name || p.name || "node"}</h3>
+              <div className="faint" style={{ fontSize: 12 }}>
+                Deployment · {p.role || "customer-tenant"}{res.region ? ` · ${res.region}` : (p.region ? ` · ${p.region}` : "")}{p.size ? ` · ${p.size}` : ""}
+              </div>
             </div>
-            {err && <div className="pill danger" style={{ marginTop: 10 }}>{err}</div>}
-            <div className="row" style={{ marginTop: 12, gap: 8 }}>
-              <button className="btn primary sm" disabled={busy || !form.service_object_id || !form.name.trim() || !svc?.configured} onClick={deploy}>
-                <Icon name="sparkle" size={14} /> {busy ? "Starting…" : "Deploy node"}
-              </button>
-              {svc && !svc.configured && <span className="faint" style={{ fontSize: 12 }}>Configure this service's credentials first.</span>}
-            </div>
-          </>
-        )}
-        <div className="row" style={{ gap: 8, marginTop: 14 }}>
-          <span className="faint" style={{ fontSize: 12 }}>Required IAM access:</span>
-          <button className="btn ghost sm" onClick={() => showIam("aws")}>AWS policy</button>
-          <button className="btn ghost sm" onClick={() => showIam("azure")}>Azure roles</button>
+          </div>
+          <div className="row" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Pill tone={DEPLOY_STATUS_TONE[job.status] || "info"} dot>{job.status}</Pill>
+            {job.node_online && <Pill tone="ok">online</Pill>}
+          </div>
         </div>
+        {job.message && <div className="faint" style={{ fontSize: 12, marginTop: 8 }}>{job.message}</div>}
       </Card>
 
-      {iam && (
-        <Card style={{ marginBottom: 16 }}>
-          <div className="spread"><h3 style={{ margin: 0 }}>{iam.title}</h3><button className="btn ghost sm" onClick={() => setIam(null)}><Icon name="x" size={13} /></button></div>
-          <div className="faint" style={{ fontSize: 12.5, margin: "6px 0 10px" }}>{iam.summary}</div>
-          <div className="faint" style={{ fontSize: 12 }}>Credentials to provide: <b>{(iam.credentials || []).join(", ")}</b></div>
-          {iam.policy && <pre className="terminal-log" style={{ marginTop: 10, maxHeight: 320, overflow: "auto" }}>{JSON.stringify(iam.policy, null, 2)}</pre>}
-          {iam.roles && <ul className="faint" style={{ fontSize: 12.5, marginTop: 10, paddingLeft: 18 }}>{iam.roles.map((r: any, i: number) => <li key={i}><b>{r.role}</b> — {r.scope}</li>)}</ul>}
-          {iam.notes && <ul className="faint" style={{ fontSize: 12, marginTop: 8, paddingLeft: 18 }}>{iam.notes.map((n: string, i: number) => <li key={i}>{n}</li>)}</ul>}
+      <div className="row" style={{ gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+        {TABS.map((t) => (
+          <button key={t.key} className={`btn sm ${tab === t.key ? "primary" : "ghost"}`} onClick={() => setTab(t.key)}>
+            <Icon name={t.icon} size={13} /> {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "overview" && (
+        <Card>
+          <div className="grid grid-2" style={{ gap: 12 }}>
+            {kv.map(([label, val]) => (
+              <div key={label}>
+                <div className="faint" style={{ fontSize: 11 }}>{label}</div>
+                <div style={{ fontWeight: 600, fontSize: 13, wordBreak: "break-all" }}>{val}</div>
+              </div>
+            ))}
+          </div>
         </Card>
       )}
-
-      <Card>
-        <div className="spread" style={{ marginBottom: 8 }}>
-          <h3 style={{ margin: 0 }}>Deployments</h3>
-          <button className="btn ghost sm" onClick={loadJobs}><Icon name="repeat" size={13} /> Refresh</button>
-        </div>
-        {jobs.length === 0 && <div className="muted" style={{ fontSize: 12.5 }}>No deployments yet.</div>}
-        <div className="stack" style={{ gap: 10 }}>
-          {jobs.map((j) => {
-            const started = new Date((j.created_at || "") + (String(j.created_at || "").endsWith("Z") ? "" : "Z")).getTime();
-            const elapsedMin = started ? Math.floor((Date.now() - started) / 60000) : 0;
-            const inFlight = ["pending", "provisioning", "bootstrapping"].includes(j.status);
-            const stuck = j.status === "bootstrapping" && elapsedMin >= 8 && !j.node_online;
-            return (
-            <div key={j.id} className="card" style={{ background: "var(--inset)" }}>
-              <div className="spread">
-                <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                  <CloudIcon provider={j.provider} size={16} />
-                  <b>{j.node_name || "node"}</b>
-                  <span className="faint" style={{ fontSize: 12 }}>· {j.provider?.toUpperCase()}</span>
-                  <Pill tone={STATUS_TONE[j.status] || "info"} dot>{j.status}</Pill>
-                  {j.node_online && <Pill tone="ok">online</Pill>}
-                  {inFlight && <span className="faint" style={{ fontSize: 11 }}>{elapsedMin}m elapsed</span>}
-                </div>
-                <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                  {(inFlight || j.status === "error") && (
-                    <button className="btn danger sm" onClick={() => abort(j)}><Icon name="x" size={12} /> Abort</button>
-                  )}
-                  <span className="faint" style={{ fontSize: 11 }}>{timeAgo(j.created_at)}</span>
-                </div>
-              </div>
-              <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>{j.message}</div>
-              {stuck && (
-                <div className="row" style={{ gap: 7, marginTop: 6, color: "var(--warn)", fontSize: 12, alignItems: "flex-start" }}>
-                  <Icon name="alert" size={12} /> <span>Taking longer than expected ({elapsedMin}m) — the install may be stuck. Check the log, or abort to tear it down.</span>
-                </div>
-              )}
-              {(j.result?.public_ip || j.result?.dns_name) && (
-                <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
-                  {j.result.dns_name ? `${j.result.dns_name} · ` : ""}{j.result.public_ip || ""}{j.result.instance_id ? ` · ${j.result.instance_id}` : ""}
-                </div>
-              )}
-              {(j.log || []).length > 0 && (
-                <details style={{ marginTop: 6 }} open={inFlight}>
-                  <summary className="faint" style={{ fontSize: 11.5, cursor: "pointer" }}>Progress log</summary>
-                  <pre className="terminal-log" style={{ marginTop: 6, maxHeight: 200, overflow: "auto" }}>{(j.log || []).map((l: any) => `${l.msg}`).join("\n")}</pre>
-                </details>
-              )}
-            </div>
-            );
-          })}
-        </div>
-      </Card>
+      {tab === "log" && (
+        <Card>
+          {(job.log || []).length === 0
+            ? <div className="muted" style={{ fontSize: 12.5 }}>No progress reported yet…</div>
+            : <pre className="terminal-log" style={{ margin: 0, maxHeight: 460, overflow: "auto" }}>{(job.log || []).map((l: any) => `${l.msg}`).join("\n")}</pre>}
+        </Card>
+      )}
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
 }
@@ -2060,6 +2140,10 @@ function Nodes() {
   const [toast, setToast] = useState("");
   const [installCmd, setInstallCmd] = useState("");
   const [sel, setSel] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [deployOpen, setDeployOpen] = useState(false);
+  const [provJob, setProvJob] = useState<string | null>(null);
+  const [deployReload, setDeployReload] = useState(0);
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
   async function load() {
     try { setNodes(await api.get<any[]>("/admin/nodes")); } catch { /* ignore */ }
@@ -2158,6 +2242,11 @@ function Nodes() {
                 storageSvcs={storageSvcs} emailSvcs={emailSvcs}
                 onEdit={editNode} onService={setNodeService} onRemove={removeNode} />
   );
+  if (provJob) return (
+    <DeploymentDetail jobId={provJob}
+      onBack={() => { setProvJob(null); void load(); }}
+      onOpenNode={(nid) => { setProvJob(null); setSel(nid); }} />
+  );
 
   const CATS = ["Control Plane", "Customer Nodes", "Public Web", "Other"];
   const hbar = (label: string, v: number | null | undefined) => {
@@ -2180,9 +2269,18 @@ function Nodes() {
         <h3 style={{ margin: 0 }}>Node fleet <span className="faint" style={{ fontSize: 12, fontWeight: 400 }}>· {nodes.length} node{nodes.length === 1 ? "" : "s"}</span></h3>
         <div className="row" style={{ gap: 12, alignItems: "center" }}>
           <ProductionVersion label="Production platform" version={versions.platform} />
-          <div className="row" style={{ gap: 8 }}>
-            <button className="btn sm" onClick={newInstaller}><Icon name="logout" size={14} /> Install a node</button>
-            <button className="btn primary sm" onClick={registerNode}><Icon name="server" size={14} /> Register node</button>
+          <div style={{ position: "relative" }}>
+            <button className="btn primary sm" onClick={() => setMenuOpen((v) => !v)}><Icon name="server" size={14} /> Add node ▾</button>
+            {menuOpen && (
+              <>
+                <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+                <div className="card" style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 41, minWidth: 220, padding: 6, display: "flex", flexDirection: "column", gap: 2, boxShadow: "var(--shadow)" }}>
+                  <button className="btn ghost sm" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => { setMenuOpen(false); setDeployOpen(true); }}><Icon name="sparkle" size={13} /> Deploy new node</button>
+                  <button className="btn ghost sm" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => { setMenuOpen(false); void registerNode(); }}><Icon name="server" size={13} /> Register existing node</button>
+                  <button className="btn ghost sm" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => { setMenuOpen(false); void newInstaller(); }}><Icon name="logout" size={13} /> Get install command</button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -2245,7 +2343,9 @@ function Nodes() {
         );
       })}
       {nodes.length === 0 && <Card><div className="muted">No nodes registered.</div></Card>}
+      <DeploymentsPanel onOpen={setProvJob} reloadKey={deployReload} />
       <Workers />
+      {deployOpen && <DeployNodeModal onClose={() => setDeployOpen(false)} onLaunched={(id) => { setDeployOpen(false); setProvJob(id); setDeployReload((x) => x + 1); }} />}
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
@@ -2464,6 +2564,8 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
   );
 
   const rate = (n?: number) => `${bytes(n || 0)}/s`;
+  const nodeHost = (() => { try { return node.endpoint ? new URL(node.endpoint).hostname : ""; } catch { return ""; } })();
+  const nodeIp = node.public_ip || (node.cloud || {}).public_ip || nodeHost;
   const cert = live?.certificate || keys?.certificate;
   const labels = history.map((p) => { const d = new Date(p.ts.endsWith("Z") ? p.ts : p.ts + "Z"); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; });
 
@@ -2527,6 +2629,10 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
             {live?.os && <span className="faint" style={{ fontSize: 11.5 }}>{live.os}</span>}
           </div>
         )}
+        <div className="row faint" style={{ gap: 18, marginTop: 10, flexWrap: "wrap", fontSize: 11.5 }}>
+          {nodeIp && <span><b style={{ color: "var(--text)" }}>IP</b>&nbsp; {nodeIp}</span>}
+          {node.endpoint && <span><b style={{ color: "var(--text)" }}>Endpoint</b>&nbsp; {node.endpoint}</span>}
+        </div>
       </Card>
 
       <div className="row" style={{ gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
@@ -5128,6 +5234,20 @@ interface DraftRow { key: string; value: string; secret: boolean; set: boolean }
 interface ServiceKind { kind: string; label: string; category: string; credential_keys: string[]; settings: string[]; setting_defaults?: Record<string, string>; required: string[]; capabilities?: string[] }
 interface ServiceObj { id: string; name: string; kind: string; kind_label: string; category: string; enabled: boolean; config_object_id: string | null; settings: Record<string, string>; setting_keys: string[]; credential_keys: string[]; capabilities?: string[]; capability_options?: string[]; configured: boolean; updated_at?: string }
 
+const CONFIG_KIND_PRESETS: Record<string, string[]> = {
+  oauth: ["client_id", "client_secret"],
+  ses: ["aws_access_key_id", "aws_secret_access_key", "region", "from_email"],
+  "api-key": ["api_key"],
+  generic: [""],
+};
+const CONFIG_KIND_OPTIONS: { value: string; label: string }[] = [
+  { value: "oauth", label: "OAuth (client id / secret)" },
+  { value: "ses", label: "AWS SES" },
+  { value: "api-key", label: "API key" },
+  { value: "generic", label: "Generic key / value" },
+];
+const isSecretKey = (k: string) => /secret|password|token|private/i.test(k);
+
 function ConfigObjectsAdmin() {
   const [objects, setObjects] = useState<ConfigObj[]>([]);
   const [toast, setToast] = useState("");
@@ -5139,20 +5259,20 @@ function ConfigObjectsAdmin() {
   }
   useEffect(() => { void load(); }, []);
 
-  function newDraft(kind = "oauth") {
-    const preset: Record<string, string[]> = {
-      oauth: ["client_id", "client_secret"],
-      ses: ["aws_access_key_id", "aws_secret_access_key", "region", "from_email"],
-      "api-key": ["api_key"],
-      generic: [""],
-    };
-    setDraft({ name: "", kind, rows: (preset[kind] || [""]).map((k) => ({ key: k, value: "", secret: /secret|password|token|private/i.test(k), set: false })) });
+  function rowsForKind(kind: string): DraftRow[] {
+    return (CONFIG_KIND_PRESETS[kind] || [""]).map((k) => ({ key: k, value: "", secret: isSecretKey(k), set: false }));
   }
+  function newDraft(kind = "oauth") { setDraft({ name: "", kind, rows: rowsForKind(kind) }); }
+  function applyKind(kind: string) { if (draft) setDraft({ ...draft, kind, rows: rowsForKind(kind) }); }
   function editDraft(o: ConfigObj) {
     setDraft({
       id: o.id, name: o.name, kind: o.kind,
       rows: Object.entries(o.keys).map(([k, v]) => ({ key: k, value: v.value, secret: v.secret, set: v.set })),
     });
+  }
+  function setRow(i: number, patch: Partial<DraftRow>) {
+    if (!draft) return;
+    const rows = [...draft.rows]; rows[i] = { ...rows[i], ...patch }; setDraft({ ...draft, rows });
   }
   async function saveDraft() {
     if (!draft) return;
@@ -5175,54 +5295,19 @@ function ConfigObjectsAdmin() {
 
   return (
     <>
-      <Card>
-        <div className="spread" style={{ marginBottom: 10 }}>
-          <div>
-            <h3 style={{ margin: 0 }}>Configuration objects</h3>
-            <div className="muted" style={{ fontSize: 12.5 }}>Encrypted key-value credentials (OAuth keys, API keys, SES) — link them to sources.</div>
-          </div>
-          <div className="row" style={{ gap: 6 }}>
-            <button className="btn sm" onClick={() => newDraft("oauth")}>+ OAuth</button>
-            <button className="btn sm" onClick={() => newDraft("ses")}>+ SES</button>
-            <button className="btn sm" onClick={() => newDraft("generic")}>+ Generic</button>
+      <div className="spread" style={{ marginBottom: 16, alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ margin: "0 0 2px" }}>Configuration objects</h2>
+          <div className="muted" style={{ fontSize: 12.5, maxWidth: 620 }}>
+            Encrypted key-value credentials (OAuth keys, API keys, SES) that sources and service objects link to.
           </div>
         </div>
+        <button className="btn primary sm" onClick={() => newDraft("oauth")}><Icon name="key" size={13} /> New configuration</button>
+      </div>
 
-        {draft && (
-          <div style={{ border: "1px solid var(--border-soft)", borderRadius: 10, padding: 14, marginBottom: 12, background: "var(--inset)" }}>
-            <div className="grid grid-2" style={{ gap: 12, marginBottom: 10 }}>
-              <Field label="Name"><input className="input sm" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. Google OAuth" /></Field>
-              <Field label="Kind"><input className="input sm" value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value })} /></Field>
-            </div>
-            <div className="stack" style={{ gap: 6 }}>
-              {draft.rows.map((r, i) => (
-                <div key={i} className="row" style={{ gap: 8 }}>
-                  <input className="input sm" style={{ width: 200 }} value={r.key} placeholder="key"
-                         onChange={(e) => { const rows = [...draft.rows]; rows[i] = { ...r, key: e.target.value, secret: /secret|password|token|private/i.test(e.target.value) }; setDraft({ ...draft, rows }); }} />
-                  <input className="input sm flex1" type={r.secret ? "password" : "text"}
-                         value={r.value} placeholder={r.secret && r.set ? "•••••• leave blank to keep" : "value"}
-                         onChange={(e) => { const rows = [...draft.rows]; rows[i] = { ...r, value: e.target.value }; setDraft({ ...draft, rows }); }} />
-                  {/(private_key|\.pem|pem|key_material)/i.test(r.key) && (
-                    <label className="btn ghost sm" style={{ cursor: "pointer", whiteSpace: "nowrap" }} title="Upload a .pem file">
-                      <Icon name="file" size={12} /> .pem
-                      <input type="file" accept=".pem,.key,.txt" style={{ display: "none" }}
-                             onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; const text = await f.text(); const rows = [...draft.rows]; rows[i] = { ...r, value: text }; setDraft({ ...draft, rows }); e.currentTarget.value = ""; }} />
-                    </label>
-                  )}
-                  <button className="btn ghost sm" onClick={() => setDraft({ ...draft, rows: draft.rows.filter((_, j) => j !== i) })}>✕</button>
-                </div>
-              ))}
-              <button className="btn ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setDraft({ ...draft, rows: [...draft.rows, { key: "", value: "", secret: false, set: false }] })}>+ Add key</button>
-            </div>
-            <div className="row" style={{ gap: 8, marginTop: 12 }}>
-              <button className="btn primary sm" onClick={saveDraft}>Save</button>
-              <button className="btn ghost sm" onClick={() => setDraft(null)}>Cancel</button>
-            </div>
-          </div>
-        )}
-
+      <Card>
         <table className="table">
-          <thead><tr><th>Name</th><th>Kind</th><th>Keys</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Type</th><th>Keys</th><th></th></tr></thead>
           <tbody>
             {objects.map((o) => (
               <tr key={o.id}>
@@ -5235,10 +5320,61 @@ function ConfigObjectsAdmin() {
                 </td>
               </tr>
             ))}
-            {objects.length === 0 && <tr><td colSpan={4} className="muted">No configuration objects yet.</td></tr>}
+            {objects.length === 0 && <tr><td colSpan={4} className="muted">No configuration objects yet — create one to store credentials.</td></tr>}
           </tbody>
         </table>
       </Card>
+
+      {draft && (
+        <div className="modal-backdrop" onClick={() => setDraft(null)}>
+          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <div>
+                <h3 style={{ margin: 0 }}>{draft.id ? "Edit configuration object" : "New configuration object"}</h3>
+                <div className="faint" style={{ fontSize: 12 }}>Encrypted credentials linked to sources &amp; services.</div>
+              </div>
+              <button className="btn ghost sm" onClick={() => setDraft(null)}><Icon name="x" size={14} /></button>
+            </div>
+            <div className="modal-body">
+              <div className="grid grid-2" style={{ gap: 12, marginBottom: 12 }}>
+                <Field label="Name"><input className="input sm" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. Google OAuth" /></Field>
+                <Field label="Type">
+                  {draft.id
+                    ? <input className="input sm" value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value })} />
+                    : <select className="input sm" value={draft.kind} onChange={(e) => applyKind(e.target.value)}>
+                        {CONFIG_KIND_OPTIONS.map((k) => <option key={k.value} value={k.value}>{k.label}</option>)}
+                      </select>}
+                </Field>
+              </div>
+              <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 6 }}>Keys</div>
+              <div className="stack" style={{ gap: 6 }}>
+                {draft.rows.map((r, i) => (
+                  <div key={i} className="row" style={{ gap: 8 }}>
+                    <input className="input sm" style={{ width: 200 }} value={r.key} placeholder="key"
+                           onChange={(e) => setRow(i, { key: e.target.value, secret: isSecretKey(e.target.value) })} />
+                    <input className="input sm flex1" type={r.secret ? "password" : "text"}
+                           value={r.value} placeholder={r.secret && r.set ? "•••••• leave blank to keep" : "value"}
+                           onChange={(e) => setRow(i, { value: e.target.value })} />
+                    {/(private_key|\.pem|pem|key_material)/i.test(r.key) && (
+                      <label className="btn ghost sm" style={{ cursor: "pointer", whiteSpace: "nowrap" }} title="Upload a .pem file">
+                        <Icon name="file" size={12} /> .pem
+                        <input type="file" accept=".pem,.key,.txt" style={{ display: "none" }}
+                               onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; const text = await f.text(); setRow(i, { value: text }); e.currentTarget.value = ""; }} />
+                      </label>
+                    )}
+                    <button className="btn ghost sm" onClick={() => setDraft({ ...draft, rows: draft.rows.filter((_, j) => j !== i) })}>✕</button>
+                  </div>
+                ))}
+                <button className="btn ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setDraft({ ...draft, rows: [...draft.rows, { key: "", value: "", secret: false, set: false }] })}>+ Add key</button>
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button className="btn ghost sm" onClick={() => setDraft(null)}>Cancel</button>
+              <button className="btn primary sm" onClick={saveDraft}>{draft.id ? "Save changes" : "Create configuration"}</button>
+            </div>
+          </div>
+        </div>
+      )}
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
@@ -5671,12 +5807,19 @@ function BillingAdmin() {
   );
 }
 
+const SERVICE_CATEGORY_LABELS: Record<string, string> = {
+  storage: "Storage", email: "Email", payment: "Payment", provisioning: "Auto-provision",
+};
+const SERVICE_CATEGORY_ORDER = ["storage", "email", "payment", "provisioning"];
+
 function ServiceObjectsAdmin() {
   const [items, setItems] = useState<ServiceObj[]>([]);
   const [kinds, setKinds] = useState<ServiceKind[]>([]);
   const [objects, setObjects] = useState<ConfigObj[]>([]);
   const [toast, setToast] = useState("");
   const [draft, setDraft] = useState<ServiceDraft | null>(null);
+  const [picking, setPicking] = useState(false);
+  const [iam, setIam] = useState<any>(null);
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3200); }
 
   async function load() {
@@ -5689,12 +5832,15 @@ function ServiceObjectsAdmin() {
   function specFor(kind: string) { return kinds.find((k) => k.kind === kind); }
   function newDraft(kind: string) {
     const spec = specFor(kind);
+    setPicking(false);
     setDraft({ name: "", kind, enabled: true, config_object_id: "", settings: { ...(spec?.setting_defaults || {}) }, capabilities: [...(spec?.capabilities || [])] });
   }
   function editDraft(o: ServiceObj) {
     const spec = specFor(o.kind);
+    setPicking(false);
     setDraft({ id: o.id, name: o.name, kind: o.kind, enabled: o.enabled, config_object_id: o.config_object_id || "", settings: { ...(o.settings || {}) }, capabilities: [...(o.capabilities || spec?.capabilities || [])] });
   }
+  function closeModal() { setDraft(null); setPicking(false); }
   async function saveDraft() {
     if (!draft) return;
     const spec = specFor(draft.kind);
@@ -5703,7 +5849,7 @@ function ServiceObjectsAdmin() {
     try {
       if (draft.id) await api.put(`/admin/service-objects/${draft.id}`, payload);
       else await api.post("/admin/service-objects", { ...payload, kind: draft.kind });
-      setDraft(null); flash("Service saved"); await load();
+      closeModal(); flash("Service saved"); await load();
     } catch { flash("Could not save"); }
   }
   async function delObject(o: ServiceObj) {
@@ -5737,83 +5883,25 @@ function ServiceObjectsAdmin() {
   const settingOptions = (key: string): string[] | null =>
     key === "storage_class" ? STORAGE_CLASS_OPTS : key === "access_tier" ? ACCESS_TIER_OPTS : null;
 
+  // Type picker: group the available kinds by category, ordered.
+  const pickerCategories = [...new Set(kinds.map((k) => k.category))]
+    .sort((a, b) => ((SERVICE_CATEGORY_ORDER.indexOf(a) + 1 || 99) - (SERVICE_CATEGORY_ORDER.indexOf(b) + 1 || 99)))
+    .map((cat) => [cat, kinds.filter((k) => k.category === cat)] as [string, ServiceKind[]]);
+
   return (
     <>
-      <Card style={{ marginBottom: 16 }}>
-        <div className="spread" style={{ marginBottom: 10 }}>
-          <div>
-            <h3 style={{ margin: 0 }}>Service objects</h3>
-            <div className="muted" style={{ fontSize: 12.5 }}>Storage, email &amp; payment backends. Credentials come from a linked configuration object; assign a service to a node under Nodes / Configuration.</div>
-          </div>
-          <div className="row" style={{ gap: 6 }}>
-            {kinds.map((k) => <button key={k.kind} className="btn sm" onClick={() => newDraft(k.kind)}>+ {k.label}</button>)}
+      <div className="spread" style={{ marginBottom: 16, alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ margin: "0 0 2px" }}>Service objects</h2>
+          <div className="muted" style={{ fontSize: 12.5, maxWidth: 640 }}>
+            Storage, email, payment &amp; auto-provision backends. Credentials come from a linked configuration
+            object; assign a service to a node under Nodes / Configuration.
           </div>
         </div>
+        <button className="btn primary sm" onClick={() => { setDraft(null); setPicking(true); }}><Icon name="mail" size={13} /> New service object</button>
+      </div>
 
-        {draft && (
-          <div style={{ border: "1px solid var(--border-soft)", borderRadius: 10, padding: 14, marginBottom: 12, background: "var(--inset)" }}>
-            <div className="row" style={{ gap: 8, marginBottom: 10 }}>
-              <Pill tone="info">{draftSpec?.label || draft.kind}</Pill>
-              <label className="row" style={{ gap: 6, fontSize: 12.5, marginLeft: "auto" }}>
-                <input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} /> Enabled
-              </label>
-            </div>
-            <div className="grid grid-2" style={{ gap: 12, marginBottom: 10 }}>
-              <Field label="Name"><input className="input sm" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. Arkive US-East S3" /></Field>
-              <Field label={`Configuration object (${(draftSpec?.credential_keys || []).join(", ")})`}>
-                <select className="input sm" value={draft.config_object_id} onChange={(e) => setDraft({ ...draft, config_object_id: e.target.value })}>
-                  <option value="">— none —</option>
-                  {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-                </select>
-              </Field>
-            </div>
-            <div className="grid grid-2" style={{ gap: 12 }}>
-              {(draftSpec?.settings || []).map((key) => {
-                const opts = settingOptions(key);
-                return (
-                  <Field key={key} label={prettyKey(key)}>
-                    {opts ? (
-                      <select className="input sm" value={draft.settings[key] || ""} onChange={(e) => setDraft({ ...draft, settings: { ...draft.settings, [key]: e.target.value } })}>
-                        {opts.map((o) => <option key={o} value={o}>{o}</option>)}
-                      </select>
-                    ) : (
-                      <input className="input sm" value={draft.settings[key] || ""}
-                             onChange={(e) => setDraft({ ...draft, settings: { ...draft.settings, [key]: e.target.value } })}
-                             placeholder={draftSpec?.required?.includes(key) ? "required" : "optional"} />
-                    )}
-                  </Field>
-                );
-              })}
-            </div>
-            {(draftSpec?.capabilities || []).length > 0 && (
-              <div style={{ marginTop: 12 }}>
-                <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 6 }}>Used for</div>
-                <div className="row" style={{ gap: 14 }}>
-                  {(draftSpec?.capabilities || []).map((cap) => (
-                    <label key={cap} className="row" style={{ gap: 6, fontSize: 12.5, alignItems: "center", cursor: "pointer" }}>
-                      <input type="checkbox" checked={draft.capabilities.includes(cap)}
-                             onChange={(e) => setDraft({
-                               ...draft,
-                               capabilities: e.target.checked
-                                 ? [...draft.capabilities, cap]
-                                 : draft.capabilities.filter((c) => c !== cap),
-                             })} />
-                      {CAPABILITY_LABELS[cap] || cap}
-                    </label>
-                  ))}
-                </div>
-                <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
-                  Controls where this backend can be selected — Arkive Cloud object storage and/or infrastructure backups.
-                </div>
-              </div>
-            )}
-            <div className="row" style={{ gap: 8, marginTop: 12 }}>
-              <button className="btn primary sm" onClick={saveDraft}>Save</button>
-              <button className="btn ghost sm" onClick={() => setDraft(null)}>Cancel</button>
-            </div>
-          </div>
-        )}
-
+      <Card>
         <ServiceTable title="Storage services" rows={storage} onEdit={editDraft} onDelete={delObject} onTest={testObject} testable />
         <div style={{ height: 14 }} />
         <ServiceTable title="Email services" rows={email} onEdit={editDraft} onDelete={delObject} onTest={testObject} testable />
@@ -5821,6 +5909,12 @@ function ServiceObjectsAdmin() {
         <ServiceTable title="Payment services" rows={payment} onEdit={editDraft} onDelete={delObject} onTest={testObject} />
         <div style={{ height: 14 }} />
         <ServiceTable title="Hyperscaler Auto-Provision" rows={provisioning} onEdit={editDraft} onDelete={delObject} onTest={testObject} />
+        <div className="row" style={{ gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span className="faint" style={{ fontSize: 12 }}>Required cloud access for auto-provision:</span>
+          <button className="btn ghost sm" onClick={async () => { try { setIam(await api.get("/admin/provisioning/iam/aws")); } catch { /* ignore */ } }}>AWS policy</button>
+          <button className="btn ghost sm" onClick={async () => { try { setIam(await api.get("/admin/provisioning/iam/azure")); } catch { /* ignore */ } }}>Azure roles</button>
+        </div>
+        {iam && <IamPanel iam={iam} onClose={() => setIam(null)} />}
         <div className="muted" style={{ fontSize: 12, marginTop: 12 }}>
           Storage services back Arkive Cloud: mappings routed to <b>cv-cloud</b> store and restore through
           the storage service selected on the running node. S3 defaults to Intelligent-Tiering and Azure to the
@@ -5828,6 +5922,111 @@ function ServiceObjectsAdmin() {
           billing; assign one to a node under <b>Configuration → Services</b> (<code>service.payment</code>).
         </div>
       </Card>
+
+      {(picking || draft) && (
+        <div className="modal-backdrop" onClick={closeModal}>
+          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <div>
+                <h3 style={{ margin: 0 }}>{picking ? "New service object" : draft?.id ? "Edit service object" : `New ${draftSpec?.label || "service"}`}</h3>
+                <div className="faint" style={{ fontSize: 12 }}>{picking ? "Choose a backend type to configure." : (draftSpec?.label || draft?.kind)}</div>
+              </div>
+              <button className="btn ghost sm" onClick={closeModal}><Icon name="x" size={14} /></button>
+            </div>
+            <div className="modal-body">
+              {picking ? (
+                <div className="stack" style={{ gap: 16 }}>
+                  {pickerCategories.map(([cat, list]) => (
+                    <div key={cat}>
+                      <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 6 }}>{SERVICE_CATEGORY_LABELS[cat] || cat}</div>
+                      <div className="grid grid-2" style={{ gap: 10 }}>
+                        {list.map((k) => (
+                          <button key={k.kind} className="card" style={{ textAlign: "left", cursor: "pointer" }} onClick={() => newDraft(k.kind)}>
+                            <div style={{ fontWeight: 700, fontSize: 13.5 }}>{k.label}</div>
+                            <div className="faint" style={{ fontSize: 11.5 }}>{(k.credential_keys || []).length ? (k.credential_keys || []).join(", ") : "no credentials required"}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  {kinds.length === 0 && <div className="muted">No service types available.</div>}
+                </div>
+              ) : draft ? (
+                <div className="stack" style={{ gap: 12 }}>
+                  <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                    <Pill tone="info">{draftSpec?.label || draft.kind}</Pill>
+                    <label className="row" style={{ gap: 6, fontSize: 12.5, marginLeft: "auto", alignItems: "center", cursor: "pointer" }}>
+                      <input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} /> Enabled
+                    </label>
+                  </div>
+                  <div className="grid grid-2" style={{ gap: 12 }}>
+                    <Field label="Name"><input className="input sm" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. Arkive US-East S3" /></Field>
+                    <Field label={`Configuration object (${(draftSpec?.credential_keys || []).join(", ")})`}>
+                      <select className="input sm" value={draft.config_object_id} onChange={(e) => setDraft({ ...draft, config_object_id: e.target.value })}>
+                        <option value="">— none —</option>
+                        {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                  {(draftSpec?.settings || []).length > 0 && (
+                    <div className="grid grid-2" style={{ gap: 12 }}>
+                      {(draftSpec?.settings || []).map((key) => {
+                        const opts = settingOptions(key);
+                        return (
+                          <Field key={key} label={prettyKey(key)}>
+                            {opts ? (
+                              <select className="input sm" value={draft.settings[key] || ""} onChange={(e) => setDraft({ ...draft, settings: { ...draft.settings, [key]: e.target.value } })}>
+                                {opts.map((o) => <option key={o} value={o}>{o}</option>)}
+                              </select>
+                            ) : (
+                              <input className="input sm" value={draft.settings[key] || ""}
+                                     onChange={(e) => setDraft({ ...draft, settings: { ...draft.settings, [key]: e.target.value } })}
+                                     placeholder={draftSpec?.required?.includes(key) ? "required" : "optional"} />
+                            )}
+                          </Field>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {(draftSpec?.capabilities || []).length > 0 && (
+                    <div>
+                      <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 6 }}>Used for</div>
+                      <div className="row" style={{ gap: 14 }}>
+                        {(draftSpec?.capabilities || []).map((cap) => (
+                          <label key={cap} className="row" style={{ gap: 6, fontSize: 12.5, alignItems: "center", cursor: "pointer" }}>
+                            <input type="checkbox" checked={draft.capabilities.includes(cap)}
+                                   onChange={(e) => setDraft({
+                                     ...draft,
+                                     capabilities: e.target.checked
+                                       ? [...draft.capabilities, cap]
+                                       : draft.capabilities.filter((c) => c !== cap),
+                                   })} />
+                            {CAPABILITY_LABELS[cap] || cap}
+                          </label>
+                        ))}
+                      </div>
+                      <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+                        Controls where this backend can be selected — Arkive Cloud object storage and/or infrastructure backups.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+            <div className="modal-foot">
+              {picking ? (
+                <button className="btn ghost sm" onClick={closeModal}>Cancel</button>
+              ) : (
+                <>
+                  {!draft?.id && <button className="btn ghost sm" style={{ marginRight: "auto" }} onClick={() => { setDraft(null); setPicking(true); }}>Back</button>}
+                  <button className="btn ghost sm" onClick={closeModal}>Cancel</button>
+                  <button className="btn primary sm" onClick={saveDraft}>{draft?.id ? "Save changes" : "Create service"}</button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
