@@ -186,6 +186,7 @@ def _effective_settings(db: Session, node: Node) -> tuple[dict, list[str]]:
 class ProvisionProgress(BaseModel):
     token: str
     message: str = ""
+    detail: str = ""
     status: str = ""
 
 
@@ -193,19 +194,26 @@ class ProvisionProgress(BaseModel):
 def provision_progress(body: ProvisionProgress, db: Session = Depends(get_db)):
     """A booting auto-provisioned VM reports bootstrap milestones (token = the
     ProvisioningJob id) so the admin auto-provision page shows live progress and
-    can tell success from a stuck/failed install. Opaque token; log-only."""
+    can tell success from a stuck/failed install. Opaque token; log-only. A failing
+    step also sends `detail` (its log tail) so the failure is diagnosable from the
+    control plane without SSH into the VM."""
     from datetime import datetime, timezone
     from ..models import ProvisioningJob
     job = db.get(ProvisioningJob, body.token) if body.token else None
     if job is None or (job.status or "") in ("online", "aborted"):
         return {"ok": True}  # unknown or already-finished job
     msg = (body.message or "").strip()[:300]
-    if msg:
+    detail = (body.detail or "").strip()[:6000]
+    if msg or detail:
+        entry = "[vm] " + msg if msg else "[vm]"
+        if detail:
+            entry = (entry + "\n" + detail)[:6300]
         log = list(job.log or [])
         log.append({"ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-                    "msg": "[vm] " + msg})
+                    "msg": entry})
         job.log = log[-100:]
-        job.message = msg
+        if msg:
+            job.message = msg
     if (body.status or "") == "error":
         job.status = "error"
     db.commit()

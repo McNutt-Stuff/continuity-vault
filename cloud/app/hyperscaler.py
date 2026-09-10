@@ -213,12 +213,14 @@ def _aws_clients(config: dict, region: str):
 
 
 def _aws_latest_ubuntu(ec2) -> str:
+    # Match by VERSION (not codename) and allow both the legacy `hvm-ssd` and the
+    # newer `hvm-ssd-gp3` name prefixes so 26.04 resolves regardless of codename.
     imgs = ec2.describe_images(
         Owners=["099720109477"],  # Canonical
-        Filters=[{"Name": "name", "Values": ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]},
+        Filters=[{"Name": "name", "Values": ["ubuntu/images/hvm-ssd*/ubuntu-*-26.04-amd64-server-*"]},
                  {"Name": "state", "Values": ["available"]}])["Images"]
     if not imgs:
-        raise ValueError("could not resolve a base Ubuntu 22.04 AMI in this region")
+        raise ValueError("could not resolve a base Ubuntu 26.04 AMI in this region")
     imgs.sort(key=lambda i: i.get("CreationDate", ""), reverse=True)
     return imgs[0]["ImageId"]
 
@@ -369,9 +371,13 @@ def _azure_deploy(config: dict, opts: dict, name: str, role: str, userdata: str,
 
     vm_size = (opts.get("size") or config.get("vm_size") or "Standard_D2s_v5").strip()
     disk_gb = int(opts.get("disk_gb") or 0)
+    # Ubuntu 26.04 LTS by default (gen2). Overridable via the service config for a
+    # different SKU/gen or a pinned version if Canonical's identifiers shift.
     storage_profile: dict = {"image_reference": {
-        "publisher": "Canonical", "offer": "0001-com-ubuntu-server-jammy",
-        "sku": "22_04-lts-gen2", "version": "latest"}}
+        "publisher": (config.get("image_publisher") or "Canonical").strip(),
+        "offer": (config.get("image_offer") or "ubuntu-26_04-lts").strip(),
+        "sku": (config.get("image_sku") or "server").strip(),
+        "version": (config.get("image_version") or "latest").strip()}}
     if disk_gb > 0:
         storage_profile["os_disk"] = {"create_option": "FromImage", "disk_size_gb": disk_gb,
                                       "managed_disk": {"storage_account_type": "Premium_LRS"}}

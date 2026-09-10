@@ -99,15 +99,26 @@ _spinner() {
 # admin's auto-provision job log streams each named install step. Enabled only
 # when CV_PROVISION_TOKEN is exported (by the VM's cloud-init user-data); a
 # manual install leaves it unset and reports nothing. Never fails the install.
+# Args: <message> [status] [detail]. `detail` carries multi-line context (e.g. a
+# failing step's log tail) that the auto-provision job log renders verbatim.
+_json_escape() {
+  local s="${1:-}"
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+  s="${s//$'\t'/    }"; s="${s//$'\r'/}"; s="${s//$'\n'/\\n}"
+  printf '%s' "$s"
+}
+
 _provision_report() {
   local url="${CV_PROVISION_URL:-${CV_CONTROL_PLANE_URL:-}}"
   [[ -z "${CV_PROVISION_TOKEN:-}" || -z "$url" ]] && return 0
   command -v curl >/dev/null 2>&1 || return 0
-  local msg="$1" status="${2:-}" esc
-  esc="${msg//\\/\\\\}"; esc="${esc//\"/\\\"}"
-  curl -fsS --max-time 5 -X POST "${url%/}/api/nodes/provision-progress" \
+  local msg status detail
+  msg="$(_json_escape "${1:-}")"
+  status="${2:-}"
+  detail="$(_json_escape "${3:-}")"
+  curl -fsS --max-time 6 -X POST "${url%/}/api/nodes/provision-progress" \
     -H "Content-Type: application/json" \
-    -d "{\"token\":\"${CV_PROVISION_TOKEN}\",\"message\":\"${esc}\",\"status\":\"${status}\"}" \
+    -d "{\"token\":\"${CV_PROVISION_TOKEN}\",\"message\":\"${msg}\",\"detail\":\"${detail}\",\"status\":\"${status}\"}" \
     >/dev/null 2>&1 || true
 }
 
@@ -153,7 +164,10 @@ step() {
 
 _step_failed() {
   local desc="$1"
-  _provision_report "Step failed: ${desc} — see /var/log/arkive-bootstrap.log" "error"
+  local tail_txt
+  tail_txt="$(tail -n 40 "$LOG" 2>/dev/null)"
+  _provision_report "Step failed: ${desc}" "error" "Last 40 log lines:
+${tail_txt}"
   printf "\n  %sStep failed:%s %s\n" "$RED" "$RESET" "$desc"
   printf "  %sLast 25 lines of %s:%s\n" "$DIM" "$LOG" "$RESET"
   tail -n 25 "$LOG" 2>/dev/null | sed 's/^/    /'
