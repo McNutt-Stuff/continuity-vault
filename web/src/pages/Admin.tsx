@@ -216,6 +216,7 @@ function TopologyAdmin() {
   const clusters: any[] = data.clusters || [];
   const regions: any[] = data.regions || [];
   const unassigned: any[] = data.unassigned_nodes || [];
+  const allNodes: any[] = data.all_nodes || [];
 
   async function newCluster() {
     const r = await formDialog({
@@ -294,20 +295,60 @@ function TopologyAdmin() {
                 <span className="faint">Customer nodes: <b>{c.customer_node_count}</b></span>
                 <span className="faint">Total nodes: <b>{c.node_count}</b></span>
               </div>
+              {/* Cluster health & usage summary */}
+              {c.summary && (
+                <div className="row" style={{ gap: 14, marginTop: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <span className="row" style={{ gap: 6, fontSize: 12 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 999, background: c.summary.nodes_online === c.summary.nodes_total ? "#35d0a5" : c.summary.nodes_online ? "#f5a623" : "#8a94a7" }} />
+                    <b>{c.summary.nodes_online}/{c.summary.nodes_total}</b> <span className="faint">online</span>
+                  </span>
+                  <span className="faint" style={{ fontSize: 12 }}><b style={{ color: "var(--text)" }}>{c.summary.tenants}</b> tenants</span>
+                  {c.summary.storage_total > 0 && (
+                    <span className="faint" style={{ fontSize: 12 }}>{bytes(c.summary.storage_used)} / {bytes(c.summary.storage_total)}</span>
+                  )}
+                  <div className="row" style={{ gap: 8, marginLeft: "auto" }}>
+                    <MiniBar label="CPU" v={c.summary.cpu_pct} />
+                    <MiniBar label="MEM" v={c.summary.mem_pct} />
+                    <MiniBar label="DISK" v={c.summary.disk_pct} />
+                  </div>
+                </div>
+              )}
               {c.regions?.length > 0 && (
-                <div className="row" style={{ gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                <div className="row" style={{ gap: 6, marginTop: 10, flexWrap: "wrap" }}>
                   {c.regions.map((r: any) => <Pill key={r.code} tone="info">{r.name}</Pill>)}
                 </div>
               )}
-              {c.nodes?.length > 0 && (
-                <div className="stack" style={{ gap: 4, marginTop: 8 }}>
-                  {c.nodes.map((n: any) => (
-                    <div key={n.id} className="spread" style={{ fontSize: 12.5, padding: "3px 0" }}>
-                      <span><Icon name="server" size={12} /> {n.name} <span className="faint">· {n.role}</span></span>
-                      <button className="btn ghost sm" onClick={() => assignNode(n.id, "")}>Remove</button>
-                    </div>
+              {/* Nodes in this cluster — platform icon, health, tenants */}
+              <div className="stack" style={{ gap: 2, marginTop: 10 }}>
+                {(c.nodes || []).map((n: any) => (
+                  <div key={n.id} className="spread" style={{ fontSize: 12.5, padding: "5px 0", borderTop: "1px solid var(--border-soft)" }}>
+                    <span className="row" style={{ gap: 7, alignItems: "center" }}>
+                      <span title={n.online ? "Online" : "Offline"} style={{ width: 7, height: 7, borderRadius: 999, background: n.online ? "#35d0a5" : "#8a94a7", flexShrink: 0 }} />
+                      <CloudIcon provider={n.cloud?.provider} size={14} />
+                      <b>{n.name}</b>{n.is_self && <span className="faint" style={{ fontSize: 10 }}>· this</span>}
+                      <span className="faint">· {n.role}</span>
+                      {n.role === "customer-tenant" && <span className="faint">· {n.tenants} tnt</span>}
+                    </span>
+                    <span className="row" style={{ gap: 10, alignItems: "center" }}>
+                      <span className="row" style={{ gap: 6 }}>
+                        <MiniBar label="C" v={n.health?.cpu_pct} />
+                        <MiniBar label="M" v={n.health?.mem_pct} />
+                        <MiniBar label="D" v={n.health?.disk_pct} />
+                      </span>
+                      <button className="btn ghost sm" onClick={() => assignNode(n.id, "")} title="Remove from cluster"><Icon name="x" size={12} /></button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {/* Add an existing node (unassigned or from another cluster) */}
+              {allNodes.filter((n) => n.cluster_id !== c.id).length > 0 && (
+                <select className="input sm" style={{ marginTop: 8, width: 240 }} defaultValue=""
+                        onChange={(e) => e.target.value && assignNode(e.target.value, c.id)}>
+                  <option value="">+ Add a node to this cluster…</option>
+                  {allNodes.filter((n) => n.cluster_id !== c.id).map((n) => (
+                    <option key={n.id} value={n.id}>{n.name} ({n.role}{n.cluster_id ? " · moving" : ""})</option>
                   ))}
-                </div>
+                </select>
               )}
             </div>
           ))}
@@ -317,7 +358,7 @@ function TopologyAdmin() {
             <div className="faint" style={{ fontSize: 12, marginBottom: 6 }}>Unassigned nodes</div>
             {unassigned.map((n) => (
               <div key={n.id} className="spread" style={{ fontSize: 12.5, padding: "4px 0" }}>
-                <span><Icon name="server" size={12} /> {n.name} <span className="faint">· {n.role}</span></span>
+                <span className="row" style={{ gap: 7, alignItems: "center" }}><CloudIcon provider={n.cloud?.provider} size={14} /> {n.name} <span className="faint">· {n.role}</span></span>
                 <select className="input sm" style={{ width: 200 }} defaultValue="" onChange={(e) => e.target.value && assignNode(n.id, e.target.value)}>
                   <option value="">Assign to cluster…</option>
                   {clusters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -1900,6 +1941,7 @@ function Nodes() {
                       <div>
                         <div style={{ fontWeight: 700, fontSize: 13.5 }}>{n.name}{n.is_self && <span className="faint" style={{ fontWeight: 400, fontSize: 10 }}> · this</span>}</div>
                         <div className="faint" style={{ fontSize: 11 }}>{n.region || n.cloud?.region || "—"}{n.version ? ` · v${n.version}` : ""}</div>
+                        {n.cluster_name && <div className="faint" style={{ fontSize: 10.5 }}><Icon name="grid" size={10} /> {n.cluster_name}</div>}
                       </div>
                     </div>
                     <span title={n.online ? "Online" : "Offline"} style={{ width: 8, height: 8, borderRadius: 999, background: n.online ? "#35d0a5" : "#8a94a7", flexShrink: 0 }} />
@@ -1947,6 +1989,23 @@ function cloudBrand(provider?: string): string | null {
 function CloudIcon({ provider, size = 16 }: { provider?: string; size?: number }) {
   const b = cloudBrand(provider);
   return b ? <SourceIcon type={b} fallback="server" size={size} /> : <Icon name="server" size={size} />;
+}
+
+function pctColor(v?: number | null): string {
+  if (v == null) return "var(--border-soft)";
+  return v >= 90 ? "#ff5d5d" : v >= 75 ? "#f5a623" : "#35d0a5";
+}
+
+// A compact labelled utilisation bar (CPU/MEM/DISK), reused across the topology view.
+function MiniBar({ label, v }: { label: string; v?: number | null }) {
+  return (
+    <div style={{ minWidth: 44 }}>
+      <div className="faint" style={{ fontSize: 9, letterSpacing: ".04em" }}>{label}{v != null ? ` ${Math.round(v)}%` : ""}</div>
+      <div style={{ height: 4, borderRadius: 2, background: "var(--inset)", overflow: "hidden", marginTop: 2 }}>
+        <div style={{ height: "100%", width: `${Math.min(100, v ?? 0)}%`, background: pctColor(v) }} />
+      </div>
+    </div>
+  );
 }
 
 function uptimeShort(s?: number | null): string {
@@ -2173,6 +2232,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
                 {node.category} · {node.role}{node.region ? ` · ${node.region}` : ""}{node.version ? ` · v${node.version}` : ""}
                 {node.version_updated_at ? ` · updated ${timeAgo(node.version_updated_at)}` : ""}
                 {live?.uptime_seconds ? ` · ${uptimeShort(live.uptime_seconds)}` : ""}
+                {node.cluster_name ? ` · cluster ${node.cluster_name}` : ""}
               </div>
             </div>
           </div>

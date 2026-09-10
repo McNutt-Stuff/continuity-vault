@@ -21,20 +21,48 @@ router = APIRouter(prefix="/admin", tags=["topology"],
 
 
 def _cluster_view(db: Session, c: Cluster) -> dict:
-    nodes = db.query(Node).filter(Node.cluster_id == c.id).all()
-    cp = next((n for n in nodes if n.role == "control-plane"), None)
+    from .admin import _node_view
+    node_rows = db.query(Node).filter(Node.cluster_id == c.id).all()
+    nodes = [_node_view(db, n) for n in node_rows]
+    cp = next((n for n in nodes if n["role"] == "control-plane"), None)
     regions = db.query(Region).filter(Region.cluster_id == c.id).order_by(Region.sort_order).all()
+
+    online = sum(1 for n in nodes if n.get("online"))
+    tenants = sum(int(n.get("tenants") or 0) for n in nodes)
+
+    def _worst(key: str):
+        vals = [n["health"].get(key) for n in nodes
+                if n.get("online") and n.get("health", {}).get(key) is not None]
+        return round(max(vals), 1) if vals else None
+
+    used = total = 0
+    for n in nodes:
+        stg = (n.get("telemetry") or {}).get("storage") or {}
+        used += int(stg.get("used") or 0)
+        total += int(stg.get("total") or 0)
+
+    compact = [{
+        "id": n["id"], "name": n["name"], "role": n["role"], "status": n["status"],
+        "is_self": n["is_self"], "endpoint": n["endpoint"], "online": n["online"],
+        "version": n["version"], "tenants": n["tenants"], "health": n["health"],
+        "cloud": n.get("cloud") or {},
+    } for n in nodes]
+
     return {
         "id": c.id, "code": c.code, "name": c.name, "description": c.description or "",
         "home_region": c.home_region or "", "status": c.status or "active",
         "global_sync_enabled": bool(c.global_sync_enabled),
-        "control_plane": ({"id": cp.id, "name": cp.name} if cp else None),
+        "control_plane": ({"id": cp["id"], "name": cp["name"]} if cp else None),
         "node_count": len(nodes),
-        "customer_node_count": sum(1 for n in nodes if n.role == "customer-tenant"),
-        "nodes": [{"id": n.id, "name": n.name, "role": n.role, "status": n.status,
-                   "is_self": bool(n.is_self), "endpoint": n.endpoint or ""}
-                  for n in nodes],
+        "customer_node_count": sum(1 for n in nodes if n["role"] == "customer-tenant"),
+        "nodes": compact,
         "regions": [{"code": r.code, "name": r.name} for r in regions],
+        "summary": {
+            "nodes_online": online, "nodes_total": len(nodes), "tenants": tenants,
+            "cpu_pct": _worst("cpu_pct"), "mem_pct": _worst("mem_pct"),
+            "disk_pct": _worst("disk_pct"),
+            "storage_used": used, "storage_total": total,
+        },
         "created_at": c.created_at.isoformat() if c.created_at else None,
     }
 
@@ -55,11 +83,18 @@ def _region_view(db: Session, r: Region) -> dict:
 def get_topology(db: Session = Depends(get_db)):
     clusters = db.query(Cluster).order_by(Cluster.created_at.asc()).all()
     regions = db.query(Region).order_by(Region.sort_order).all()
-    unassigned = db.query(Node).filter(Node.cluster_id.is_(None)).all()
+    all_nodes = db.query(Node).order_by(Node.role, Node.name).all()
+    unassigned = [n for n in all_nodes if not n.cluster_id]
     return {
         "clusters": [_cluster_view(db, c) for c in clusters],
         "regions": [_region_view(db, r) for r in regions],
-        "unassigned_nodes": [{"id": n.id, "name": n.name, "role": n.role} for n in unassigned],
+        "unassigned_nodes": [{"id": n.id, "name": n.name, "role": n.role,
+                              "cloud": n.cloud or {}} for n in unassigned],
+        # Every node + its current cluster, so the cluster page can offer an
+        # "add existing node" picker (moving a node from one cluster to another).
+        "all_nodes": [{"id": n.id, "name": n.name, "role": n.role,
+                       "cluster_id": n.cluster_id, "cloud": n.cloud or {}}
+                      for n in all_nodes],
         "geo_zones": sorted({r["geo_zone"] for r in geo.REGION_TAXONOMY}),
         "accepted_countries": sorted(geo.ACCEPTED_COUNTRIES),
     }
