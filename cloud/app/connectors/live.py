@@ -125,6 +125,25 @@ def _is_auth_status(code: int) -> bool:
     return code in (401, 403)
 
 
+# Gmail signals its per-user rate / quota limit as an HTTP 403 with one of these
+# error reasons — transient, NOT a loss of authorization.
+_GMAIL_RATE_REASONS = ("rateLimitExceeded", "userRateLimitExceeded",
+                       "dailyLimitExceeded", "quotaExceeded")
+
+
+class _GmailRateLimited(Exception):
+    """Gmail per-user rate/quota 403 — transient; the run defers and retries and
+    the source is NOT flagged for re-authorization."""
+
+
+def _gmail_403_reason(r) -> str:
+    try:
+        return (((r.json().get("error") or {}).get("errors") or [{}])[0]
+                .get("reason", "") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _gmail_message(c: httpx.Client, headers: dict, mid: str,
                    cap: int = _DEFAULT_CAP) -> Optional[SourceObject]:
     # format=raw returns the full RFC822 message (body + attachments) plus
@@ -140,14 +159,8 @@ def _gmail_message(c: httpx.Client, headers: dict, mid: str,
             # per-user rate limit surfaces as a 403 (rate/quota reason) — back off
             # and retry; a genuinely restricted message (confidential mode, admin
             # policy) is skipped. Only true auth failures are 401 (raised below).
-            reason = ""
-            try:
-                reason = (((r.json().get("error") or {}).get("errors") or [{}])[0]
-                          .get("reason", ""))
-            except Exception:  # noqa: BLE001
-                reason = ""
-            if reason in ("rateLimitExceeded", "userRateLimitExceeded",
-                          "quotaExceeded") and attempt < 2:
+            reason = _gmail_403_reason(r)
+            if reason in _GMAIL_RATE_REASONS and attempt < 2:
                 time.sleep(1.5 * (attempt + 1))
                 continue
             logger.warning("gmail message %s skipped (HTTP 403 %s)", mid,
@@ -195,6 +208,32 @@ def _gmail_folder(label_ids: List[str]) -> str:
     return "Mail"
 
 
+def _gmail_list_page(c: httpx.Client, headers: dict, params: dict) -> dict:
+    """One messages.list page, retrying Gmail's transient 403 rate/quota + 5xx with
+    backoff. Raises _GmailRateLimited (non-auth) if the limit persists so the run
+    defers instead of being flagged for re-authorization."""
+    import time
+    r = None
+    for attempt in range(4):
+        r = c.get(f"{GMAIL}/messages", headers=headers, params=params)
+        if r.status_code == 403:
+            reason = _gmail_403_reason(r)
+            if reason in _GMAIL_RATE_REASONS:
+                if attempt < 3:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise _GmailRateLimited(
+                    f"Gmail rate limit ({reason}) on messages.list — will retry next run")
+            # A non-rate 403 (scope/permission) is a genuine auth problem → raise.
+        elif r.status_code >= 500 and attempt < 3:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        r.raise_for_status()
+        return r.json()
+    r.raise_for_status()
+    return r.json()
+
+
 def _gmail_list_ids(c: httpx.Client, headers: dict, cap: int,
                     query: str = "", include_spam_trash: bool = False) -> List[str]:
     """All message ids (full sync), paging until exhausted or the safety cap.
@@ -212,9 +251,7 @@ def _gmail_list_ids(c: httpx.Client, headers: dict, cap: int,
             params["includeSpamTrash"] = "true"
         if token:
             params["pageToken"] = token
-        r = c.get(f"{GMAIL}/messages", headers=headers, params=params)
-        r.raise_for_status()
-        data = r.json()
+        data = _gmail_list_page(c, headers, params)
         ids.extend(ref["id"] for ref in data.get("messages", []))
         token = data.get("nextPageToken")
         if not token:
@@ -225,6 +262,7 @@ def _gmail_list_ids(c: httpx.Client, headers: dict, cap: int,
 def _gmail_history_ids(c: httpx.Client, headers: dict, start_history_id: str,
                        cap: int) -> List[str]:
     """Ids of messages added/changed since ``start_history_id`` (delta sync)."""
+    import time
     ids: set[str] = set()
     token: Optional[str] = None
     while len(ids) < cap:
@@ -232,9 +270,27 @@ def _gmail_history_ids(c: httpx.Client, headers: dict, start_history_id: str,
                   "historyTypes": ["messageAdded", "labelAdded", "labelRemoved"]}
         if token:
             params["pageToken"] = token
-        r = c.get(f"{GMAIL}/history", headers=headers, params=params)
-        if r.status_code in (404, 410):
-            raise _HistoryGone()
+        r = None
+        for attempt in range(4):
+            r = c.get(f"{GMAIL}/history", headers=headers, params=params)
+            if r.status_code in (404, 410):
+                raise _HistoryGone()
+            if r.status_code == 403:
+                # Gmail's per-user rate/quota limit surfaces as a 403 here too —
+                # back off and retry; if it persists, defer (non-auth) so the
+                # source isn't wrongly flagged as needing re-authorization. A
+                # non-rate 403 (scope/permission) is a real auth error → raise.
+                reason = _gmail_403_reason(r)
+                if reason in _GMAIL_RATE_REASONS:
+                    if attempt < 3:
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    raise _GmailRateLimited(
+                        f"Gmail rate limit ({reason}) on history — will retry next run")
+            if r.status_code >= 500 and attempt < 3:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            break
         r.raise_for_status()
         data = r.json()
         for h in data.get("history", []):
@@ -393,9 +449,7 @@ def _stream_gmail_backfill(c, headers, cursor, state, base_query_parts,
             params["includeSpamTrash"] = "true"
         if next_token:
             params["pageToken"] = next_token
-        r = c.get(f"{GMAIL}/messages", headers=headers, params=params)
-        r.raise_for_status()
-        data = r.json()
+        data = _gmail_list_page(c, headers, params)
         for ref in data.get("messages", []):
             o = emit(c, ref["id"])
             if o:
