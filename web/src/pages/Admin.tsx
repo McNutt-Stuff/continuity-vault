@@ -2103,7 +2103,7 @@ function Nodes() {
     let terminate = false;
     if (info?.can_terminate_vm) {
       const r = await formDialog({
-        title: `Purge ${n.name}?`, tone: "danger", confirmLabel: "Purge node", message: base,
+        title: `Purge ${n.name}?`, confirmLabel: "Purge node", message: base,
         fields: [{ name: "vm", label: `Auto-provisioned cloud VM (${(info.provider || "").toUpperCase()} · ${info.instance_id})`, defaultValue: "keep", options: [
           { label: "Leave the VM alone (already de-provisioned)", value: "keep" },
           { label: "Also terminate the cloud VM", value: "terminate" }] }],
