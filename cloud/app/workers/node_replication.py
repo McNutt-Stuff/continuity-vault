@@ -516,6 +516,7 @@ def _push(s) -> int:
             comm_since = None
     comm_high = comm_since
     index_replicas = []
+    recovery_keys: list = []
     log_entries: list = []
     log_cursor = _read_state().get("logs_cursor")
     log_since = None
@@ -608,6 +609,12 @@ def _push(s) -> int:
         from ..models import IndexReplica
         for row in db.query(IndexReplica).all():
             index_replicas.append(_row(row))
+        # Vault Recovery Keys the node created (verifier + code-wrapped root keys),
+        # so the control plane can verify + redeem one at login (which runs on the
+        # CP, pre-auth, before any node proxy). Small + rarely changes → send all.
+        from ..models import VaultRecoveryKey
+        for row in db.query(VaultRecoveryKey).all():
+            recovery_keys.append(_row(row))
         # Unified logs — everything this node captured since the last confirmed push
         # (app logs + the appliances/agents it manages + audit dual-writes). The
         # cursor only advances on a confirmed delivery, so a failed push retries the
@@ -622,7 +629,8 @@ def _push(s) -> int:
     if not (receipts or documents or accounts or jobs or agents or appliances
             or appliance_storages or insights
             or integ_instances or net_clients or net_apps or net_usage or integ_runs
-            or communications or index_replicas or net_samples or log_entries):
+            or communications or index_replicas or net_samples or log_entries
+            or recovery_keys):
         return 0
     res = _post("/nodes/sync/push", {
         "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
@@ -634,6 +642,7 @@ def _push(s) -> int:
         "network_samples": net_samples,
         "communications": communications,
         "index_replicas": index_replicas,
+        "recovery_keys": recovery_keys,
         "log_entries": log_entries,
     })
     if res and res.get("ok"):

@@ -111,6 +111,7 @@ class User(Base):
 
     tenant = relationship("Tenant", back_populates="users")
     passkeys = relationship("Passkey", back_populates="user", cascade="all, delete-orphan")
+    recovery_keys = relationship("VaultRecoveryKey", cascade="all, delete-orphan")
 
     @property
     def full_name(self) -> str:
@@ -135,6 +136,30 @@ class Passkey(Base):
     created_at = Column(DateTime, default=_now)
 
     user = relationship("User", back_populates="passkeys")
+
+
+class VaultRecoveryKey(Base):
+    """Last-resort Vault Recovery Key (like a 1Password recovery/secret key).
+
+    A single high-entropy code the customer keeps offline. It wraps a copy of
+    each eligible vault's root key (split-control / customer-managed only — never
+    zero-knowledge) so that if every passkey is lost or compromised the customer
+    can prove identity via the code and restore access to their vault key. Only a
+    verifier hash and the code-wrapped key copies are stored — never the code."""
+
+    __tablename__ = "vault_recovery_keys"
+    id = Column(String, primary_key=True, default=_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    salt = Column(String, nullable=False)      # base64 random salt for the KDF
+    verifier = Column(String, nullable=False)  # hex verifier to check the code
+    hint = Column(String, default="")          # last 4 chars, for display only
+    # [{vault_id, nonce, ct}] — each eligible vault root key wrapped under the code
+    wrapped_keys = Column(JSON, default=list)
+    vault_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_now)
+    last_used_at = Column(DateTime, nullable=True)
+    rotated_at = Column(DateTime, nullable=True)
 
 
 class Vault(Base):

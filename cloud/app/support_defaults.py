@@ -557,6 +557,42 @@ person can recover the most sensitive data alone.
 """,
         help_routes=[]),
     _doc(
+        "recovery-key", "Vault Recovery Key", "Security & Account", _SECURITY, 25, "key",
+        "A one‑time code that lets you regain access to your vault if you ever lose all your passkeys.",
+        """
+# Vault Recovery Key
+
+Your vault is unlocked by your **passkeys**. A **Vault Recovery Key** is your
+last‑resort way back in if you ever lose *every* passkey — a single, high‑entropy
+code (like a password manager's recovery/secret key) that you keep somewhere safe
+and private.
+
+## What it does
+When you create a recovery key, Arkive wraps a copy of your vault key with it and
+stores only a **verifier** and the wrapped copy — never the code itself. If all
+your passkeys are lost, you enter the recovery key to restore access to your
+vault and enrol a fresh passkey.
+
+## Create one
+Go to **Settings → Security → Vault Recovery Key** and follow the short wizard.
+You'll confirm with your passkey, then we show the code **once**. Copy it into a
+password manager or download/print it and store it offline. We can't show it
+again — if you lose it, rotate to generate a new one.
+
+## Use it (all passkeys lost)
+On the sign‑in screen choose **“Lost all your passkeys? Use your recovery key,”**
+enter your email and the recovery key, then enrol a new passkey when prompted.
+
+## Good to know
+- Treat it like a password — anyone with it can recover your vault.
+- **Rotate** it after you add new vaults so it covers them too, or if you think it
+  may have been exposed.
+- Recovery keys apply to **split‑control** and **customer‑managed** vaults.
+  **Zero‑knowledge** vaults keep their keys entirely on your own devices, so there
+  is nothing for Arkive to escrow — a recovery key isn't available for them.
+""",
+        help_routes=["/settings"]),
+    _doc(
         "audit-log", "Audit Log", "Security & Account", _SECURITY, 30, "shield",
         "The tamper‑evident record of every action, and how to verify its integrity.",
         """

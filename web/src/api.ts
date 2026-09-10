@@ -81,6 +81,18 @@ export interface Me {
   passkey_verified: boolean;
   needs_setup?: boolean;
   features?: Record<string, boolean>;
+  recovery_key?: {
+    eligible: boolean;
+    eligible_vaults: number;
+    created: boolean;
+    created_at?: string | null;
+    rotated_at?: string | null;
+    last_used_at?: string | null;
+    hint?: string;
+    covered_vaults?: number;
+    needs_prompt?: boolean;
+    stale?: boolean;
+  } | null;
   passkeys: { id: string; label: string; transport: string }[];
 }
 

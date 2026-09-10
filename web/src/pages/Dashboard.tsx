@@ -139,6 +139,24 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {me?.recovery_key?.needs_prompt && (
+        <Card style={{ marginBottom: 16, borderColor: "var(--warn)", cursor: "pointer" }} onClick={() => nav("/settings")}>
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            <div className="result-icon" style={{ background: "var(--inset)", color: "var(--warn)" }}>
+              <Icon name="key" size={18} />
+            </div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>Create your Vault Recovery Key</div>
+              <div className="faint" style={{ fontSize: 12.5 }}>
+                If you ever lose all your passkeys, a recovery key is the only way back into your vault.
+                Set one up now in Settings → Security — it only takes a moment and we show it just once.
+              </div>
+            </div>
+            <Icon name="gear" size={16} />
+          </div>
+        </Card>
+      )}
+
       {purges.map((p) => (
         <Card key={p.id} style={{ marginBottom: 16, borderColor: "var(--danger)", cursor: "pointer" }} onClick={() => nav("/connectors")}>
           <div className="row" style={{ gap: 12, alignItems: "center" }}>

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from cv_crypto.provider import get_provider
 
-from .. import audit, authcodes, security
+from .. import audit, authcodes, recovery_key as _recovery_key, security
 from .. import features as _features
 from ..config import get_settings
 from ..db import get_db
@@ -191,6 +191,35 @@ def email_verify(body: EmailVerifyRequest, db: Session = Depends(get_db)):
         db.commit()
     audit.record(db, actor=email, action=f"auth.email.{purpose}", tenant_id=user.tenant_id)
     # Email proves identity but not hardware possession: not passkey-verified.
+    return _session_response(user, passkey_verified=False, db=db)
+
+
+# --- Vault Recovery Key redemption (all passkeys lost) -----------------------
+
+
+class RecoveryRedeem(BaseModel):
+    email: str
+    code: str
+
+
+@router.post("/recovery/redeem", response_model=LoginResponse)
+def recovery_redeem(body: RecoveryRedeem, db: Session = Depends(get_db)):
+    """Last-resort access: verify a Vault Recovery Key, restore the vault key(s),
+    and issue a session so the customer can enrol a fresh passkey. Not
+    passkey-verified — the client is directed to add a passkey immediately."""
+    email = body.email.strip().lower()
+    user = db.query(User).filter(User.email == email).first()
+    if not user or user.status != "active":
+        raise HTTPException(403, "invalid recovery key")
+    rec = _recovery_key.get_record(db, user.id)
+    if not rec or not _recovery_key.verify(rec, body.code):
+        audit.record(db, actor=email, action="recovery_key.redeem_failed",
+                     tenant_id=user.tenant_id, severity="warning")
+        raise HTTPException(403, "invalid recovery key")
+    restored = _recovery_key.redeem(db, rec, body.code)
+    audit.record(db, actor=email, action="recovery_key.redeemed",
+                 tenant_id=user.tenant_id, severity="notice",
+                 detail={"vaults": len(restored)})
     return _session_response(user, passkey_verified=False, db=db)
 
 
@@ -529,6 +558,7 @@ def me(principal: security.Principal = Depends(security.get_principal),
         "passkey_verified": principal.passkey_verified,
         "needs_setup": user.setup_completed_at is None,
         "features": _features.effective(user, tenant),
+        "recovery_key": (_recovery_key.status(db, user, tenant) if tenant else None),
         "passkeys": [{"id": p.id, "label": p.label, "transport": p.transport}
                      for p in user.passkeys],
     }

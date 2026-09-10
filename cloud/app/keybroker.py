@@ -53,6 +53,29 @@ def provision_vault_root_key(vault_id: str, ownership_model: str) -> Dict[str, o
     return {"root_key": root, "record": record}
 
 
+def import_root_key(vault_id: str, root: bytes, ownership_model: str) -> Dict[str, object]:
+    """(Re)write a vault's fleet-KEK-wrapped root key record from a plaintext
+    root key recovered out-of-band (Vault Recovery Key redemption). Idempotent:
+    re-wraps the same root under the current fleet KEK so the vault key is usable
+    again after all passkeys were lost."""
+    provider = get_provider()
+    master = provider.hkdf(
+        (os.environ.get("CV_KEK_SECRET", "dev-kek") + vault_id).encode(),
+        b"cv-broker-master",
+        32,
+    )
+    nonce, ct = provider.aes_encrypt(master, root, b"vault-root")
+    record = {
+        "vaultId": vault_id,
+        "ownershipModel": ownership_model,
+        "wrapped": {"nonce": base64.b64encode(nonce).decode(),
+                    "ct": base64.b64encode(ct).decode()},
+        "rootKeyHash": hexdigest(root),
+    }
+    _path(vault_id).write_text(json.dumps(record))
+    return record
+
+
 def release_vault_root_key(vault_id: str) -> bytes:
     """Release (unwrap) the vault root key for an authorized operation only.
 

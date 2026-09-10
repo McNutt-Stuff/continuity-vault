@@ -279,6 +279,7 @@ class PushPayload(BaseModel):
     integration_runs: list[dict] = []
     communications: list[dict] = []
     index_replicas: list[dict] = []
+    recovery_keys: list[dict] = []
     log_entries: list[dict] = []
 
 
@@ -435,6 +436,24 @@ def push(body: PushPayload, authorization: str = Header(default=""),
         else:
             db.add(IndexReplica(**kw))
         counts["index_replicas"] += 1
+    # Vault Recovery Keys (verifier + code-wrapped root keys) the node created, so
+    # a recovery-key redemption at login (which runs on the CP, pre-auth) can
+    # verify + restore. Key on user_id (one per user); skip unknown tenant/user.
+    from ..models import VaultRecoveryKey
+    for rk in body.recovery_keys:
+        uid = rk.get("user_id")
+        if not _known(rk) or not uid or uid not in valid_users:
+            continue
+        kw = _deser(VaultRecoveryKey, rk)
+        existing = (db.query(VaultRecoveryKey)
+                    .filter(VaultRecoveryKey.user_id == uid).first())
+        if existing is not None:
+            for k, v in kw.items():
+                if k != "id":
+                    setattr(existing, k, v)
+        else:
+            db.add(VaultRecoveryKey(**kw))
+        counts["recovery_keys"] = counts.get("recovery_keys", 0) + 1
     # Communications history from the node's email service. The control plane owns
     # the open fields (the tracking pixel always hits the CP), so never overwrite
     # them from a node push — which also preserves a stub created by an early open.

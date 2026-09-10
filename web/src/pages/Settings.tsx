@@ -178,6 +178,8 @@ export default function Settings() {
               </div>
             </Card>
 
+            <RecoveryKeyCard />
+
             <Card>
               <h2 style={{ marginBottom: 4 }}>Your encryption keys</h2>
               <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
@@ -602,6 +604,234 @@ function PlanChangeCard() {
                 {busy ? "Applying…" : prev ? `Confirm — switch to ${prev.target_plan.name}` : "Confirm"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function RecoveryKeyCard() {
+  const { me, stepUp, refresh } = useAuth();
+  const rk = me?.recovery_key;
+  const [open, setOpen] = useState(false);
+  const [step, setStep] = useState<"intro" | "code" | "done">("intro");
+  const [busy, setBusy] = useState(false);
+  const [code, setCode] = useState("");
+  const [ack, setAck] = useState(false);
+  const [err, setErr] = useState("");
+  const [rotate, setRotate] = useState(false);
+
+  if (!rk) return null;
+
+  function fmt(d?: string | null): string {
+    if (!d) return "—";
+    try { return new Date(d.endsWith("Z") ? d : d + "Z").toLocaleString(); } catch { return d; }
+  }
+
+  function startWizard(isRotate: boolean) {
+    setRotate(isRotate); setStep("intro"); setCode(""); setAck(false); setErr(""); setOpen(true);
+  }
+
+  async function generate() {
+    setBusy(true); setErr("");
+    const path = rotate ? "/recovery-key/rotate" : "/recovery-key";
+    try {
+      let res: { code: string; hint: string; vault_count: number };
+      try {
+        res = await api.post(path, {});
+      } catch (e) {
+        if ((e as { status?: number })?.status === 403) {
+          await stepUp();
+          res = await api.post(path, {});
+        } else { throw e; }
+      }
+      setCode(res.code); setStep("code"); setAck(false);
+    } catch (e) {
+      setErr((e as { message?: string })?.message || "Could not create your recovery key");
+    } finally { setBusy(false); }
+  }
+
+  async function finish() {
+    setOpen(false);
+    await refresh();
+  }
+
+  async function removeKey() {
+    const ok = await confirmDialog({
+      title: "Delete your recovery key?",
+      message: "Your existing recovery key will stop working immediately. If you lose all your passkeys after this, there is no last-resort way back into your vault until you create a new one.",
+      confirmLabel: "Delete recovery key", tone: "danger",
+    });
+    if (!ok) return;
+    try {
+      try { await api.del("/recovery-key"); }
+      catch (e) { if ((e as { status?: number })?.status === 403) { await stepUp(); await api.del("/recovery-key"); } else throw e; }
+      await refresh();
+    } catch (e) {
+      notify({ message: (e as { message?: string })?.message || "Could not delete", tone: "warn" });
+    }
+  }
+
+  function copyCode() {
+    navigator.clipboard?.writeText(code).then(
+      () => notify({ message: "Recovery key copied", tone: "ok" }),
+      () => {},
+    );
+  }
+
+  function downloadCode() {
+    const body =
+      "Arkive — Vault Recovery Key\n" +
+      "Keep this somewhere safe and private. It is the last-resort way back into\n" +
+      "your vault if you ever lose all of your passkeys. Anyone with this code can\n" +
+      "recover your vault key, so treat it like a password.\n\n" +
+      `Account: ${me?.email || ""}\n` +
+      `Created: ${new Date().toLocaleString()}\n\n` +
+      `Recovery key:\n${code}\n`;
+    const blob = new Blob([body], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "arkive-recovery-key.txt"; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <Card style={{ marginTop: 16 }}>
+      <div className="spread" style={{ alignItems: "flex-start" }}>
+        <div>
+          <h2 style={{ marginBottom: 4 }}>Vault Recovery Key</h2>
+          <div className="muted" style={{ fontSize: 12.5, maxWidth: 620 }}>
+            A one-time, high-entropy code — like a recovery key — that lets you regain access to your
+            vault if you ever lose <b>all</b> of your passkeys. We show it a single time and never keep
+            a copy. Store it in a password manager or print it and keep it somewhere safe.
+          </div>
+        </div>
+        {rk.created && <Pill tone="ok" dot>active</Pill>}
+      </div>
+
+      {!rk.eligible && (
+        <div className="row" style={{ gap: 8, marginTop: 14, color: "var(--text-dim)", fontSize: 12.5, alignItems: "flex-start" }}>
+          <Icon name="info" size={14} />
+          <span>Recovery keys apply to split-control and customer-managed vaults. Your zero-knowledge
+            vaults keep their keys entirely on your own devices, so there is nothing for Arkive to escrow.</span>
+        </div>
+      )}
+
+      {rk.eligible && !rk.created && (
+        <div className="card" style={{ marginTop: 14, background: "var(--inset)" }}>
+          <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
+            <Icon name="alert" size={16} />
+            <div className="flex1">
+              <div style={{ fontWeight: 600, marginBottom: 2 }}>You haven't created a recovery key yet</div>
+              <div className="faint" style={{ fontSize: 12.5 }}>
+                Without one, losing every passkey means losing access to your vault. Set one up now — it only takes a moment.
+              </div>
+            </div>
+          </div>
+          <div className="row" style={{ marginTop: 12 }}>
+            <button className="btn primary sm" onClick={() => startWizard(false)}>
+              <Icon name="key" size={14} /> Create recovery key
+            </button>
+          </div>
+        </div>
+      )}
+
+      {rk.created && (
+        <div style={{ marginTop: 14 }}>
+          <div className="result-row">
+            <div className="result-icon" style={{ background: "var(--bg-elev-2)" }}><Icon name="key" size={16} /></div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>Recovery key ending ••••{rk.hint}</div>
+              <div className="faint" style={{ fontSize: 12 }}>
+                Created {fmt(rk.created_at)}{rk.rotated_at ? ` · rotated ${fmt(rk.rotated_at)}` : ""}
+                {rk.last_used_at ? ` · last used ${fmt(rk.last_used_at)}` : ""} · covers {rk.covered_vaults} vault{rk.covered_vaults === 1 ? "" : "s"}
+              </div>
+            </div>
+          </div>
+          {rk.stale && (
+            <div className="row" style={{ gap: 8, marginTop: 8, color: "var(--text-dim)", fontSize: 12.5, alignItems: "flex-start" }}>
+              <Icon name="alert" size={13} />
+              <span>You've added vaults since this key was made. Rotate it so the recovery key covers them too.</span>
+            </div>
+          )}
+          <div className="row" style={{ marginTop: 12, gap: 8 }}>
+            <button className="btn sm" onClick={() => startWizard(true)}><Icon name="repeat" size={14} /> Rotate</button>
+            <button className="btn sm ghost" onClick={removeKey}><Icon name="trash" size={14} /> Delete</button>
+          </div>
+        </div>
+      )}
+
+      {open && (
+        <div className="modal-backdrop" onClick={() => !busy && setOpen(false)}>
+          <div className="modal-panel" style={{ width: "min(520px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <h3 style={{ margin: 0 }}>{rotate ? "Rotate recovery key" : "Create recovery key"}</h3>
+              {!busy && <button className="btn ghost sm" onClick={() => setOpen(false)}><Icon name="x" size={14} /></button>}
+            </div>
+
+            {step === "intro" && (
+              <>
+                <div className="modal-body">
+                  <ul className="faint" style={{ fontSize: 12.5, margin: 0, paddingLeft: 18, lineHeight: 1.8 }}>
+                    <li>We'll generate a unique recovery code and wrap a copy of your vault key with it.</li>
+                    <li>The code is shown <b>once</b>. Arkive never stores it — only a verifier.</li>
+                    <li>Keep it offline (password manager or a printout). Anyone with it can recover your vault.</li>
+                    {rotate && <li>Rotating replaces your current recovery key — the old one stops working.</li>}
+                  </ul>
+                  <div className="faint" style={{ fontSize: 12, marginTop: 12 }}>
+                    You'll confirm with your passkey to continue.
+                  </div>
+                  {err && <div style={{ color: "var(--danger, #ff5d5d)", fontSize: 12.5, marginTop: 10 }}><Icon name="alert" size={13} /> {err}</div>}
+                </div>
+                <div className="modal-foot">
+                  <button className="btn ghost sm" onClick={() => setOpen(false)} disabled={busy}>Cancel</button>
+                  <button className="btn primary sm" onClick={generate} disabled={busy}>
+                    {busy ? "Generating…" : "Generate recovery key"}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {step === "code" && (
+              <>
+                <div className="modal-body">
+                  <div className="row" style={{ gap: 8, marginBottom: 10, color: "var(--text-dim)", fontSize: 12.5, alignItems: "flex-start" }}>
+                    <Icon name="alert" size={14} />
+                    <span>This is the only time we'll show this code. Save it now.</span>
+                  </div>
+                  <div className="reckey-code">{code}</div>
+                  <div className="row" style={{ gap: 8, marginTop: 12 }}>
+                    <button className="btn sm" onClick={copyCode}><Icon name="note" size={14} /> Copy</button>
+                    <button className="btn sm" onClick={downloadCode}><Icon name="file" size={14} /> Download .txt</button>
+                  </div>
+                  <label className="row" style={{ gap: 8, marginTop: 16, alignItems: "flex-start", cursor: "pointer" }}>
+                    <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} style={{ marginTop: 2 }} />
+                    <span style={{ fontSize: 12.5 }}>I've saved my recovery key somewhere safe. I understand Arkive can't show it again.</span>
+                  </label>
+                </div>
+                <div className="modal-foot">
+                  <button className="btn primary sm" disabled={!ack} onClick={() => setStep("done")}>Done</button>
+                </div>
+              </>
+            )}
+
+            {step === "done" && (
+              <>
+                <div className="modal-body" style={{ textAlign: "center", padding: "18px 8px" }}>
+                  <div style={{ display: "inline-flex", padding: 12, borderRadius: "50%", background: "var(--inset)", marginBottom: 10 }}>
+                    <Icon name="check" size={22} />
+                  </div>
+                  <div style={{ fontWeight: 600, marginBottom: 4 }}>Recovery key ready</div>
+                  <div className="faint" style={{ fontSize: 12.5 }}>
+                    If you ever lose all your passkeys, use “Sign in with a recovery key” on the login screen.
+                  </div>
+                </div>
+                <div className="modal-foot">
+                  <button className="btn primary sm" onClick={finish}>Close</button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

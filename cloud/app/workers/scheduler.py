@@ -511,6 +511,11 @@ def _run_notifications() -> None:
             except Exception:  # noqa: BLE001
                 db.rollback()
                 logger.exception("storage-problem notify failed for %s", u.id)
+            try:
+                _notify_recovery_key(db, notif, u, now)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("recovery-key notify failed for %s", u.id)
         # Weekly org roll-up (Mondays in the node's timezone), to org admins.
         if local.weekday() == 0:
             try:
@@ -550,6 +555,15 @@ def _notify_storage_problems(db, notif, user, now: datetime) -> None:
     bucket = int(now.timestamp() // (repeat_h * 3600))
     notif.send_notification(db, user, "storage_problem",
                             dedupe_key=f"stgprob:{bucket}", issues=issues)
+
+
+def _notify_recovery_key(db, notif, user, now: datetime) -> None:
+    """Nudge eligible users (split-control / customer-managed vaults) who haven't
+    created a Vault Recovery Key yet. The builder returns None when not needed, so
+    this is a no-op once they've made one. Reminds at most ~weekly."""
+    week = now.strftime("%Y-W%W")
+    notif.send_notification(db, user, "recovery_key_missing",
+                            dedupe_key=f"reckey:{week}")
 
 
 def _run_weekly_org(db, notif, assigned: set[str], now: datetime) -> None:

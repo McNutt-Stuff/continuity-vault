@@ -27,6 +27,7 @@ from .api import (
     node_sync,
     photos,
     recovery,
+    recovery_key,
     restore,
     rules,
     search,
@@ -97,6 +98,7 @@ app.include_router(terminal.agent_terminal_router, prefix=API)
 app.include_router(debug.router, prefix=API)
 app.include_router(activity.router, prefix=API)
 app.include_router(recovery.router, prefix=API)
+app.include_router(recovery_key.router, prefix=API)
 app.include_router(photos.router, prefix=API)
 app.include_router(photos.actions_router, prefix=API)
 app.include_router(site.public_router, prefix=API)

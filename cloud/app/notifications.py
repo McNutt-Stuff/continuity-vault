@@ -48,6 +48,9 @@ NOTIFICATION_TYPES = [
     {"key": "plan_change", "label": "Plan & billing changes", "icon": "credit-card",
      "default": True, "scope": "user",
      "desc": "A confirmation whenever your plan, storage or appliances change."},
+    {"key": "recovery_key_missing", "label": "Recovery key reminder", "icon": "key",
+     "default": True, "scope": "user",
+     "desc": "A reminder to create a Vault Recovery Key so you can regain access if every passkey is ever lost."},
     {"key": "weekly_org", "label": "Weekly organization summary", "icon": "activity",
      "default": True, "scope": "org",
      "desc": "A weekly roll-up of your organization's protection, by member and source."},
@@ -825,6 +828,39 @@ def _source_name(source_type: str) -> str:
     return (source_type or "Source").replace("_", " ").title()
 
 
+def build_recovery_key_missing(db, user: User) -> dict | None:
+    """Reminder to create a Vault Recovery Key (only when eligible + not yet
+    created). Returns None if the user already has one or has no eligible vault."""
+    try:
+        from . import recovery_key as _rk
+        tenant = db.get(Tenant, user.tenant_id)
+        if not tenant:
+            return None
+        st = _rk.status(db, user, tenant)
+    except Exception:  # noqa: BLE001
+        return None
+    if not st.get("needs_prompt"):
+        return None
+    parts: list[str] = []
+    parts.append('<p style="margin:0 0 12px;">Your Arkive vault is protected by passkeys. If you '
+                 'ever lose <b>all</b> of them, a <b>Vault Recovery Key</b> is the only way back in — '
+                 'a one-time code you keep somewhere safe (a password manager or a printout).</p>')
+    parts.append(_rows([
+        {"icon": "key", "name": "Create it once", "detail": "A short guided step in your settings."},
+        {"icon": "lock", "name": "Store it offline", "detail": "We show it a single time and never keep a copy."},
+        {"icon": "shield", "name": "Last-resort recovery", "detail": "Restore your vault key if every passkey is lost."},
+    ]))
+    return {
+        "subject": "Create your Arkive Vault Recovery Key",
+        "title": "Set up your Vault Recovery Key",
+        "body_html": "".join(parts),
+        "text": ("Create a Vault Recovery Key so you can regain access if you ever lose all your "
+                 f"passkeys. Set it up in Settings → Security: {_portal_url()}/settings"),
+        "cta": {"label": "Create my recovery key", "url": f"{_portal_url()}/settings"},
+        "preheader": "A last-resort way back into your vault if all passkeys are lost",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Dispatch + logging + rate limiting                                          #
 # --------------------------------------------------------------------------- #
@@ -903,6 +939,8 @@ def _build(db, user: User, key: str, ctx: dict) -> dict | None:
         return build_storage_problem(db, user, ctx.get("issues"))
     if key == "plan_change":
         return build_plan_change(db, user, ctx.get("change") or {})
+    if key == "recovery_key_missing":
+        return build_recovery_key_missing(db, user)
     if key == "weekly_org":
         tenant = db.get(Tenant, user.tenant_id)
         return build_weekly_org(db, tenant) if tenant else None

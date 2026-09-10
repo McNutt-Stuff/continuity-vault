@@ -706,3 +706,13 @@ h3 { font-size: 15px; }
 .plan-gate-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
 .plan-gate-note { font-size: 12px; color: var(--faint); }
 .plan-gate > :last-child { margin-bottom: 0; }
+
+/* Vault Recovery Key — the one-time code display */
+.reckey-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 17px; font-weight: 600; letter-spacing: 0.06em; word-break: break-all;
+  text-align: center; line-height: 1.7;
+  padding: 16px 14px; border-radius: 10px;
+  border: 1px dashed rgba(122, 92, 255, 0.45); background: var(--inset);
+  user-select: all;
+}

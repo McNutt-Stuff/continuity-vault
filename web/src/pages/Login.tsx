@@ -2,13 +2,14 @@ import { useState } from "react";
 import { useAuth } from "../auth";
 import { Icon } from "../components/Icon";
 
-type Stage = "email" | "code";
+type Stage = "email" | "code" | "recovery";
 
 export default function Login() {
-  const { loginStart, loginWithPasskey, requestEmailCode, verifyEmailCode, sessionExpired } = useAuth();
+  const { loginStart, loginWithPasskey, requestEmailCode, verifyEmailCode, redeemRecoveryKey, sessionExpired } = useAuth();
   const [stage, setStage] = useState<Stage>("email");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
+  const [recoveryCode, setRecoveryCode] = useState("");
   const [codePurpose, setCodePurpose] = useState<"login" | "verify">("login");
   const [devCode, setDevCode] = useState<string | null>(null);
   const [delivery, setDelivery] = useState<string | null>(null);
@@ -69,6 +70,18 @@ export default function Login() {
     }
   }
 
+  async function onRedeemRecovery() {
+    setErr("");
+    setBusy(true);
+    try {
+      await redeemRecoveryKey(email.trim().toLowerCase(), recoveryCode.trim());
+      // Session established (not passkey-verified) -> the portal prompts the user
+      // to enrol a fresh passkey in Settings.
+    } catch (e) {
+      fail(e);
+    }
+  }
+
   return (
     <div className="auth-wrap">
       <div className="auth-card card">
@@ -112,6 +125,53 @@ export default function Login() {
             <div className="faint" style={{ fontSize: 12, textAlign: "center" }}>
               Passwordless — secured by passkeys (Touch ID, Windows Hello, or a security key).
             </div>
+            <button
+              className="btn ghost sm"
+              style={{ width: "100%", marginTop: 10 }}
+              onClick={() => { setErr(""); setStage("recovery"); }}
+            >
+              <Icon name="key" size={13} /> Lost all your passkeys? Use your recovery key
+            </button>
+          </>
+        )}
+
+        {stage === "recovery" && (
+          <>
+            <div className="auth-sub">Sign in with your Vault Recovery Key</div>
+            <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>
+              Enter the one-time recovery key you saved when you set it up. We'll restore access to your
+              vault and help you enrol a new passkey.
+            </div>
+            <div className="field">
+              <label>Your email</label>
+              <input
+                className="input"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@email.com"
+              />
+            </div>
+            <div className="field">
+              <label>Recovery key</label>
+              <input
+                className="input mono"
+                autoFocus
+                value={recoveryCode}
+                onChange={(e) => setRecoveryCode(e.target.value.toUpperCase())}
+                onKeyDown={(e) => e.key === "Enter" && onRedeemRecovery()}
+                placeholder="ARK1-XXXXX-XXXXX-..."
+                style={{ letterSpacing: 1 }}
+              />
+            </div>
+            <button
+              className="btn primary"
+              style={{ width: "100%" }}
+              onClick={onRedeemRecovery}
+              disabled={busy || !email || recoveryCode.trim().length < 10}
+            >
+              Recover access
+            </button>
+            <button className="btn ghost sm" style={{ marginTop: 10 }} onClick={() => { setErr(""); setStage("email"); }}>Back</button>
           </>
         )}
 

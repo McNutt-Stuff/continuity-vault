@@ -25,6 +25,7 @@ interface AuthState {
   signup: (email: string, displayName: string, orgName: string) => Promise<CodeResult>;
   requestEmailCode: (email: string, purpose?: string) => Promise<CodeResult>;
   verifyEmailCode: (email: string, code: string, purpose?: string) => Promise<void>;
+  redeemRecoveryKey: (email: string, code: string) => Promise<void>;
   enrollPasskey: (label?: string) => Promise<void>;
   stepUp: () => Promise<void>;
   logout: () => void;
@@ -117,6 +118,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await applySession(res);
   }
 
+  // Last-resort access: redeem a Vault Recovery Key. Restores the vault key and
+  // yields an identity session (not hardware-verified) so the user can enrol a
+  // fresh passkey immediately.
+  async function redeemRecoveryKey(email: string, code: string) {
+    const res = await api.post<LoginResponse>("/auth/recovery/redeem", { email, code });
+    await applySession(res);
+  }
+
   // Enroll a real passkey (platform authenticator / security key). A successful
   // registration also produces a hardware-verified session.
   async function enrollPasskey(label = "This device") {
@@ -162,6 +171,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signup,
         requestEmailCode,
         verifyEmailCode,
+        redeemRecoveryKey,
         enrollPasskey,
         stepUp,
         logout,
