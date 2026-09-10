@@ -24,6 +24,7 @@ from cv_crypto.profiles import PROFILE_REGISTRY
 from cv_crypto.provider import get_provider
 
 from .. import audit, authcodes, config_catalog, credstore, node_config, notifications, platform_config, security, services
+from .. import admin_notifications
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
@@ -3418,3 +3419,55 @@ def backup_run_log(run_id: str,
     return {"id": run.id, "node_name": run.node_name, "status": run.status,
             "error": run.error or "", "message": run.message or "",
             "log": run.log or []}
+
+
+# --------------------------------------------------------------------------- #
+# Admin Notifications — platform-operator email alerts                         #
+# --------------------------------------------------------------------------- #
+
+class AdminNotifySettings(BaseModel):
+    enabled: bool | None = None
+    recipient_ids: list[str] | None = None
+    extra_emails: list[str] | None = None
+    types: dict[str, bool] | None = None
+
+
+@router.get("/notifications/settings")
+def admin_notify_settings(db: Session = Depends(get_db)):
+    """Everything the Admin Notifications page needs: the current config, the
+    selectable platform admins, the type catalog and the recent alert log."""
+    return {
+        "config": admin_notifications.get_config(db),
+        "admins": admin_notifications.available_admins(db),
+        "types": admin_notifications.ADMIN_NOTIFICATION_TYPES,
+        "recent": admin_notifications.recent_log(db, limit=50),
+    }
+
+
+@router.put("/notifications/settings")
+def admin_notify_save(body: AdminNotifySettings,
+                      principal: security.Principal = Depends(security.require_platform_admin),
+                      db: Session = Depends(get_db)):
+    cfg = admin_notifications.save_config(
+        db, enabled=body.enabled, recipient_ids=body.recipient_ids,
+        extra_emails=body.extra_emails, types=body.types)
+    audit.record(db, actor=principal.user_id, action="admin.notify_settings_updated",
+                 category="admin", detail={"enabled": cfg["enabled"],
+                                           "recipients": len(cfg["recipient_ids"]),
+                                           "extra": len(cfg["extra_emails"])})
+    return {"ok": True, "config": cfg}
+
+
+class AdminNotifyTest(BaseModel):
+    type: str
+
+
+@router.post("/notifications/test")
+def admin_notify_test(body: AdminNotifyTest,
+                      principal: security.Principal = Depends(security.require_platform_admin),
+                      db: Session = Depends(get_db)):
+    res = admin_notifications.send_test(db, body.type)
+    audit.record(db, actor=principal.user_id, action="admin.notify_test",
+                 category="admin", detail={"type": body.type, "ok": res.get("ok")})
+    return res
+

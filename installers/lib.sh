@@ -95,6 +95,22 @@ _spinner() {
   done
 }
 
+# Best-effort live progress to the control plane during auto-provision, so the
+# admin's auto-provision job log streams each named install step. Enabled only
+# when CV_PROVISION_TOKEN is exported (by the VM's cloud-init user-data); a
+# manual install leaves it unset and reports nothing. Never fails the install.
+_provision_report() {
+  local url="${CV_PROVISION_URL:-${CV_CONTROL_PLANE_URL:-}}"
+  [[ -z "${CV_PROVISION_TOKEN:-}" || -z "$url" ]] && return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  local msg="$1" status="${2:-}" esc
+  esc="${msg//\\/\\\\}"; esc="${esc//\"/\\\"}"
+  curl -fsS --max-time 5 -X POST "${url%/}/api/nodes/provision-progress" \
+    -H "Content-Type: application/json" \
+    -d "{\"token\":\"${CV_PROVISION_TOKEN}\",\"message\":\"${esc}\",\"status\":\"${status}\"}" \
+    >/dev/null 2>&1 || true
+}
+
 # step "Description" command [args...]
 # The command may be a shell function; its output goes only to $LOG.
 step() {
@@ -107,6 +123,7 @@ step() {
     return 0
   fi
 
+  _provision_report "$desc"
   echo "=== step $_STEP_NO: $desc ===" >> "$LOG"
 
   if [[ "${CV_VERBOSE:-0}" == "1" || ! -t 1 ]]; then
@@ -136,6 +153,7 @@ step() {
 
 _step_failed() {
   local desc="$1"
+  _provision_report "Step failed: ${desc} — see /var/log/arkive-bootstrap.log" "error"
   printf "\n  %sStep failed:%s %s\n" "$RED" "$RESET" "$desc"
   printf "  %sLast 25 lines of %s:%s\n" "$DIM" "$LOG" "$RESET"
   tail -n 25 "$LOG" 2>/dev/null | sed 's/^/    /'

@@ -118,6 +118,24 @@ def trigger_update(body: TriggerUpdateRequest,
                              "approvalMode": body.approval_mode})
     audit.record(db, actor=principal.user_id, action="update.triggered",
                  detail={"target": body.target_type, "version": release.version})
+
+    # Alert platform admins that an update was dispatched (best-effort).
+    try:
+        from .. import admin_notifications
+        target = f"{body.target_type} → {release.version}"
+        detail = f"appliance {body.target_id}" if body.target_id else "all cloud nodes (poll-applied)"
+        admin_notifications.emit(
+            db, "updates",
+            subject=f"[Arkive] Update dispatched — {target}",
+            title="Software update dispatched",
+            intro=f"An update to {release.version} was dispatched to {body.target_type}.",
+            rows=[{"icon": "sparkle", "name": target, "detail": detail},
+                  {"icon": "clock", "name": "Approval mode", "detail": body.approval_mode}],
+            severity="info")
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger("cv.updates").exception("admin update alert failed")
+
     return {"job_id": job.id, "status": job.status,
             "note": "Cloud updates run via the updater script polling this job; "
                     "appliance updates delivered as signed STAGE_UPDATE command."}

@@ -114,6 +114,10 @@ def start_scheduler() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("appliance health check failed")
             try:
+                _check_node_health()
+            except Exception:  # noqa: BLE001
+                logger.exception("node health check failed")
+            try:
                 _run_notifications()
             except Exception:  # noqa: BLE001
                 logger.exception("notification sweep failed")
@@ -201,9 +205,31 @@ def _test_customer_storages() -> None:
                                  severity="warning",
                                  detail={"name": cs.name, "provider": cs.provider,
                                          "error": (err or "health check failed")[:240]})
+                    _alert_admins_storage_failed(db, cs, err)
             except Exception:  # noqa: BLE001
                 logger.exception("storage health test failed for %s", cs.id)
                 db.rollback()
+
+
+def _alert_admins_storage_failed(db, cs, err: str) -> None:
+    """Notify platform admins that a customer's storage newly failed its probe."""
+    try:
+        from .. import admin_notifications
+        from ..models import Tenant
+        tenant = db.get(Tenant, cs.tenant_id)
+        cust = (tenant.name if tenant else None) or cs.tenant_id
+        admin_notifications.raise_alert(
+            db, "customer_alert",
+            subject=f"[Arkive] Customer storage failing — {cust}",
+            title="Customer storage failing",
+            intro=f"{cust}'s storage \"{cs.name}\" ({cs.provider}) failed its health probe.",
+            rows=[{"icon": "user", "name": cust, "detail": cs.provider},
+                  {"icon": "alert", "name": cs.name, "detail": (err or "health check failed")[:120]}],
+            severity="warning", tenant_id=cs.tenant_id,
+            dedupe_key=f"storage:{cs.id}", dedupe_within_hours=12)
+    except Exception:  # noqa: BLE001
+        logger.exception("admin storage-failed alert failed for %s", getattr(cs, "id", "?"))
+
 
 
 _last_appliance_health: datetime | None = None
@@ -242,9 +268,81 @@ def _check_appliance_health() -> None:
                              tenant_id=a.tenant_id, resource=a.id, category="appliance",
                              severity="critical" if sev == "critical" else "warning",
                              detail={"name": a.name, "problems": probs[:6]})
+                _alert_admins_appliance_problem(db, a, probs, sev)
             except Exception:  # noqa: BLE001
                 db.rollback()
                 logger.exception("appliance health check failed for %s", a.id)
+
+
+def _alert_admins_appliance_problem(db, appliance, probs: list, sev: str) -> None:
+    """Notify platform admins of a newly-detected appliance health problem."""
+    try:
+        from .. import admin_notifications
+        from ..models import Tenant
+        tenant = db.get(Tenant, appliance.tenant_id)
+        cust = (tenant.name if tenant else None) or appliance.tenant_id
+        rows = [{"icon": "appliance", "name": appliance.name or "Appliance", "detail": cust}]
+        rows += [{"icon": "alert", "name": str(p), "detail": ""} for p in probs[:5]]
+        admin_notifications.raise_alert(
+            db, "platform_health",
+            subject=f"[Arkive] Appliance health — {appliance.name or appliance.id}",
+            title="Appliance health problem",
+            intro=f"{appliance.name or 'An appliance'} ({cust}) reported a health problem.",
+            rows=rows, severity="critical" if sev == "critical" else "warning",
+            tenant_id=appliance.tenant_id,
+            dedupe_key=f"appliance:{appliance.id}", dedupe_within_hours=6)
+    except Exception:  # noqa: BLE001
+        logger.exception("admin appliance-problem alert failed for %s", getattr(appliance, "id", "?"))
+
+
+_last_node_health: datetime | None = None
+# Node ids we've already alerted as offline this episode (cleared when they recover).
+_node_offline_alerted: set = set()
+_NODE_OFFLINE_SECONDS = 180  # heartbeat gap before we consider a node offline
+
+
+def _check_node_health() -> None:
+    """Control-plane only: detect customer/remote nodes that stopped heartbeating
+    (and ones that recover) and alert platform admins. Deduped per offline episode
+    so a persistently-down node emails once, plus a single recovery notice."""
+    role = (get_settings().node_role or "control-plane")
+    if role != "control-plane":
+        return
+    global _last_node_health
+    now = datetime.utcnow()
+    if _last_node_health and (now - _last_node_health) < timedelta(minutes=2):
+        return
+    _last_node_health = now
+    from .. import admin_notifications
+    from ..models import Node
+    with SessionLocal() as db:
+        for n in db.query(Node).filter(Node.is_self.is_(False)).all():
+            try:
+                hb = n.last_heartbeat_at
+                offline = bool(hb) and (now - hb).total_seconds() >= _NODE_OFFLINE_SECONDS
+                # A node that never checked in yet isn't alerted (still provisioning).
+                if offline and n.id not in _node_offline_alerted:
+                    mins = int((now - hb).total_seconds() // 60)
+                    admin_notifications.emit(
+                        db, "node_alert",
+                        subject=f"[Arkive] Node offline — {n.name or n.id}",
+                        title="Node offline",
+                        intro=f"Node \"{n.name or n.id}\" ({n.role}) stopped sending heartbeats.",
+                        rows=[{"icon": "server", "name": n.name or n.id, "detail": f"offline ~{mins}m"},
+                              {"icon": "activity", "name": "Role / region", "detail": f"{n.role} · {n.region or '—'}"}],
+                        severity="critical", dedupe_key=f"node_offline:{n.id}", dedupe_within_hours=6)
+                    _node_offline_alerted.add(n.id)
+                elif not offline and n.id in _node_offline_alerted:
+                    _node_offline_alerted.discard(n.id)
+                    admin_notifications.emit(
+                        db, "node_alert",
+                        subject=f"[Arkive] Node back online — {n.name or n.id}",
+                        title="Node back online",
+                        intro=f"Node \"{n.name or n.id}\" ({n.role}) is sending heartbeats again.",
+                        rows=[{"icon": "server", "name": n.name or n.id, "detail": "online"}],
+                        severity="info", dedupe_key=f"node_online:{n.id}", dedupe_within_hours=1)
+            except Exception:  # noqa: BLE001
+                logger.exception("node health check failed for %s", getattr(n, "id", "?"))
 
 
 def _run_due_purges() -> None:

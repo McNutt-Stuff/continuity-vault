@@ -66,6 +66,46 @@ DISK_PRESETS = [
 DEFAULT_DISK_BY_ROLE = {"customer-tenant": 1000, "public-web": 100, "control-plane": 200}
 
 
+# Deployable regions per provider (value = provider region id, label = friendly
+# name). Drives the deploy form's Region picker so an operator picks from real
+# hyperscaler regions instead of typing one.
+REGION_PRESETS = {
+    "aws": [
+        {"value": "us-east-1", "label": "US East (N. Virginia)"},
+        {"value": "us-east-2", "label": "US East (Ohio)"},
+        {"value": "us-west-1", "label": "US West (N. California)"},
+        {"value": "us-west-2", "label": "US West (Oregon)"},
+        {"value": "ca-central-1", "label": "Canada (Central)"},
+        {"value": "eu-west-1", "label": "Europe (Ireland)"},
+        {"value": "eu-west-2", "label": "Europe (London)"},
+        {"value": "eu-central-1", "label": "Europe (Frankfurt)"},
+        {"value": "eu-north-1", "label": "Europe (Stockholm)"},
+        {"value": "ap-southeast-1", "label": "Asia Pacific (Singapore)"},
+        {"value": "ap-southeast-2", "label": "Asia Pacific (Sydney)"},
+        {"value": "ap-northeast-1", "label": "Asia Pacific (Tokyo)"},
+        {"value": "ap-south-1", "label": "Asia Pacific (Mumbai)"},
+        {"value": "sa-east-1", "label": "South America (São Paulo)"},
+    ],
+    "azure": [
+        {"value": "eastus", "label": "East US (Virginia)"},
+        {"value": "eastus2", "label": "East US 2 (Virginia)"},
+        {"value": "centralus", "label": "Central US (Iowa)"},
+        {"value": "westus2", "label": "West US 2 (Washington)"},
+        {"value": "westus3", "label": "West US 3 (Arizona)"},
+        {"value": "canadacentral", "label": "Canada Central (Toronto)"},
+        {"value": "northeurope", "label": "North Europe (Ireland)"},
+        {"value": "westeurope", "label": "West Europe (Netherlands)"},
+        {"value": "uksouth", "label": "UK South (London)"},
+        {"value": "germanywestcentral", "label": "Germany West Central"},
+        {"value": "southeastasia", "label": "Southeast Asia (Singapore)"},
+        {"value": "australiaeast", "label": "Australia East (Sydney)"},
+        {"value": "japaneast", "label": "Japan East (Tokyo)"},
+        {"value": "centralindia", "label": "Central India (Pune)"},
+        {"value": "brazilsouth", "label": "Brazil South (São Paulo)"},
+    ],
+}
+
+
 def catalog(provider: str) -> dict:
     provider = (provider or "").lower()
     return {
@@ -74,6 +114,7 @@ def catalog(provider: str) -> dict:
         "default_size_by_role": DEFAULT_SIZE_BY_ROLE.get(provider, {}),
         "disk_presets": DISK_PRESETS,
         "default_disk_by_role": DEFAULT_DISK_BY_ROLE,
+        "regions": REGION_PRESETS.get(provider, []),
     }
 
 
@@ -97,6 +138,9 @@ def build_userdata(*, role: str, name: str, fqdn: str, cp_url: str, secret: str,
         f"export CV_NODE_ROLE={role}", f"export CV_NODE_NAME={name}",
         f"export CV_DOMAIN={fqdn}", f"export CV_CONTROL_PLANE_URL={cp}",
         f"export CV_NODE_SECRET={secret}", f'TOKEN="{progress_token}"',
+        # Exported so the installer (lib.sh) streams each named setup step back to
+        # the control plane's auto-provision job log.
+        f"export CV_PROVISION_TOKEN={progress_token}", f"export CV_PROVISION_URL={cp}",
         report,
         "trap 'report \"Bootstrap FAILED on the VM — see /var/log/arkive-bootstrap.log\"' ERR",
         'report "VM booted — downloading the installer"',

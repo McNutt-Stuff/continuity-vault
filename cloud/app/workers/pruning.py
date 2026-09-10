@@ -29,6 +29,8 @@ R_NETWORK_SAMPLES = 90   # daily network trend rollups
 R_LOGS_LOW = 7           # info/debug platform log lines
 R_LOGS_HIGH = 30         # warning/error/critical platform log lines
 R_NODE_METRICS = 90      # telemetry time-series (also pruned by telemetry.py)
+R_ADMIN_ALERTS = 30      # node-side admin-alert push queue (pushed to CP)
+R_ADMIN_NOTIF_LOG = 120  # CP admin-notification send log
 
 
 # Advisory-lock key so a scheduled prune and a manually-triggered one can never run
@@ -42,7 +44,8 @@ def prune_all(db) -> dict:
     so one failure can't abort the rest. Returns per-table row counts. A session
     advisory lock ensures only one prune runs at a time (skips if already running)."""
     from ..models import (ApplianceCommand, BackupRun, IntegrationRun, LogEntry, NetworkSample,
-                          NetworkUsage, NodeMetric, PendingAction, SyncJob)
+                          NetworkUsage, NodeMetric, PendingAction, SyncJob,
+                          AdminAlertEvent, AdminNotificationLog)
     from .. import node_config
     now = datetime.utcnow()
     counts: dict = {}
@@ -119,6 +122,14 @@ def prune_all(db) -> dict:
 
     _do("node_metrics_deleted", lambda: db.query(NodeMetric).filter(
         NodeMetric.ts < now - timedelta(days=r_node_metrics)).delete(
+            synchronize_session=False))
+
+    _do("admin_alert_events_deleted", lambda: db.query(AdminAlertEvent).filter(
+        AdminAlertEvent.created_at < now - timedelta(days=R_ADMIN_ALERTS)).delete(
+            synchronize_session=False))
+
+    _do("admin_notification_log_deleted", lambda: db.query(AdminNotificationLog).filter(
+        AdminNotificationLog.created_at < now - timedelta(days=R_ADMIN_NOTIF_LOG)).delete(
             synchronize_session=False))
 
     if is_pg:

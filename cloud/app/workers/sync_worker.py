@@ -24,7 +24,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Callable, List, Optional
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from cv_crypto.command import build_snapshot_manifest
@@ -33,7 +32,6 @@ from cv_crypto.provider import hexdigest
 from cv_crypto.signing import HybridSigner
 
 from .. import audit, credstore, fleet, keybroker, node_config
-from .. import features, rules_engine
 from ..connectors import get_connector
 from ..connectors import oauth
 from ..models import (
@@ -42,11 +40,8 @@ from ..models import (
     Collection,
     ConnectorAccount,
     ObjectVersion,
-    Rule,
     SearchDocument,
     SnapshotReceipt,
-    Tenant,
-    User,
     Vault,
 )
 from ..storage import build_destination
@@ -71,9 +66,7 @@ def _is_auth_error(exc: Exception) -> bool:
     s = str(exc).lower()
     tokens = ("401", "403", "invalid_grant", "invalid_token", "unauthorized",
               "forbidden", "token has expired", "token expired", "reauth",
-              "access_denied", "revoked", "needs-reauth", "invalid credentials",
-              "authentication failed", "invalid email", "invalid password",
-              "app-specific password")
+              "access_denied", "revoked", "needs-reauth", "invalid credentials")
     return any(t in s for t in tokens)
 
 
@@ -86,26 +79,11 @@ def _is_timeout_error(exc: Exception) -> bool:
 
 def _normalize_sync_error(exc: Exception) -> str:
     msg = (str(exc).strip() or exc.__class__.__name__)
-    # Capture the provider's HTTP status + a short response snippet when present,
-    # so a source failure records WHY (e.g. invalid_grant, quota exceeded) instead
-    # of a bare exception class. Error responses carry codes/descriptions, not
-    # secrets, and we cap the snippet.
-    resp = getattr(exc, "response", None)
-    if resp is not None:
-        code = getattr(resp, "status_code", None)
-        body = ""
-        try:
-            body = (resp.text or "").strip().replace("\n", " ")[:200]
-        except Exception:  # noqa: BLE001
-            body = ""
-        extra = " ".join(x for x in (f"HTTP {code}" if code else "", body) if x).strip()
-        if extra and extra not in msg:
-            msg = f"{msg} ({extra})".strip()
     if _is_auth_error(exc):
-        return ("Authentication failed: " + msg)[:800]
+        return ("Authentication failed: " + msg)[:500]
     if _is_timeout_error(exc):
-        return ("Connection timeout: " + msg)[:800]
-    return msg[:800]
+        return ("Connection timeout: " + msg)[:500]
+    return msg[:500]
 
 
 def _record_sync_success(db: Session, account: Optional[ConnectorAccount], count: int) -> None:
@@ -169,9 +147,8 @@ def _record_sync_error(db: Session, account: Optional[ConnectorAccount],
         db.commit()
     except Exception:
         db.rollback()
-    # The tenant-attributed audit event below is the canonical, richly-detailed log
-    # (account/type/error, customer, needs_reauth) that lands in Platform Logs — no
-    # separate context-less "sync failed" line (it duplicated this without tenant).
+    logger.error("sync failed: source=%s account=%s reauth=%s error=%s",
+                 collection.source_type, account.account_label, needs_auth, msg)
     try:
         audit.record(
             db, actor="sync-worker",
@@ -260,47 +237,25 @@ def _compose_preview(meta: dict, max_fields: int = 4) -> str:
     return " · ".join(bits)
 
 
-# An appliance is considered reachable for routing if it heartbeated within this
-# window (2 missed 30s beats + slack). Beyond it, writes queue for retry.
-_APPLIANCE_ONLINE_MAX_AGE_S = 120
-
-
-def _appliance_online(a: Optional[Appliance]) -> bool:
-    """True when the appliance has a fresh heartbeat (reachable for a write)."""
-    hb = getattr(a, "last_heartbeat_at", None) if a is not None else None
-    if hb is None:
-        return False
-    if hb.tzinfo is not None:
-        hb = hb.replace(tzinfo=None)
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    return (now - hb).total_seconds() < _APPLIANCE_ONLINE_MAX_AGE_S
-
-
 def _resolve_appliance(db: Session, tenant_id: str, kind: str) -> Optional[Appliance]:
     """Resolve a destination to a live appliance. Accepts the canonical
     ``store:<storageId>`` form, the legacy ``appliance:<id>`` form, and the bare
-    ``appliance`` (most-recent sealed unit).
-
-    An appliance that hasn't heartbeated recently is treated as UNAVAILABLE
-    (returns None) so the caller enqueues the write for retry and it shows up in
-    the node's queue — rather than issuing a command that silently sits pending on
-    an offline unit while staging fills up."""
+    ``appliance`` (most-recent sealed unit)."""
     if kind.startswith("store:"):
         store = db.get(ApplianceStorage, kind.split(":", 1)[1])
         if not store or store.tenant_id != tenant_id:
             return None
         a = db.get(Appliance, store.appliance_id)
-        return a if a and a.tenant_id == tenant_id and _appliance_online(a) else None
+        return a if a and a.tenant_id == tenant_id else None
     if ":" in kind:
         aid = kind.split(":", 1)[1]
         a = db.get(Appliance, aid)
-        return a if a and a.tenant_id == tenant_id and _appliance_online(a) else None
-    a = (db.query(Appliance)
-         .filter(Appliance.tenant_id == tenant_id,
-                 Appliance.state.in_(["SEALED", "ONLINE_STAGING", "READY_TO_SEAL"]))
-         .order_by(Appliance.last_heartbeat_at.desc())
-         .first())
-    return a if a and _appliance_online(a) else None
+        return a if a and a.tenant_id == tenant_id else None
+    return (db.query(Appliance)
+            .filter(Appliance.tenant_id == tenant_id,
+                    Appliance.state.in_(["SEALED", "ONLINE_STAGING", "READY_TO_SEAL"]))
+            .order_by(Appliance.last_heartbeat_at.desc())
+            .first())
 
 
 def _storage_id(kind: str) -> Optional[str]:
@@ -557,49 +512,6 @@ def _persist_stream_cursor(account: ConnectorAccount, mode: str,
             account.sync_cursor = new_cursor
 
 
-def _load_collection_rules(db: Session, collection: Collection):
-    """Enabled rules that apply to this collection (scoped by collection id and/or
-    source type), ordered so lower priority runs first. Empty scope = applies to
-    everything for the tenant. Rules take precedence over the basic Data Map logic."""
-    rules = (db.query(Rule)
-             .filter(Rule.tenant_id == collection.tenant_id, Rule.enabled.is_(True))
-             .order_by(Rule.priority.asc(), Rule.created_at.asc()).all())
-    out = []
-    for r in rules:
-        colls = r.collection_ids or []
-        srcs = r.source_types or []
-        if colls and collection.id not in colls:
-            continue
-        if srcs and collection.source_type not in srcs:
-            continue
-        out.append(r)
-    return out
-
-
-def _apply_rule_outcome(labels: List[str], meta: dict, preview: str, outcome):
-    """Fold a rule outcome into the index fields: add labels, mark restricted,
-    obfuscate the preview/metadata, and record which rules matched (``_rules``) so
-    it's queryable and visible in search."""
-    if not outcome or not outcome.applied:
-        return labels, meta, preview
-    new_labels = list(labels or [])
-    for lbl in outcome.add_labels:
-        if lbl not in new_labels:
-            new_labels.append(lbl)
-    if outcome.restricted and "Restricted" not in new_labels:
-        new_labels.append("Restricted")
-    new_meta = dict(meta or {})
-    new_preview = preview
-    if outcome.obfuscate:
-        new_preview = rules_engine.mask(preview)
-        new_meta = {k: (v if str(k).startswith("_") else rules_engine.mask(str(v)))
-                    for k, v in new_meta.items()}
-    new_meta["_rules"] = outcome.rule_names
-    if outcome.restricted:
-        new_meta["_restricted"] = True
-    return new_labels, new_meta, new_preview
-
-
 def ingest_objects(db: Session, collection: Collection, source_objects,
                    destinations: Optional[List[str]] = None,
                    searchable_fields: Optional[List[str]] = None,
@@ -623,19 +535,6 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     for k in source_keys:
         if k and k != "*" and k not in display_keys:
             display_keys.append(k)
-
-    # Rules engine (compliance) — evaluated per object below, TAKING PRECEDENCE
-    # over the basic Data Map logic. Only loaded when the tenant has the feature
-    # enabled; empty otherwise so ingestion is unchanged for everyone else.
-    tenant = db.get(Tenant, collection.tenant_id)
-    # Honour the OWNER user's flag too — personal/shared accounts can only enable
-    # rules per user (tenant flags aren't exposed for shared tenants).
-    rule_owner = db.get(User, vault.owner_user_id) if vault.owner_user_id else None
-    rules: list = []
-    rule_plan = "business"
-    if tenant is not None and features.resolve(rule_owner, tenant, "rules_enabled"):
-        rule_plan = (tenant.plan or "personal")
-        rules = _load_collection_rules(db, collection)
 
     root_key = keybroker.release_vault_root_key(vault.id)
     hierarchy = EnvelopeKeyHierarchy(root_key)
@@ -677,29 +576,11 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
 
     stored = 0
     deduped = 0
-    discarded = 0
     for idx, src in enumerate(src_list):
         # Prefer a client-supplied plaintext hash (agents encrypt with a fresh
         # nonce each run, so the ciphertext hash is never stable); otherwise hash
         # the content directly (connector plaintext is stable).
         content_hash = src.content_hash or hashlib.sha256(src.content or b"").hexdigest()
-        # Evaluate compliance rules once per object (precedence over basic logic).
-        outcome = None
-        if rules:
-            outcome = rules_engine.evaluate(
-                rules,
-                rules_engine.object_fields(
-                    doc_type=src.doc_type, category=src.category,
-                    title=src.title or "", source_type=collection.source_type,
-                    labels=src.labels, meta=src.meta),
-                plan=rule_plan)
-            if outcome.applied:
-                audit.record(db, actor="rules-engine", action="rule.matched",
-                             tenant_id=collection.tenant_id, resource=src.object_id,
-                             detail={"object": src.object_id, "source": collection.source_type,
-                                     "rules": outcome.rule_names,
-                                     "actions": sorted({a for m in outcome.matched
-                                                        for a in m.get("actions", [])})})
         prev = current_versions.get(src.object_id)
         if prev is None:
             pd = prior_docs.get(src.object_id)
@@ -731,44 +612,6 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                     SearchDocument.modified_at != src.modified_at,
                 ).update({SearchDocument.modified_at: src.modified_at},
                          synchronize_session=False)
-            # Self-heal derived index fields (title/preview/meta/labels) when the
-            # connector's extraction improved — repairs existing rows in place, no
-            # new version. Guarded on title/preview so it's a no-op (0 rows matched)
-            # once corrected and never churns on steady-state re-syncs.
-            if not zero_knowledge:
-                d_meta = _discrete_metadata(src.meta, display_keys)
-                d_preview = _compose_preview(d_meta)
-                d_title = str(src.title) if src.title is not None else ""
-                d_labels = src.labels or []
-                # Keep rule marks (labels/restricted/obfuscation/_rules) fresh on
-                # unchanged objects too, so editing a rule re-applies on re-sync.
-                if outcome is not None:
-                    d_labels, d_meta, d_preview = _apply_rule_outcome(
-                        d_labels, d_meta, d_preview, outcome)
-                d_blob = " ".join(
-                    str(x) for x in [src.title, *d_labels, *_flatten_values(d_meta)]
-                    if x is not None).strip()
-                db.query(SearchDocument).filter(
-                    SearchDocument.tenant_id == collection.tenant_id,
-                    SearchDocument.collection_id == collection.id,
-                    SearchDocument.object_id == src.object_id,
-                    SearchDocument.is_current.is_(True),
-                    or_(SearchDocument.title != d_title, SearchDocument.preview != d_preview),
-                ).update({
-                    SearchDocument.title: d_title,
-                    SearchDocument.preview: d_preview,
-                    SearchDocument.meta: d_meta,
-                    SearchDocument.doc_type: src.doc_type,
-                    SearchDocument.category: src.category,
-                    SearchDocument.labels: d_labels,
-                    SearchDocument.search_blob: d_blob,
-                }, synchronize_session=False)
-            continue
-
-        # Rules: DISCARD takes precedence — don't version, store, or index this
-        # object (it isn't backed up at all).
-        if outcome is not None and outcome.discard:
-            discarded += 1
             continue
 
         # New object, or content changed → record a new immutable version.
@@ -787,10 +630,6 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
             _encrypt_content_units(snapshot_key, src.content, src.object_id, chunk_size))
         total_bytes += len(src.content)
         stored += 1
-        # Rules: NO_INDEX stores the content (recoverable) but keeps it out of the
-        # search index. Skip building a SearchDocument entirely.
-        if outcome is not None and outcome.no_index:
-            continue
         # Index only discrete, connector-declared metadata — no body/content. The
         # preview is a composed "Field: value" summary of that metadata (empty for
         # zero-knowledge vaults, which index the title only).
@@ -798,19 +637,13 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
             discrete_meta: dict = {}
             preview = ""
             search_blob = ""
-            index_labels: list = []
         else:
             discrete_meta = _discrete_metadata(src.meta, display_keys)
             preview = _compose_preview(discrete_meta)
-            index_labels = src.labels or []
-            # Fold in any matching rules (labels, restricted, obfuscation, _rules).
-            if outcome is not None:
-                index_labels, discrete_meta, preview = _apply_rule_outcome(
-                    index_labels, discrete_meta, preview, outcome)
             # Coerce every part to str — some connectors (e.g. Gmail) can surface
             # non-str header objects, which would break the join.
             search_blob = " ".join(
-                str(x) for x in [src.title, *index_labels, *_flatten_values(discrete_meta)]
+                str(x) for x in [src.title, *(src.labels or []), *_flatten_values(discrete_meta)]
                 if x is not None
             ).strip()
         index_rows.append(
@@ -826,7 +659,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                 title=str(src.title) if src.title is not None else "",
                 preview=preview,
                 meta=discrete_meta,
-                labels=[] if zero_knowledge else index_labels,
+                labels=[] if zero_knowledge else (src.labels or []),
                 search_blob=search_blob,
                 size_bytes=src.size_bytes,
                 modified_at=src.modified_at,
@@ -1022,18 +855,9 @@ def _account_config(db: Session, collection: Collection,
     try:
         creds = credstore.decrypt(collection.tenant_id, account.encrypted_credentials)
     except Exception as exc:
-        # AES-GCM InvalidTag stringifies to "" — surface a real message. This
-        # almost always means the node's CV_KEK_SECRET differs from where the
-        # source was linked (a federated node can't decrypt CP-encrypted creds),
-        # so every sync here fails. Raise so the standard error path records it on
-        # the account (last_error/fail_count), audits it WITH the tenant, and feeds
-        # the source-problem notification — instead of silently retrying forever.
-        detail = (str(exc).strip() or exc.__class__.__name__)
-        raise RuntimeError(
-            f"Stored credentials could not be decrypted ({detail}). The encryption "
-            f"key on this server may not match where the source was connected — "
-            f"reconnect the source, or align the node's key with the control plane."
-        ) from exc
+        logger.warning("credentials decrypt failed during sync: source=%s account=%s error=%s",
+                       collection.source_type, getattr(account, "account_label", "?"), exc)
+        return {}
     # Credential access is security-relevant — record it in the audit ledger.
     audit.record(db, actor="sync-worker", action="connector.credentials_accessed",
                  tenant_id=collection.tenant_id, resource=account.id,

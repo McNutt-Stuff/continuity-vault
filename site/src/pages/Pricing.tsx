@@ -46,7 +46,7 @@ export default function Pricing() {
                     <li key={f}><span className="tick">✓</span> {f}</li>
                   ))}
                 </ul>
-                <Link className={`btn ${p.featured ? "primary" : "ghost"}`} to="/contact">{p.cta}</Link>
+                <Link className={`btn ${p.featured ? "primary" : "ghost"}`} to={p.cta === "Talk to sales" ? "/contact" : "/start"}>{p.cta}</Link>
               </div>
             );
           })}

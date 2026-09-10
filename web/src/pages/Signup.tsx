@@ -38,9 +38,9 @@ const PLAN_BLURB: Record<string, string> = {
   business: "For teams and businesses that need continuity.",
   enterprise: "Scale, controls, and priority support.",
 };
-const RECOMMENDED = "business";
+const RECOMMENDED = "family";
 const DEDICATED = new Set(["family", "business", "enterprise"]);
-const STEPS = ["Plan", "Account", "Address", "Protection", "Billing"];
+const STEPS = ["Plan", "Account", "Contact", "Protection", "Billing"];
 const iconOf = (n: string): IconName => (["cloud","server","key","shield","check","database","file"].includes(n) ? n : "database") as IconName;
 function money(n: number) { return "$" + Math.round(n).toLocaleString(); }
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -66,6 +66,11 @@ export default function Signup() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [done, setDone] = useState<{ dev_code?: string; trial?: boolean } | null>(null);
+  // Email-verification interstitial (after the Account step).
+  const [verify, setVerify] = useState<{ token: string; sent: boolean; devLink?: string } | null>(null);
+  // When the email link opens this page (/signup?verify=TOKEN), confirm it here.
+  const landingToken = useMemo(() => new URLSearchParams(window.location.search).get("verify"), []);
+  const [landing, setLanding] = useState<"pending" | "ok" | "error">("pending");
 
   const stripeRef = useRef<any>(null);
   const cardElRef = useRef<any>(null);
@@ -76,6 +81,27 @@ export default function Signup() {
     api.get<PayConfig>("/signup/payment-config").then(setPay).catch(() => setPay({ configured: false }));
   }, []);
 
+  // Landing from the verification email: confirm the token, then let the original
+  // signup tab (which is polling) continue automatically.
+  useEffect(() => {
+    if (!landingToken) return;
+    api.post(`/signup/verify/confirm?token=${encodeURIComponent(landingToken)}`, {})
+      .then(() => setLanding("ok")).catch(() => setLanding("error"));
+  }, [landingToken]);
+
+  // Poll verification status while the interstitial is showing.
+  useEffect(() => {
+    if (!verify) return;
+    let stop = false;
+    const iv = setInterval(async () => {
+      try {
+        const s = await api.get<{ verified: boolean }>(`/signup/verify/status?token=${encodeURIComponent(verify.token)}`);
+        if (!stop && s.verified) { clearInterval(iv); setVerify(null); setStep(2); }
+      } catch { /* keep polling */ }
+    }, 3000);
+    return () => { stop = true; clearInterval(iv); };
+  }, [verify]);
+
   const stripeMode = pay?.processor === "stripe" && !!pay.publishable_key;
   const selectedPlan = useMemo(() => cfg?.plans.find((p) => p.id === plan), [cfg, plan]);
   const isDedicated = DEDICATED.has(plan);
@@ -85,16 +111,22 @@ export default function Signup() {
   const applianceFee = cfg?.appliance_nonreturn_fee || 1999;
   const hasHardware = options.has("appliance") || Object.values(qty).some((q) => q > 0);
 
-  // Live monthly estimate (mirrors the in-app onboarding math).
+  // Live estimate. Arkive Cloud is billed on usage at the plan's per-TB rate for
+  // the chosen storage amount; appliances add a monthly lease + one-time setup.
   const est = useMemo(() => {
-    if (!pricing || !selectedPlan) return { monthly: 0, payg: false };
-    const rate = selectedPlan.price_per_tb_month;
-    const minTb = selectedPlan.min_tb || 0;
-    const billable = isDedicated ? Math.max(licensedTb, minTb) : minTb;
-    const protection = billable * rate;
-    const appliance = (pricing.appliance_tiers || []).reduce((s, t) => s + (qty[t.capacity_tb] || 0) * t.monthly, 0);
-    return { monthly: protection + appliance, payg: !isDedicated };
-  }, [pricing, selectedPlan, isDedicated, licensedTb, qty]);
+    const rate = selectedPlan?.price_per_tb_month || 0;
+    const minTb = selectedPlan?.min_tb || 0;
+    const usesCloud = options.has("cv-cloud");
+    const storageTb = Math.max(licensedTb, minTb || 1);
+    const cloud = usesCloud ? storageTb * rate : 0;
+    const tiers = pricing?.appliance_tiers || [];
+    const applianceMonthly = tiers.reduce((s, t) => s + (qty[t.capacity_tb] || 0) * t.monthly, 0);
+    const applianceSetup = tiers.reduce((s, t) => s + (qty[t.capacity_tb] || 0) * t.setup, 0);
+    return { monthly: cloud + applianceMonthly, setup: applianceSetup, cloud, applianceMonthly, storageTb, rate, usesCloud };
+  }, [pricing, selectedPlan, licensedTb, qty, options]);
+
+  // Keep the storage amount at or above the selected plan's minimum.
+  useEffect(() => { const m = selectedPlan?.min_tb || 0; if (m) setLicensedTb((v) => Math.max(v, m)); }, [selectedPlan?.min_tb]);
 
   // Mount the Stripe card field on the billing step.
   useEffect(() => {
@@ -118,6 +150,55 @@ export default function Signup() {
   function up(k: keyof typeof form, v: string) { setForm((f) => ({ ...f, [k]: v })); }
   function toggleOpt(id: string) { setOptions((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
   function bump(cap: number, d: number) { setQty((c) => ({ ...c, [cap]: Math.max(0, (c[cap] || 0) + d) })); }
+
+  // Kick off the email-verification interstitial after the Account step.
+  async function startVerify() {
+    const e = validAccount(); if (e) return setErr(e);
+    setErr(""); setBusy(true);
+    try {
+      const r = await api.post<{ token: string; sent?: boolean; dev_link?: string }>(
+        "/signup/verify/start", { email: form.email.trim().toLowerCase(), first_name: form.first_name.trim() });
+      setVerify({ token: r.token, sent: !!r.sent, devLink: r.dev_link });
+    } catch (er) {
+      setErr((er as { message?: string })?.message || "We couldn't send your verification email. Please try again.");
+    } finally { setBusy(false); }
+  }
+
+  // Itemized summary of the monthly and one-time charges for the current selection.
+  function SummaryBox() {
+    const applianceLines = (pricing?.appliance_tiers || [])
+      .map((t) => ({ ...t, n: qty[t.capacity_tb] || 0 })).filter((x) => x.n > 0);
+    return (
+      <div className="card" style={{ background: "var(--inset)", marginTop: 16 }}>
+        <div className="stack" style={{ gap: 7 }}>
+          {est.usesCloud && (
+            <div className="spread" style={{ fontSize: 13 }}>
+              <span>Arkive Cloud · {est.storageTb} TB <span className="faint">(billed on usage)</span></span>
+              <span>{money(est.cloud)}/mo</span>
+            </div>
+          )}
+          {applianceLines.map((x) => (
+            <div key={x.capacity_tb} className="spread" style={{ fontSize: 13 }}>
+              <span>{x.n}× {x.model} appliance</span>
+              <span>{money(x.n * x.monthly)}/mo</span>
+            </div>
+          ))}
+          <div className="spread" style={{ borderTop: "1px solid var(--border-soft)", paddingTop: 8, marginTop: 1, fontWeight: 700 }}>
+            <span>Billed monthly</span><span>{money(est.monthly)}/mo</span>
+          </div>
+          {est.setup > 0 && (
+            <div className="spread" style={{ fontWeight: 700 }}>
+              <span>One-time hardware setup</span><span>{money(est.setup)}</span>
+            </div>
+          )}
+        </div>
+        <div className="faint" style={{ fontSize: 11, marginTop: 8 }}>
+          Free for {trialDays} days.{est.usesCloud ? ` Arkive Cloud is billed on actual usage at $${est.rate}/TB · month.` : ""}
+          {est.setup > 0 ? " One-time hardware setup is charged when your appliance ships, after your trial." : ""}
+        </div>
+      </div>
+    );
+  }
 
   function validAccount(): string {
     if (!form.first_name.trim()) return "Please enter your first name.";
@@ -167,6 +248,33 @@ export default function Signup() {
     } catch (e) {
       setErr((e as { message?: string })?.message || "Sign-up failed. Please try again.");
     } finally { setBusy(false); }
+  }
+
+  // Email verified via the link — tell the user they can return to their signup.
+  if (landingToken) {
+    return (
+      <div className="auth-wrap"><div className="auth-card card">
+        <div className="auth-logo"><img src="/logos/Logo-Full.png" alt="Arkive" /></div>
+        {landing === "error" ? (
+          <>
+            <div className="auth-sub">This verification link has expired</div>
+            <div className="faint" style={{ fontSize: 13, textAlign: "center" }}>
+              Go back to your signup tab and resend the verification email.
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: 10 }}>
+              <span style={{ display: "inline-flex", padding: 14, borderRadius: "50%", background: "var(--inset)" }}><Icon name="check" size={24} /></span>
+            </div>
+            <div className="auth-sub" style={{ textAlign: "center" }}>Email verified</div>
+            <div className="faint" style={{ fontSize: 13, textAlign: "center" }}>
+              You can return to your signup — it will continue automatically. You can close this tab.
+            </div>
+          </>
+        )}
+      </div></div>
+    );
   }
 
   if (cfg && !cfg.enabled) {
@@ -237,7 +345,7 @@ export default function Signup() {
           )}
 
           {/* STEP 1 — Account */}
-          {step === 1 && (
+          {step === 1 && !verify && (
             <>
               <h2 style={{ margin: "0 0 16px" }}>Your details</h2>
               <div className="row" style={{ gap: 10 }}>
@@ -250,15 +358,42 @@ export default function Signup() {
               {err && <div className="pill danger" style={{ marginBottom: 10 }}>{err}</div>}
               <div className="spread" style={{ marginTop: 8 }}>
                 <button className="btn ghost" onClick={() => setStep(0)}>Back</button>
-                <button className="btn primary" onClick={() => { const e = validAccount(); if (e) return setErr(e); setErr(""); setStep(2); }}>Continue</button>
+                <button className="btn primary" disabled={busy} onClick={startVerify}>{busy ? "Sending…" : "Continue"}</button>
               </div>
             </>
+          )}
+
+          {/* STEP 1b — Verify email interstitial (waits for the emailed link) */}
+          {step === 1 && verify && (
+            <div style={{ textAlign: "center", padding: "8px 0" }}>
+              <div style={{ display: "inline-flex", padding: 14, borderRadius: "50%", background: "var(--inset)", marginBottom: 12 }}><Icon name="mail" size={24} /></div>
+              <h2 style={{ margin: "0 0 6px" }}>Verify your email</h2>
+              <div className="faint" style={{ fontSize: 13, maxWidth: 400, margin: "0 auto 4px" }}>
+                We sent a verification link to <b>{form.email}</b>. Open it and this page will continue automatically.
+              </div>
+              <div className="row" style={{ gap: 8, justifyContent: "center", alignItems: "center", margin: "16px 0", color: "var(--text-dim)", fontSize: 12.5 }}>
+                <span className="spinner" style={{ width: 14, height: 14 }} />
+                Waiting for you to verify…
+              </div>
+              {verify.devLink && (
+                <div className="pill info" style={{ marginBottom: 12 }}>
+                  Dev link: <a href={verify.devLink} target="_blank" rel="noreferrer" style={{ marginLeft: 6, color: "var(--accent, #4f7cff)" }}>open</a>
+                </div>
+              )}
+              {err && <div className="pill danger" style={{ marginBottom: 10 }}>{err}</div>}
+              <div className="faint" style={{ fontSize: 12 }}>
+                Didn't get it? <button className="btn ghost sm" disabled={busy} onClick={startVerify}>Resend email</button>
+              </div>
+              <div style={{ marginTop: 14 }}>
+                <button className="btn ghost" onClick={() => { setVerify(null); setErr(""); }}>Back</button>
+              </div>
+            </div>
           )}
 
           {/* STEP 2 — Address */}
           {step === 2 && (
             <>
-              <h2 style={{ margin: "0 0 4px" }}>Billing address</h2>
+              <h2 style={{ margin: "0 0 4px" }}>Contact information</h2>
               <div className="faint" style={{ fontSize: 12.5, marginBottom: 16 }}>We use this to place your data in the right region and for billing.</div>
               <div className="field"><label>Street address</label><input className="input" autoFocus value={form.line1} onChange={(e) => up("line1", e.target.value)} placeholder="123 Main St" /></div>
               <div className="field"><label>Apt, suite, etc. <span className="faint">(optional)</span></label><input className="input" value={form.line2} onChange={(e) => up("line2", e.target.value)} /></div>
@@ -305,11 +440,14 @@ export default function Signup() {
                         </div>
                       </div>
 
-                      {on && t.id === "cv-cloud" && isDedicated && (
+                      {on && t.id === "cv-cloud" && (
                         <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)" }}>
-                          <label className="faint" style={{ fontSize: 12 }}>How much to protect: <b style={{ color: "var(--text)" }}>{licensedTb} TB</b></label>
-                          <input type="range" min={Math.max(1, selectedPlan?.min_tb || 1)} max={50} value={licensedTb}
+                          <label className="faint" style={{ fontSize: 12 }}>Storage amount: <b style={{ color: "var(--text)" }}>{est.storageTb} TB</b></label>
+                          <input type="range" min={Math.max(1, selectedPlan?.min_tb || 1)} max={50} value={est.storageTb}
                                  onChange={(e) => setLicensedTb(parseInt(e.target.value, 10))} style={{ width: "100%" }} />
+                          <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
+                            Billed on usage — you only pay for what you store. Est. <b style={{ color: "var(--text)" }}>{money(est.cloud)}/mo</b> at ${selectedPlan?.price_per_tb_month}/TB · month.
+                          </div>
                         </div>
                       )}
                       {on && t.id === "appliance" && (pricing?.appliance_tiers || []).length > 0 && (
@@ -348,11 +486,7 @@ export default function Signup() {
                 </div>
               )}
 
-              <div className="card" style={{ background: "var(--inset)", marginTop: 16 }}>
-                <div className="spread"><span className="faint">Estimated monthly</span>
-                  <span style={{ fontWeight: 700 }}>{est.payg ? "Pay as you go" : `${money(est.monthly)}/mo`}</span></div>
-                <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>Free for {trialDays} days · then billed monthly{est.payg ? ` at $${selectedPlan?.price_per_tb_month}/TB` : ""}.</div>
-              </div>
+              <SummaryBox />
 
               <div className="spread" style={{ marginTop: 16 }}>
                 <button className="btn ghost" onClick={() => setStep(2)}>Back</button>
@@ -366,12 +500,13 @@ export default function Signup() {
             <>
               <h2 style={{ margin: "0 0 4px" }}>Start your free trial</h2>
               <div className="faint" style={{ fontSize: 12.5, marginBottom: 16 }}>
-                Free for {trialDays} days. {est.payg ? "You'll be billed for what you protect" : `Then ${money(est.monthly)}/mo`} — cancel anytime before the trial ends and you won't be charged.
+                Free for {trialDays} days, then {money(est.monthly)}/mo{est.setup > 0 ? ` plus a one-time ${money(est.setup)} hardware setup` : ""} — cancel anytime before the trial ends and you won't be charged.
               </div>
+              <SummaryBox />
               {stripeMode ? (
                 <>
-                  <div className="field"><label>Card details</label><div ref={cardMountRef} className="input" style={{ padding: "12px 12px" }} /></div>
-                  <div className="faint" style={{ fontSize: 11, marginBottom: 12 }}><Icon name="lock" size={11} /> Secured by Stripe. Your card is charged {money(est.monthly)} only after your {trialDays}-day trial ends.</div>
+                  <div className="field" style={{ marginTop: 16 }}><label>Card details</label><div ref={cardMountRef} className="input" style={{ padding: "12px 12px" }} /></div>
+                  <div className="faint" style={{ fontSize: 11, marginBottom: 12 }}><Icon name="lock" size={11} /> Secured by Stripe. Your card is charged after your {trialDays}-day trial ends.</div>
                   {err && <div className="pill danger" style={{ marginBottom: 10 }}>{err}</div>}
                   <div className="spread">
                     <button className="btn ghost" onClick={() => setStep(3)} disabled={busy}>Back</button>

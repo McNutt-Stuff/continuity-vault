@@ -167,6 +167,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "fleet", label: "Appliance fleet", icon: "server", group: "Infrastructure" },
   { key: "crypto", label: "Crypto", icon: "lock", group: "Infrastructure" },
   { key: "updates", label: "Updates", icon: "clock", group: "Infrastructure" },
+  { key: "notifications", label: "Notifications", icon: "mail", group: "Infrastructure" },
   { key: "debug", label: "Debug", icon: "activity", group: "Infrastructure" },
   { key: "logs", label: "Platform Logs", icon: "note", group: "Infrastructure" },
   { key: "audit", label: "Audit log", icon: "shield", group: "Infrastructure" },
@@ -201,6 +202,7 @@ export default function Admin() {
       {s === "crypto" && <Crypto />}
       {s === "audit" && <Audit />}
       {s === "updates" && <Updates />}
+      {s === "notifications" && <NotificationsAdmin />}
       {s === "debug" && <DebugAdmin />}
       {s === "logs" && <PlatformLogs />}
       {s === "support-tickets" && <SupportTicketsAdmin />}
@@ -444,7 +446,7 @@ function AutoProvisionAdmin() {
   useEffect(() => {
     api.get<any[]>("/admin/provisioning/services").then(setSvcs).catch(() => {});
     api.get<any>("/admin/topology").then((t) => setClusters(t.clusters || [])).catch(() => {});
-    api.get<any[]>("/admin/config-profiles").then((p) => setProfiles((p || []).filter((x) => (x.kind || x.target) === "node"))).catch(() => {});
+    api.get<any>("/admin/config-profiles").then((r) => setProfiles((r.profiles || []).filter((x: any) => x.target === "node"))).catch(() => {});
     void loadJobs();
   }, []);
   useEffect(() => {
@@ -463,6 +465,7 @@ function AutoProvisionAdmin() {
       setCat(c);
       setForm((f) => ({
         ...f,
+        region: "",
         size: f.size || (c.default_size_by_role?.[f.role] || c.sizes?.[0]?.value || ""),
         disk_gb: f.disk_gb || String(c.default_disk_by_role?.[f.role] || ""),
       }));
@@ -562,7 +565,12 @@ function AutoProvisionAdmin() {
                   </select>
                 </div>
               </Field>
-              <Field label={`Region ${svc ? `(default ${svc.region || "—"})` : ""}`}><input className="input sm" value={form.region} onChange={(e) => setForm({ ...form, region: e.target.value })} placeholder="leave blank for default" /></Field>
+              <Field label={`Region ${svc ? `(default ${svc.region || "—"})` : ""}`}>
+                <select className="input sm" value={form.region} onChange={(e) => setForm({ ...form, region: e.target.value })}>
+                  <option value="">{svc?.region ? `Service default (${svc.region})` : "Provider default"}</option>
+                  {(cat?.regions || []).map((r: any) => <option key={r.value} value={r.value}>{r.label} — {r.value}</option>)}
+                </select>
+              </Field>
               <Field label="Configuration profile">
                 <select className="input sm" value={form.config_profile_id} onChange={(e) => setForm({ ...form, config_profile_id: e.target.value })}>
                   <option value="">— none —</option>
@@ -4309,6 +4317,206 @@ function NotifTest({ dbg, flash }: {
         </div>
       )}
     </Card>
+  );
+}
+
+interface AdminNotifType { key: string; label: string; icon: string; default: boolean; severity: string; desc: string; }
+interface AdminNotifAdmin { id: string; email: string; name: string; }
+interface AdminNotifConfig { enabled: boolean; recipient_ids: string[]; extra_emails: string[]; types: Record<string, boolean>; }
+interface AdminNotifLog { id: string; type: string; severity: string; subject: string; summary: string; recipients: string[]; ok: boolean; created_at: string | null; }
+interface AdminNotifPayload { config: AdminNotifConfig; admins: AdminNotifAdmin[]; types: AdminNotifType[]; recent: AdminNotifLog[]; }
+
+function NotifSwitch({ on, onClick }: { on: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick} aria-pressed={on} title={on ? "On" : "Off"}
+      style={{ width: 40, height: 22, borderRadius: 999, border: "none", cursor: "pointer", flexShrink: 0,
+               background: on ? "var(--brand)" : "var(--border)", position: "relative", transition: "background .15s" }}>
+      <span style={{ position: "absolute", top: 3, left: on ? 21 : 3, width: 16, height: 16,
+                     borderRadius: "50%", background: "#fff", transition: "left .15s" }} />
+    </button>
+  );
+}
+
+const NOTIF_SEV_TONE: Record<string, "ok" | "info" | "warn" | "danger"> = {
+  info: "info", warning: "warn", critical: "danger",
+};
+
+// Admin Notifications — platform-operator email alerts (health, updates, node &
+// customer alerts, billing failures, new signups) to a selectable admin list.
+function NotificationsAdmin() {
+  const [data, setData] = useState<AdminNotifPayload | null>(null);
+  const [enabled, setEnabled] = useState(true);
+  const [types, setTypes] = useState<Record<string, boolean>>({});
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [extra, setExtra] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState("");
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
+
+  function apply(p: AdminNotifPayload) {
+    setData(p);
+    setEnabled(p.config.enabled);
+    setTypes({ ...p.config.types });
+    setSel(new Set(p.config.recipient_ids || []));
+    setExtra((p.config.extra_emails || []).join(", "));
+  }
+  const load = () => api.get<AdminNotifPayload>("/admin/notifications/settings").then(apply).catch(() => {});
+  useEffect(() => { void load(); }, []);
+
+  function toggleType(k: string) { setTypes((t) => ({ ...t, [k]: !t[k] })); }
+  function toggleAdmin(id: string) { setSel((c) => { const s = new Set(c); s.has(id) ? s.delete(id) : s.add(id); return s; }); }
+
+  async function save() {
+    setSaving(true);
+    try {
+      const extra_emails = extra.split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean);
+      const r = await api.put<{ config: AdminNotifConfig }>("/admin/notifications/settings", {
+        enabled, types, recipient_ids: [...sel], extra_emails });
+      if (data) apply({ ...data, config: r.config });
+      flash("Notification settings saved");
+    } catch (e) { await notify({ message: (e as Error).message || "Could not save", tone: "danger" }); }
+    finally { setSaving(false); }
+  }
+
+  async function sendTest(key: string) {
+    setTesting(key);
+    try {
+      const r = await api.post<{ ok: boolean; message: string; recipients?: string[] }>(
+        "/admin/notifications/test", { type: key });
+      if (r.ok) { flash(`Test sent to ${(r.recipients || []).length} recipient(s)`); void load(); }
+      else await notify({ message: r.message || "Could not send test", tone: "danger" });
+    } catch (e) { await notify({ message: (e as Error).message || "Could not send test", tone: "danger" }); }
+    finally { setTesting(""); }
+  }
+
+  if (!data) return <Card><div className="muted">Loading…</div></Card>;
+
+  const recipientCount = sel.size > 0 ? sel.size : data.admins.length;
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 12, alignItems: "flex-start" }}>
+        <div>
+          <h3 style={{ margin: "0 0 2px" }}>Admin Notifications</h3>
+          <div className="faint" style={{ fontSize: 12.5, maxWidth: 560 }}>
+            Email platform admins when significant things happen — platform health, updates,
+            node &amp; customer alerts, billing failures and new signups.
+          </div>
+        </div>
+        <button className="btn primary" onClick={save} disabled={saving}>
+          {saving ? "Saving…" : "Save changes"}
+        </button>
+      </div>
+
+      <Card style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ alignItems: "center", gap: 12 }}>
+          <div className="row" style={{ gap: 10, alignItems: "center" }}>
+            <Icon name="mail" size={16} />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>Admin notifications</div>
+              <div className="faint" style={{ fontSize: 12 }}>Master switch for all platform-admin alerts.</div>
+            </div>
+          </div>
+          <NotifSwitch on={enabled} onClick={() => setEnabled((v) => !v)} />
+        </div>
+      </Card>
+
+      <div className="row" style={{ gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+        {/* Alert types */}
+        <Card style={{ flex: "1 1 340px", minWidth: 320, opacity: enabled ? 1 : 0.55 }}>
+          <h4 style={{ margin: "0 0 2px" }}>Alert types</h4>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 6 }}>Choose which events send an email.</div>
+          <div className="stack" style={{ gap: 0 }}>
+            {data.types.map((t) => (
+              <div key={t.key} className="spread"
+                   style={{ padding: "11px 0", borderTop: "1px solid var(--border-soft)", alignItems: "center", gap: 12 }}>
+                <div className="row" style={{ gap: 10, alignItems: "center", minWidth: 0 }}>
+                  <Icon name={(t.icon || "mail") as IconName} size={15} />
+                  <div style={{ minWidth: 0 }}>
+                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                      <span style={{ fontWeight: 600, fontSize: 13.5 }}>{t.label}</span>
+                      <Pill tone={NOTIF_SEV_TONE[t.severity] || "info"}>{t.severity}</Pill>
+                    </div>
+                    <div className="faint" style={{ fontSize: 12 }}>{t.desc}</div>
+                  </div>
+                </div>
+                <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                  <button className="btn ghost sm" onClick={() => sendTest(t.key)}
+                          disabled={testing === t.key || !enabled || !types[t.key]}
+                          title={!types[t.key] ? "Enable this type to test" : "Send a sample email"}>
+                    {testing === t.key ? "Sending…" : "Test"}
+                  </button>
+                  <NotifSwitch on={!!types[t.key]} onClick={() => toggleType(t.key)} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        {/* Recipients */}
+        <Card style={{ flex: "1 1 300px", minWidth: 300, opacity: enabled ? 1 : 0.55 }}>
+          <h4 style={{ margin: "0 0 2px" }}>Recipients</h4>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>
+            {sel.size === 0
+              ? `All platform admins (${data.admins.length}) receive alerts.`
+              : `${sel.size} selected admin(s) receive alerts.`}
+          </div>
+          <div className="stack" style={{ gap: 0 }}>
+            {data.admins.map((a) => (
+              <label key={a.id} className="spread"
+                     style={{ padding: "9px 0", borderTop: "1px solid var(--border-soft)", alignItems: "center", cursor: "pointer", gap: 10 }}>
+                <div className="row" style={{ gap: 10, alignItems: "center", minWidth: 0 }}>
+                  <Icon name="user" size={14} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{a.name}</div>
+                    <div className="faint" style={{ fontSize: 11.5 }}>{a.email}</div>
+                  </div>
+                </div>
+                <input type="checkbox" checked={sel.has(a.id)} onChange={() => toggleAdmin(a.id)} />
+              </label>
+            ))}
+            {data.admins.length === 0 && <div className="muted" style={{ fontSize: 12.5, padding: "8px 0" }}>No platform admins found.</div>}
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>Also notify (extra addresses)</div>
+            <input className="input" value={extra} onChange={(e) => setExtra(e.target.value)}
+                   placeholder="ops@company.com, oncall@company.com" />
+            <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
+              Comma-separated. Always notified, even without an Arkive admin account.
+            </div>
+          </div>
+        </Card>
+      </div>
+
+      {/* Recent alerts */}
+      <Card style={{ marginTop: 16 }}>
+        <div className="spread" style={{ marginBottom: 8 }}>
+          <h4 style={{ margin: 0 }}>Recent alerts</h4>
+          <div className="faint" style={{ fontSize: 12 }}>Delivered to {recipientCount} recipient(s)</div>
+        </div>
+        {data.recent.length === 0 ? (
+          <div className="muted" style={{ fontSize: 12.5 }}>No admin alerts have been sent yet.</div>
+        ) : (
+          <table className="table">
+            <thead><tr><th>When</th><th>Type</th><th>Subject</th><th>Recipients</th><th>Status</th></tr></thead>
+            <tbody>
+              {data.recent.map((r) => (
+                <tr key={r.id}>
+                  <td className="faint" style={{ fontSize: 12, whiteSpace: "nowrap" }}>{r.created_at ? timeAgo(r.created_at) : "—"}</td>
+                  <td><Pill tone={NOTIF_SEV_TONE[r.severity] || "info"}>{r.type}</Pill></td>
+                  <td style={{ fontSize: 13 }}>{r.subject}</td>
+                  <td className="faint" style={{ fontSize: 12 }}>{(r.recipients || []).length}</td>
+                  <td>{r.ok ? <Pill tone="ok">sent</Pill> : <Pill tone="danger">failed</Pill>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
   );
 }
 

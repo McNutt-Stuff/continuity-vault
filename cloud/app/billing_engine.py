@@ -151,7 +151,8 @@ def run_due_charges(db: Session, now: datetime | None = None) -> int:
 def _handle_failure(db: Session, prof: BillingProfile, now: datetime) -> None:
     """A charge failed: escalate dunning, retry a few times, then cancel."""
     prof.dunning_attempts = (prof.dunning_attempts or 0) + 1
-    if prof.dunning_attempts >= MAX_DUNNING_ATTEMPTS:
+    final = prof.dunning_attempts >= MAX_DUNNING_ATTEMPTS
+    if final:
         prof.status = "canceled"
         prof.active = False
         prof.next_charge_at = None
@@ -160,6 +161,35 @@ def _handle_failure(db: Session, prof: BillingProfile, now: datetime) -> None:
         prof.status = "past_due"
         prof.next_charge_at = now + timedelta(days=DUNNING_RETRY_DAYS)
         _email_dunning(db, prof, final=False)
+    _alert_admins_billing_failure(db, prof, final)
+
+
+def _alert_admins_billing_failure(db: Session, prof: BillingProfile, final: bool) -> None:
+    """Notify platform admins of a failed charge (deduped per profile+day)."""
+    try:
+        from . import admin_notifications
+        from .models import Tenant
+        tenant = db.get(Tenant, prof.tenant_id)
+        name = (tenant.name if tenant else None) or prof.tenant_id
+        amount = f"${(prof.amount_cents or 0) / 100:.2f} {prof.currency or 'USD'}"
+        attempt = f"{prof.dunning_attempts} of {MAX_DUNNING_ATTEMPTS}"
+        rows = [{"icon": "user", "name": name, "detail": amount},
+                {"icon": "credit-card", "name": prof.plan_name or "Plan", "detail": f"attempt {attempt}"}]
+        if final:
+            intro = (f"{name}'s recurring charge failed on the final dunning attempt — "
+                     f"the account has been canceled for non-payment.")
+        else:
+            intro = f"{name}'s recurring charge failed ({amount}). Dunning attempt {attempt}."
+        admin_notifications.emit(
+            db, "billing_failure",
+            subject=f"[Arkive] Billing failure — {name}",
+            title="Billing charge failed", intro=intro, rows=rows,
+            severity="critical" if final else "warning",
+            dedupe_key=f"billing:{prof.id}:{prof.dunning_attempts}",
+            dedupe_within_hours=12)
+    except Exception:  # noqa: BLE001 — alerting must never affect billing
+        logger.exception("admin billing-failure alert failed for profile %s", prof.id)
+
 
 
 def _billing_contact(db: Session, prof: BillingProfile):

@@ -989,6 +989,52 @@ class NotificationLog(Base):
 
 
 
+class AdminNotificationLog(Base):
+    """One row per platform-admin alert email sent by the Admin Notifications
+    framework (platform health, updates, node/customer alerts, billing failures,
+    new signups). Powers the admin's recent-alerts view and dedupe (so a repeating
+    condition like an offline node doesn't email every sweep). Platform-scoped —
+    no tenant/user ownership; recipients are the selected platform admins."""
+
+    __tablename__ = "admin_notification_log"
+    id = Column(String, primary_key=True, default=_uuid)
+    type = Column(String, index=True, nullable=False)    # admin notification type key
+    severity = Column(String, default="info")            # info | warning | critical
+    dedupe_key = Column(String, index=True, default="")  # e.g. "node_offline:<node_id>"
+    subject = Column(String, default="")
+    summary = Column(Text, default="")                   # short human summary for the admin UI
+    recipients = Column(JSON, default=list)              # addresses the alert was sent to
+    ok = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=_now, index=True)
+
+
+
+class AdminAlertEvent(Base):
+    """A platform-admin alert RAISED ON A FEDERATED NODE, queued for delivery by
+    the control plane. Node-side health checks (appliance/storage problems) run on
+    the node that owns the resource, but platform admins + the authoritative mail
+    service live on the control plane — so instead of emailing locally the node
+    records one of these and pushes it to the CP (workers/node_replication._push →
+    api/node_sync.push), which calls ``admin_notifications.emit`` from the CP. On
+    the control plane itself alerts are emitted directly and never queued here."""
+
+    __tablename__ = "admin_alert_events"
+    id = Column(String, primary_key=True, default=_uuid)
+    type = Column(String, nullable=False)                # admin notification type key
+    severity = Column(String, default="info")            # info | warning | critical
+    subject = Column(String, default="")
+    title = Column(String, default="")
+    intro = Column(Text, default="")
+    rows = Column(JSON, default=list)                    # [{icon,name,detail}] for the email body
+    cta = Column(JSON, default=dict)                     # optional {label,url}
+    dedupe_key = Column(String, default="")
+    dedupe_within_hours = Column(Integer, default=0)
+    tenant_id = Column(String, index=True, nullable=True)  # customer the alert concerns
+    origin_node = Column(String, default="")             # node name that raised it
+    created_at = Column(DateTime, default=_now, index=True)  # push cursor key
+
+
+
 class Communication(Base):
     """Every outbound email to a user/address, captured globally at the email
     service (emailer.send) so the admin sees a full per-account communications

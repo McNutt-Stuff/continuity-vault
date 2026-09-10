@@ -19,15 +19,15 @@ Key material and connector credentials are wrapped with the fleet-wide
 from __future__ import annotations
 
 import logging
-import os
 import secrets
 from datetime import datetime
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import DateTime
 from sqlalchemy.orm import Session
 
-from .. import keybroker, fleet
+from .. import keybroker
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
@@ -44,7 +44,6 @@ from ..models import (
     IntegrationRun,
     NetworkApp,
     NetworkClient,
-    NetworkSample,
     NetworkUsage,
     Node,
     PricingConfig,
@@ -72,42 +71,6 @@ def _require_fleet(authorization: str) -> None:
     expected = _fleet_secret() or ""
     if not token or not expected or not secrets.compare_digest(token, expected):
         raise HTTPException(401, "invalid node credentials")
-
-
-def _fp(secret: str | None) -> str:
-    """Non-reversible fingerprint of a fleet crypto secret, so a node can detect a
-    mismatch (and fetch the real value) without the secret ever crossing the wire
-    on every poll."""
-    import hashlib
-    return hashlib.sha256(secret.encode()).hexdigest()[:16] if secret else ""
-
-
-def _fleet_crypto_secrets() -> dict:
-    """The crypto secrets the fleet shares so a node can unwrap replicated vault
-    keys + decrypt connector credentials, AND sign appliance commands with the same
-    key as the control plane. The CP is authoritative; these are the EFFECTIVE
-    values it actually uses (matching credstore/keybroker defaults)."""
-    kek = os.environ.get("CV_KEK_SECRET", "dev-kek")
-    sess = get_settings().session_secret
-    return {"kek": kek, "session_secret": sess,
-            "signer": fleet.export_signer_secret(),
-            "kek_fp": _fp(kek), "session_fp": _fp(sess),
-            "signer_fp": fleet.signer_fingerprint()}
-
-
-class FleetIdent(BaseModel):
-    node: str = ""
-
-
-@router.post("/fleet-secrets")
-def fleet_secrets(body: FleetIdent = FleetIdent(), authorization: str = Header(default="")):
-    """Deliver the fleet crypto secrets (KEK + session secret) to an authenticated
-    node so federation crypto self-aligns instead of relying on hand-set env. Gated
-    by the fleet secret — which already authorizes pulling every tenant's config +
-    wrapped keys, so this grants no new data reach. Nodes call it ONLY when the
-    fingerprint advertised in the pull differs from what they hold."""
-    _require_fleet(authorization)
-    return _fleet_crypto_secrets()
 
 
 def _ser(obj) -> dict:
@@ -251,12 +214,6 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "pending_insights": pending_insights,
         "agent_commands": agent_commands,
         "key_records": key_records,
-        # Fingerprints of the fleet crypto secrets (never the secrets themselves).
-        # The node compares these to what it holds and fetches /fleet-secrets only
-        # on a mismatch, so it self-aligns without a hand-set CV_KEK_SECRET.
-        "fleet_key_fp": _fp(os.environ.get("CV_KEK_SECRET", "dev-kek")),
-        "session_key_fp": _fp(get_settings().session_secret),
-        "signer_fp": fleet.signer_fingerprint(),
     }
 
 
@@ -275,12 +232,9 @@ class PushPayload(BaseModel):
     network_clients: list[dict] = []
     network_apps: list[dict] = []
     network_usage: list[dict] = []
-    network_samples: list[dict] = []
     integration_runs: list[dict] = []
     communications: list[dict] = []
-    index_replicas: list[dict] = []
-    recovery_keys: list[dict] = []
-    log_entries: list[dict] = []
+    admin_alerts: list[dict] = []
 
 
 _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
@@ -314,8 +268,7 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     counts = {"receipts": 0, "documents": 0, "connector_accounts": 0,
               "jobs": 0, "agents": 0, "appliances": 0, "appliance_storages": 0,
               "insights": 0,
-              "integrations": 0, "network": 0, "communications": 0,
-              "index_replicas": 0}
+              "integrations": 0, "network": 0, "communications": 0, "admin_alerts": 0}
     # A node can hold data for a tenant/user that was removed on the control
     # plane; inserting it would violate a FK and abort the whole push. Skip any
     # row whose tenant or owner isn't present here so one orphan can't block sync.
@@ -418,42 +371,6 @@ def push(body: PushPayload, authorization: str = Header(default=""),
             db.add(UserInsights(**kw))
         counts["insights"] += 1
     _ingest_integration_push(db, body, counts, valid_tenants, valid_users)
-    # Search-index replica health (DR copies of the index the node produced). Key
-    # on (scope, scope_id, destination) since the row id differs per DB.
-    from ..models import IndexReplica
-    for ir in body.index_replicas:
-        if not _known(ir):
-            continue
-        kw = _deser(IndexReplica, ir)
-        existing = (db.query(IndexReplica)
-                    .filter(IndexReplica.scope == ir.get("scope"),
-                            IndexReplica.scope_id == ir.get("scope_id"),
-                            IndexReplica.destination == ir.get("destination")).first())
-        if existing is not None:
-            for k, v in kw.items():
-                if k != "id":
-                    setattr(existing, k, v)
-        else:
-            db.add(IndexReplica(**kw))
-        counts["index_replicas"] += 1
-    # Vault Recovery Keys (verifier + code-wrapped root keys) the node created, so
-    # a recovery-key redemption at login (which runs on the CP, pre-auth) can
-    # verify + restore. Key on user_id (one per user); skip unknown tenant/user.
-    from ..models import VaultRecoveryKey
-    for rk in body.recovery_keys:
-        uid = rk.get("user_id")
-        if not _known(rk) or not uid or uid not in valid_users:
-            continue
-        kw = _deser(VaultRecoveryKey, rk)
-        existing = (db.query(VaultRecoveryKey)
-                    .filter(VaultRecoveryKey.user_id == uid).first())
-        if existing is not None:
-            for k, v in kw.items():
-                if k != "id":
-                    setattr(existing, k, v)
-        else:
-            db.add(VaultRecoveryKey(**kw))
-        counts["recovery_keys"] = counts.get("recovery_keys", 0) + 1
     # Communications history from the node's email service. The control plane owns
     # the open fields (the tracking pixel always hits the CP), so never overwrite
     # them from a node push — which also preserves a stub created by an early open.
@@ -472,22 +389,17 @@ def push(body: PushPayload, authorization: str = Header(default=""),
                 kw.pop(f, None)
             db.add(Communication(**kw))
         counts["communications"] += 1
-    # Unified logs the node captured (its app logs + managed appliances/agents +
-    # audit dual-writes). Upsert by id; stamp the node so the admin can attribute +
-    # drill down. Record last_log_push_at so node details show the push freshness.
-    from ..models import LogEntry
-    for le in body.log_entries:
-        if not _known(le) or not _has_pk(LogEntry, le):
-            continue
-        if db.get(LogEntry, le.get("id")) is None:
-            kw = _deser(LogEntry, le)
-            if push_node is not None:
-                kw.setdefault("node_id", push_node.id)
-                kw.setdefault("node_name", push_node.name)
-            db.add(LogEntry(**kw))
-            counts["logs"] = counts.get("logs", 0) + 1
-    if push_node is not None:
-        push_node.last_log_push_at = datetime.utcnow()
+    # Platform-admin alerts a node raised (appliance/storage health). Emit them
+    # from the control plane, where the platform admins + mail service live. Dedupe
+    # is enforced by admin_notifications.emit via AdminNotificationLog.
+    if body.admin_alerts:
+        from .. import admin_notifications
+        for al in body.admin_alerts:
+            try:
+                admin_notifications.emit_pushed(db, al)
+                counts["admin_alerts"] += 1
+            except Exception:  # noqa: BLE001 — one bad alert must not fail the push
+                logger.exception("admin alert emit failed (type=%s)", al.get("type"))
     db.commit()
     return {"ok": True, **counts}
 
@@ -568,24 +480,6 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict,
         if not db.get(IntegrationRun, row.get("id")):
             db.add(IntegrationRun(**_deser(IntegrationRun, row)))
             counts["network"] += 1
-    for row in body.network_samples:
-        if not _ok(row):
-            continue
-        kw = _deser(NetworkSample, row)
-        cur = (db.query(NetworkSample)
-               .filter(NetworkSample.tenant_id == kw.get("tenant_id"),
-                       NetworkSample.integration_id == kw.get("integration_id"),
-                       NetworkSample.day == kw.get("day"),
-                       NetworkSample.dim == kw.get("dim"),
-                       NetworkSample.key == kw.get("key", "")).first())
-        if cur is None:
-            db.add(NetworkSample(**{k: v for k, v in kw.items() if k != "id"}))
-        else:
-            for f in ("name", "category", "source_type", "device_type",
-                      "total_bytes", "tx_bytes", "rx_bytes", "count"):
-                if f in kw:
-                    setattr(cur, f, kw[f])
-        counts["network"] += 1
 
 
 # --------------------------------------------------------------------------- #
@@ -636,11 +530,9 @@ def keys_report(db: Session) -> dict:
 def node_live(authorization: str = Header(default=""), db: Session = Depends(get_db)):
     _require_fleet(authorization)
     from .. import sysinfo
-    from ..workers import status as worker_status
     s = get_settings()
     out = sysinfo.live(cert_host=s.domain)
     out["db"] = _db_stats(db)
-    out["workers"] = worker_status.snapshot()
     return out
 
 
@@ -740,11 +632,9 @@ def node_backup(authorization: str = Header(default="")):
 
 
 class PurgeReq(BaseModel):
-    account_id: str | None = None
-    collection_id: str | None = None  # set for agent-collected sources (no connector account)
+    account_id: str
     tenant_id: str
     destinations: list[str] | None = None
-    keep_source: bool = False
 
 
 @router.post("/purge")
@@ -752,33 +642,14 @@ def node_purge(body: PurgeReq, authorization: str = Header(default=""),
                db: Session = Depends(get_db)):
     """Purge a source's local data on this node (index + recovery points +
     mappings + account), called by the control plane during a source purge.
-    ``destinations`` limits the purge to specific stores; None/["all"] = everywhere.
-    ``keep_source`` wipes the data but keeps the source connected + syncing."""
+    ``destinations`` limits the purge to specific stores; None/["all"] = everywhere."""
     _require_fleet(authorization)
-    dests = body.destinations
-    # Agent-collected source: a single Collection with no connector account.
-    if body.collection_id:
-        from ..models import Collection
-        from .connectors import (_purge_collection_data_only, _purge_collection_local,
-                                 _purge_collection_destinations)
-        coll = db.get(Collection, body.collection_id)
-        if not coll or coll.tenant_id != body.tenant_id:
-            return {"ok": True, "documents": 0, "recovery_points": 0, "collections": 0}
-        if body.keep_source:
-            counts = _purge_collection_data_only(db, coll)
-        elif not dests or "all" in dests:
-            counts = _purge_collection_local(db, coll)
-        else:
-            counts = _purge_collection_destinations(db, coll, dests)
-        db.commit()
-        return {"ok": True, **counts}
     acct = db.get(ConnectorAccount, body.account_id)
     if not acct or acct.tenant_id != body.tenant_id:
         return {"ok": True, "documents": 0, "recovery_points": 0, "collections": 0}
-    from .connectors import _purge_destinations, _purge_source_local, _purge_source_data_only
-    if body.keep_source:
-        counts = _purge_source_data_only(db, acct)
-    elif not dests or "all" in dests:
+    from .connectors import _purge_destinations, _purge_source_local
+    dests = body.destinations
+    if not dests or "all" in dests:
         counts = _purge_source_local(db, acct)
     else:
         counts = _purge_destinations(db, acct, dests)

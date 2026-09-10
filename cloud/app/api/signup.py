@@ -11,16 +11,18 @@ a one-time login code. First sign-in shows the in-portal setup wizard.
 
 from __future__ import annotations
 
+import html as _html
 import logging
 import re
 import secrets as _secrets
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import audit, authcodes, geo, routing, security  # noqa: F401
+from .. import audit, authcodes, emailer, geo, routing, security  # noqa: F401
 from ..config import get_settings
 from ..db import get_db
 from ..emailer import send_email
@@ -90,6 +92,92 @@ def signup_payment_config():
         out["client_id"] = cfg.get("client_id") or ""
         out["environment"] = cfg.get("environment") or "live"
     return out
+
+
+# --- Email verification interstitial (runs after the Account step) -----------
+# The wizard sends the customer a verification link and polls /verify/status,
+# continuing automatically once they click it. Single-use tokens live in memory
+# (no account exists yet at this point); a shared cache would back multi-worker.
+_VERIFY_TTL_SECONDS = 30 * 60
+_verify_store: dict[str, dict] = {}
+
+
+def _prune_verify(now: float) -> None:
+    for tok in [t for t, v in _verify_store.items()
+                if now - v.get("created", 0) > _VERIFY_TTL_SECONDS]:
+        _verify_store.pop(tok, None)
+
+
+class VerifyStartBody(BaseModel):
+    email: str
+    first_name: str = ""
+
+
+@router.post("/verify/start")
+def signup_verify_start(body: VerifyStartBody):
+    """Issue a single-use email-verification token and email the customer a link.
+    The signup wizard polls /signup/verify/status and continues automatically once
+    the customer clicks the link (which hits /signup/verify/confirm)."""
+    if not settings.public_signup_enabled:
+        raise HTTPException(403, "sign-up is not available right now")
+    now = time.time()
+    _prune_verify(now)
+    email = body.email.strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(400, "please enter a valid email address")
+    # Reuse an unexpired, unverified token for the same email so a resend doesn't
+    # orphan the tab that's already polling the earlier token.
+    token = next((t for t, v in _verify_store.items()
+                  if v["email"] == email and not v["verified"]), None)
+    if not token:
+        token = _secrets.token_urlsafe(24)
+        _verify_store[token] = {"email": email, "verified": False, "created": now}
+    link = f"{_portal_url()}/signup?verify={token}"
+    resp: dict = {"ok": True, "token": token}
+    try:
+        first = (body.first_name or "").strip()
+        greeting = _html.escape(first) if first else "there"
+        html = emailer.render(
+            "Verify your email",
+            f'<p style="margin:0 0 12px;">Hi {greeting}, please confirm this is your '
+            f'email address to continue setting up your Arkive account.</p>'
+            f'<p style="margin:0 0 12px;">Click the button below, then return to your '
+            f'signup — it will continue automatically.</p>',
+            cta={"label": "Verify my email", "url": link},
+            preheader="Confirm your email to continue your Arkive signup",
+            footer_note="If you didn't start an Arkive signup, you can ignore this email.")
+        emailer.send(email, "Verify your email to continue — Arkive",
+                     html=html, text=f"Verify your email to continue your Arkive signup: {link}",
+                     category="signin")
+        resp["sent"] = True
+    except Exception:  # noqa: BLE001 — never fail the flow on a delivery hiccup
+        logger.exception("signup verify email failed for %s", email)
+        resp["sent"] = False
+    if settings.environment == "development":
+        resp["dev_link"] = link
+    return resp
+
+
+@router.get("/verify/status")
+def signup_verify_status(token: str):
+    """Poll target for the wizard — true once the customer clicks their link."""
+    _prune_verify(time.time())
+    v = _verify_store.get(token)
+    if not v:
+        return {"verified": False, "expired": True}
+    return {"verified": bool(v["verified"]), "email": v["email"]}
+
+
+@router.post("/verify/confirm")
+def signup_verify_confirm(token: str):
+    """Hit by the email link's landing page to mark the token verified."""
+    v = _verify_store.get(token)
+    if not v or time.time() - v.get("created", 0) > _VERIFY_TTL_SECONDS:
+        raise HTTPException(404, "this verification link has expired — go back to your "
+                                 "signup and resend the email")
+    v["verified"] = True
+    logger.info("signup email verified for %s", v["email"])
+    return {"ok": True, "email": v["email"]}
 
 
 class Address(BaseModel):
@@ -208,6 +296,22 @@ def signup(body: SignupBody, db: Session = Depends(get_db)):
     audit.record(db, actor=email, action="auth.signup", tenant_id=tenant.id,
                  detail={"plan": plan, "region": region_code, "country": country,
                          "trial": bool(body.trial)})
+
+    # Alert platform admins to the new signup (best-effort — never blocks signup).
+    try:
+        from .. import admin_notifications
+        admin_notifications.emit(
+            db, "new_signup",
+            subject=f"[Arkive] New signup — {org}",
+            title="New customer signup",
+            intro=f"{display} just signed up for the {plan.title()} plan.",
+            rows=[{"icon": "user", "name": org, "detail": f"{plan.title()} plan"},
+                  {"icon": "email", "name": email, "detail": display},
+                  {"icon": "activity", "name": "Region", "detail": f"{region_code} · {country}"}],
+            severity="info", cta={"label": "Open admin", "url": _portal_url() + "/admin"})
+    except Exception:  # noqa: BLE001
+        logger.exception("admin new-signup alert failed for %s", email)
+
 
     trial_started = False
     if body.payment_method_token:

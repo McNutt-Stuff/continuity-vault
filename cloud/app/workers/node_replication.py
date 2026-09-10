@@ -29,6 +29,7 @@ from ..db import WorkerSessionLocal as SessionLocal
 from ..models import (
     Appliance,
     ApplianceStorage,
+    AdminAlertEvent,
     Collection,
     Communication,
     ConfigObject,
@@ -40,12 +41,9 @@ from ..models import (
     IntegrationRun,
     NetworkApp,
     NetworkClient,
-    NetworkSample,
     NetworkUsage,
-    LogEntry,
     Node,
     PricingConfig,
-    Rule,
     SearchDocument,
     ServiceObject,
     SnapshotReceipt,
@@ -61,7 +59,6 @@ logger = logging.getLogger("cv.replication")
 
 _thread: threading.Thread | None = None
 _running_jobs: set[str] = set()
-_fleet_checked = False  # one-time log guard for the fleet-secret alignment check
 _running_insights: set[str] = set()
 
 # Upsert in FK-dependency order so a strict database accepts the rows.
@@ -80,9 +77,6 @@ _PULL_ORDER = [
     ("connector_accounts", ConnectorAccount),
     ("customer_storages", CustomerStorage),
     ("collections", Collection),
-    # Rules federate to nodes so ingestion evaluates them locally (they own no
-    # runtime fields, so nothing to exclude).
-    ("rules", Rule),
 ]
 
 # Fields owned by the NODE, never overwritten by a pull (the node produces these
@@ -90,11 +84,6 @@ _PULL_ORDER = [
 # would clobber a just-recorded sync error/cursor before it's ever pushed).
 _PULL_EXCLUDE = {
     "desktop_agents": {"pending_commands", "last_scan", "fs_expansions"},
-    # A node identifies ITSELF via is_self. The control plane's fleet has is_self
-    # set on the CP row; pulling that down would flip the node's self-identity to
-    # the CP — so it stamps its own logs (and resolves node_config profiles) as the
-    # control plane. Never let a pull touch is_self.
-    "nodes": {"is_self"},
     "connector_accounts": {"sync_cursor", "last_sync_at", "last_object_count",
                            "last_error", "last_error_at", "auth_status"},
     # The node's scheduler owns each mapping's run stamp; pulling the control
@@ -137,118 +126,6 @@ def _write_state(d: dict) -> None:
         _state_path().write_text(json.dumps(d))
     except Exception:
         logger.debug("could not persist replication state", exc_info=True)
-
-
-def _fleet_secrets_path() -> Path:
-    base = Path(os.environ.get("CV_KEY_STORE", "./cv_keystore")).parent
-    return base / "fleet_secrets.json"
-
-
-def _fp(secret: str | None) -> str:
-    import hashlib
-    return hashlib.sha256(secret.encode()).hexdigest()[:16] if secret else ""
-
-
-def _persist_fleet_secrets(d: dict) -> None:
-    """Store the adopted fleet secrets locally (0600) so a restart re-applies them
-    BEFORE any worker runs — otherwise a stale CV_KEK_SECRET in the unit's env
-    would win at boot and every decrypt would fail until the first pull."""
-    try:
-        p = _fleet_secrets_path()
-        p.write_text(json.dumps(d))
-        try:
-            p.chmod(0o600)
-        except Exception:  # noqa: BLE001
-            pass
-    except Exception:  # noqa: BLE001
-        logger.debug("could not persist fleet secrets", exc_info=True)
-
-
-def _adopt_fleet_secrets(secrets_blob: dict, *, source: str) -> bool:
-    """Apply KEK + session secret in-process so credstore/keybroker (read CV_KEK_SECRET
-    at call time) and the session serializer use the fleet values. Never logs the
-    secret. Returns True if anything changed."""
-    changed = []
-    kek = secrets_blob.get("kek")
-    if kek and os.environ.get("CV_KEK_SECRET", "dev-kek") != kek:
-        os.environ["CV_KEK_SECRET"] = kek
-        changed.append("KEK")
-    sess = secrets_blob.get("session_secret")
-    if sess and get_settings().session_secret != sess:
-        os.environ["CV_SESSION_SECRET"] = sess
-        try:
-            from .. import security
-            security.set_session_secret(sess)
-        except Exception:  # noqa: BLE001
-            logger.debug("could not reload session secret", exc_info=True)
-        changed.append("session")
-    signer = secrets_blob.get("signer")
-    if signer:
-        try:
-            from .. import fleet
-            if fleet.import_signer_secret(signer):
-                changed.append("signer")
-        except Exception:  # noqa: BLE001
-            logger.debug("could not adopt fleet signer", exc_info=True)
-    if changed:
-        logger.warning("adopted fleet %s secret(s) from %s — federation crypto now "
-                       "aligned with the control plane", "+".join(changed), source)
-    return bool(changed)
-
-
-def _sync_fleet_secrets(s, bundle: dict) -> None:
-    """Compare the fingerprints the control plane advertised in the pull to what we
-    hold; on a mismatch, fetch the real secrets over the authenticated fleet
-    channel and adopt + persist them. Cheap no-op once aligned."""
-    global _fleet_checked
-    want_kek = bundle.get("fleet_key_fp") or ""
-    want_sess = bundle.get("session_key_fp") or ""
-    want_signer = bundle.get("signer_fp") or ""
-    if not want_kek and not want_sess and not want_signer:
-        # The control plane isn't advertising fingerprints yet (older CP build):
-        # log once so it's obvious auto-distribution can't run until the CP updates.
-        if not _fleet_checked:
-            _fleet_checked = True
-            logger.warning("fleet-secret auto-sync: control plane advertised no key "
-                           "fingerprints — it needs the fleet-secrets update deployed "
-                           "before this node can align its CV_KEK_SECRET")
-        return
-    have_kek = _fp(os.environ.get("CV_KEK_SECRET", "dev-kek"))
-    have_sess = _fp(get_settings().session_secret)
-    have_signer = ""
-    try:
-        from .. import fleet
-        have_signer = fleet.signer_fingerprint()
-    except Exception:  # noqa: BLE001
-        have_signer = ""
-    if want_kek == have_kek and want_sess == have_sess and want_signer == have_signer:
-        if not _fleet_checked:
-            _fleet_checked = True
-            logger.info("fleet-secret auto-sync: KEK/session/signer already aligned "
-                        "with the control plane")
-        return
-    logger.warning("fleet-secret mismatch (kek %s→%s) — fetching + adopting from the "
-                   "control plane", have_kek, want_kek)
-    secrets_blob = _post("/nodes/sync/fleet-secrets",
-                         {"node": s.node_name or s.domain})
-    if not secrets_blob:
-        logger.warning("fleet-secret mismatch detected but the control plane didn't "
-                       "return the secrets — will retry next cycle")
-        return
-    _fleet_checked = True
-    if _adopt_fleet_secrets(secrets_blob, source="control plane"):
-        _persist_fleet_secrets({"kek": os.environ.get("CV_KEK_SECRET"),
-                                "session_secret": get_settings().session_secret})
-
-
-def load_persisted_fleet_secrets() -> None:
-    """Re-apply fleet secrets adopted on a previous run, called at startup BEFORE
-    workers start so a restart never runs a sync with a stale env key. No network."""
-    try:
-        blob = json.loads(_fleet_secrets_path().read_text())
-    except Exception:  # noqa: BLE001
-        return
-    _adopt_fleet_secrets(blob, source="local store")
 
 
 def _load_cursor() -> str | None:
@@ -339,10 +216,6 @@ def _pull(s) -> int:
                    {"name": s.node_name or s.domain, "role": s.node_role or "customer-tenant"})
     if not bundle:
         return 0
-    # Self-align the fleet crypto secrets FIRST — before any wrapped key is
-    # unwrapped or credential decrypted below — so a node with a stale/hand-set
-    # CV_KEK_SECRET adopts the control plane's and can actually read what it holds.
-    _sync_fleet_secrets(s, bundle)
     n = 0
     skipped = 0
     with SessionLocal() as db:
@@ -505,7 +378,6 @@ def _push(s) -> int:
             integ_since = None
     integ_high = integ_since
     integ_instances, net_clients, net_apps, net_usage, integ_runs = [], [], [], [], []
-    net_samples: list = []
     communications = []
     comm_cursor = _read_state().get("communications_cursor")
     comm_since = None
@@ -515,17 +387,15 @@ def _push(s) -> int:
         except ValueError:
             comm_since = None
     comm_high = comm_since
-    index_replicas = []
-    recovery_keys: list = []
-    log_entries: list = []
-    log_cursor = _read_state().get("logs_cursor")
-    log_since = None
-    if log_cursor:
+    alerts = []
+    alerts_cursor = _read_state().get("admin_alerts_cursor")
+    alerts_since = None
+    if alerts_cursor:
         try:
-            log_since = datetime.fromisoformat(log_cursor)
+            alerts_since = datetime.fromisoformat(alerts_cursor)
         except ValueError:
-            log_since = None
-    log_high = log_since
+            alerts_since = None
+    alerts_high = alerts_since
     with SessionLocal() as db:
         rq = db.query(SnapshotReceipt)
         if since is not None:
@@ -586,15 +456,6 @@ def _push(s) -> int:
             rq2 = rq2.filter(IntegrationRun.created_at > integ_since)
         for row in rq2.order_by(IntegrationRun.created_at.asc()).limit(1000).all():
             integ_runs.append(_row(row))
-        # Daily network trend rollups (updated_at advances as each day's sample is
-        # refreshed), so the portal/admin show 90-day trends for node-routed tenants.
-        sq = db.query(NetworkSample)
-        if integ_since is not None:
-            sq = sq.filter(NetworkSample.updated_at > integ_since)
-        for row in sq.order_by(NetworkSample.updated_at.asc()).limit(8000).all():
-            net_samples.append(_row(row))
-            if row.updated_at and (integ_high is None or row.updated_at > integ_high):
-                integ_high = row.updated_at
         # Outbound-email history the node's email service recorded, so the admin's
         # per-user communications log on the control plane is complete.
         cq = db.query(Communication)
@@ -604,33 +465,19 @@ def _push(s) -> int:
             communications.append(_row(row))
             if row.created_at and (comm_high is None or row.created_at > comm_high):
                 comm_high = row.created_at
-        # Search-index replica health (DR copies of the index on each storage), so
-        # the portal/admin show index protection for node-routed tenants.
-        from ..models import IndexReplica
-        for row in db.query(IndexReplica).all():
-            index_replicas.append(_row(row))
-        # Vault Recovery Keys the node created (verifier + code-wrapped root keys),
-        # so the control plane can verify + redeem one at login (which runs on the
-        # CP, pre-auth, before any node proxy). Small + rarely changes → send all.
-        from ..models import VaultRecoveryKey
-        for row in db.query(VaultRecoveryKey).all():
-            recovery_keys.append(_row(row))
-        # Unified logs — everything this node captured since the last confirmed push
-        # (app logs + the appliances/agents it manages + audit dual-writes). The
-        # cursor only advances on a confirmed delivery, so a failed push retries the
-        # whole batch next cycle and no log line is ever dropped.
-        lq = db.query(LogEntry)
-        if log_since is not None:
-            lq = lq.filter(LogEntry.created_at > log_since)
-        for row in lq.order_by(LogEntry.created_at.asc()).limit(5000).all():
-            log_entries.append(_row(row))
-            if row.created_at and (log_high is None or row.created_at > log_high):
-                log_high = row.created_at
+        # Platform-admin alerts raised on this node (appliance/storage health) —
+        # delivered by the control plane, where the admins + mail service live.
+        aq = db.query(AdminAlertEvent)
+        if alerts_since is not None:
+            aq = aq.filter(AdminAlertEvent.created_at > alerts_since)
+        for row in aq.order_by(AdminAlertEvent.created_at.asc()).limit(500).all():
+            alerts.append(_row(row))
+            if row.created_at and (alerts_high is None or row.created_at > alerts_high):
+                alerts_high = row.created_at
     if not (receipts or documents or accounts or jobs or agents or appliances
             or appliance_storages or insights
             or integ_instances or net_clients or net_apps or net_usage or integ_runs
-            or communications or index_replicas or net_samples or log_entries
-            or recovery_keys):
+            or communications or alerts):
         return 0
     res = _post("/nodes/sync/push", {
         "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
@@ -639,11 +486,7 @@ def _push(s) -> int:
         "appliance_storages": appliance_storages, "insights": insights,
         "integration_instances": integ_instances, "network_clients": net_clients,
         "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
-        "network_samples": net_samples,
-        "communications": communications,
-        "index_replicas": index_replicas,
-        "recovery_keys": recovery_keys,
-        "log_entries": log_entries,
+        "communications": communications, "admin_alerts": alerts,
     })
     if res and res.get("ok"):
         if high is not None:
@@ -658,9 +501,9 @@ def _push(s) -> int:
             st = _read_state()
             st["communications_cursor"] = comm_high.isoformat()
             _write_state(st)
-        if log_high is not None:
+        if alerts_high is not None:
             st = _read_state()
-            st["logs_cursor"] = log_high.isoformat()
+            st["admin_alerts_cursor"] = alerts_high.isoformat()
             _write_state(st)
         logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d "
                     "appliances=%d storages=%d insights=%d integrations=%d network=%d",
@@ -697,10 +540,6 @@ def start_replication() -> None:
         time.sleep(10)
         while True:
             try:
-                _ensure_self_node(s)
-            except Exception:  # noqa: BLE001
-                logger.debug("self-node reconcile failed", exc_info=True)
-            try:
                 _pull(s)
             except Exception:  # noqa: BLE001
                 logger.exception("replication pull cycle failed")
@@ -714,30 +553,3 @@ def start_replication() -> None:
     _thread.start()
     logger.info("node replication started (control plane=%s, every %ds)",
                 s.control_plane_url, interval)
-
-
-def _ensure_self_node(s) -> None:
-    """Re-assert THIS node's ``is_self`` from its configured identity, idempotently.
-    A node pulls the fleet's ``nodes`` from the control plane; earlier builds let
-    that overwrite the local ``is_self`` flag, so the node adopted the CP's row as
-    "self" — mis-stamping its logs as the control plane and mis-resolving
-    node_config / backup targets. Correct it here so an already-affected node
-    self-heals: exactly the row matching our name is is_self, all others are not."""
-    name = (getattr(s, "node_name", "") or getattr(s, "domain", "") or "").strip()
-    if not name:
-        return
-    with SessionLocal() as db:
-        me = db.query(Node).filter(Node.name == name).first()
-        if me is None:
-            return
-        changed = False
-        if not me.is_self:
-            me.is_self = True
-            changed = True
-        for other in db.query(Node).filter(Node.is_self.is_(True), Node.id != me.id).all():
-            other.is_self = False
-            changed = True
-        if changed:
-            db.commit()
-            logger.warning("corrected self-node identity to %s (is_self was pointing "
-                           "elsewhere — logs/config now attribute to this node)", name)
