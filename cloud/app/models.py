@@ -646,6 +646,9 @@ class SoftwareRelease(Base):
     security_floor = Column(String, default="0.0.0")
     manifest = Column(JSON, nullable=False)  # signed update manifest
     created_at = Column(DateTime, default=_now)
+
+
+class UpdateJob(Base):
     __tablename__ = "update_jobs"
     id = Column(String, primary_key=True, default=_uuid)
     tenant_id = Column(String, nullable=True, index=True)
