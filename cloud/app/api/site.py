@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -222,6 +222,7 @@ def provision_progress(body: ProvisionProgress, db: Session = Depends(get_db)):
 
 @public_router.post("/nodes/heartbeat")
 def node_heartbeat(body: NodeHeartbeat,
+                   request: Request,
                    authorization: str = Header(default=""),
                    db: Session = Depends(get_db)):
     """A non-control-plane node reports in and receives the settings from its bound
@@ -246,6 +247,12 @@ def node_heartbeat(body: NodeHeartbeat,
     node.region = (body.cloud or {}).get("region") or node.region
     node.status = "active"
     node.last_heartbeat_at = _now()
+    # The node's real public IP as observed by the control plane (behind the TLS
+    # proxy, the original client is the first X-Forwarded-For hop).
+    _ip = ((request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+           or (request.client.host if request.client else ""))
+    if _ip and not _ip.startswith(("127.", "::1")):
+        node.public_ip = _ip
     db.commit()
     merged, applied = _effective_settings(db, node)
     overrides = dict(node.config_overrides or {})

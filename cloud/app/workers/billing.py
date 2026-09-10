@@ -33,6 +33,12 @@ def start_billing_worker() -> None:
                     run_due_charges(db)
             except Exception:  # noqa: BLE001 — never let the worker die
                 logger.exception("billing sweep failed")
+            try:
+                from .. import cloud_costs
+                with SessionLocal() as db:
+                    cloud_costs.sample_all(db)
+            except Exception:  # noqa: BLE001
+                logger.exception("cloud cost sample failed")
             time.sleep(_TICK_SECONDS)
 
     _thread = threading.Thread(target=loop, name="cv-billing", daemon=True)

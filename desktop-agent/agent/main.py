@@ -58,8 +58,10 @@ def _is_cp_unavailable(exc: BaseException) -> bool:
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in _GATEWAY_CODES
-    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
-                            httpx.RemoteProtocolError, httpx.PoolTimeout))
+    # Any timeout (connect/read/write/pool) or transport/network error means the
+    # control plane is momentarily unreachable or the link stalled mid-upload —
+    # transient: defer the collect and retry, never a hard failure or data loss.
+    return isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
 
 
 def _now_iso() -> str:
@@ -752,7 +754,7 @@ class Agent:
         return cols
 
     def _push_objects(self, source_type: str, objects: list, destinations: list,
-                      max_batch_bytes: int = 32 * 1024 * 1024, max_batch: int = 500) -> int:
+                      max_batch_bytes: int = 8 * 1024 * 1024, max_batch: int = 250) -> int:
         """Client-encrypt each object and push in batches bounded by cumulative
         size (files can be large) so no single request is oversized. A batch that
         fails with a PERSISTENT error (a single oversized/malformed object) is
@@ -820,7 +822,9 @@ class Agent:
         for attempt in range(3):
             try:
                 r = httpx.post(f"{base}/agent/ingest", json=payload,
-                               headers=self._headers(), timeout=180)
+                               headers=self._headers(),
+                               timeout=httpx.Timeout(connect=30.0, read=300.0,
+                                                     write=300.0, pool=30.0))
                 if r.status_code in _GATEWAY_CODES:
                     raise ControlPlaneUnavailable(f"HTTP {r.status_code}")
                 r.raise_for_status()

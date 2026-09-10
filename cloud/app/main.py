@@ -17,6 +17,7 @@ from .api import (
     collections,
     comms,
     connectors,
+    costs,
     dashboard,
     debug,
     index_status,
@@ -99,6 +100,7 @@ app.include_router(agents.agent_router, prefix=API)
 app.include_router(admin.router, prefix=API)
 app.include_router(topology.router, prefix=API)
 app.include_router(provisioning.router, prefix=API)
+app.include_router(costs.router, prefix=API)
 app.include_router(terminal.admin_terminal_router, prefix=API)
 app.include_router(terminal.agent_terminal_router, prefix=API)
 app.include_router(debug.router, prefix=API)

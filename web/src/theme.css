@@ -324,6 +324,32 @@ h3 { font-size: 15px; }
 .auth-card .lock-banner { background: #f6f8fc; border: 1px solid #e7ebf3; color: #0f1626; }
 .auth-card .pill.info { color: #2456d6; border-color: #cfe0ff; background: #eaf1ff; }
 .auth-card .pill.danger { color: #c0343b; border-color: #f5c9cc; background: #fdecec; }
+
+/* Signup wizard: force the light palette onto its own subtree (like the auth
+   card) so the multi-step wizard reads correctly even when the site is in dark
+   mode. CSS custom properties inherit, so redefining them here themes every
+   descendant (inner cards, inputs, pills, bars, inline var(--…) styles). */
+.signup-card {
+  --bg: #f4f6fb;
+  --bg-elev: #ffffff;
+  --bg-elev-2: #eef1f7;
+  --panel: #ffffff;
+  --border: #d5dcea;
+  --border-soft: #e6eaf2;
+  --text: #16203a;
+  --text-dim: #55617a;
+  --text-faint: #8a94a7;
+  --brand-2: #3a67e6;
+  --inset: #eef1f7;
+  --shadow: 0 30px 90px -30px rgba(8, 16, 40, .35);
+  background: #ffffff; color: #16203a;
+  border: 1px solid #e7ebf3;
+}
+.signup-card .btn.primary {
+  background: linear-gradient(135deg, #5c83f0, #4069db);
+  box-shadow: 0 8px 18px -10px rgba(64, 105, 219, .55);
+}
+.signup-card .btn.primary:hover { filter: brightness(1.05); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border);
   background: var(--bg-elev); cursor: pointer; font-size: 12.5px; }

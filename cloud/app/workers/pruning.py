@@ -31,6 +31,7 @@ R_LOGS_HIGH = 30         # warning/error/critical platform log lines
 R_NODE_METRICS = 90      # telemetry time-series (also pruned by telemetry.py)
 R_ADMIN_ALERTS = 30      # node-side admin-alert push queue (pushed to CP)
 R_ADMIN_NOTIF_LOG = 120  # CP admin-notification send log
+R_CLOUD_COSTS = 180      # hourly cloud-cost samples (trend history)
 
 
 # Advisory-lock key so a scheduled prune and a manually-triggered one can never run
@@ -45,7 +46,7 @@ def prune_all(db) -> dict:
     advisory lock ensures only one prune runs at a time (skips if already running)."""
     from ..models import (ApplianceCommand, BackupRun, IntegrationRun, LogEntry, NetworkSample,
                           NetworkUsage, NodeMetric, PendingAction, SyncJob,
-                          AdminAlertEvent, AdminNotificationLog)
+                          AdminAlertEvent, AdminNotificationLog, CloudCostSample)
     from .. import node_config
     now = datetime.utcnow()
     counts: dict = {}
@@ -130,6 +131,10 @@ def prune_all(db) -> dict:
 
     _do("admin_notification_log_deleted", lambda: db.query(AdminNotificationLog).filter(
         AdminNotificationLog.created_at < now - timedelta(days=R_ADMIN_NOTIF_LOG)).delete(
+            synchronize_session=False))
+
+    _do("cloud_cost_samples_deleted", lambda: db.query(CloudCostSample).filter(
+        CloudCostSample.created_at < now - timedelta(days=R_CLOUD_COSTS)).delete(
             synchronize_session=False))
 
     if is_pg:

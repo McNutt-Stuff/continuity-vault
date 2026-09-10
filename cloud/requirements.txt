@@ -19,6 +19,8 @@ azure-identity>=1.16.0
 azure-mgmt-compute>=30.0.0
 azure-mgmt-network>=25.0.0
 azure-mgmt-dns>=8.1.0
+# Azure Cost Management (Cloud Billing service object): read month-to-date spend.
+azure-mgmt-costmanagement>=4.0.0
 # Google Cloud Storage backend for customer bring-your-own storage.
 # 3.x+ (like pyicloud 2.7) is on protobuf 6 — pin the floor so pip upgrades the
 # whole google stack onto a protobuf that also satisfies pyicloud (else the

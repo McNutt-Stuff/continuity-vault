@@ -290,7 +290,7 @@ export default function Signup() {
 
   return (
     <div className="auth-wrap">
-      <div className="card" style={{ width: "min(680px, 100%)", padding: 0, overflow: "hidden" }}>
+      <div className="card signup-card" style={{ width: "min(680px, 100%)", padding: 0, overflow: "hidden" }}>
         {/* Header + progress */}
         <div style={{ padding: "20px 24px 0" }}>
           <div className="spread" style={{ alignItems: "center" }}>

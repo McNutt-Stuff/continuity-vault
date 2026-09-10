@@ -610,6 +610,29 @@ class RestoreRequest(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class CloudCostSample(Base):
+    """An hourly snapshot of month-to-date cloud spend, mapped to a platform
+    entity, from a Cloud Billing service object (AWS Cost Explorer / Azure Cost
+    Management). Written once per hour per (service object × entity) by the cost
+    worker; powers the per-object "this month" cost badges and the Revenue & Costs
+    trend view. Control-plane authoritative (billing lives on the CP)."""
+
+    __tablename__ = "cloud_cost_samples"
+    id = Column(String, primary_key=True, default=_uuid)
+    ts = Column(DateTime, index=True, default=_now)      # sample hour (truncated)
+    provider = Column(String, default="")                # aws | azure
+    service_object_id = Column(String, index=True, nullable=True)
+    category = Column(String, index=True, default="other")  # nodes|storage|backups|microservices|other
+    entity_type = Column(String, default="")             # total | category | node | storage_service
+    entity_id = Column(String, index=True, nullable=True)
+    entity_label = Column(String, default="")
+    amount = Column(Float, default=0.0)                  # month-to-date cost in `currency`
+    currency = Column(String, default="USD")
+    period = Column(String, default="")                  # the month this MTD covers (YYYY-MM)
+    meta = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_now, index=True)
+
+
 class SoftwareRelease(Base):
     """Signed software release for cloud-triggered updates (spec 11)."""
 
@@ -623,9 +646,6 @@ class SoftwareRelease(Base):
     security_floor = Column(String, default="0.0.0")
     manifest = Column(JSON, nullable=False)  # signed update manifest
     created_at = Column(DateTime, default=_now)
-
-
-class UpdateJob(Base):
     __tablename__ = "update_jobs"
     id = Column(String, primary_key=True, default=_uuid)
     tenant_id = Column(String, nullable=True, index=True)

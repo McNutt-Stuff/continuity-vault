@@ -25,6 +25,7 @@ from cv_crypto.provider import get_provider
 
 from .. import audit, authcodes, config_catalog, credstore, node_config, notifications, platform_config, security, services
 from .. import admin_notifications
+from .. import cloud_costs
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
@@ -1539,6 +1540,7 @@ def _node_view(db: Session, n: Node) -> dict:
         "version": n.version, "online": online, "telemetry": tel,
         "cloud": n.cloud or {},
         "public_ip": n.public_ip or (n.cloud or {}).get("public_ip") or "",
+        "cost_mtd": cloud_costs.entity_cost(db, "node", n.id),
         # The self/control-plane node IS the reference build, so it's never "behind";
         # fleet nodes are compared to the bundle the control plane serves.
         "production_version": node_prod,
@@ -2761,6 +2763,20 @@ _SERVICE_KINDS: dict = {
                              "admin_username": "arkive"},
         "required": ["subscription_id", "resource_group", "location"],
     },
+    "cloud-billing-aws": {
+        "label": "Cloud Billing (AWS Cost Explorer)",
+        "category": "billing",
+        "credential_keys": ["aws_access_key_id", "aws_secret_access_key"],
+        "settings": [],
+        "required": [],
+    },
+    "cloud-billing-azure": {
+        "label": "Cloud Billing (Azure Cost Management)",
+        "category": "billing",
+        "credential_keys": ["tenant_id", "client_id", "client_secret", "subscription_id"],
+        "settings": [],
+        "required": ["subscription_id"],
+    },
 }
 
 
@@ -3190,6 +3206,7 @@ def storage_usage(db: Session = Depends(get_db)):
             "nodes": svc_nodes.get(s.id, []),
             "active": s.id in svc_nodes,
             "settings": s.settings or {},
+            "cost_mtd": cloud_costs.entity_cost(db, "storage_service", s.id),
         })
 
     return {
@@ -3396,6 +3413,7 @@ def backups_overview(db: Session = Depends(get_db)):
             "success_24h": ok24, "failed_24h": fail24,
             "interval_minutes": get_settings().backup_interval_minutes,
             "last_run_at": last_run.created_at.isoformat() if last_run and last_run.created_at else None,
+            "cost_mtd": cloud_costs.summary(db).get("by_category", {}).get("backups", 0.0),
         },
         "nodes": node_rows,
         "services": services,

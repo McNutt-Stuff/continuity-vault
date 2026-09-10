@@ -152,6 +152,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "reports", label: "Reports", icon: "activity", group: "Customers" },
   { key: "customer-analytics", label: "Customer Analytics", icon: "insights", group: "Customers" },
   { key: "billing", label: "Billing", icon: "credit-card", group: "Customers" },
+  { key: "finance", label: "Revenue & Costs", icon: "insights", group: "Customers" },
   { key: "config-objects", label: "Configuration objects", icon: "key", group: "Configurations" },
   { key: "config-profiles", label: "Configuration profiles", icon: "puzzle", group: "Configurations" },
   { key: "sources", label: "Sources", icon: "link", group: "Configurations" },
@@ -185,6 +186,7 @@ export default function Admin() {
       {s === "reports" && <Reports />}
       {s === "customer-analytics" && <CustomerAnalytics />}
       {s === "billing" && <BillingAdmin />}
+      {s === "finance" && <FinanceAdmin />}
       {s === "nodes" && <Nodes />}
       {s === "topology" && <TopologyAdmin />}
       {s === "storage-usage" && <StorageUsageAdmin />}
@@ -2346,6 +2348,7 @@ function Nodes() {
                     <span>{n.tenants || 0} tenant{n.tenants === 1 ? "" : "s"}</span>
                     <span>{n.status !== "active" ? n.status : uptimeShort(n.uptime_seconds)}</span>
                   </div>
+                  {n.cost_mtd > 0 && <div className="faint" style={{ fontSize: 10.5, marginTop: 4 }}>${Number(n.cost_mtd).toFixed(2)} this month</div>}
                 </Card>
               ))}
             </div>
@@ -2400,6 +2403,16 @@ function uptimeShort(s?: number | null): string {
   if (d) return `up ${d}d ${h}h`;
   if (h) return `up ${h}h ${m}m`;
   return `up ${m}m`;
+}
+
+// A compact labelled key/value used in the node detail header facts grid.
+function Fact({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div className="faint" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".05em" }}>{label}</div>
+      <div style={{ fontSize: 12.5, fontWeight: 600, wordBreak: "break-all" }}>{value}</div>
+    </div>
+  );
 }
 
 type NodeTab = "health" | "processes" | "keys" | "logs" | "tenants" | "config" | "queue";
@@ -2574,8 +2587,6 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
   );
 
   const rate = (n?: number) => `${bytes(n || 0)}/s`;
-  const nodeHost = (() => { try { return node.endpoint ? new URL(node.endpoint).hostname : ""; } catch { return ""; } })();
-  const nodeIp = node.public_ip || (node.cloud || {}).public_ip || nodeHost;
   const cert = live?.certificate || keys?.certificate;
   const labels = history.map((p) => { const d = new Date(p.ts.endsWith("Z") ? p.ts : p.ts + "Z"); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; });
 
@@ -2603,45 +2614,37 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
           </div>
         </div>
       </div>
-      <div className="faint" style={{ fontSize: 11.5, marginBottom: 10, marginTop: -4 }}>
-        <Icon name="note" size={11} /> Last log push {node.last_log_push_at ? timeAgo(node.last_log_push_at) : (node.is_self ? "n/a (control plane)" : "never")}
-        {node.last_log_push_at ? <span title={fmtAbsolute(node.last_log_push_at)}> </span> : null}
-      </div>
-
       <Card style={{ marginBottom: 14 }}>
-        <div className="spread">
+        <div className="spread" style={{ alignItems: "flex-start" }}>
           <div className="row" style={{ gap: 12 }}>
             <div className="result-icon" style={{ width: 40, height: 40, background: "var(--inset)", color: node.online ? "#35d0a5" : "#8a94a7" }}>
               <CloudIcon provider={node.cloud?.provider} size={22} />
             </div>
             <div>
               <h3 style={{ margin: 0 }}>{node.name} {node.is_self && <span className="faint" style={{ fontWeight: 400, fontSize: 12 }}>· this node</span>}</h3>
-              <div className="faint" style={{ fontSize: 12 }}>
-                {node.category} · {node.role}{node.region ? ` · ${node.region}` : ""}{node.version ? ` · v${node.version}` : ""}
-                {node.version_updated_at ? ` · updated ${timeAgo(node.version_updated_at)}` : ""}
-                {live?.uptime_seconds ? ` · ${uptimeShort(live.uptime_seconds)}` : ""}
-                {node.cluster_name ? ` · cluster ${node.cluster_name}` : ""}
-              </div>
+              <div className="faint" style={{ fontSize: 12 }}>{node.category} · {node.role}{node.cluster_name ? ` · ${node.cluster_name}` : ""}</div>
             </div>
           </div>
           <div className="row" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <Pill tone={node.online ? "ok" : "warn"}>{node.online ? "Online" : "Offline"}</Pill>
+            <Pill tone={node.online ? "ok" : "warn"} dot>{node.online ? "Online" : "Offline"}</Pill>
             <Pill tone={node.status === "active" ? "info" : "warn"}>{node.status}</Pill>
             {live?.source === "heartbeat" && <Pill tone="warn">heartbeat only</Pill>}
             <VersionPill version={node.version} updateAvailable={node.update_available} />
           </div>
         </div>
-        {(node.cloud?.provider && node.cloud.provider !== "unknown") && (
-          <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-            <Pill tone="info"><CloudIcon provider={node.cloud.provider} size={12} /> {String(node.cloud.provider).toUpperCase()}{node.cloud.region ? ` · ${node.cloud.region}` : ""}</Pill>
-            {node.cloud.instance_type && <span className="faint" style={{ fontSize: 11.5 }}>{node.cloud.instance_type}</span>}
-            {live?.hostname && <span className="faint" style={{ fontSize: 11.5 }}>{live.hostname}</span>}
-            {live?.os && <span className="faint" style={{ fontSize: 11.5 }}>{live.os}</span>}
-          </div>
-        )}
-        <div className="row faint" style={{ gap: 18, marginTop: 10, flexWrap: "wrap", fontSize: 11.5 }}>
-          {nodeIp && <span><b style={{ color: "var(--text)" }}>IP</b>&nbsp; {nodeIp}</span>}
-          {node.endpoint && <span><b style={{ color: "var(--text)" }}>Endpoint</b>&nbsp; {node.endpoint}</span>}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border-soft)" }}>
+          <Fact label="IP address" value={node.public_ip || (node.cloud || {}).public_ip || "—"} />
+          <Fact label="Endpoint" value={node.endpoint || "—"} />
+          <Fact label="Region" value={node.region || node.cloud?.region || "—"} />
+          <Fact label="Provider" value={node.cloud?.provider && node.cloud.provider !== "unknown" ? String(node.cloud.provider).toUpperCase() : "—"} />
+          {node.cloud?.instance_type && <Fact label="Instance type" value={node.cloud.instance_type} />}
+          <Fact label="Version" value={node.version ? `v${node.version}` : "—"} />
+          {node.version_updated_at && <Fact label="Updated" value={timeAgo(node.version_updated_at)} />}
+          {node.cost_mtd > 0 && <Fact label="Cost (MTD)" value={`$${Number(node.cost_mtd).toFixed(2)}`} />}
+          {live?.uptime_seconds ? <Fact label="Uptime" value={uptimeShort(live.uptime_seconds).replace(/^up /, "")} /> : null}
+          {live?.hostname && <Fact label="Hostname" value={live.hostname} />}
+          {live?.os && <Fact label="OS" value={live.os} />}
+          <Fact label="Last log push" value={node.last_log_push_at ? timeAgo(node.last_log_push_at) : (node.is_self ? "n/a" : "never")} />
         </div>
       </Card>
 
@@ -5615,6 +5618,120 @@ function RevCard({ label, value, sub, accent }: { label: string; value: string; 
   );
 }
 
+interface CostSummary {
+  currency: string; period: string; updated_at: string | null; configured: boolean;
+  cost_mtd: number; cost_by_category: Record<string, number>;
+  revenue_mtd: number; revenue_all_time: number; mrr: number; arr: number;
+  gross_profit_mtd: number; gross_margin_pct: number | null; active_subscriptions: number;
+}
+const usd = (n: number) => "$" + (n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const COST_CAT_LABEL: Record<string, string> = {
+  nodes: "Nodes (compute)", storage: "Arkive Cloud storage", backups: "Backups",
+  microservices: "Micro-services", other: "Other",
+};
+const COST_CAT_COLOR: Record<string, string> = {
+  nodes: "#4f7cff", storage: "#35d0a5", backups: "#f5a623", microservices: "#c56cf0", other: "#8a94a7",
+};
+const COST_CATS = ["nodes", "storage", "backups", "microservices", "other"];
+
+// Revenue & Costs: collected revenue vs. cloud spend (month-to-date), by category
+// + trend, sampled hourly from the Cloud Billing service objects.
+function FinanceAdmin() {
+  const [sum, setSum] = useState<CostSummary | null>(null);
+  const [trend, setTrend] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState("");
+  function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
+  async function load() {
+    try { setSum(await api.get<CostSummary>("/admin/costs/summary")); } catch { /* ignore */ }
+    try { setTrend(await api.get<any>("/admin/costs/trends?days=30")); } catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); }, []);
+  async function sampleNow() {
+    setBusy(true);
+    try { await api.post("/admin/costs/sample-now", {}); flash("Cost sample refreshed"); await load(); }
+    catch (e) { await notify({ message: (e as Error).message || "Sample failed", tone: "danger" }); }
+    finally { setBusy(false); }
+  }
+  if (!sum) return <Card><div className="muted">Loading financials…</div></Card>;
+  const cats = sum.cost_by_category || {};
+  const points = trend?.points || [];
+  const trendData = points.map((p: any) => p.total || 0);
+  const trendLabels = points.map((p: any) => { const d = new Date(p.ts.endsWith("Z") ? p.ts : p.ts + "Z"); return `${d.getMonth() + 1}/${d.getDate()}`; });
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 16, alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ margin: "0 0 2px" }}>Revenue &amp; Costs</h2>
+          <div className="muted" style={{ fontSize: 12.5, maxWidth: 640 }}>
+            Collected revenue vs. cloud spend (month-to-date), by category — updated hourly from your Cloud Billing service objects.
+          </div>
+        </div>
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          {sum.updated_at && <span className="faint" style={{ fontSize: 11.5 }}>cost updated {timeAgo(sum.updated_at)}</span>}
+          <button className="btn ghost sm" disabled={busy} onClick={sampleNow}><Icon name="repeat" size={13} /> {busy ? "Sampling…" : "Refresh cost"}</button>
+        </div>
+      </div>
+
+      {!sum.configured && (
+        <Card style={{ marginBottom: 16 }}>
+          <div className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+            <Icon name="info" size={15} />
+            <div className="faint" style={{ fontSize: 12.5 }}>
+              No <b>Cloud Billing</b> service object is configured, so cost data is empty. Add one under
+              {" "}<b>Service objects → Cloud Billing (AWS / Azure)</b> with read-only cost credentials to start tracking spend.
+            </div>
+          </div>
+        </Card>
+      )}
+
+      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
+        <RevCard label="Revenue (MTD)" value={usd(sum.revenue_mtd)} sub="Collected this month" accent="#35d0a5" />
+        <RevCard label="Cloud cost (MTD)" value={usd(sum.cost_mtd)} sub={`${sum.period || ""} month-to-date`} accent="#f2545b" />
+        <RevCard label="Gross profit (MTD)" value={usd(sum.gross_profit_mtd)} sub={sum.gross_margin_pct != null ? `${sum.gross_margin_pct}% margin` : "revenue − cost"} accent={sum.gross_profit_mtd >= 0 ? "#35d0a5" : "#f2545b"} />
+        <RevCard label="MRR" value={usd(sum.mrr)} sub={`${sum.active_subscriptions} active sub(s)`} accent="#4f7cff" />
+        <RevCard label="ARR" value={usd(sum.arr)} sub="Annual recurring revenue" accent="#7aa2ff" />
+      </div>
+
+      <div className="row" style={{ gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <Card style={{ flex: "1 1 320px", minWidth: 300 }}>
+          <h4 style={{ margin: "0 0 10px" }}>Cloud cost by category</h4>
+          {sum.cost_mtd <= 0 ? <div className="muted" style={{ fontSize: 12.5 }}>No cost recorded yet.</div> : (
+            <div className="stack" style={{ gap: 8 }}>
+              {COST_CATS.map((c) => {
+                const v = cats[c] || 0; const pct = sum.cost_mtd ? Math.round(v / sum.cost_mtd * 100) : 0;
+                return (
+                  <div key={c}>
+                    <div className="spread" style={{ fontSize: 12.5, marginBottom: 3 }}>
+                      <span>{COST_CAT_LABEL[c] || c}</span>
+                      <span style={{ fontWeight: 600 }}>{usd(v)} <span className="faint">· {pct}%</span></span>
+                    </div>
+                    <div style={{ height: 6, borderRadius: 999, background: "var(--inset)", overflow: "hidden" }}>
+                      <div style={{ width: `${pct}%`, height: "100%", background: COST_CAT_COLOR[c] }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+        <Card style={{ flex: "2 1 420px", minWidth: 320 }}>
+          <div className="spread" style={{ marginBottom: 8 }}>
+            <h4 style={{ margin: 0 }}>Cost trend</h4>
+            <span className="faint" style={{ fontSize: 11 }}>month-to-date, sampled hourly</span>
+          </div>
+          {trendData.length === 0 ? <div className="muted" style={{ fontSize: 12.5 }}>No samples yet — costs appear after the first hourly sample.</div> : (
+            <AreaChart height={200} unit="" fmt={(v) => "$" + Math.round(v)} labels={trendLabels}
+                       series={[{ name: "cost", color: "#4f7cff", data: trendData }]} />
+          )}
+        </Card>
+      </div>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+}
+
 function BillingAdmin() {
   const [profiles, setProfiles] = useState<AdminBillingProfile[]>([]);
   const [summary, setSummary] = useState<AdminBillingSummary | null>(null);
@@ -5835,9 +5952,9 @@ function BillingAdmin() {
 }
 
 const SERVICE_CATEGORY_LABELS: Record<string, string> = {
-  storage: "Storage", email: "Email", payment: "Payment", provisioning: "Auto-provision",
+  storage: "Storage", email: "Email", payment: "Payment", provisioning: "Auto-provision", billing: "Cloud Billing",
 };
-const SERVICE_CATEGORY_ORDER = ["storage", "email", "payment", "provisioning"];
+const SERVICE_CATEGORY_ORDER = ["storage", "email", "payment", "provisioning", "billing"];
 
 function ServiceObjectsAdmin() {
   const [items, setItems] = useState<ServiceObj[]>([]);
@@ -5906,6 +6023,7 @@ function ServiceObjectsAdmin() {
   const email = items.filter((i) => i.category === "email");
   const payment = items.filter((i) => i.category === "payment");
   const provisioning = items.filter((i) => i.category === "provisioning");
+  const billing = items.filter((i) => i.category === "billing");
   const draftSpec = draft ? specFor(draft.kind) : undefined;
   const settingOptions = (key: string): string[] | null =>
     key === "storage_class" ? STORAGE_CLASS_OPTS : key === "access_tier" ? ACCESS_TIER_OPTS : null;
@@ -5942,6 +6060,13 @@ function ServiceObjectsAdmin() {
           <button className="btn ghost sm" onClick={async () => { try { setIam(await api.get("/admin/provisioning/iam/azure")); } catch { /* ignore */ } }}>Azure roles</button>
         </div>
         {iam && <IamPanel iam={iam} onClose={() => setIam(null)} />}
+        <div style={{ height: 14 }} />
+        <ServiceTable title="Cloud Billing" rows={billing} onEdit={editDraft} onDelete={delObject} onTest={testObject} />
+        <div className="row" style={{ gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span className="faint" style={{ fontSize: 12 }}>Required cloud access for cost reads:</span>
+          <button className="btn ghost sm" onClick={async () => { try { setIam(await api.get("/admin/costs/iam/aws")); } catch { /* ignore */ } }}>AWS billing policy</button>
+          <button className="btn ghost sm" onClick={async () => { try { setIam(await api.get("/admin/costs/iam/azure")); } catch { /* ignore */ } }}>Azure billing roles</button>
+        </div>
         <div className="muted" style={{ fontSize: 12, marginTop: 12 }}>
           Storage services back Arkive Cloud: mappings routed to <b>cv-cloud</b> store and restore through
           the storage service selected on the running node. S3 defaults to Intelligent-Tiering and Azure to the
@@ -6100,7 +6225,7 @@ interface CloudIndexReplica { status: string; object_count: number; last_replica
 interface StorageUsage {
   cloud_total: { bytes: number; objects: number; recovery_points: number; tenants: number };
   by_tenant: { tenant_id: string; customer_id?: string; scope?: string; tenant_name: string; plan: string; licensed_bytes: number; bytes: number; objects: number; recovery_points: number; index_replica?: CloudIndexReplica | null }[];
-  services: { id: string; name: string; kind: string; kind_label: string; enabled: boolean; nodes: string[]; active: boolean; settings: Record<string, string> }[];
+  services: { id: string; name: string; kind: string; kind_label: string; enabled: boolean; nodes: string[]; active: boolean; settings: Record<string, string>; cost_mtd?: number }[];
 }
 
 function StorageUsageAdmin() {
@@ -6137,6 +6262,7 @@ function StorageUsageAdmin() {
                 {s.settings.bucket ? `bucket ${s.settings.bucket}` : s.settings.container ? `container ${s.settings.container}` : "—"}
                 {s.settings.region ? ` · ${s.settings.region}` : ""}
               </div>
+              {s.cost_mtd ? <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>${s.cost_mtd.toFixed(2)} this month</div> : null}
               <div className="row" style={{ gap: 6, marginTop: 8, flexWrap: "wrap" }}>
                 {s.nodes.length
                   ? s.nodes.map((n) => <Pill key={n} tone="info"><Icon name="server" size={11} /> {n}</Pill>)
@@ -6202,7 +6328,7 @@ interface StoredBackup {
   destinations: { name: string; kind: string; bytes: number; key?: string }[];
 }
 interface BackupsData {
-  summary: { nodes_total: number; nodes_protected: number; total_stored_bytes: number; success_24h: number; failed_24h: number; interval_minutes: number; last_run_at: string | null };
+  summary: { nodes_total: number; nodes_protected: number; total_stored_bytes: number; success_24h: number; failed_24h: number; interval_minutes: number; last_run_at: string | null; cost_mtd?: number };
   nodes: BackupNode[];
   services: BackupService[];
   stored_backups: StoredBackup[];
@@ -6281,6 +6407,7 @@ function BackupsAdmin() {
         <Stat label="Backup storage used" value={bytes(sum.total_stored_bytes)} />
         <Stat label="Succeeded (24h)" value={sum.success_24h} />
         <Stat label="Failed (24h)" value={sum.failed_24h} />
+        {sum.cost_mtd ? <Stat label="Backup cost (MTD)" value={`$${sum.cost_mtd.toFixed(2)}`} /> : null}
       </div>
 
       <Card style={{ marginTop: 16 }}>
