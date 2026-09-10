@@ -70,6 +70,9 @@ export default function Start() {
             <a className="btn primary lg" href={SIGNUP_URL}>Start your free trial</a>
             <a className="btn ghost lg" href="/pricing">See pricing</a>
           </div>
+          <p className="lead" style={{ margin: "18px auto 0", fontSize: 14 }}>
+            Need enterprise controls, SSO, or volume pricing? <a href="/contact">Contact sales</a>.
+          </p>
         </div>
       </Section>
     </>

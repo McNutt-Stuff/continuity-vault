@@ -10,7 +10,7 @@ interface Pricing {
   currency: string; protection_price_per_tb_month: number; cloud_price_per_tb_month: number;
   appliance_tiers: ApplianceTier[]; tiers: StorageTier[];
 }
-interface Config { enabled: boolean; trial_days: number; accepted_countries: string[]; plans: Plan[]; pricing: Pricing; }
+interface Config { enabled: boolean; trial_days: number; appliance_nonreturn_fee?: number; accepted_countries: string[]; plans: Plan[]; pricing: Pricing; }
 interface PayConfig { configured: boolean; processor?: string | null; publishable_key?: string; currency?: string; }
 
 let _stripeScript: Promise<void> | null = null;
@@ -43,6 +43,12 @@ const DEDICATED = new Set(["family", "business", "enterprise"]);
 const STEPS = ["Plan", "Account", "Address", "Protection", "Billing"];
 const iconOf = (n: string): IconName => (["cloud","server","key","shield","check","database","file"].includes(n) ? n : "database") as IconName;
 function money(n: number) { return "$" + Math.round(n).toLocaleString(); }
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+// "Starting at" price = the plan's floor (min TB × rate); pay-as-you-go when no minimum.
+function planStart(p: Plan): { label: string; sub: string } {
+  if (p.min_tb > 0) return { label: `Starting at ${money(p.min_tb * p.price_per_tb_month)}/mo`, sub: `${p.min_tb} TB included · $${p.price_per_tb_month}/TB after` };
+  return { label: "Pay as you go", sub: `$${p.price_per_tb_month}/TB · month` };
+}
 
 export default function Signup() {
   const nav = useNavigate();
@@ -76,6 +82,8 @@ export default function Signup() {
   const subs = form.country === "CA" ? CA_PROVINCES : US_STATES;
   const pricing = cfg?.pricing;
   const trialDays = cfg?.trial_days || 7;
+  const applianceFee = cfg?.appliance_nonreturn_fee || 1999;
+  const hasHardware = options.has("appliance") || Object.values(qty).some((q) => q > 0);
 
   // Live monthly estimate (mirrors the in-app onboarding math).
   const est = useMemo(() => {
@@ -113,7 +121,9 @@ export default function Signup() {
 
   function validAccount(): string {
     if (!form.first_name.trim()) return "Please enter your first name.";
-    if (!form.email.includes("@")) return "Please enter a valid email.";
+    if (!form.last_name.trim()) return "Please enter your last name.";
+    if (!EMAIL_RE.test(form.email.trim())) return "Please enter a valid email address.";
+    if (form.phone.trim() && form.phone.replace(/\D/g, "").length < 7) return "Please enter a valid phone number.";
     if (isDedicated && !form.org_name.trim()) return "Please name your organization.";
     return "";
   }
@@ -123,6 +133,8 @@ export default function Signup() {
     if (!form.city.trim()) return "Please enter your city.";
     if (!form.subdivision) return "Please choose your state or province.";
     if (!form.postal_code.trim()) return "Please enter your postal code.";
+    if (form.country === "US" && !/^\d{5}(-\d{4})?$/.test(form.postal_code.trim())) return "Please enter a valid US ZIP code.";
+    if (form.country === "CA" && !/^[A-Za-z]\d[A-Za-z] ?\d[A-Za-z]\d$/.test(form.postal_code.trim())) return "Please enter a valid Canadian postal code.";
     return "";
   }
 
@@ -198,6 +210,7 @@ export default function Signup() {
               <div className="stack" style={{ gap: 10 }}>
                 {(cfg?.plans || []).map((p) => {
                   const on = plan === p.id;
+                  const price = planStart(p);
                   return (
                     <button key={p.id} className="card" onClick={() => setPlan(p.id)}
                             style={{ textAlign: "left", cursor: "pointer", position: "relative",
@@ -205,9 +218,12 @@ export default function Signup() {
                       {p.id === RECOMMENDED && <span className="pill info" style={{ position: "absolute", top: -10, right: 14, fontSize: 10 }}>Most popular</span>}
                       <div className="spread">
                         <div style={{ fontWeight: 700, fontSize: 15 }}>{p.name}</div>
-                        <div style={{ fontWeight: 700 }}>${p.price_per_tb_month}<span className="faint" style={{ fontWeight: 400, fontSize: 12 }}>/TB·mo</span></div>
+                        <div style={{ fontWeight: 700, textAlign: "right" }}>{price.label}</div>
                       </div>
-                      <div className="faint" style={{ fontSize: 12.5, marginTop: 4 }}>{PLAN_BLURB[p.id] || ""}{p.min_tb ? ` · ${p.min_tb} TB minimum` : ""}</div>
+                      <div className="spread" style={{ marginTop: 4 }}>
+                        <div className="faint" style={{ fontSize: 12.5 }}>{PLAN_BLURB[p.id] || ""}</div>
+                        <div className="faint" style={{ fontSize: 11 }}>{price.sub}</div>
+                      </div>
                     </button>
                   );
                 })}
@@ -277,43 +293,58 @@ export default function Signup() {
                 {(pricing?.tiers || []).map((t) => {
                   const on = options.has(t.id);
                   return (
-                    <button key={t.id} className="card" onClick={() => toggleOpt(t.id)}
-                            style={{ textAlign: "left", cursor: "pointer", borderColor: on ? (t.color || "var(--accent, #4f7cff)") : undefined, borderWidth: on ? 2 : 1 }}>
-                      <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
+                    <div key={t.id} className="card" style={{ borderColor: on ? (t.color || "var(--accent, #4f7cff)") : undefined, borderWidth: on ? 2 : 1 }}>
+                      <div className="row" style={{ gap: 10, alignItems: "flex-start", cursor: "pointer" }} onClick={() => toggleOpt(t.id)}>
                         <div className="result-icon" style={{ width: 30, height: 30, background: "var(--inset)", color: t.color }}><Icon name={iconOf(t.icon)} size={16} /></div>
                         <div className="flex1">
-                          <div className="spread"><span style={{ fontWeight: 700 }}>{t.title}</span>{on && <Icon name="check" size={15} />}</div>
+                          <div className="spread">
+                            <span style={{ fontWeight: 700 }}>{t.title}{t.id === "cv-cloud" && <span className="pill info" style={{ marginLeft: 8, fontSize: 10 }}>Recommended</span>}</span>
+                            {on && <Icon name="check" size={15} />}
+                          </div>
                           <div className="faint" style={{ fontSize: 12 }}>{t.tagline}</div>
                         </div>
                       </div>
-                    </button>
+
+                      {on && t.id === "cv-cloud" && isDedicated && (
+                        <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)" }}>
+                          <label className="faint" style={{ fontSize: 12 }}>How much to protect: <b style={{ color: "var(--text)" }}>{licensedTb} TB</b></label>
+                          <input type="range" min={Math.max(1, selectedPlan?.min_tb || 1)} max={50} value={licensedTb}
+                                 onChange={(e) => setLicensedTb(parseInt(e.target.value, 10))} style={{ width: "100%" }} />
+                        </div>
+                      )}
+                      {on && t.id === "appliance" && (pricing?.appliance_tiers || []).length > 0 && (
+                        <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)" }}>
+                          <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Choose your appliance(s)</div>
+                          <div className="stack" style={{ gap: 6 }}>
+                            {(pricing?.appliance_tiers || []).map((at) => (
+                              <div key={at.capacity_tb} className="spread" style={{ fontSize: 12.5 }}>
+                                <span>{at.model} · {at.capacity_tb} TB <span className="faint">· {money(at.monthly)}/mo + {money(at.setup)} setup</span></span>
+                                <span className="row" style={{ gap: 8, alignItems: "center" }}>
+                                  <button className="btn ghost sm" onClick={() => bump(at.capacity_tb, -1)}>−</button>
+                                  <span style={{ minWidth: 16, textAlign: "center" }}>{qty[at.capacity_tb] || 0}</span>
+                                  <button className="btn ghost sm" onClick={() => bump(at.capacity_tb, 1)}>+</button>
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="row" style={{ gap: 7, marginTop: 10, color: "var(--text-dim)", fontSize: 11.5, alignItems: "flex-start" }}>
+                            <Icon name="info" size={12} /> <span>Your appliance ships <b>after</b> your {trialDays}-day free trial completes.</span>
+                          </div>
+                        </div>
+                      )}
+                      {on && t.id === "customer-cloud" && (
+                        <div className="faint" style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)", fontSize: 11.5 }}>
+                          <Icon name="info" size={12} /> Connect your own S3 / Azure / GCS bucket from your account after sign-in.
+                        </div>
+                      )}
+                    </div>
                   );
                 })}
               </div>
 
-              {isDedicated && (
-                <div style={{ marginTop: 16 }}>
-                  <label className="faint" style={{ fontSize: 12 }}>Licensed protected storage: <b style={{ color: "var(--text)" }}>{licensedTb} TB</b></label>
-                  <input type="range" min={Math.max(1, selectedPlan?.min_tb || 1)} max={50} value={licensedTb}
-                         onChange={(e) => setLicensedTb(parseInt(e.target.value, 10))} style={{ width: "100%" }} />
-                </div>
-              )}
-
-              {options.has("appliance") && (pricing?.appliance_tiers || []).length > 0 && (
-                <div style={{ marginTop: 16 }}>
-                  <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Add a secure appliance</div>
-                  <div className="stack" style={{ gap: 6 }}>
-                    {(pricing?.appliance_tiers || []).map((t) => (
-                      <div key={t.capacity_tb} className="spread" style={{ fontSize: 12.5 }}>
-                        <span>{t.model} · {t.capacity_tb} TB <span className="faint">· {money(t.monthly)}/mo + {money(t.setup)} setup</span></span>
-                        <span className="row" style={{ gap: 8, alignItems: "center" }}>
-                          <button className="btn ghost sm" onClick={() => bump(t.capacity_tb, -1)}>−</button>
-                          <span style={{ minWidth: 16, textAlign: "center" }}>{qty[t.capacity_tb] || 0}</span>
-                          <button className="btn ghost sm" onClick={() => bump(t.capacity_tb, 1)}>+</button>
-                        </span>
-                      </div>
-                    ))}
-                  </div>
+              {!options.has("cv-cloud") && (
+                <div className="row" style={{ gap: 8, marginTop: 10, color: "var(--warn)", fontSize: 12, alignItems: "flex-start" }}>
+                  <Icon name="alert" size={13} /> <span>We recommend keeping <b>Arkive Cloud</b> on as your always-available primary copy. You can add others alongside it.</span>
                 </div>
               )}
 
@@ -364,6 +395,11 @@ export default function Signup() {
                   </div>
                 </>
               )}
+              {/* Fine print */}
+              <div className="faint" style={{ fontSize: 10.5, marginTop: 16, lineHeight: 1.6, borderTop: "1px solid var(--border-soft)", paddingTop: 12 }}>
+                By starting your trial you agree to our terms and privacy policy. You won't be charged during your {trialDays}-day trial; we'll bill your plan automatically when it ends unless you cancel.
+                {hasHardware && <> Any appliance ships after your trial completes. <b>If you cancel your plan and do not return your appliance(s), a fee of {money(applianceFee)} per appliance applies.</b></>}
+              </div>
             </>
           )}
 
@@ -371,10 +407,10 @@ export default function Signup() {
           {step === 5 && done && (
             <div style={{ textAlign: "center", padding: "12px 0" }}>
               <div style={{ display: "inline-flex", padding: 14, borderRadius: "50%", background: "var(--inset)", marginBottom: 12 }}><Icon name="mail" size={24} /></div>
-              <h2 style={{ margin: "0 0 6px" }}>Check your email</h2>
+              <h2 style={{ margin: "0 0 6px" }}>Verify your email</h2>
               <div className="faint" style={{ fontSize: 13, maxWidth: 380, margin: "0 auto" }}>
                 {done.trial ? `Your ${trialDays}-day free trial has started. ` : ""}
-                We sent a one-time sign-in code to <b>{form.email}</b>. Enter it on the next screen to finish setting up your account.
+                We emailed a one-time code to <b>{form.email}</b> — enter it on the next screen to verify your email and finish setting up. We've also sent a summary of your plan.
               </div>
               {done.dev_code && <div className="pill info" style={{ marginTop: 12 }}>Dev code: <span className="mono" style={{ marginLeft: 6 }}>{done.dev_code}</span></div>}
               <button className="btn primary" style={{ width: "100%", marginTop: 18 }} onClick={() => nav("/")}>Continue to sign in</button>

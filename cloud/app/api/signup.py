@@ -12,6 +12,7 @@ a one-time login code. First sign-in shows the in-portal setup wizard.
 from __future__ import annotations
 
 import logging
+import re
 import secrets as _secrets
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -30,8 +31,14 @@ settings = get_settings()
 logger = logging.getLogger("cv.signup")
 
 TRIAL_DAYS = 7
-_DEDICATED_PLANS = {"family", "business", "enterprise"}
+# Fee charged per appliance if a customer cancels and doesn't return the hardware.
+APPLIANCE_NONRETURN_FEE = 1999
+# Family + Business get their own dedicated (organization) tenant. Enterprise is a
+# sales-assisted process — never offered through self-service signup.
+_DEDICATED_PLANS = {"family", "business"}
+_HIDDEN_PLANS = {"enterprise"}
 _VALID_OPTIONS = {"cv-cloud", "appliance", "customer-cloud"}
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _plans(db: Session) -> list[dict]:
@@ -39,7 +46,8 @@ def _plans(db: Session) -> list[dict]:
     p = get_pricing(db)
     return [{"id": pl.get("id"), "name": pl.get("name"),
              "price_per_tb_month": pl.get("price_per_tb_month"),
-             "min_tb": pl.get("min_tb", 0)} for pl in (p.license_plans or [])]
+             "min_tb": pl.get("min_tb", 0)}
+            for pl in (p.license_plans or []) if pl.get("id") not in _HIDDEN_PLANS]
 
 
 @router.get("/config")
@@ -54,6 +62,7 @@ def signup_config(db: Session = Depends(get_db)):
     return {
         "enabled": bool(settings.public_signup_enabled),
         "trial_days": TRIAL_DAYS,
+        "appliance_nonreturn_fee": APPLIANCE_NONRETURN_FEE,
         "accepted_countries": sorted(geo.ACCEPTED_COUNTRIES),
         "plans": _plans(db),
         "pricing": pricing_public(get_pricing(db)),
@@ -117,16 +126,33 @@ def signup(body: SignupBody, db: Session = Depends(get_db)):
         raise HTTPException(403, "sign-up is not available right now")
 
     email = body.email.strip().lower()
-    if not email or "@" not in email:
-        raise HTTPException(400, "a valid email is required")
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(400, "please enter a valid email address")
     if not body.first_name.strip():
-        raise HTTPException(400, "your name is required")
+        raise HTTPException(400, "your first name is required")
+    if not body.last_name.strip():
+        raise HTTPException(400, "your last name is required")
+    if body.phone.strip() and len(re.sub(r"\D", "", body.phone)) < 7:
+        raise HTTPException(400, "please enter a valid phone number")
 
-    country = geo.normalize_country(body.address.country)
+    a = body.address
+    country = geo.normalize_country(a.country)
     if not geo.is_accepted(country):
         raise HTTPException(400, "sign-up isn't available in your country yet — "
                                  "we're expanding to more regions soon")
-    region_code = geo.resolve_region(country, body.address.subdivision)
+    if not a.line1.strip():
+        raise HTTPException(400, "your street address is required")
+    if not a.city.strip():
+        raise HTTPException(400, "your city is required")
+    if not geo.normalize_subdivision(a.subdivision):
+        raise HTTPException(400, "please choose your state or province")
+    postal = a.postal_code.strip()
+    if country == "US" and not re.match(r"^\d{5}(-\d{4})?$", postal):
+        raise HTTPException(400, "please enter a valid US ZIP code")
+    if country == "CA" and not re.match(r"^[A-Za-z]\d[A-Za-z] ?\d[A-Za-z]\d$", postal):
+        raise HTTPException(400, "please enter a valid Canadian postal code")
+
+    region_code = geo.resolve_region(country, a.subdivision)
     region = db.query(Region).filter(Region.code == region_code).first()
     if region is None or not region.signup_enabled:
         raise HTTPException(400, "sign-up isn't available for your region yet")
@@ -138,6 +164,8 @@ def signup(body: SignupBody, db: Session = Depends(get_db)):
     plan = body.plan if body.plan in plans else "personal"
     dedicated = plan in _DEDICATED_PLANS
     tenant_type = "dedicated" if dedicated else "shared"
+    if dedicated and not body.org_name.strip():
+        raise HTTPException(400, "please name your organization")
 
     first = body.first_name.strip()
     last = body.last_name.strip()
@@ -188,15 +216,22 @@ def signup(body: SignupBody, db: Session = Depends(get_db)):
         except Exception:  # noqa: BLE001 — never fail the signup on billing issues
             logger.exception("signup billing failed for %s", email)
 
+    # A summary/welcome email (separate from the sign-in code) so the customer has
+    # a record of their plan, protection, trial terms and the hardware fine print.
+    try:
+        _send_signup_summary(db, user, plan, options, appliance_plan)
+    except Exception:  # noqa: BLE001
+        logger.exception("signup summary email failed for %s", email)
+
     resp: dict = {"ok": True, "region": region_code, "plan": plan,
                   "tenant_id": tenant.id, "trial": trial_started, "trial_days": TRIAL_DAYS,
                   "vault_id": vault.id}
     try:
         code = authcodes.issue_code(email, "login")
         resp["delivery"] = send_email(
-            email, "Welcome to Arkive — your sign-in code",
-            f"Welcome to Arkive!\n\nYour sign-in code is: {code}\nIt expires shortly.\n\n"
-            "Enter it on the sign-in screen to finish setting up your account.",
+            email, "Verify your email — your Arkive sign-in code",
+            f"Welcome to Arkive!\n\nVerify your email and finish setting up your account "
+            f"by entering this code on the sign-in screen: {code}\nIt expires shortly.",
             category="signin")
         resp["sent"] = True
         if settings.environment == "development":
@@ -205,6 +240,52 @@ def signup(body: SignupBody, db: Session = Depends(get_db)):
         resp["sent"] = False
         resp["throttled"] = True
     return resp
+
+
+def _send_signup_summary(db: Session, user: User, plan: str, options: list[str],
+                         appliance_plan: list[dict]) -> None:
+    """Email the new customer a summary of their plan, protection, trial and the
+    hardware terms (ship-after-trial + non-return fee)."""
+    from datetime import datetime, timedelta, timezone
+    from .. import emailer
+
+    labels = {"cv-cloud": "Arkive Cloud", "appliance": "Secure appliance",
+              "customer-cloud": "Your own cloud storage"}
+    trial_end = (datetime.now(timezone.utc) + timedelta(days=TRIAL_DAYS)).strftime("%B %-d, %Y")
+    has_hw = "appliance" in options or bool(appliance_plan)
+    n_appliances = sum(int(s.get("qty") or 0) for s in (appliance_plan or []))
+
+    parts = [f'<p style="margin:0 0 12px;">Welcome to Arkive, {user.first_name or "there"}! '
+             f'Here\'s a summary of your new account.</p>']
+    rows = [{"icon": "sparkle", "name": "Plan", "detail": plan.title()},
+            {"icon": "shield", "name": "Protection", "detail": ", ".join(labels.get(o, o) for o in options)},
+            {"icon": "clock", "name": "Free trial", "detail": f"{TRIAL_DAYS} days — through {trial_end}"}]
+    parts.append(emailer_rows(rows))
+    parts.append(f'<p style="margin:14px 0 0;">Your {TRIAL_DAYS}-day free trial is active. '
+                 f'We\'ll start billing your {plan.title()} plan on {trial_end} — cancel anytime before then '
+                 f'and you won\'t be charged.</p>')
+    if has_hw:
+        parts.append(f'<p style="margin:12px 0 0;"><b>Hardware:</b> your appliance'
+                     f'{"s" if n_appliances != 1 else ""} will ship after your {TRIAL_DAYS}-day trial completes.</p>')
+    footer = (f"Fine print: if you cancel your plan and do not return your appliance(s), a fee of "
+              f"${APPLIANCE_NONRETURN_FEE:,} per appliance applies." if has_hw else
+              "You're receiving this because you created an Arkive account.")
+    html = emailer.render("Your Arkive account is ready", "".join(parts),
+                          cta={"label": "Sign in to Arkive", "url": _portal_url() + "/"},
+                          preheader="Your plan, protection and trial details",
+                          footer_note=footer)
+    emailer.send(user.email, "Your Arkive account — plan & trial summary",
+                 html=html, text="Welcome to Arkive. Your account is ready; sign in with the code we emailed.",
+                 category="signup")
+
+
+def emailer_rows(rows: list[dict]) -> str:
+    from .. import notifications
+    return notifications._rows(rows)
+
+
+def _portal_url() -> str:
+    return (getattr(settings, "rp_origin", "") or "https://vault.arkive.life").rstrip("/")
 
 
 def _save_billing_address(db: Session, tenant: Tenant, user: User, body: SignupBody) -> None:
