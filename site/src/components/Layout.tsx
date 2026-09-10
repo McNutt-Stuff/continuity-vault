@@ -24,14 +24,14 @@ export function Layout({ children }: { children: ReactNode }) {
           </nav>
           <div className="nav-cta">
             <a className="btn ghost" href={site.appUrl}>Sign in</a>
-            <a className="btn primary" href={`${site.appUrl}/signup`}>Get started</a>
+            <Link className="btn primary" to="/start">Get started</Link>
           </div>
           <button className="btn ghost menu-btn" onClick={() => setOpen((o) => !o)} aria-label="Menu">☰</button>
         </div>
         <div className={`mobile-menu ${open ? "open" : ""}`}>
           {site.nav.map((n) => <Link key={n.to} to={n.to}>{n.label}</Link>)}
           <Link to="/support">Support</Link>
-          <a href={`${site.appUrl}/signup`}>Get started</a>
+          <Link to="/start">Get started</Link>
           <a href={site.appUrl}>Sign in</a>
         </div>
       </header>
@@ -109,7 +109,7 @@ export function CTABand() {
         <h2 className="gradient-text">Your data deserves to be permanent.</h2>
         <p className="lead" style={{ margin: "0 auto 26px" }}>Set up continuous, quantum-safe protection in minutes. Recover with confidence for years.</p>
         <div style={{ display: "flex", gap: 14, justifyContent: "center", flexWrap: "wrap" }}>
-          <a className="btn primary lg" href={`${site.appUrl}/signup`}>Get started</a>
+          <Link className="btn primary lg" to="/start">Get started</Link>
           <Link className="btn ghost lg" to="/features">Explore features</Link>
         </div>
       </div>

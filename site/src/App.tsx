@@ -12,6 +12,7 @@ import About from "./pages/About";
 import Privacy from "./pages/Privacy";
 import Contact from "./pages/Contact";
 import Support from "./pages/Support";
+import Start from "./pages/Start";
 
 const SITE_URL = "https://arkive.life";
 // Per-route title + meta description so search engines and LLM crawlers index a
@@ -31,6 +32,7 @@ const SEO: Record<string, { title: string; desc: string }> = {
   "/privacy": { title: "Privacy — Arkive", desc: "How Arkive protects your privacy with zero-knowledge, end-to-end encryption." },
   "/contact": { title: "Contact — Arkive", desc: "Get in touch with the Arkive team." },
   "/support": { title: "Help Center — Arkive", desc: "Guides and answers for setting up and using Arkive." },
+  "/start": { title: "Start your 7-day free trial — Arkive", desc: "Try Arkive free for 7 days. Quantum-safe backup and instant recovery, set up in minutes. No charge today, cancel anytime." },
 };
 
 function setMeta(name: string, content: string, attr: "name" | "property" = "name") {
@@ -75,6 +77,7 @@ export default function App() {
         <Route path="/contact" element={<Contact />} />
         <Route path="/support" element={<Support />} />
         <Route path="/support/:slug" element={<Support />} />
+        <Route path="/start" element={<Start />} />
         <Route path="*" element={<Home />} />
       </Routes>
     </Layout>

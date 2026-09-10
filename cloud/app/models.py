@@ -1286,6 +1286,7 @@ class BillingProfile(Base):
     status = Column(String, default="inactive")            # inactive|active|paused|past_due|canceled
     active = Column(Boolean, default=False)                # admin switch: are recurring charges on?
     activated_at = Column(DateTime, nullable=True)         # when recurring billing was first turned on
+    trial_ends_at = Column(DateTime, nullable=True)        # end of a free trial (auto-bills on/after this)
     next_charge_at = Column(DateTime, nullable=True)       # next scheduled recurring charge (anniversary)
     dunning_attempts = Column(Integer, default=0)          # consecutive failed charges (reset on success)
     current_period_end = Column(DateTime, nullable=True)

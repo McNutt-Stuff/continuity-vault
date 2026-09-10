@@ -20,7 +20,7 @@ export const home = {
   h1: "Protect the digital life you can't afford to lose.",
   lead:
     "Arkive continuously backs up your email, files, photos, passwords and accounts — encrypted with post-quantum cryptography, stored across a cloud you control and offline secure hardware. Recover anything, prove it's intact, and never lose what matters.",
-  ctaPrimary: { label: "Start protecting your data", to: "/pricing" },
+  ctaPrimary: { label: "Start your 7-day free trial", to: "/start" },
   ctaSecondary: { label: "See how it works", to: "/features" },
   badges: [
     "Post-quantum encryption (ML-KEM / ML-DSA)",

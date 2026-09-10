@@ -296,6 +296,8 @@ def _apply_additive_migrations() -> None:
         # existing nodes/tenants tables.
         "ALTER TABLE nodes ADD COLUMN cluster_id VARCHAR",
         "ALTER TABLE tenants ADD COLUMN region_code VARCHAR DEFAULT ''",
+        # Free-trial support: a billing profile can be trialing (auto-bills at trial end).
+        "ALTER TABLE billing_profiles ADD COLUMN trial_ends_at TIMESTAMP",
         "ALTER TABLE appliances ADD COLUMN version_updated_at TIMESTAMP",
         "ALTER TABLE desktop_agents ADD COLUMN version_updated_at TIMESTAMP",
         # Per-user vault ownership (data partitioning). Backfill legacy/shared

@@ -67,6 +67,20 @@ def activate(db: Session, prof: BillingProfile, now: datetime | None = None,
     return charge
 
 
+def start_trial(db: Session, prof: BillingProfile, days: int = 7,
+                now: datetime | None = None) -> None:
+    """Begin a free trial: the profile is active (so the due-charge sweep owns it)
+    but the FIRST charge is deferred to the trial end, at which point
+    run_due_charges bills the full monthly amount automatically. Caller commits."""
+    now = now or _now()
+    prof.active = True
+    prof.status = "trialing"
+    prof.activated_at = now
+    prof.trial_ends_at = now + timedelta(days=days)
+    prof.next_charge_at = prof.trial_ends_at
+    prof.dunning_attempts = 0
+
+
 def _default_pm(db: Session, prof: BillingProfile) -> PaymentMethod | None:
     if prof.payment_method_id:
         pm = db.get(PaymentMethod, prof.payment_method_id)
