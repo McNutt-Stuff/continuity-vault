@@ -861,6 +861,29 @@ class Cluster(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+class ProvisioningJob(Base):
+    """A hyperscaler auto-provision task (create a VM node, DNS record, storage,
+    …) run against a Hyperscaler Auto-Provision service object. Tracked so the
+    admin can watch a single-click node deployment go from launch → bootstrap →
+    online, and retry/inspect failures."""
+
+    __tablename__ = "provisioning_jobs"
+    id = Column(String, primary_key=True, default=_uuid)
+    kind = Column(String, default="deploy_node")   # deploy_node | create_dns | create_storage
+    provider = Column(String, default="")           # aws | azure
+    service_object_id = Column(String, nullable=True)
+    status = Column(String, default="pending")      # pending|provisioning|bootstrapping|online|error
+    message = Column(String, default="")            # latest human-readable step / error
+    log = Column(JSON, default=list)                # [{ts, msg}] progress trail
+    params = Column(JSON, default=dict)             # requested options (role, region, size, name…)
+    result = Column(JSON, default=dict)             # {instance_id, public_ip, dns_name, region}
+    node_id = Column(String, nullable=True)         # the Node once it registers
+    cluster_id = Column(String, nullable=True)      # cluster to place the new node in
+    created_by = Column(String, default="")         # actor (admin user id)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
 class Region(Base):
     """A customer-facing geographic region (e.g. "North America East"). Signups are
     routed to a region by the address they provide; each region is served by a

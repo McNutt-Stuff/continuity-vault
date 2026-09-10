@@ -26,6 +26,7 @@ from .api import (
     org,
     node_sync,
     photos,
+    provisioning,
     recovery,
     recovery_key,
     restore,
@@ -97,6 +98,7 @@ app.include_router(agents.fleet_router, prefix=API)
 app.include_router(agents.agent_router, prefix=API)
 app.include_router(admin.router, prefix=API)
 app.include_router(topology.router, prefix=API)
+app.include_router(provisioning.router, prefix=API)
 app.include_router(terminal.admin_terminal_router, prefix=API)
 app.include_router(terminal.agent_terminal_router, prefix=API)
 app.include_router(debug.router, prefix=API)

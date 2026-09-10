@@ -96,6 +96,27 @@ def self_payment_service() -> Optional[dict]:
     return _self_services().get("payment")
 
 
+def resolve_service(db, service_id: str) -> Optional[dict]:
+    """{"kind","name","config"} for ANY ServiceObject by id (merged decrypted
+    credentials + non-secret settings). Used by infrastructure automation
+    (hyperscaler auto-provision) to act with a chosen service's credentials."""
+    from .models import ConfigObject, ServiceObject
+    from . import credstore
+    svc = db.get(ServiceObject, service_id)
+    if svc is None:
+        return None
+    values: dict = {}
+    if svc.config_object_id:
+        obj = db.get(ConfigObject, svc.config_object_id)
+        if obj and obj.encrypted_values:
+            try:
+                values = credstore.decrypt("platform", obj.encrypted_values)
+            except Exception:
+                values = {}
+    return {"id": svc.id, "kind": svc.kind, "name": svc.name,
+            "enabled": bool(svc.enabled), "config": {**values, **(svc.settings or {})}}
+
+
 def _node_effective(db, node) -> dict:
     """Effective config (override > profile) for an arbitrary node — used to
     resolve a tenant's assigned processor from the control plane."""

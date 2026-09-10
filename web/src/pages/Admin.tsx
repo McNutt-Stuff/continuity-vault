@@ -161,6 +161,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "website", label: "Website", icon: "grid", group: "Configurations" },
   { key: "nodes", label: "Nodes", icon: "server", group: "Infrastructure" },
   { key: "topology", label: "Topology", icon: "grid", group: "Infrastructure" },
+  { key: "auto-provision", label: "Auto-Provision", icon: "sparkle", group: "Infrastructure" },
   { key: "storage-usage", label: "Arkive Cloud", icon: "database", group: "Infrastructure" },
   { key: "backups", label: "Backups", icon: "shield", group: "Infrastructure" },
   { key: "fleet", label: "Appliance fleet", icon: "server", group: "Infrastructure" },
@@ -186,6 +187,7 @@ export default function Admin() {
       {s === "billing" && <BillingAdmin />}
       {s === "nodes" && <Nodes />}
       {s === "topology" && <TopologyAdmin />}
+      {s === "auto-provision" && <AutoProvisionAdmin />}
       {s === "storage-usage" && <StorageUsageAdmin />}
       {s === "backups" && <BackupsAdmin />}
       {s === "config-objects" && <ConfigObjectsAdmin />}
@@ -420,6 +422,154 @@ function TopologyAdmin() {
             ))}
           </tbody>
         </table>
+      </Card>
+    </>
+  );
+}
+
+function AutoProvisionAdmin() {
+  const [svcs, setSvcs] = useState<any[]>([]);
+  const [jobs, setJobs] = useState<any[]>([]);
+  const [clusters, setClusters] = useState<any[]>([]);
+  const [form, setForm] = useState({ service_object_id: "", name: "", role: "customer-tenant", region: "", size: "", cluster_id: "" });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [iam, setIam] = useState<any>(null);
+
+  const loadJobs = () => api.get<any[]>("/admin/provisioning/jobs").then(setJobs).catch(() => {});
+  useEffect(() => {
+    api.get<any[]>("/admin/provisioning/services").then(setSvcs).catch(() => {});
+    api.get<any>("/admin/topology").then((t) => setClusters(t.clusters || [])).catch(() => {});
+    void loadJobs();
+  }, []);
+  // Poll while any job is in flight.
+  useEffect(() => {
+    const active = jobs.some((j) => ["pending", "provisioning", "bootstrapping"].includes(j.status));
+    if (!active) return;
+    const t = setInterval(loadJobs, 5000);
+    return () => clearInterval(t);
+  }, [jobs]);
+
+  const svc = svcs.find((s) => s.id === form.service_object_id);
+
+  async function deploy() {
+    setErr(""); setBusy(true);
+    try {
+      await api.post("/admin/provisioning/deploy-node", {
+        service_object_id: form.service_object_id, name: form.name.trim(), role: form.role,
+        region: form.region.trim() || null, size: form.size.trim() || null,
+        cluster_id: form.cluster_id || null,
+      });
+      setForm({ ...form, name: "" });
+      await loadJobs();
+    } catch (e) { setErr((e as Error).message || "Could not start the deployment"); }
+    finally { setBusy(false); }
+  }
+
+  async function showIam(provider: string) {
+    try { setIam(await api.get(`/admin/provisioning/iam/${provider}`)); } catch { /* ignore */ }
+  }
+
+  const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "info"> = {
+    online: "ok", error: "danger", bootstrapping: "warn", provisioning: "info", pending: "info",
+  };
+
+  return (
+    <>
+      <Card style={{ marginBottom: 16 }}>
+        <h2 style={{ margin: "0 0 4px" }}>Auto-provision a node</h2>
+        <div className="faint" style={{ fontSize: 12.5, marginBottom: 14 }}>
+          Launch a VM in AWS or Azure, run the bootstrap so it installs + registers itself, publish DNS,
+          and bring it online — one click. Configure credentials under <b>Service objects → Hyperscaler Auto-Provision</b>.
+        </div>
+        {svcs.length === 0 ? (
+          <div className="muted" style={{ fontSize: 12.5 }}>No Hyperscaler Auto-Provision service objects yet. Create one under Service objects.</div>
+        ) : (
+          <>
+            <div className="grid grid-2" style={{ gap: 12 }}>
+              <Field label="Provider / service">
+                <select className="input sm" value={form.service_object_id} onChange={(e) => setForm({ ...form, service_object_id: e.target.value })}>
+                  <option value="">— choose —</option>
+                  {svcs.map((s) => <option key={s.id} value={s.id} disabled={!s.configured}>{s.name} ({s.provider.toUpperCase()}){s.configured ? "" : " — not configured"}</option>)}
+                </select>
+              </Field>
+              <Field label="Node name"><input className="input sm" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. nam-east-cust-2" /></Field>
+              <Field label="Role">
+                <select className="input sm" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+                  <option value="customer-tenant">Customer node</option>
+                  <option value="public-web">Public web</option>
+                </select>
+              </Field>
+              <Field label="Cluster">
+                <select className="input sm" value={form.cluster_id} onChange={(e) => setForm({ ...form, cluster_id: e.target.value })}>
+                  <option value="">— unassigned —</option>
+                  {clusters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </Field>
+              <Field label={`Region ${svc ? `(default ${svc.region || "—"})` : ""}`}><input className="input sm" value={form.region} onChange={(e) => setForm({ ...form, region: e.target.value })} placeholder="leave blank for default" /></Field>
+              <Field label="Instance size (optional)"><input className="input sm" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })} placeholder="e.g. t3.large / Standard_D2s_v5" /></Field>
+            </div>
+            {err && <div className="pill danger" style={{ marginTop: 10 }}>{err}</div>}
+            <div className="row" style={{ marginTop: 12, gap: 8 }}>
+              <button className="btn primary sm" disabled={busy || !form.service_object_id || !form.name.trim() || !svc?.configured} onClick={deploy}>
+                <Icon name="sparkle" size={14} /> {busy ? "Starting…" : "Deploy node"}
+              </button>
+              {svc && !svc.configured && <span className="faint" style={{ fontSize: 12 }}>Configure this service's credentials first.</span>}
+            </div>
+          </>
+        )}
+        <div className="row" style={{ gap: 8, marginTop: 14 }}>
+          <span className="faint" style={{ fontSize: 12 }}>Required IAM access:</span>
+          <button className="btn ghost sm" onClick={() => showIam("aws")}>AWS policy</button>
+          <button className="btn ghost sm" onClick={() => showIam("azure")}>Azure roles</button>
+        </div>
+      </Card>
+
+      {iam && (
+        <Card style={{ marginBottom: 16 }}>
+          <div className="spread"><h3 style={{ margin: 0 }}>{iam.title}</h3><button className="btn ghost sm" onClick={() => setIam(null)}><Icon name="x" size={13} /></button></div>
+          <div className="faint" style={{ fontSize: 12.5, margin: "6px 0 10px" }}>{iam.summary}</div>
+          <div className="faint" style={{ fontSize: 12 }}>Credentials to provide: <b>{(iam.credentials || []).join(", ")}</b></div>
+          {iam.policy && <pre className="terminal-log" style={{ marginTop: 10, maxHeight: 320, overflow: "auto" }}>{JSON.stringify(iam.policy, null, 2)}</pre>}
+          {iam.roles && <ul className="faint" style={{ fontSize: 12.5, marginTop: 10, paddingLeft: 18 }}>{iam.roles.map((r: any, i: number) => <li key={i}><b>{r.role}</b> — {r.scope}</li>)}</ul>}
+          {iam.notes && <ul className="faint" style={{ fontSize: 12, marginTop: 8, paddingLeft: 18 }}>{iam.notes.map((n: string, i: number) => <li key={i}>{n}</li>)}</ul>}
+        </Card>
+      )}
+
+      <Card>
+        <div className="spread" style={{ marginBottom: 8 }}>
+          <h3 style={{ margin: 0 }}>Deployments</h3>
+          <button className="btn ghost sm" onClick={loadJobs}><Icon name="repeat" size={13} /> Refresh</button>
+        </div>
+        {jobs.length === 0 && <div className="muted" style={{ fontSize: 12.5 }}>No deployments yet.</div>}
+        <div className="stack" style={{ gap: 10 }}>
+          {jobs.map((j) => (
+            <div key={j.id} className="card" style={{ background: "var(--inset)" }}>
+              <div className="spread">
+                <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                  <CloudIcon provider={j.provider} size={16} />
+                  <b>{j.node_name || "node"}</b>
+                  <span className="faint" style={{ fontSize: 12 }}>· {j.provider?.toUpperCase()}</span>
+                  <Pill tone={STATUS_TONE[j.status] || "info"} dot>{j.status}</Pill>
+                  {j.node_online && <Pill tone="ok">online</Pill>}
+                </div>
+                <span className="faint" style={{ fontSize: 11 }}>{timeAgo(j.created_at)}</span>
+              </div>
+              <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>{j.message}</div>
+              {(j.result?.public_ip || j.result?.dns_name) && (
+                <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
+                  {j.result.dns_name ? `${j.result.dns_name} · ` : ""}{j.result.public_ip || ""}{j.result.instance_id ? ` · ${j.result.instance_id}` : ""}
+                </div>
+              )}
+              {(j.log || []).length > 0 && (
+                <details style={{ marginTop: 6 }}>
+                  <summary className="faint" style={{ fontSize: 11.5, cursor: "pointer" }}>Progress log</summary>
+                  <pre className="terminal-log" style={{ marginTop: 6, maxHeight: 200, overflow: "auto" }}>{(j.log || []).map((l: any) => `${l.msg}`).join("\n")}</pre>
+                </details>
+              )}
+            </div>
+          ))}
+        </div>
       </Card>
     </>
   );
@@ -5268,6 +5418,7 @@ function ServiceObjectsAdmin() {
   const storage = items.filter((i) => i.category === "storage");
   const email = items.filter((i) => i.category === "email");
   const payment = items.filter((i) => i.category === "payment");
+  const provisioning = items.filter((i) => i.category === "provisioning");
   const draftSpec = draft ? specFor(draft.kind) : undefined;
   const settingOptions = (key: string): string[] | null =>
     key === "storage_class" ? STORAGE_CLASS_OPTS : key === "access_tier" ? ACCESS_TIER_OPTS : null;
@@ -5354,6 +5505,8 @@ function ServiceObjectsAdmin() {
         <ServiceTable title="Email services" rows={email} onEdit={editDraft} onDelete={delObject} onTest={testObject} testable />
         <div style={{ height: 14 }} />
         <ServiceTable title="Payment services" rows={payment} onEdit={editDraft} onDelete={delObject} onTest={testObject} />
+        <div style={{ height: 14 }} />
+        <ServiceTable title="Hyperscaler Auto-Provision" rows={provisioning} onEdit={editDraft} onDelete={delObject} onTest={testObject} />
         <div className="muted" style={{ fontSize: 12, marginTop: 12 }}>
           Storage services back Arkive Cloud: mappings routed to <b>cv-cloud</b> store and restore through
           the storage service selected on the running node. S3 defaults to Intelligent-Tiering and Azure to the

@@ -2641,6 +2641,27 @@ _SERVICE_KINDS: dict = {
         "setting_defaults": {"environment": "live"},
         "required": ["client_id", "client_secret"],
     },
+    "hyperscaler-aws": {
+        "label": "Hyperscaler Auto-Provision (AWS)",
+        "category": "provisioning",
+        "credential_keys": ["aws_access_key_id", "aws_secret_access_key"],
+        "settings": ["region", "instance_type", "ami_id", "subnet_id",
+                     "security_group_id", "key_name", "hosted_zone_id", "domain_suffix"],
+        "setting_defaults": {"region": "us-east-1", "instance_type": "t3.large"},
+        "required": ["region"],
+    },
+    "hyperscaler-azure": {
+        "label": "Hyperscaler Auto-Provision (Azure)",
+        "category": "provisioning",
+        "credential_keys": ["tenant_id", "client_id", "client_secret",
+                            "subscription_id", "admin_password"],
+        "settings": ["location", "resource_group", "vm_size", "vnet", "subnet",
+                     "admin_username", "ssh_public_key", "dns_zone",
+                     "dns_resource_group", "domain_suffix"],
+        "setting_defaults": {"location": "eastus", "vm_size": "Standard_D2s_v5",
+                             "admin_username": "arkive"},
+        "required": ["subscription_id", "resource_group", "location"],
+    },
 }
 
 
