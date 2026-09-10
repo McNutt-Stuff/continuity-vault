@@ -24,6 +24,46 @@ interface Options {
 
 const PLAN_RANK: Record<string, number> = { personal: 0, family: 1, business: 2 };
 
+// A compact dropdown mirroring the unified-search filter menu (fs-* styling), so
+// the rule builder reads like the search filters instead of raw inputs.
+function RuleSelect({ value, options, onPick, placeholder, allowCustom, width }: {
+  value: string;
+  options: { value: string; label: string }[];
+  onPick: (v: string) => void;
+  placeholder?: string;
+  allowCustom?: boolean;
+  width?: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const cur = options.find((o) => o.value === value);
+  return (
+    <div className="filter-select" style={{ position: "relative", minWidth: width || 130 }}>
+      <button type="button" className={`fs-trigger ${value ? "on" : ""}`} onClick={() => setOpen((o) => !o)}>
+        <span className="fs-trigger-label">{cur ? cur.label : (value || placeholder || "—")}</span>
+        <span className="fs-caret">▾</span>
+      </button>
+      {open && (
+        <>
+          <div className="fs-overlay" onClick={() => setOpen(false)} />
+          <div className="fs-menu" style={{ minWidth: width || 180 }}>
+            {allowCustom && (
+              <input className="fs-input" autoFocus placeholder="Type a field…" defaultValue={value}
+                     onKeyDown={(e) => { if (e.key === "Enter") { onPick((e.target as HTMLInputElement).value.trim()); setOpen(false); } }}
+                     onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== value) onPick(v); }} />
+            )}
+            {options.map((o) => (
+              <button key={o.value} className="fs-opt" onClick={() => { onPick(o.value); setOpen(false); }}>
+                <span className="fs-opt-label">{o.label}</span>
+                {value === o.value && <Icon name="check" size={11} />}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function blankRule(): Rule {
   return {
     id: "", name: "", description: "", enabled: true, priority: 100, match: "all",
@@ -229,11 +269,12 @@ function RuleEditor({ rule, opts, planRank, onChange, onSave, onDelete, saving, 
         <div className="stack" style={{ gap: 8 }}>
           {rule.conditions.map((c, i) => (
             <div key={i} className="rule-cond">
-              <input className="input sm" list="rule-fields" value={c.field} placeholder="field (e.g. from, meta.folder)"
-                     onChange={(e) => setCond(i, { field: e.target.value })} />
-              <select className="input sm" value={c.op} onChange={(e) => setCond(i, { op: e.target.value })}>
-                {opts.operators.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-              </select>
+              <RuleSelect value={c.field} placeholder="field" allowCustom width={150}
+                          options={opts.field_suggestions.map((f) => ({ value: f, label: f }))}
+                          onPick={(v) => setCond(i, { field: v })} />
+              <RuleSelect value={c.op} placeholder="is" width={130}
+                          options={opts.operators.map((o) => ({ value: o.id, label: o.label }))}
+                          onPick={(v) => setCond(i, { op: v })} />
               {!["exists", "not_exists"].includes(c.op) && (
                 <input className="input sm" value={c.value || ""} placeholder="value"
                        onChange={(e) => setCond(i, { value: e.target.value })} />
@@ -242,7 +283,6 @@ function RuleEditor({ rule, opts, planRank, onChange, onSave, onDelete, saving, 
                       disabled={rule.conditions.length <= 1} title="Remove"><Icon name="x" size={13} /></button>
             </div>
           ))}
-          <datalist id="rule-fields">{opts.field_suggestions.map((f) => <option key={f} value={f} />)}</datalist>
           <button className="btn ghost sm" style={{ alignSelf: "flex-start" }}
                   onClick={() => onChange("conditions", [...rule.conditions, { field: "", op: "contains", value: "" }])}>
             <Icon name="plus" size={13} /> Add condition

@@ -1,0 +1,18 @@
+User-agent: *
+Allow: /
+
+# AI / LLM crawlers are welcome to index the public marketing pages.
+User-agent: GPTBot
+Allow: /
+User-agent: OAI-SearchBot
+Allow: /
+User-agent: ChatGPT-User
+Allow: /
+User-agent: PerplexityBot
+Allow: /
+User-agent: ClaudeBot
+Allow: /
+User-agent: Google-Extended
+Allow: /
+
+Sitemap: https://arkive.life/sitemap.xml

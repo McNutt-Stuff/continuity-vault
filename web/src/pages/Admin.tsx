@@ -159,6 +159,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "pricing", label: "Pricing", icon: "database", group: "Configurations" },
   { key: "website", label: "Website", icon: "grid", group: "Configurations" },
   { key: "nodes", label: "Nodes", icon: "server", group: "Infrastructure" },
+  { key: "topology", label: "Topology", icon: "grid", group: "Infrastructure" },
   { key: "storage-usage", label: "Arkive Cloud", icon: "database", group: "Infrastructure" },
   { key: "backups", label: "Backups", icon: "shield", group: "Infrastructure" },
   { key: "fleet", label: "Appliance fleet", icon: "server", group: "Infrastructure" },
@@ -183,6 +184,7 @@ export default function Admin() {
       {s === "customer-analytics" && <CustomerAnalytics />}
       {s === "billing" && <BillingAdmin />}
       {s === "nodes" && <Nodes />}
+      {s === "topology" && <TopologyAdmin />}
       {s === "storage-usage" && <StorageUsageAdmin />}
       {s === "backups" && <BackupsAdmin />}
       {s === "config-objects" && <ConfigObjectsAdmin />}
@@ -200,6 +202,164 @@ export default function Admin() {
       {s === "logs" && <PlatformLogs />}
       {s === "support-tickets" && <SupportTicketsAdmin />}
       {s === "support-docs" && <SupportDocsAdmin />}
+    </>
+  );
+}
+
+function TopologyAdmin() {
+  const [data, setData] = useState<any>(null);
+  const load = () => api.get("/admin/topology").then(setData).catch(() => {});
+  useEffect(() => { void load(); }, []);
+  if (!data) return <Card><div className="muted">Loading topology…</div></Card>;
+
+  const clusters: any[] = data.clusters || [];
+  const regions: any[] = data.regions || [];
+  const unassigned: any[] = data.unassigned_nodes || [];
+
+  async function newCluster() {
+    const r = await formDialog({
+      title: "New cluster", confirmLabel: "Create",
+      message: "A cluster groups nodes (one control plane + many customer nodes) and serves one or more regions.",
+      fields: [
+        { name: "code", label: "Code (slug)", required: true, placeholder: "e.g. nam-1" },
+        { name: "name", label: "Name", required: true, placeholder: "North America Primary" },
+        { name: "description", label: "Description" },
+        { name: "home_region", label: "Home region code", placeholder: "nam-east" },
+      ],
+    });
+    if (!r) return;
+    try { await api.post("/admin/clusters", r); await load(); }
+    catch (e) { notify({ message: (e as Error).message, tone: "warn" }); }
+  }
+  async function editCluster(c: any) {
+    const r = await formDialog({
+      title: `Edit ${c.name}`, confirmLabel: "Save",
+      fields: [
+        { name: "name", label: "Name", defaultValue: c.name },
+        { name: "description", label: "Description", defaultValue: c.description },
+        { name: "home_region", label: "Home region code", defaultValue: c.home_region },
+        { name: "status", label: "Status", defaultValue: c.status, options: [
+          { label: "Active", value: "active" }, { label: "Draining", value: "draining" }, { label: "Offline", value: "offline" }] },
+        { name: "global_sync_enabled", label: "Global sync (multi-cluster)", defaultValue: String(c.global_sync_enabled), options: [
+          { label: "Disabled", value: "false" }, { label: "Enabled", value: "true" }] },
+      ],
+    });
+    if (!r) return;
+    try { await api.put(`/admin/clusters/${c.id}`, { ...r, global_sync_enabled: r.global_sync_enabled === "true" }); await load(); }
+    catch (e) { notify({ message: (e as Error).message, tone: "warn" }); }
+  }
+  async function delCluster(c: any) {
+    if (!(await confirmDialog({ title: `Delete ${c.name}?`, message: "Its nodes and regions will be detached (regions stop accepting signups).", confirmLabel: "Delete", tone: "danger" }))) return;
+    try { await api.del(`/admin/clusters/${c.id}`); await load(); }
+    catch (e) { notify({ message: (e as Error).message, tone: "warn" }); }
+  }
+  async function assignNode(nodeId: string, clusterId: string) {
+    try { await api.put(`/admin/nodes/${nodeId}/cluster`, { cluster_id: clusterId || null }); await load(); }
+    catch (e) { notify({ message: (e as Error).message, tone: "warn" }); }
+  }
+  async function setRegion(rid: string, patch: any) {
+    try { await api.put(`/admin/regions/${rid}`, patch); await load(); }
+    catch (e) { notify({ message: (e as Error).message, tone: "warn" }); }
+  }
+
+  return (
+    <>
+      <Card style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ marginBottom: 6 }}>
+          <div>
+            <h2 style={{ margin: 0 }}>Clusters</h2>
+            <div className="faint" style={{ fontSize: 12.5 }}>Each cluster has one control plane and many customer nodes, and serves one or more regions.</div>
+          </div>
+          <button className="btn primary sm" onClick={newCluster}><Icon name="plus" size={14} /> New cluster</button>
+        </div>
+        {clusters.length === 0 && <div className="muted" style={{ fontSize: 12.5 }}>No clusters yet.</div>}
+        <div className="stack" style={{ gap: 12 }}>
+          {clusters.map((c) => (
+            <div key={c.id} className="card" style={{ background: "var(--inset)" }}>
+              <div className="spread">
+                <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                  <div style={{ fontWeight: 700 }}>{c.name}</div>
+                  <Pill tone="info">{c.code}</Pill>
+                  <Pill tone={c.status === "active" ? "ok" : "warn"} dot>{c.status}</Pill>
+                  {c.global_sync_enabled && <Pill tone="info">global sync</Pill>}
+                </div>
+                <div className="row" style={{ gap: 6 }}>
+                  <button className="btn ghost sm" onClick={() => editCluster(c)}><Icon name="edit" size={13} /></button>
+                  <button className="btn ghost sm" onClick={() => delCluster(c)}><Icon name="trash" size={13} /></button>
+                </div>
+              </div>
+              <div className="row" style={{ gap: 16, marginTop: 8, fontSize: 12.5 }} >
+                <span className="faint">Control plane: <b>{c.control_plane?.name || "— none —"}</b></span>
+                <span className="faint">Customer nodes: <b>{c.customer_node_count}</b></span>
+                <span className="faint">Total nodes: <b>{c.node_count}</b></span>
+              </div>
+              {c.regions?.length > 0 && (
+                <div className="row" style={{ gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                  {c.regions.map((r: any) => <Pill key={r.code} tone="info">{r.name}</Pill>)}
+                </div>
+              )}
+              {c.nodes?.length > 0 && (
+                <div className="stack" style={{ gap: 4, marginTop: 8 }}>
+                  {c.nodes.map((n: any) => (
+                    <div key={n.id} className="spread" style={{ fontSize: 12.5, padding: "3px 0" }}>
+                      <span><Icon name="server" size={12} /> {n.name} <span className="faint">· {n.role}</span></span>
+                      <button className="btn ghost sm" onClick={() => assignNode(n.id, "")}>Remove</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        {unassigned.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="faint" style={{ fontSize: 12, marginBottom: 6 }}>Unassigned nodes</div>
+            {unassigned.map((n) => (
+              <div key={n.id} className="spread" style={{ fontSize: 12.5, padding: "4px 0" }}>
+                <span><Icon name="server" size={12} /> {n.name} <span className="faint">· {n.role}</span></span>
+                <select className="input sm" style={{ width: 200 }} defaultValue="" onChange={(e) => e.target.value && assignNode(n.id, e.target.value)}>
+                  <option value="">Assign to cluster…</option>
+                  {clusters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div style={{ marginBottom: 8 }}>
+          <h2 style={{ margin: 0 }}>Regions</h2>
+          <div className="faint" style={{ fontSize: 12.5 }}>New accounts are geo-routed to a region by the address they provide, then placed on the least-full customer node in that region's cluster.</div>
+        </div>
+        <table className="table" style={{ width: "100%" }}>
+          <thead><tr>
+            <th style={{ textAlign: "left" }}>Region</th><th style={{ textAlign: "left" }}>Zone</th>
+            <th style={{ textAlign: "left" }}>Cluster</th><th>Signups</th><th>Tenants</th>
+          </tr></thead>
+          <tbody>
+            {regions.map((r) => (
+              <tr key={r.id}>
+                <td><b>{r.name}</b> <span className="faint">· {r.code}</span></td>
+                <td className="faint">{r.geo_zone}</td>
+                <td>
+                  <select className="input sm" value={r.cluster_id || ""} onChange={(e) => setRegion(r.id, { cluster_id: e.target.value || null })}>
+                    <option value="">— none —</option>
+                    {clusters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </td>
+                <td style={{ textAlign: "center" }}>
+                  <button className={`btn sm ${r.signup_enabled ? "" : "ghost"}`} onClick={() => setRegion(r.id, { signup_enabled: !r.signup_enabled })}
+                          disabled={!r.cluster_id && !r.signup_enabled}>
+                    {r.signup_enabled ? "On" : "Off"}
+                  </button>
+                </td>
+                <td style={{ textAlign: "center" }}>{r.tenant_count}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
     </>
   );
 }

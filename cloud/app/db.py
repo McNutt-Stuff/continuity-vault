@@ -60,6 +60,21 @@ def init_db() -> None:
     _apply_additive_migrations()
     _backfill_appliance_storage()
     _clean_far_future_calendar()
+    _seed_topology()
+
+
+def _seed_topology() -> None:
+    """Seed the region taxonomy + default cluster (idempotent, best-effort).
+    Platform topology is control-plane-owned, so only the CP seeds it."""
+    try:
+        from .config import get_settings
+        if (get_settings().node_role or "control-plane") != "control-plane":
+            return
+        from . import routing
+        with SessionLocal() as db:
+            routing.ensure_default_topology(db)
+    except Exception:
+        pass  # never block startup on topology seeding
 
 
 def _clean_far_future_calendar() -> None:
@@ -276,6 +291,11 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE purge_requests ADD COLUMN IF NOT EXISTS collection_id VARCHAR",
         "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS last_log_push_at TIMESTAMP",
         "ALTER TABLE nodes ADD COLUMN version_updated_at TIMESTAMP",
+        # Cluster/Region topology (scalable multi-cluster placement). clusters +
+        # regions are NEW tables (create_all); these add the linking columns to the
+        # existing nodes/tenants tables.
+        "ALTER TABLE nodes ADD COLUMN cluster_id VARCHAR",
+        "ALTER TABLE tenants ADD COLUMN region_code VARCHAR DEFAULT ''",
         "ALTER TABLE appliances ADD COLUMN version_updated_at TIMESTAMP",
         "ALTER TABLE desktop_agents ADD COLUMN version_updated_at TIMESTAMP",
         # Per-user vault ownership (data partitioning). Backfill legacy/shared

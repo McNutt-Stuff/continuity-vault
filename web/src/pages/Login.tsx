@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth";
 import { Icon } from "../components/Icon";
 
@@ -6,6 +7,7 @@ type Stage = "email" | "code" | "recovery";
 
 export default function Login() {
   const { loginStart, loginWithPasskey, requestEmailCode, verifyEmailCode, redeemRecoveryKey, sessionExpired } = useAuth();
+  const nav = useNavigate();
   const [stage, setStage] = useState<Stage>("email");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
@@ -132,6 +134,9 @@ export default function Login() {
             >
               <Icon name="key" size={13} /> Lost all your passkeys? Use your recovery key
             </button>
+            <div className="faint" style={{ fontSize: 12, textAlign: "center", marginTop: 12 }}>
+              New to Arkive? <a onClick={() => nav("/signup")} style={{ cursor: "pointer", color: "var(--accent, #4f7cff)" }}>Create an account</a>
+            </div>
           </>
         )}
 

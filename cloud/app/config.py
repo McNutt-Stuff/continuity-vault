@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     # Authentication.
     # Self-service sign-up is OFF: only trusted, pre-created accounts sign in.
     allow_signup: bool = False
+    # Public plan sign-up (the guided signup → provision → billing → setup flow),
+    # geo-gated to accepted countries + signup-enabled regions.
+    public_signup_enabled: bool = True
     email_code_ttl_seconds: int = 600
     smtp_host: str | None = None
     smtp_port: int = 587

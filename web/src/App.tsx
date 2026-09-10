@@ -7,6 +7,7 @@ import { Pill } from "./components/ui";
 import { DialogHost, notify } from "./components/dialog";
 import { api } from "./api";
 import Login from "./pages/Login";
+import Signup from "./pages/Signup";
 import Dashboard from "./pages/Dashboard";
 import Search from "./pages/Search";
 import Insights from "./pages/Insights";
@@ -49,6 +50,13 @@ const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
 // include the one it depends on (feature gating). Empty = not configured = show all.
 const NAV_REQUIRES: Record<string, string> = { "/appliances": "appliance" };
 
+// Logged-out routing: the public sign-up page is reachable at /signup; every
+// other path shows the sign-in screen.
+function LoggedOut() {
+  const { pathname } = useLocation();
+  return pathname === "/signup" ? <Signup /> : <Login />;
+}
+
 export default function App() {
   const { me, loading } = useAuth();
 
@@ -59,7 +67,7 @@ export default function App() {
       </div>
     );
 
-  if (!me) return (<><Login /><DialogHost /></>);
+  if (!me) return (<><LoggedOut /><DialogHost /></>);
 
   return (
     <div className="app-shell">

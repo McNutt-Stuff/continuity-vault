@@ -58,6 +58,9 @@ class Tenant(Base):
     # appliance/agent channels and storage. NULL = processed on the control plane
     # itself (single-box default). Assigning a node offloads tenant processing.
     node_id = Column(String, ForeignKey("nodes.id"), nullable=True, index=True)
+    # The geographic region this tenant was routed to at signup (e.g. "nam-east"),
+    # derived from the address they provided. Drives node placement + data locality.
+    region_code = Column(String, default="", index=True)
     status = Column(String, default="active")
     # Admin-controlled capability flags (e.g. purge_enabled=False for a legal hold
     # / subpoena). Org tenants set them tenant-wide; personal accounts use user-level.
@@ -822,6 +825,9 @@ class Node(Base):
     config_overrides = Column(JSON, default=dict)
     # The single configuration profile (kind='node') assigned to this node.
     config_profile_id = Column(String, nullable=True)
+    # The cluster this node belongs to. A cluster has exactly ONE control-plane
+    # node and any number of customer-tenant / other nodes (see Cluster).
+    cluster_id = Column(String, ForeignKey("clusters.id"), nullable=True, index=True)
     # Storage service objects this node backs its own core state up to. A list so
     # a node can replicate its infrastructure backup to MULTIPLE destinations for
     # resiliency (use different services, not the same one twice).
@@ -829,6 +835,52 @@ class Node(Base):
     last_heartbeat_at = Column(DateTime, nullable=True)
     last_log_push_at = Column(DateTime, nullable=True)  # last time this node pushed its logs to the CP
     created_at = Column(DateTime, default=_now)
+
+
+class Cluster(Base):
+    """A logical grouping of platform nodes that operate together (the unit of
+    horizontal scale). A cluster has exactly ONE control-plane node and any number
+    of customer-tenant / storage / edge nodes. Clusters serve one or more Regions;
+    new accounts are routed to a cluster by the customer's geography, then placed
+    on its least-full customer node. A future global-sync layer keeps the shared
+    auth service / account DB / lookups consistent ACROSS clusters."""
+
+    __tablename__ = "clusters"
+    id = Column(String, primary_key=True, default=_uuid)
+    code = Column(String, unique=True, nullable=False)   # stable slug, e.g. "nam-1"
+    name = Column(String, nullable=False)                # "North America Primary"
+    description = Column(String, default="")
+    # The cluster's home/primary region code (informational; a cluster may serve
+    # several regions via Region.cluster_id). e.g. "nam-east".
+    home_region = Column(String, default="")
+    status = Column(String, default="active")            # active | draining | offline
+    # Global-sync (auth/account/lookups across clusters) — future; a flag now so
+    # the topology is ready for multi-cluster federation.
+    global_sync_enabled = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class Region(Base):
+    """A customer-facing geographic region (e.g. "North America East"). Signups are
+    routed to a region by the address they provide; each region is served by a
+    Cluster. Regions form a global taxonomy (best-practice zones) so the platform
+    is ready for worldwide distribution — a region can be present but not yet
+    accepting signups (signup_enabled=False) until its cluster exists."""
+
+    __tablename__ = "regions"
+    id = Column(String, primary_key=True, default=_uuid)
+    code = Column(String, unique=True, nullable=False)   # "nam-east", "eu-west", ...
+    name = Column(String, nullable=False)                # "North America East"
+    # Broad continental zone for grouping/fallback ("north-america", "europe", ...).
+    geo_zone = Column(String, default="")
+    # The cluster that currently serves this region (NULL = not yet provisioned).
+    cluster_id = Column(String, ForeignKey("clusters.id"), nullable=True, index=True)
+    # Whether we accept NEW signups routed to this region right now.
+    signup_enabled = Column(Boolean, default=False)
+    sort_order = Column(Integer, default=100)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
 class LogEntry(Base):
