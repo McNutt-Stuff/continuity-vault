@@ -2641,6 +2641,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
           <Fact label="Version" value={node.version ? `v${node.version}` : "—"} />
           {node.version_updated_at && <Fact label="Updated" value={timeAgo(node.version_updated_at)} />}
           {node.cost_mtd > 0 && <Fact label="Cost (MTD)" value={`$${Number(node.cost_mtd).toFixed(2)}`} />}
+          {node.cloud_resource_id && <Fact label="Cloud resource id" value={node.cloud_resource_id} />}
           {live?.uptime_seconds ? <Fact label="Uptime" value={uptimeShort(live.uptime_seconds).replace(/^up /, "")} /> : null}
           {live?.hostname && <Fact label="Hostname" value={live.hostname} />}
           {live?.os && <Fact label="OS" value={live.os} />}
@@ -5627,24 +5628,61 @@ interface CostSummary {
 const usd = (n: number) => "$" + (n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const COST_CAT_LABEL: Record<string, string> = {
   nodes: "Nodes (compute)", storage: "Arkive Cloud storage", backups: "Backups",
-  microservices: "Micro-services", other: "Other",
+  network: "Network (data transfer)", microservices: "Micro-services", other: "Other",
 };
 const COST_CAT_COLOR: Record<string, string> = {
-  nodes: "#4f7cff", storage: "#35d0a5", backups: "#f5a623", microservices: "#c56cf0", other: "#8a94a7",
+  nodes: "#4f7cff", storage: "#35d0a5", backups: "#f5a623", network: "#22c1dc",
+  microservices: "#c56cf0", other: "#8a94a7",
 };
-const COST_CATS = ["nodes", "storage", "backups", "microservices", "other"];
+const COST_CATS = ["nodes", "storage", "backups", "network", "microservices", "other"];
+
+interface CostDetailEntity { entity_type: string; entity_id: string; label: string; amount: number; cloud_resource_id: string; mapped: boolean }
+interface CostDetailCategory { category: string; amount: number; entities: CostDetailEntity[] }
+interface CostDetail { period: string; updated_at: string | null; currency: string; resource_mapped: boolean; categories: CostDetailCategory[]; unmapped: { cloud_resource_id: string; amount: number }[] }
+interface CostMapItem { entity_type: string; entity_id: string; label: string; kind: string; provider: string; cloud_resource_id: string; cost_mtd: number; matched: boolean }
+interface CostMappings { items: CostMapItem[]; unmapped: { cloud_resource_id: string; amount: number }[]; resource_mapped: boolean; currency: string; updated_at: string | null }
+
+// A single editable node/storage → hyperscaler resource-id row.
+function MappingRow({ it, saving, onSave }: { it: CostMapItem; saving: boolean; onSave: (v: string) => void }) {
+  const [val, setVal] = useState(it.cloud_resource_id || "");
+  useEffect(() => { setVal(it.cloud_resource_id || ""); }, [it.cloud_resource_id]);
+  const dirty = val.trim() !== (it.cloud_resource_id || "");
+  return (
+    <tr>
+      <td style={{ padding: "6px 8px 6px 0" }}>{it.label}</td>
+      <td className="faint" style={{ padding: "6px 8px" }}>{it.entity_type === "node" ? "Node" : "Storage"}</td>
+      <td className="faint" style={{ padding: "6px 8px" }}>{it.provider ? it.provider.toUpperCase() : "—"}</td>
+      <td style={{ padding: "6px 8px" }}>
+        <div className="row" style={{ gap: 6, alignItems: "center" }}>
+          <input className="input sm" value={val} placeholder="e.g. i-0abc… / /subscriptions/…"
+                 style={{ minWidth: 220, fontFamily: "var(--mono, monospace)", fontSize: 11.5 }}
+                 onChange={(e) => setVal(e.target.value)} />
+          {it.matched && <span className="pill ok sm" style={{ fontSize: 10 }} title="Matched in latest billing data">matched</span>}
+          {dirty && <button className="btn sm" disabled={saving} onClick={() => onSave(val)}>{saving ? "…" : "Save"}</button>}
+        </div>
+      </td>
+      <td style={{ padding: "6px 0 6px 8px", textAlign: "right", fontWeight: 600 }}>{it.cost_mtd > 0 ? usd(it.cost_mtd) : "—"}</td>
+    </tr>
+  );
+}
 
 // Revenue & Costs: collected revenue vs. cloud spend (month-to-date), by category
 // + trend, sampled hourly from the Cloud Billing service objects.
 function FinanceAdmin() {
   const [sum, setSum] = useState<CostSummary | null>(null);
   const [trend, setTrend] = useState<any>(null);
+  const [detail, setDetail] = useState<CostDetail | null>(null);
+  const [maps, setMaps] = useState<CostMappings | null>(null);
+  const [showDetail, setShowDetail] = useState(false);
+  const [savingMap, setSavingMap] = useState("");
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
   async function load() {
     try { setSum(await api.get<CostSummary>("/admin/costs/summary")); } catch { /* ignore */ }
     try { setTrend(await api.get<any>("/admin/costs/trends?days=30")); } catch { /* ignore */ }
+    try { setDetail(await api.get<CostDetail>("/admin/costs/detail")); } catch { /* ignore */ }
+    try { setMaps(await api.get<CostMappings>("/admin/costs/mappings")); } catch { /* ignore */ }
   }
   useEffect(() => { void load(); }, []);
   async function sampleNow() {
@@ -5652,6 +5690,16 @@ function FinanceAdmin() {
     try { await api.post("/admin/costs/sample-now", {}); flash("Cost sample refreshed"); await load(); }
     catch (e) { await notify({ message: (e as Error).message || "Sample failed", tone: "danger" }); }
     finally { setBusy(false); }
+  }
+  async function saveMapping(it: CostMapItem, value: string) {
+    const key = `${it.entity_type}:${it.entity_id}`;
+    setSavingMap(key);
+    try {
+      await api.put(`/admin/costs/mappings/${it.entity_type}/${it.entity_id}`, { cloud_resource_id: value.trim() });
+      flash("Resource mapping saved");
+      try { setMaps(await api.get<CostMappings>("/admin/costs/mappings")); } catch { /* ignore */ }
+    } catch (e) { await notify({ message: (e as Error).message || "Save failed", tone: "danger" }); }
+    finally { setSavingMap(""); }
   }
   if (!sum) return <Card><div className="muted">Loading financials…</div></Card>;
   const cats = sum.cost_by_category || {};
@@ -5696,13 +5744,17 @@ function FinanceAdmin() {
 
       <div className="row" style={{ gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
         <Card style={{ flex: "1 1 320px", minWidth: 300 }}>
-          <h4 style={{ margin: "0 0 10px" }}>Cloud cost by category</h4>
+          <div className="spread" style={{ marginBottom: 10 }}>
+            <h4 style={{ margin: 0 }}>Cloud cost by category</h4>
+            {sum.cost_mtd > 0 && <button className="btn ghost sm" onClick={() => setShowDetail(true)}><Icon name="grid" size={12} /> Details</button>}
+          </div>
           {sum.cost_mtd <= 0 ? <div className="muted" style={{ fontSize: 12.5 }}>No cost recorded yet.</div> : (
             <div className="stack" style={{ gap: 8 }}>
               {COST_CATS.map((c) => {
                 const v = cats[c] || 0; const pct = sum.cost_mtd ? Math.round(v / sum.cost_mtd * 100) : 0;
                 return (
-                  <div key={c}>
+                  <button key={c} onClick={() => setShowDetail(true)} title="View which objects make up this cost"
+                          style={{ all: "unset", cursor: "pointer", display: "block" }}>
                     <div className="spread" style={{ fontSize: 12.5, marginBottom: 3 }}>
                       <span>{COST_CAT_LABEL[c] || c}</span>
                       <span style={{ fontWeight: 600 }}>{usd(v)} <span className="faint">· {pct}%</span></span>
@@ -5710,7 +5762,7 @@ function FinanceAdmin() {
                     <div style={{ height: 6, borderRadius: 999, background: "var(--inset)", overflow: "hidden" }}>
                       <div style={{ width: `${pct}%`, height: "100%", background: COST_CAT_COLOR[c] }} />
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -5727,6 +5779,110 @@ function FinanceAdmin() {
           )}
         </Card>
       </div>
+
+      {maps && (
+        <Card style={{ marginTop: 16 }}>
+          <div className="spread" style={{ marginBottom: 8, alignItems: "flex-start" }}>
+            <div>
+              <h4 style={{ margin: "0 0 2px" }}>Cloud resource mapping</h4>
+              <div className="faint" style={{ fontSize: 12 }}>
+                Associate each node and storage service with its hyperscaler resource id (EC2 instance id, Azure VM/storage resource id, S3 bucket) so its cloud spend can be attributed precisely.
+                {maps.resource_mapped ? " Resource-level billing is available." : " Resource-level billing data isn't available yet — cost is distributed until ids are matched."}
+              </div>
+            </div>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="tbl" style={{ width: "100%", fontSize: 12.5 }}>
+              <thead><tr>
+                <th style={{ textAlign: "left" }}>Object</th><th style={{ textAlign: "left" }}>Type</th>
+                <th style={{ textAlign: "left" }}>Provider</th><th style={{ textAlign: "left" }}>Resource id</th>
+                <th style={{ textAlign: "right" }}>Cost (MTD)</th>
+              </tr></thead>
+              <tbody>
+                {maps.items.map((it) => (
+                  <MappingRow key={`${it.entity_type}:${it.entity_id}`} it={it}
+                              saving={savingMap === `${it.entity_type}:${it.entity_id}`}
+                              onSave={(v) => saveMapping(it, v)} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {maps.unmapped.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div className="faint" style={{ fontSize: 12, marginBottom: 6 }}>
+                <Icon name="alert" size={12} /> Unmapped cloud resources incurring cost (assign an id above to attribute them):
+              </div>
+              <div className="stack" style={{ gap: 4 }}>
+                {maps.unmapped.slice(0, 12).map((u) => (
+                  <div key={u.cloud_resource_id} className="spread" style={{ fontSize: 12, fontFamily: "var(--mono, monospace)" }}>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "70%" }} title={u.cloud_resource_id}>{u.cloud_resource_id}</span>
+                    <span style={{ fontWeight: 600 }}>{usd(u.amount)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {showDetail && detail && (
+        <div className="modal-backdrop" onClick={() => setShowDetail(false)}>
+          <div className="modal-panel" style={{ width: "min(760px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="spread">
+              <div>
+                <h3 style={{ margin: 0 }}>Cost drilldown</h3>
+                <div className="faint" style={{ fontSize: 12 }}>{detail.period} month-to-date · which objects make up each category{detail.updated_at ? ` · updated ${timeAgo(detail.updated_at)}` : ""}</div>
+              </div>
+              <button className="btn ghost sm" onClick={() => setShowDetail(false)}><Icon name="x" size={14} /></button>
+            </div>
+            <div className="modal-body" style={{ maxHeight: "68vh", overflow: "auto" }}>
+              {detail.categories.filter((c) => c.amount > 0 || c.entities.length > 0).map((c) => (
+                <div key={c.category} style={{ marginBottom: 16 }}>
+                  <div className="spread" style={{ marginBottom: 6 }}>
+                    <span style={{ fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ width: 9, height: 9, borderRadius: 999, background: COST_CAT_COLOR[c.category] }} />
+                      {COST_CAT_LABEL[c.category] || c.category}
+                    </span>
+                    <span style={{ fontWeight: 700 }}>{usd(c.amount)}</span>
+                  </div>
+                  {c.entities.length === 0 ? (
+                    <div className="faint" style={{ fontSize: 12, paddingLeft: 15 }}>No per-object breakdown for this category.</div>
+                  ) : (
+                    <div className="stack" style={{ gap: 3, paddingLeft: 15 }}>
+                      {c.entities.map((e) => (
+                        <div key={`${e.entity_type}:${e.entity_id}:${c.category}`} className="spread" style={{ fontSize: 12.5 }}>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, overflow: "hidden" }}>
+                            <Icon name={e.entity_type === "node" ? "server" : "database"} size={12} />
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.label}</span>
+                            {e.cloud_resource_id
+                              ? <span className={e.mapped ? "pill ok sm" : "pill sm"} title={e.cloud_resource_id} style={{ fontSize: 10 }}>{e.mapped ? "matched" : "id set"}</span>
+                              : <span className="pill warn sm" style={{ fontSize: 10 }}>no id</span>}
+                          </span>
+                          <span style={{ fontWeight: 600 }}>{usd(e.amount)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {detail.unmapped.length > 0 && (
+                <div style={{ marginTop: 4, borderTop: "1px solid var(--border-soft)", paddingTop: 12 }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>Unmapped cloud resources</div>
+                  <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>These resources incur cost but aren't associated with any platform object. Map them in <b>Cloud resource mapping</b>.</div>
+                  <div className="stack" style={{ gap: 3 }}>
+                    {detail.unmapped.slice(0, 20).map((u) => (
+                      <div key={u.cloud_resource_id} className="spread" style={{ fontSize: 12, fontFamily: "var(--mono, monospace)" }}>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "70%" }} title={u.cloud_resource_id}>{u.cloud_resource_id}</span>
+                        <span style={{ fontWeight: 600 }}>{usd(u.amount)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );

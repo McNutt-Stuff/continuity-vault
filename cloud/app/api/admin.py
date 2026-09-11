@@ -1540,6 +1540,7 @@ def _node_view(db: Session, n: Node) -> dict:
         "version": n.version, "online": online, "telemetry": tel,
         "cloud": n.cloud or {},
         "public_ip": n.public_ip or (n.cloud or {}).get("public_ip") or "",
+        "cloud_resource_id": n.cloud_resource_id or "",
         "cost_mtd": cloud_costs.entity_cost(db, "node", n.id),
         # The self/control-plane node IS the reference build, so it's never "behind";
         # fleet nodes are compared to the bundle the control plane serves.
@@ -1701,6 +1702,7 @@ class NodeUpdate(BaseModel):
     role: str | None = None
     endpoint: str | None = None
     status: str | None = None
+    cloud_resource_id: str | None = None
     storage_service_id: str | None = None
     email_service_id: str | None = None
     backup_service_ids: list[str] | None = None
@@ -2802,6 +2804,7 @@ def _service_view(db: Session, svc: ServiceObject) -> dict:
         "enabled": bool(svc.enabled),
         "config_object_id": svc.config_object_id,
         "settings": svc.settings or {},
+        "cloud_resource_id": svc.cloud_resource_id or "",
         "setting_keys": spec.get("settings", []),
         "credential_keys": spec.get("credential_keys", []),
         "capabilities": svc.storage_capabilities(),
@@ -2824,6 +2827,7 @@ class ServiceObjectBody(BaseModel):
     config_object_id: str | None = None
     settings: dict = {}
     capabilities: list[str] | None = None
+    cloud_resource_id: str | None = None
 
 
 class ServiceTest(BaseModel):
@@ -2848,6 +2852,7 @@ def create_service_object(body: ServiceObjectBody,
     svc = ServiceObject(name=body.name.strip() or "Service", kind=body.kind,
                         enabled=body.enabled, config_object_id=body.config_object_id or None,
                         settings=body.settings or {},
+                        cloud_resource_id=(body.cloud_resource_id or "").strip(),
                         capabilities=_clean_capabilities(body.kind, body.capabilities))
     db.add(svc)
     db.commit()
@@ -2864,6 +2869,7 @@ class ServiceObjectUpdate(BaseModel):
     config_object_id: str | None = None
     settings: dict | None = None
     capabilities: list[str] | None = None
+    cloud_resource_id: str | None = None
 
 
 @router.put("/service-objects/{sid}")
@@ -2884,6 +2890,8 @@ def update_service_object(sid: str, body: ServiceObjectUpdate,
         svc.settings = body.settings
     if body.capabilities is not None:
         svc.capabilities = _clean_capabilities(svc.kind, body.capabilities)
+    if body.cloud_resource_id is not None:
+        svc.cloud_resource_id = body.cloud_resource_id.strip()
     db.commit()
     services.invalidate()
     emailer.invalidate_config_cache()

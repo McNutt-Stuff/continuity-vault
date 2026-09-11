@@ -8,11 +8,11 @@ Revenue & Costs summary that pairs collected revenue with cloud cost.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .. import cloud_costs, security
+from .. import audit, cloud_costs, security
 from ..db import get_db
-
 router = APIRouter(prefix="/admin/costs", tags=["costs"],
                    dependencies=[Depends(security.require_platform_admin)])
 
@@ -56,9 +56,45 @@ def trends(days: int = 30, db: Session = Depends(get_db)):
     return cloud_costs.trends(db, days=days)
 
 
+@router.get("/detail")
+def detail(db: Session = Depends(get_db)):
+    """Per-object cost drilldown: each category with the platform objects/resources
+    that make it up, plus unmapped cloud resources to associate."""
+    return cloud_costs.detail(db)
+
+
+@router.get("/mappings")
+def mappings(db: Session = Depends(get_db)):
+    """Billable platform objects (nodes + storage services) with their editable
+    hyperscaler resource id and month-to-date cost, plus unmapped resources."""
+    return cloud_costs.mappings(db)
+
+
+class MappingBody(BaseModel):
+    cloud_resource_id: str = ""
+
+
+@router.put("/mappings/{entity_type}/{entity_id}")
+def set_mapping(entity_type: str, entity_id: str, body: MappingBody,
+                principal: security.Principal = Depends(security.require_platform_admin),
+                db: Session = Depends(get_db)):
+    """Add/fix/clear the hyperscaler resource id associated with an object."""
+    try:
+        out = cloud_costs.set_mapping(db, entity_type, entity_id, body.cloud_resource_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    audit.record(db, actor=principal.user_id, action="costs.mapping_set", category="admin",
+                 resource=entity_id,
+                 detail={"entity_type": entity_type, "label": out.get("label"),
+                         "cloud_resource_id": out.get("cloud_resource_id")})
+    return out
+
+
 @router.post("/sample-now")
 def sample_now(principal: security.Principal = Depends(security.require_platform_admin),
                db: Session = Depends(get_db)):
     """Force an immediate cost sample (otherwise hourly). Best-effort."""
     n = cloud_costs.sample_all(db)
+    audit.record(db, actor=principal.user_id, action="costs.sampled", category="admin",
+                 detail={"trigger": "manual", "services_sampled": n})
     return {"ok": True, "sampled": n, "summary": cloud_costs.summary(db)}

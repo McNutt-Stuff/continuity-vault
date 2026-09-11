@@ -622,10 +622,11 @@ class CloudCostSample(Base):
     ts = Column(DateTime, index=True, default=_now)      # sample hour (truncated)
     provider = Column(String, default="")                # aws | azure
     service_object_id = Column(String, index=True, nullable=True)
-    category = Column(String, index=True, default="other")  # nodes|storage|backups|microservices|other
-    entity_type = Column(String, default="")             # total | category | node | storage_service
+    category = Column(String, index=True, default="other")  # nodes|storage|backups|network|microservices|other
+    entity_type = Column(String, default="")             # total | category | node | storage_service | resource
     entity_id = Column(String, index=True, nullable=True)
     entity_label = Column(String, default="")
+    cloud_resource_id = Column(String, default="", index=True)  # matched hyperscaler resource id (when known)
     amount = Column(Float, default=0.0)                  # month-to-date cost in `currency`
     currency = Column(String, default="USD")
     period = Column(String, default="")                  # the month this MTD covers (YYYY-MM)
@@ -834,6 +835,7 @@ class Node(Base):
     role = Column(String, default="control-plane")  # control-plane | customer-tenant | public-web | storage | worker | edge
     endpoint = Column(String, default="")            # base URL / address
     public_ip = Column(String, default="")           # last-known public IP (set by auto-provision)
+    cloud_resource_id = Column(String, default="")   # hyperscaler resource id (EC2 instance / Azure VM) for billing
     status = Column(String, default="active")        # active | draining | offline | maintenance
     is_self = Column(Boolean, default=False)         # the running instance
     version = Column(String, default="")
@@ -1298,6 +1300,7 @@ class ServiceObject(Base):
     enabled = Column(Boolean, default=True)
     config_object_id = Column(String, nullable=True)  # linked credentials
     settings = Column(JSON, default=dict)             # non-secret routing
+    cloud_resource_id = Column(String, default="")    # hyperscaler resource id (S3 bucket / Azure storage acct) for billing
     capabilities = Column(JSON, default=list)         # storage "used for": cloud | backup
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
