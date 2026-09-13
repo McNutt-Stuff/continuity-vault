@@ -84,6 +84,9 @@ app.include_router(integrations.router, prefix=API)
 app.include_router(integrations.advanced_router, prefix=API)
 app.include_router(integrations.agent_router, prefix=API)
 app.include_router(integrations.admin_router, prefix=API)
+# Microsoft 365 managed integration — self-contained package router.
+from .integrations.microsoft365 import api as m365_api  # noqa: E402
+app.include_router(m365_api.router, prefix=API)
 app.include_router(billing.router, prefix=API)
 app.include_router(billing.admin_router, prefix=API)
 app.include_router(connectors.router, prefix=API)

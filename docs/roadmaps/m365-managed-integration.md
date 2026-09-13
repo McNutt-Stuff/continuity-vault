@@ -6,7 +6,7 @@
 
 ## Current summary
 - Overall status: In progress (Phase 0 + architecture foundation)
-- Current phase: Phase 1 — Platform primitives (started)
+- Current phase: Phase 2 — M365 connection + identity (control-plane surface landed)
 - Last updated: 2026-09-13
 - Owner: (assign)
 
@@ -38,9 +38,9 @@
 | P0 | Repo discovery + roadmap + gap analysis | Done | This file |
 | P1a | Packaged-integration SDK/registry + auto-discovery | Done | `integrations/__init__._discover`, `ubiquiti/` + `microsoft365/` packages |
 | P1b | Entitlement (plan + flag) + fail-closed create guard | Done | `_spec_entitlement`, create 403/409 |
-| P1c | Managed credential/source/org-source/mapping/rule models | Todo | Migrations + tests |
-| P1d | Desired-state federation envelope + node validation | Todo | Signed command + node reject tests |
-| P2 | M365 connection + Entra identity (OAuth, discovery, mapping) | Todo | Pilot tenant connect/scope/map |
+| P1c | Managed credential/source/org-source/mapping/rule models | Done | `integrations/microsoft365/models.py` (18 `m365_*` tables, auto-created) |
+| P1d | Desired-state federation envelope + node validation | Partial | `IntegrationDesiredState` records written on activate; node validation TBD |
+| P2 | M365 connection + Entra identity (OAuth, discovery, mapping) | In progress | `microsoft365/api.py`: connect/oauth/scope/identities/activate/disconnect (CP records); Entra discovery on node TBD |
 | P3 | Core managed protection (Exchange/OneDrive) | Todo | End-to-end recovery test |
 | P4 | Organization collaboration (SharePoint/Teams) | Todo | Design-partner validation |
 | P5 | Compliance packs + security-source evidence | Todo | Evidence/privacy review |
