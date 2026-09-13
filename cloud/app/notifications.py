@@ -325,36 +325,72 @@ def _source_issues(db, user: User) -> list[dict]:
                         "fails": int(a.fail_count or 0),
                         "reauth": a.auth_status == "needs-reauth" or _likely_reauth(msg)})
 
+    # Integrations (appliance-run, e.g. UniFi): flag explicit errors AND silent
+    # STALLS — an enabled, provisioned integration that simply stopped collecting
+    # (appliance offline / stopped reporting) freezes last_run_at with no error,
+    # so without this it would never alert.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     iq = (db.query(IntegrationInstance)
           .filter(IntegrationInstance.tenant_id == user.tenant_id,
                   IntegrationInstance.enabled.is_(True),
                   or_(IntegrationInstance.owner_user_id == user.id,
-                      IntegrationInstance.owner_user_id.is_(None)),
-                  or_(IntegrationInstance.status == "error",
-                      IntegrationInstance.last_error.isnot(None),
-                      IntegrationInstance.provision_state == "error")).all())
+                      IntegrationInstance.owner_user_id.is_(None))).all())
     for inst in iq:
-        msg = (inst.last_error or inst.provision_message
-               or "Integration requires attention. Please reconnect or retry setup.")
-        runs = (db.query(IntegrationRun.status)
-                .filter(IntegrationRun.integration_id == inst.id)
-                .order_by(IntegrationRun.created_at.desc()).limit(12).all())
-        fails = 0
-        for (st,) in runs:
-            if st == "error":
-                fails += 1
-            else:
-                break
-        if fails == 0 and inst.status == "error":
-            fails = 1
+        prov = inst.provision_state or "idle"
+        errored = bool(inst.status == "error" or inst.last_error or prov == "error")
+        ref = inst.last_success_at or inst.last_run_at
+        # Stale: provisioned + previously ran, but no success in a while. Use a
+        # generous floor (≥3h, or 4× the poll interval) so a single missed poll
+        # doesn't alert — a stall since a past date clearly does.
+        stale_after_min = max(180, int(inst.poll_interval_minutes or 30) * 4)
+        stale = bool(prov in ("idle", "done") and inst.last_run_at is not None
+                     and ref is not None
+                     and (now - ref).total_seconds() > stale_after_min * 60)
+        # Stuck setup: a re-auth/verification the appliance can't finish (it stops
+        # pulling non-idle/done states, so collection silently halts) that has sat
+        # in a non-terminal provisioning state for a while.
+        setup_ref = inst.updated_at or inst.last_run_at
+        setup_stuck = bool(prov in ("starting", "verifying", "awaiting_otp")
+                           and setup_ref is not None
+                           and (now - setup_ref).total_seconds() > 2 * 3600)
+        if not errored and not stale and not setup_stuck:
+            continue
+        if errored:
+            msg = (inst.last_error or inst.provision_message
+                   or "Integration requires attention. Please reconnect or retry setup.")
+            runs = (db.query(IntegrationRun.status)
+                    .filter(IntegrationRun.integration_id == inst.id)
+                    .order_by(IntegrationRun.created_at.desc()).limit(12).all())
+            fails = 0
+            for (st,) in runs:
+                if st == "error":
+                    fails += 1
+                else:
+                    break
+            if fails == 0 and inst.status == "error":
+                fails = 1
+            reauth = _likely_reauth(msg)
+        elif setup_stuck:
+            need = ("waiting for your verification code"
+                    if prov == "awaiting_otp" else "sign-in didn't complete")
+            msg = f"Setup hasn't finished — {need}. Collection is paused until it's done."
+            fails = 0
+            reauth = True
+        else:  # stalled — no recent successful collection
+            since = ref.strftime("%b %-d") if ref else "recently"
+            msg = (f"No data collected since {since} — the integration or its "
+                   f"appliance may be offline.")
+            fails = 0
+            reauth = False
         out.append({"id": inst.id,
                     "kind": "integration",
                     "name": inst.label or _source_name(inst.integration_type),
                     "source_type": inst.integration_type,
                     "error": msg.splitlines()[0][:160],
-                    "at": inst.last_run_at or inst.updated_at,
+                    "at": ref or inst.updated_at,
                     "fails": fails,
-                    "reauth": _likely_reauth(msg)})
+                    "stale": (not errored and stale),
+                    "reauth": reauth})
 
     out.sort(key=lambda i: i.get("at") or datetime.min.replace(tzinfo=None), reverse=True)
     return out
