@@ -4650,6 +4650,7 @@ function DebugAdmin() {
   const [health, setHealth] = useState<any>(null);
   const [bench, setBench] = useState<any>(null);
   const [nodes, setNodes] = useState<any>(null);
+  const [costs, setCosts] = useState<any>(null);
   const [sql, setSql] = useState("SELECT relname, n_live_tup, n_dead_tup FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 20");
   const [qres, setQres] = useState<any>(null);
   const [qerr, setQerr] = useState("");
@@ -4860,6 +4861,87 @@ function DebugAdmin() {
             </tbody>
           </table>
         ) : <div className="muted" style={{ fontSize: 12.5 }}>Probe every fleet node's database (via the fleet secret) to find which one is slow.</div>}
+      </Card>
+
+      <Card>
+        <div className="spread" style={{ marginBottom: 8 }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 15 }}>Cloud cost diagnostics</h3>
+            <div className="faint" style={{ fontSize: 11.5 }}>Live-pulls the raw AWS/Azure billing API and shows how each resource maps to a node/bucket — use this when prices look identical or wrong.</div>
+          </div>
+          <button className="btn ghost sm" disabled={busy === "costs"} onClick={() => void run("costs", async () => setCosts(await dbg("GET", "/debug/costs")))}>{busy === "costs" ? "Pulling…" : "Pull raw costs"}</button>
+        </div>
+        {costs ? (
+          (costs.services || []).length === 0 ? <div className="muted" style={{ fontSize: 12.5 }}>No Cloud Billing service objects configured.</div> : (
+            <div className="stack" style={{ gap: 14 }}>
+              {(costs.services || []).map((s: any) => (
+                <div key={s.service_object_id} style={{ border: "1px solid var(--border-soft)", borderRadius: 8, padding: 12 }}>
+                  <div className="spread" style={{ marginBottom: 6 }}>
+                    <span style={{ fontWeight: 600 }}>{s.name} <span className="faint">· {String(s.provider).toUpperCase()}</span></span>
+                    {s.ok ? <Pill tone="ok" dot>{`total $${Number(s.total_mtd || 0).toFixed(2)} ${s.currency || ""}`}</Pill>
+                          : <Pill tone="danger" dot>error</Pill>}
+                  </div>
+                  {!s.ok ? (
+                    <div className="faint" style={{ fontSize: 12 }}>
+                      {s.operation}: status {s.error?.status ?? "—"} · {s.error?.code || "?"} — {s.error?.error || "failed"}
+                      {(!s.credentials_present || s.credentials_present.length === 0) && <div style={{ color: "var(--warn)" }}>No credentials resolved on this service object.</div>}
+                    </div>
+                  ) : (
+                    <>
+                      <div className="row" style={{ gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                        <Pill tone={s.resource_level_available ? "ok" : "warn"}>{s.resource_level_available ? "resource-level ✓" : "no resource-level data"}</Pill>
+                        {s.provider === "aws" && <Pill tone={s.role_tag_available ? "ok" : "warn"}>{s.role_tag_available ? "arkive:role tag ✓" : "no arkive:role data"}</Pill>}
+                      </div>
+                      {(s.notes || []).length > 0 && (
+                        <ul style={{ margin: "0 0 8px", paddingLeft: 18, fontSize: 12, color: "var(--warn)" }}>
+                          {s.notes.map((nt: string, i: number) => <li key={i} style={{ marginBottom: 3 }}>{nt}</li>)}
+                        </ul>
+                      )}
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
+                        <div>
+                          <div className="faint" style={{ fontSize: 11, marginBottom: 3 }}>By service</div>
+                          {Object.entries(s.by_service || {}).sort((a: any, b: any) => b[1] - a[1]).slice(0, 8).map(([k, v]: any) => (
+                            <div key={k} className="spread" style={{ fontSize: 11.5 }}><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</span><span>${Number(v).toFixed(2)}</span></div>
+                          ))}
+                        </div>
+                        <div>
+                          <div className="faint" style={{ fontSize: 11, marginBottom: 3 }}>By category</div>
+                          {Object.entries(s.by_category_raw || {}).filter((e: any) => e[1] > 0).map(([k, v]: any) => (
+                            <div key={k} className="spread" style={{ fontSize: 11.5 }}><span>{k}</span><span>${Number(v).toFixed(2)}</span></div>
+                          ))}
+                        </div>
+                      </div>
+                      <div style={{ marginTop: 8 }}>
+                        <div className="faint" style={{ fontSize: 11, marginBottom: 3 }}>Node mapping</div>
+                        <table className="table" style={{ fontSize: 11.5 }}>
+                          <thead><tr><th>Node</th><th>Role</th><th>Resource id</th><th>Match</th><th style={{ textAlign: "right" }}>Resource $</th></tr></thead>
+                          <tbody>
+                            {(s.nodes || []).map((n: any, i: number) => (
+                              <tr key={i}>
+                                <td>{n.node}</td><td className="faint">{n.role}</td>
+                                <td style={{ fontFamily: "var(--mono, monospace)", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", maxWidth: 180 }} title={n.cloud_resource_id}>{n.cloud_resource_id || "—"}</td>
+                                <td>{n.matched ? <Pill tone="ok">yes</Pill> : <Pill tone="warn">no</Pill>}</td>
+                                <td style={{ textAlign: "right" }}>{n.resource_cost != null ? `$${Number(n.resource_cost).toFixed(2)}` : "—"}</td>
+                              </tr>
+                            ))}
+                            {(s.storage || []).map((st: any, i: number) => (
+                              <tr key={`s${i}`}>
+                                <td>{st.service}</td><td className="faint">{st.kind}</td>
+                                <td style={{ fontFamily: "var(--mono, monospace)", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", maxWidth: 180 }} title={st.effective_resource_id}>{st.effective_resource_id || "—"}</td>
+                                <td>{st.matched ? <Pill tone="ok">yes</Pill> : <Pill tone="warn">no</Pill>}</td>
+                                <td style={{ textAlign: "right" }}>{st.resource_cost != null ? `$${Number(st.resource_cost).toFixed(2)}` : "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )
+        ) : <div className="muted" style={{ fontSize: 12.5 }}>Pull the raw provider cost data to diagnose per-node/per-bucket attribution.</div>}
       </Card>
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}

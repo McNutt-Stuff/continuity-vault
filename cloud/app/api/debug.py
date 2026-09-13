@@ -118,6 +118,10 @@ _MANIFEST = {
          "desc": "Free inline-ciphertext envelopes + delete old terminal appliance commands."},
         {"method": "GET", "path": "/api/debug/nodes",
          "desc": "Fan out DB health to every fleet node (via the fleet secret) to find the slow one."},
+        {"method": "GET", "path": "/api/debug/costs",
+         "desc": "Cloud cost diagnostics: RAW provider breakdown (by_service/by_role/by_resource), "
+                 "category rollup, and per-node/per-bucket mapping analysis with notes explaining "
+                 "identical or misattributed prices. Optional ?provider=aws|azure."},
     ],
     "notes": [
         "All responses are JSON. Query/maintenance are read-only or explicitly guarded — safe on production.",
@@ -351,6 +355,17 @@ def prune_db(db: Session = Depends(get_db)):
     counts = prune_all(db)
     return {"ok": True, "pruned": counts,
             "note": "run VACUUM (ANALYZE) to reclaim the freed space on disk"}
+
+
+@router.get("/costs", dependencies=[Depends(require_debug_key)])
+def costs_debug(provider: str = "", db: Session = Depends(get_db)):
+    """Cloud cost diagnostics: live-call the provider cost API for each Cloud
+    Billing service object and return the RAW breakdown (by_service/by_role/
+    by_resource) + per-object mapping analysis so you can see WHY prices are
+    identical or misattributed. Optional ?provider=aws|azure."""
+    from .. import cloud_costs
+    logger.info("debug: cost diagnostics requested (provider=%s)", provider or "all")
+    return cloud_costs.diagnose(db, provider_filter=provider)
 
 
 @router.get("/health", dependencies=[Depends(require_debug_key)])

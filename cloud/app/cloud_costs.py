@@ -332,6 +332,38 @@ def _cloud_stored_bytes(db) -> int:
         return 0
 
 
+def _match_resource(rid: str, by_resource: dict):
+    """Find the cost for a resource id in a by-resource map, tolerating format
+    differences (an EC2 instance id matches exactly; an S3 bucket may be billed as
+    its ARN; an Azure resource may be the full ARM path). Returns (matched_key,
+    cost) or (None, 0.0)."""
+    rid = (rid or "").strip()
+    if not rid or not by_resource:
+        return None, 0.0
+    if rid in by_resource:
+        return rid, float(by_resource[rid] or 0)
+    tail = rid.split("/")[-1].split(":")[-1].lower()
+    for k, v in by_resource.items():
+        kt = str(k).split("/")[-1].split(":")[-1].lower()
+        if (kt and kt == tail) or (k and (str(k).endswith(rid) or rid.endswith(str(k)))):
+            return k, float(v or 0)
+    return None, 0.0
+
+
+def _storage_resource_id(svc) -> str:
+    """The billing resource id for a storage service: the admin-set id, else a
+    provider-appropriate default — S3 is billed by BUCKET NAME (which we already
+    store in settings), so derive it; Azure Blob needs the full storage-account
+    ARM id, which can't be derived from the container alone."""
+    rid = (getattr(svc, "cloud_resource_id", "") or "").strip()
+    if rid:
+        return rid
+    settings = svc.settings or {}
+    if svc.kind == "storage-s3":
+        return (settings.get("bucket") or "").strip()
+    return ""
+
+
 def _map_samples(db, provider: str, svc_id: str, breakdown: dict, ts: datetime) -> list:
     """Turn a normalized breakdown into CloudCostSample rows: a grand total, one
     per category, and per-entity rows (nodes, storage services, network). When
@@ -380,14 +412,17 @@ def _map_samples(db, provider: str, svc_id: str, breakdown: dict, ts: datetime) 
 
     # --- compute (nodes) — resource-matched share, else role/count distribution ---
     node_amounts: dict[str, float] = {}
+    node_matched: dict[str, tuple] = {}
     node_cost = cat_totals["nodes"]
     if node_cost > 0 and nodes:
-        matched = {n.id: by_resource[n.cloud_resource_id]
-                   for n in nodes if (n.cloud_resource_id or "") in by_resource}
-        matched_sum = sum(v for v in matched.values() if v) if matched else 0.0
+        for n in nodes:
+            k, c = _match_resource(n.cloud_resource_id or "", by_resource)
+            if k:
+                node_matched[n.id] = (k, c)
+        matched_sum = sum(c for _, c in node_matched.values() if c) if node_matched else 0.0
         if matched_sum > 0:
             for n in nodes:
-                node_amounts[n.id] = (matched.get(n.id, 0.0) / matched_sum) * node_cost
+                node_amounts[n.id] = (node_matched.get(n.id, ("", 0.0))[1] / matched_sum) * node_cost
         else:
             role_counts: dict[str, int] = {}
             for n in nodes:
@@ -400,31 +435,34 @@ def _map_samples(db, provider: str, svc_id: str, breakdown: dict, ts: datetime) 
                     node_amounts[n.id] = node_cost / len(nodes)
         for n in nodes:
             rid = n.cloud_resource_id or ""
-            mapped = bool(rid in by_resource and matched_sum > 0)
+            mapped = bool(n.id in node_matched and matched_sum > 0)
             if mapped:
-                matched_rids.add(rid)
+                matched_rids.add(node_matched[n.id][0])
             _row("nodes", "node", n.id, n.name, node_amounts.get(n.id, 0.0),
                  resource_id=rid, meta={"mapped": mapped})
 
     # --- storage services — resource-matched share, else even by count ---
     stor_amounts: dict[str, float] = {}
+    stor_matched: dict[str, tuple] = {}
     stor_cost = cat_totals["storage"]
     if stor_cost > 0 and storage_svcs:
-        matched = {s.id: by_resource[s.cloud_resource_id]
-                   for s in storage_svcs if (s.cloud_resource_id or "") in by_resource}
-        matched_sum = sum(v for v in matched.values() if v) if matched else 0.0
+        for s in storage_svcs:
+            k, c = _match_resource(_storage_resource_id(s), by_resource)
+            if k:
+                stor_matched[s.id] = (k, c)
+        matched_sum = sum(c for _, c in stor_matched.values() if c) if stor_matched else 0.0
         if matched_sum > 0:
             for s in storage_svcs:
-                stor_amounts[s.id] = (matched.get(s.id, 0.0) / matched_sum) * stor_cost
+                stor_amounts[s.id] = (stor_matched.get(s.id, ("", 0.0))[1] / matched_sum) * stor_cost
         else:
             share = stor_cost / len(storage_svcs)
             for s in storage_svcs:
                 stor_amounts[s.id] = share
         for s in storage_svcs:
-            rid = s.cloud_resource_id or ""
-            mapped = bool(rid in by_resource and matched_sum > 0)
+            rid = _storage_resource_id(s)
+            mapped = bool(s.id in stor_matched and matched_sum > 0)
             if mapped:
-                matched_rids.add(rid)
+                matched_rids.add(stor_matched[s.id][0])
             _row("storage", "storage_service", s.id, s.name, stor_amounts.get(s.id, 0.0),
                  resource_id=rid, meta={"mapped": mapped})
 
@@ -682,6 +720,7 @@ def mappings(db) -> dict:
         items.append({"entity_type": "storage_service", "entity_id": s.id, "label": s.name,
                       "kind": s.kind, "provider": "aws" if s.kind == "storage-s3" else "azure",
                       "cloud_resource_id": s.cloud_resource_id or "",
+                      "effective_resource_id": _storage_resource_id(s),
                       "cost_mtd": entity_cost(db, "storage_service", s.id),
                       "matched": bool(mapped_flag.get(f"storage_service:{s.id}"))})
     return {"items": items, "unmapped": d.get("unmapped", []),
@@ -707,3 +746,113 @@ def set_mapping(db, entity_type: str, entity_id: str, resource_id: str) -> dict:
     _INVALIDATE()
     return {"entity_type": entity_type, "entity_id": entity_id,
             "label": getattr(obj, "name", ""), "cloud_resource_id": rid}
+
+
+# --------------------------------------------------------------------------- #
+# Deep diagnostics (debug API) — raw provider data + mapping analysis         #
+# --------------------------------------------------------------------------- #
+
+def _diag_notes(provider: str, b: dict, node_map: list, stor_map: list) -> list:
+    """Human-readable hints explaining why per-object cost may look wrong."""
+    notes: list = []
+    by_resource = b.get("by_resource") or {}
+    by_role = b.get("by_role") or {}
+    if not by_resource:
+        notes.append(
+            "No resource-level cost data returned — per-node/per-bucket cost is being "
+            "DISTRIBUTED, not measured. " + (
+                "AWS: enable Cost Explorer → Preferences → 'Hourly and resource-level data' "
+                "(only the last ~14 days are available), and note the payer account must own the resources."
+                if provider == "aws" else
+                "Azure: the ResourceId grouping returned nothing — confirm the app has Cost "
+                "Management Reader on the subscription that owns the resources."))
+    if provider == "aws" and not by_role:
+        notes.append(
+            "arkive:role tag grouping returned nothing — activate 'arkive:role' (and it is set as "
+            "arkive:managed=true on provisioned instances) as a Cost Allocation Tag in Billing → "
+            "Cost Allocation Tags; new tag data takes ~24h to appear.")
+    matched_nodes = [n for n in node_map if n.get("matched")]
+    if by_resource and not matched_nodes and node_map:
+        notes.append(
+            "Resource-level data IS present but NO node's cloud_resource_id matched a billed "
+            "resource id — check the ids under Revenue & Costs → Cloud resource mapping "
+            "(AWS wants the i-… instance id; Azure wants the full /subscriptions/… resource id).")
+    if not matched_nodes and node_map:
+        roles = {}
+        for n in node_map:
+            roles[n["role"]] = roles.get(n["role"], 0) + 1
+        dupes = [r for r, c in roles.items() if c > 1]
+        if dupes:
+            notes.append(
+                f"Multiple nodes share role(s) {', '.join(dupes)}; without resource-level "
+                "matching they split that role's cost EVENLY, so they show identical prices.")
+    unmatched_stor = [s for s in stor_map if not s.get("matched")]
+    if by_resource and unmatched_stor:
+        notes.append(
+            "Storage services didn't match a billed resource. S3 is billed by BUCKET NAME "
+            "(derived from settings); Azure Blob needs the storage-account ARM id set manually.")
+    return notes
+
+
+def diagnose(db, provider_filter: str = "") -> dict:
+    """Deep cost diagnostics for the debug API. For every Cloud Billing service
+    object: the RAW provider breakdown (by_service / by_role / by_resource), the
+    category rollup, and a per-object mapping analysis showing which nodes/storage
+    matched a billed resource — plus notes explaining identical or misattributed
+    prices. Live-calls the provider cost API (best-effort; errors are captured)."""
+    from .models import ServiceObject, Node
+    from . import services
+    provider_filter = (provider_filter or "").lower().strip()
+    nodes = db.query(Node).all()
+    storage_svcs = (db.query(ServiceObject)
+                    .filter(ServiceObject.kind.in_(("storage-s3", "storage-azure"))).all())
+    out: dict = {"generated_at": _now().isoformat(), "configured": _has_billing_service(db),
+                 "node_count": len(nodes), "storage_service_count": len(storage_svcs),
+                 "services": []}
+    for svc in db.query(ServiceObject).filter(ServiceObject.kind.in_(_BILLING_KINDS)).all():
+        provider = provider_of(svc.kind)
+        if provider_filter and provider != provider_filter:
+            continue
+        entry: dict = {"service_object_id": svc.id, "name": svc.name, "provider": provider,
+                       "enabled": bool(svc.enabled)}
+        cfg = (services.resolve_service(db, svc.id) or {}).get("config", {}) or {}
+        entry["credentials_present"] = sorted(k for k, v in cfg.items() if v)
+        try:
+            b = fetch_costs(provider, cfg)
+            by_resource = b.get("by_resource") or {}
+            cat = {c: 0.0 for c in CATEGORIES}
+            for name, amt in (b.get("by_service") or {}).items():
+                cat[_categorize(provider, name)] += float(amt or 0)
+            node_map = []
+            for n in nodes:
+                k, c = _match_resource(n.cloud_resource_id or "", by_resource)
+                node_map.append({"node": n.name, "role": n.role,
+                                 "cloud_resource_id": n.cloud_resource_id or "",
+                                 "matched": bool(k), "matched_key": k,
+                                 "resource_cost": round(c, 4) if k else None})
+            stor_map = []
+            for s in storage_svcs:
+                eff = _storage_resource_id(s)
+                k, c = _match_resource(eff, by_resource)
+                stor_map.append({"service": s.name, "kind": s.kind,
+                                 "cloud_resource_id": s.cloud_resource_id or "",
+                                 "effective_resource_id": eff,
+                                 "matched": bool(k), "matched_key": k,
+                                 "resource_cost": round(c, 4) if k else None})
+            entry.update({
+                "ok": True, "currency": b.get("currency"), "total_mtd": b.get("total"),
+                "resource_level_available": bool(by_resource),
+                "role_tag_available": bool(b.get("by_role")),
+                "by_service": {k: round(float(v or 0), 4) for k, v in (b.get("by_service") or {}).items()},
+                "by_role": {k: round(float(v or 0), 4) for k, v in (b.get("by_role") or {}).items()},
+                "by_resource": {k: round(float(v or 0), 4) for k, v in by_resource.items()},
+                "by_category_raw": {k: round(v, 4) for k, v in cat.items()},
+                "nodes": node_map, "storage": stor_map,
+                "notes": _diag_notes(provider, b, node_map, stor_map),
+            })
+        except Exception as exc:  # noqa: BLE001 — surface, never crash the debug call
+            info = _normalize_cloud_error(exc)
+            op = "ce:GetCostAndUsage" if provider == "aws" else "CostManagement.query.usage"
+            entry.update({"ok": False, "operation": op, "error": info})
+        out["services"].append(entry)
+    return out
