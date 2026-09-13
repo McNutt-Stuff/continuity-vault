@@ -22,7 +22,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, or_
 
 from . import emailer
-from .models import (Collection, ConnectorAccount, IntegrationInstance, IntegrationRun,
+from .models import (Appliance, Collection, ConnectorAccount, CustomerStorage,
+                     IntegrationInstance, IntegrationRun,
                      NotificationLog, SearchDocument, SnapshotReceipt, SystemSetting,
                      Tenant, User, Vault)
 
@@ -39,6 +40,12 @@ NOTIFICATION_TYPES = [
     {"key": "source_problem", "label": "Source problem alerts", "icon": "alert",
      "default": True, "scope": "user",
      "desc": "Get notified when one of your connected sources needs attention."},
+    {"key": "appliance_problem", "label": "Appliance problem alerts", "icon": "server",
+     "default": True, "scope": "user",
+     "desc": "Get notified when one of your secure appliances goes offline or needs attention."},
+    {"key": "storage_problem", "label": "Storage problem alerts", "icon": "database",
+     "default": True, "scope": "user",
+     "desc": "Get notified when one of your storage destinations fails or needs attention."},
     {"key": "plan_change", "label": "Plan & billing changes", "icon": "credit-card",
      "default": True, "scope": "user",
      "desc": "A confirmation whenever your plan, storage or appliances change."},
@@ -353,6 +360,71 @@ def _source_issues(db, user: User) -> list[dict]:
     return out
 
 
+def _appliance_issues(db, user: User) -> list[dict]:
+    """Secure appliances (this user's tenant) that need attention: offline
+    (stale heartbeat), tamper-detected, failed attestation, or in an error state."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    offline_after = timedelta(minutes=20)
+    out: list[dict] = []
+    for a in (db.query(Appliance)
+              .filter(Appliance.tenant_id == user.tenant_id).all()):
+        state = (a.state or "").upper()
+        if state in ("PROVISIONING", "DECOMMISSIONED", "RETIRED"):
+            continue  # not yet in service / intentionally removed
+        problems: list[str] = []
+        if (a.tamper_state or "normal") != "normal":
+            problems.append(f"Tamper alert ({a.tamper_state})")
+        if state in ("ERROR", "FAULT", "OFFLINE"):
+            problems.append(f"Appliance state: {state.title()}")
+        stale = a.last_heartbeat_at and (now - a.last_heartbeat_at) > offline_after
+        if a.last_heartbeat_at is None or stale:
+            problems.append("Offline — no recent check-in")
+        if a.last_attestation_at is not None and not a.attestation_ok:
+            problems.append("Attestation failed")
+        if not problems:
+            continue
+        out.append({"id": a.id, "kind": "appliance",
+                    "name": a.name or a.model or a.serial,
+                    "model": a.model, "serial": a.serial,
+                    "error": problems[0],
+                    "problems": problems,
+                    "at": a.last_heartbeat_at or a.version_updated_at})
+    out.sort(key=lambda i: i.get("at") or datetime.min.replace(tzinfo=None), reverse=True)
+    return out
+
+
+def _storage_issues(db, user: User) -> list[dict]:
+    """Customer-owned storage destinations (bring-your-own-storage) for this
+    user's tenant that failed their last health test, are degraded/errored, or
+    stalled during provisioning — anything the customer must fix to keep backups
+    flowing to that destination."""
+    out: list[dict] = []
+    q = (db.query(CustomerStorage)
+         .filter(CustomerStorage.tenant_id == user.tenant_id,
+                 CustomerStorage.enabled.is_(True),
+                 or_(CustomerStorage.owner_user_id == user.id,
+                     CustomerStorage.owner_user_id.is_(None)),
+                 or_(CustomerStorage.status.in_(("degraded", "error")),
+                     CustomerStorage.provision_state == "error",
+                     CustomerStorage.last_test_ok.is_(False))))
+    for s in q.all():
+        # A never-tested destination isn't yet a problem — only flag a recorded failure.
+        if s.status not in ("degraded", "error") and s.provision_state != "error" \
+                and not (s.last_test_at and not s.last_test_ok):
+            continue
+        msg = (s.last_test_error or s.provision_message
+               or ("Storage destination is degraded." if s.status == "degraded"
+                   else "Storage destination needs attention."))
+        out.append({"id": s.id, "kind": "storage",
+                    "name": s.name or f"{(s.provider or '').upper()} storage",
+                    "provider": s.provider,
+                    "error": str(msg).splitlines()[0][:160],
+                    "at": s.last_test_at or s.updated_at,
+                    "reauth": _likely_reauth(str(msg))})
+    out.sort(key=lambda i: i.get("at") or datetime.min.replace(tzinfo=None), reverse=True)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Builders — return {subject, title, body_html, text, cta, preheader}         #
 # --------------------------------------------------------------------------- #
@@ -558,6 +630,54 @@ def build_source_problem(db, user: User, issues: list[dict] | None = None) -> di
     }
 
 
+def build_appliance_problem(db, user: User, issues: list[dict] | None = None) -> dict | None:
+    issues = issues if issues is not None else _appliance_issues(db, user)
+    if not issues:
+        return None
+    n = len(issues)
+    parts: list[str] = []
+    lead = ("One of your secure appliances needs attention."
+            if n == 1 else f"<b>{n} secure appliances</b> need attention.")
+    parts.append(f'<p style="margin:0 0 12px;">{lead} Your sealed data stays safe — '
+                 f'restore its connection to resume off-site protection and monitoring.</p>')
+    parts.append(_rows([{"icon": "server",
+                         "name": f'{i["name"]}{(" · " + i["model"]) if i.get("model") else ""}',
+                         "detail": "; ".join(i.get("problems") or [i["error"]])} for i in issues]))
+    return {
+        "subject": (f'Action needed: appliance “{issues[0]["name"]}” needs attention'
+                    if n == 1 else f"Action needed: {n} appliances need attention"),
+        "title": "An appliance needs your attention" if n == 1 else f"{n} appliances need attention",
+        "body_html": "".join(parts),
+        "text": "; ".join(f'{i["name"]}: {i["error"]}' for i in issues),
+        "cta": {"label": "View appliances", "url": f"{_portal_url()}/appliances"},
+        "preheader": f"{n} appliance(s) need attention",
+    }
+
+
+def build_storage_problem(db, user: User, issues: list[dict] | None = None) -> dict | None:
+    issues = issues if issues is not None else _storage_issues(db, user)
+    if not issues:
+        return None
+    n = len(issues)
+    parts: list[str] = []
+    lead = ("One of your storage destinations needs attention."
+            if n == 1 else f"<b>{n} storage destinations</b> need attention.")
+    parts.append(f'<p style="margin:0 0 12px;">{lead} Fix it so backups keep flowing there — '
+                 f'your existing data on that destination is unaffected.</p>')
+    parts.append(_rows([{"icon": "database",
+                         "name": f'{i["name"]}{(" · " + i["provider"].upper()) if i.get("provider") else ""}',
+                         "detail": i["error"]} for i in issues]))
+    return {
+        "subject": (f'Action needed: storage “{issues[0]["name"]}” needs attention'
+                    if n == 1 else f"Action needed: {n} storage destinations need attention"),
+        "title": "A storage destination needs your attention" if n == 1 else f"{n} storage destinations need attention",
+        "body_html": "".join(parts),
+        "text": "; ".join(f'{i["name"]}: {i["error"]}' for i in issues),
+        "cta": {"label": "Review storage", "url": f"{_portal_url()}/storage"},
+        "preheader": f"{n} storage destination(s) need attention",
+    }
+
+
 def build_plan_change(db, user: User, change: dict) -> dict:
     """``change`` = {summary:[str], line_items:[{label,amount}], total_label, total,
     effective, plan_name}."""
@@ -673,6 +793,10 @@ def _build(db, user: User, key: str, ctx: dict) -> dict | None:
         return build_daily_summary(db, user, force=bool(ctx.get("force") or ctx.get("build_force")))
     if key == "source_problem":
         return build_source_problem(db, user, ctx.get("issues"))
+    if key == "appliance_problem":
+        return build_appliance_problem(db, user, ctx.get("issues"))
+    if key == "storage_problem":
+        return build_storage_problem(db, user, ctx.get("issues"))
     if key == "plan_change":
         return build_plan_change(db, user, ctx.get("change") or {})
     if key == "weekly_org":
@@ -692,6 +816,15 @@ def send_test(db, user: User, key: str) -> dict:
         issues = _source_issues(db, user)
         ctx["issues"] = issues or [{"id": "sample", "name": "Gmail (sample)",
                                     "error": "Authorization expired — please re-connect.", "at": None}]
+    if key == "appliance_problem":
+        issues = _appliance_issues(db, user)
+        ctx["issues"] = issues or [{"id": "sample", "name": "CV Edge 8 (sample)", "model": "CV Edge 8",
+                                    "error": "Offline — no recent check-in",
+                                    "problems": ["Offline — no recent check-in"], "at": None}]
+    if key == "storage_problem":
+        issues = _storage_issues(db, user)
+        ctx["issues"] = issues or [{"id": "sample", "name": "My S3 bucket (sample)", "provider": "aws",
+                                    "error": "Last health test failed — check credentials.", "at": None}]
     built = _build(db, user, key, ctx)
     if built is None and key == "daily_summary":
         built = build_daily_summary(db, user, force=True)

@@ -94,7 +94,7 @@ def set_mapping(entity_type: str, entity_id: str, body: MappingBody,
 def sample_now(principal: security.Principal = Depends(security.require_platform_admin),
                db: Session = Depends(get_db)):
     """Force an immediate cost sample (otherwise hourly). Best-effort."""
-    n = cloud_costs.sample_all(db)
+    n = cloud_costs.sample_all(db, force=True)
     audit.record(db, actor=principal.user_id, action="costs.sampled", category="admin",
                  detail={"trigger": "manual", "services_sampled": n})
     return {"ok": True, "sampled": n, "summary": cloud_costs.summary(db)}

@@ -98,10 +98,15 @@ IAM_GUIDANCE = {
         ],
         "notes": [
             "Cost Management Reader is read-only — it grants no access to resources or data.",
-            "Tag resources with arkive-role so per-node costs resolve (grouping by ServiceName always works).",
+            "Per-node cost on Azure resolves from the VM's resource id (auto-detected), so no tag is "
+            "required. The optional 'arkive-role' tag (value = the node role, e.g. customer-tenant / "
+            "control-plane / public-web) is only for role-level cost-allocation reports; new "
+            "Arkive-provisioned VMs are tagged arkive-role + arkive-managed=true automatically.",
             "For precise per-object mapping, set each node/storage service's cloud resource id "
             "(the Azure resource id, e.g. /subscriptions/…/virtualMachines/<name>) under "
             "Revenue & Costs → Cloud resource mapping.",
+            "Cost Management is rate-limited (HTTP 429) — Arkive samples hourly with backoff; avoid "
+            "repeatedly forcing a refresh.",
             "Network / data-transfer spend is tracked as its own category and attributed to the "
             "objects that drive it.",
         ],
@@ -231,6 +236,35 @@ def _aws_resource_costs(ce, now: datetime) -> dict:
     return by_resource
 
 
+def _azure_query_with_retry(client, scope: str, query: dict, label: str = "usage"):
+    """Run a Cost Management query, retrying on HTTP 429 with backoff that honors
+    the provider's Retry-After header. Azure throttles this API hard, so callers
+    must not hammer it. Re-raises the final error (preserving status/code)."""
+    from azure.core.exceptions import HttpResponseError
+    delay = 3.0
+    attempts = 4
+    for i in range(attempts):
+        try:
+            return client.query.usage(scope, query)
+        except HttpResponseError as exc:
+            if getattr(exc, "status_code", None) != 429 or i == attempts - 1:
+                raise
+            wait = delay
+            try:
+                hdrs = exc.response.headers if getattr(exc, "response", None) else {}
+                ra = hdrs.get("Retry-After") or hdrs.get("retry-after")
+                if ra:
+                    wait = float(ra)
+            except Exception:  # noqa: BLE001
+                pass
+            wait = min(30.0, max(1.0, wait))
+            logger.warning("cost: Azure 429 on %s — retrying in %.0fs (attempt %d/%d)",
+                           label, wait, i + 1, attempts)
+            time.sleep(wait)
+            delay *= 2
+    return None
+
+
 def _azure_costs(config: dict) -> dict:
     from azure.identity import ClientSecretCredential
     from azure.mgmt.costmanagement import CostManagementClient
@@ -249,7 +283,7 @@ def _azure_costs(config: dict) -> dict:
             "grouping": [{"type": "Dimension", "name": "ServiceName"}],
         },
     }
-    result = client.query.usage(scope, query)
+    result = _azure_query_with_retry(client, scope, query, "by-service")
     cols = [c.name for c in (result.columns or [])]
     i_cost = next((i for i, c in enumerate(cols) if c.lower() in ("pretaxcost", "cost", "costusd")), 0)
     i_svc = next((i for i, c in enumerate(cols) if c.lower() == "servicename"), None)
@@ -266,6 +300,7 @@ def _azure_costs(config: dict) -> dict:
         if i_cur is not None and i_cur < len(row) and row[i_cur]:
             currency = str(row[i_cur])
         by_service[name] = by_service.get(name, 0.0) + amt
+    time.sleep(1.0)  # space the two calls — Azure Cost Management throttles hard (429)
     by_resource = _azure_resource_costs(client, scope)
     return {"currency": currency, "period": _period(now),
             "total": round(sum(by_service.values()), 4), "by_service": by_service,
@@ -285,7 +320,7 @@ def _azure_resource_costs(client, scope: str) -> dict:
                 "grouping": [{"type": "Dimension", "name": "ResourceId"}],
             },
         }
-        result = client.query.usage(scope, query)
+        result = _azure_query_with_retry(client, scope, query, "by-resource")
         cols = [c.name for c in (result.columns or [])]
         i_cost = next((i for i, c in enumerate(cols) if c.lower() in ("pretaxcost", "cost", "costusd")), 0)
         i_rid = next((i for i, c in enumerate(cols) if c.lower() == "resourceid"), None)
@@ -364,6 +399,29 @@ def _storage_resource_id(svc) -> str:
     return ""
 
 
+def _provider_from_resource_id(rid: str) -> str:
+    """Infer the cloud from a resource id shape (i-… → aws, /subscriptions/… → azure)."""
+    rid = (rid or "").strip().lower()
+    if rid.startswith("i-") or rid.startswith("arn:aws") or "amazonaws" in rid:
+        return "aws"
+    if rid.startswith("/subscriptions/"):
+        return "azure"
+    return ""
+
+
+def _node_provider(n) -> str:
+    """Which cloud a node runs on — from its resource id first, then IMDS cloud hint."""
+    p = _provider_from_resource_id(getattr(n, "cloud_resource_id", "") or "")
+    if p:
+        return p
+    pv = str((getattr(n, "cloud", None) or {}).get("provider") or "").lower()
+    if "amazon" in pv or "aws" in pv:
+        return "aws"
+    if "azure" in pv or "microsoft" in pv:
+        return "azure"
+    return ""
+
+
 def _map_samples(db, provider: str, svc_id: str, breakdown: dict, ts: datetime) -> list:
     """Turn a normalized breakdown into CloudCostSample rows: a grand total, one
     per category, and per-entity rows (nodes, storage services, network). When
@@ -409,6 +467,14 @@ def _map_samples(db, provider: str, svc_id: str, breakdown: dict, ts: datetime) 
     nodes = db.query(Node).all()
     storage_svcs = (db.query(ServiceObject)
                     .filter(ServiceObject.kind.in_(("storage-s3", "storage-azure"))).all())
+
+    # Scope attribution to THIS billing provider — an AWS bill must not be spread
+    # across Azure nodes (and vice versa). Fall back to all nodes only if none can
+    # be attributed to a provider (detection not yet available).
+    prov_nodes = [n for n in nodes if _node_provider(n) == provider]
+    nodes = prov_nodes or nodes
+    stor_kind = "storage-s3" if provider == "aws" else "storage-azure"
+    storage_svcs = [s for s in storage_svcs if s.kind == stor_kind]
 
     # --- compute (nodes) — resource-matched share, else role/count distribution ---
     node_amounts: dict[str, float] = {}
@@ -493,10 +559,12 @@ def _map_samples(db, provider: str, svc_id: str, breakdown: dict, ts: datetime) 
     return rows
 
 
-def sample_all(db) -> int:
+def sample_all(db, force: bool = False) -> int:
     """Fetch + record hourly cost samples for every Cloud Billing service object.
-    Deduped per (hour × service). Best-effort — records the provider error detail
-    on failure. Returns the number of service objects sampled."""
+    Deduped per (hour × service) unless ``force`` — a forced (manual) refresh
+    replaces the current hour's rows so newly-set resource ids/mappings take effect
+    immediately. Best-effort — records the provider error detail on failure.
+    Returns the number of service objects sampled."""
     from .models import CloudCostSample, ServiceObject
     from . import services, audit
     ts = _now().replace(minute=0, second=0, microsecond=0)
@@ -505,7 +573,7 @@ def sample_all(db) -> int:
                                               ServiceObject.enabled.is_(True)).all():
         exists = db.query(CloudCostSample.id).filter(
             CloudCostSample.service_object_id == svc.id, CloudCostSample.ts == ts).first()
-        if exists:
+        if exists and not force:
             continue
         provider = provider_of(svc.kind)
         cfg = (services.resolve_service(db, svc.id) or {}).get("config", {}) or {}
@@ -526,6 +594,10 @@ def sample_all(db) -> int:
                 db.rollback()
             continue
         try:
+            if exists and force:  # replace this hour's rows so new ids/mappings apply
+                db.query(CloudCostSample).filter(
+                    CloudCostSample.service_object_id == svc.id,
+                    CloudCostSample.ts == ts).delete(synchronize_session=False)
             for row in _map_samples(db, provider, svc.id, breakdown, ts):
                 db.add(row)
             db.commit()
@@ -606,7 +678,7 @@ def summary(db) -> dict:
         latest = {}
         for r in rows:
             if r.ts.isoformat() == lt:
-                latest[r.category] = round(float(r.amount or 0), 2)
+                latest[r.category] = round(latest.get(r.category, 0.0) + float(r.amount or 0), 2)
         cats = latest
     return {
         "currency": m.get("_currency", "USD"),
@@ -661,25 +733,34 @@ def detail(db) -> dict:
     currency = rows[0].currency if rows else "USD"
     resource_mapped = False
     cat_total: dict[str, float] = {}
-    cat_entities: dict[str, list] = {}
+    cat_entities: dict[str, dict] = {}   # category -> {entity_key: entity}
     unmapped: list = []
     for r in rows:
         if r.entity_type == "total":
-            resource_mapped = bool((r.meta or {}).get("resource_mapped"))
+            resource_mapped = resource_mapped or bool((r.meta or {}).get("resource_mapped"))
         elif r.entity_type == "category":
-            cat_total[r.category] = round(float(r.amount or 0), 2)
+            # Multiple billing providers each write a category row — SUM them.
+            cat_total[r.category] = round(cat_total.get(r.category, 0.0) + float(r.amount or 0), 2)
         elif r.entity_type in ("node", "storage_service"):
-            cat_entities.setdefault(r.category, []).append({
-                "entity_type": r.entity_type, "entity_id": r.entity_id,
-                "label": r.entity_label, "amount": round(float(r.amount or 0), 2),
-                "cloud_resource_id": r.cloud_resource_id or "",
-                "mapped": bool((r.meta or {}).get("mapped"))})
+            bucket = cat_entities.setdefault(r.category, {})
+            key = f"{r.entity_type}:{r.entity_id}"
+            e = bucket.get(key)
+            if e:
+                e["amount"] = round(e["amount"] + float(r.amount or 0), 2)
+                e["cloud_resource_id"] = e["cloud_resource_id"] or (r.cloud_resource_id or "")
+                e["mapped"] = e["mapped"] or bool((r.meta or {}).get("mapped"))
+            else:
+                bucket[key] = {
+                    "entity_type": r.entity_type, "entity_id": r.entity_id,
+                    "label": r.entity_label, "amount": round(float(r.amount or 0), 2),
+                    "cloud_resource_id": r.cloud_resource_id or "",
+                    "mapped": bool((r.meta or {}).get("mapped"))}
         elif r.entity_type == "resource":
             unmapped.append({"cloud_resource_id": r.cloud_resource_id or r.entity_id or "",
                              "amount": round(float(r.amount or 0), 2)})
     categories = []
     for c in CATEGORIES:
-        ents = sorted(cat_entities.get(c, []), key=lambda e: e["amount"], reverse=True)
+        ents = sorted(cat_entities.get(c, {}).values(), key=lambda e: e["amount"], reverse=True)
         categories.append({"category": c, "amount": cat_total.get(c, 0.0), "entities": ents})
     return {"period": period, "updated_at": ts.isoformat(), "currency": currency,
             "resource_mapped": resource_mapped, "categories": categories,
@@ -824,14 +905,17 @@ def diagnose(db, provider_filter: str = "") -> dict:
             for name, amt in (b.get("by_service") or {}).items():
                 cat[_categorize(provider, name)] += float(amt or 0)
             node_map = []
-            for n in nodes:
+            prov_nodes = [n for n in nodes if _node_provider(n) == provider]
+            for n in (prov_nodes or nodes):
                 k, c = _match_resource(n.cloud_resource_id or "", by_resource)
                 node_map.append({"node": n.name, "role": n.role,
+                                 "provider": _node_provider(n) or "unknown",
                                  "cloud_resource_id": n.cloud_resource_id or "",
                                  "matched": bool(k), "matched_key": k,
                                  "resource_cost": round(c, 4) if k else None})
             stor_map = []
-            for s in storage_svcs:
+            stor_kind = "storage-s3" if provider == "aws" else "storage-azure"
+            for s in [s for s in storage_svcs if s.kind == stor_kind]:
                 eff = _storage_resource_id(s)
                 k, c = _match_resource(eff, by_resource)
                 stor_map.append({"service": s.name, "kind": s.kind,

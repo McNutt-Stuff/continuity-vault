@@ -390,6 +390,7 @@ def _azure_deploy(config: dict, opts: dict, name: str, role: str, userdata: str,
     progress(f"Creating virtual machine ({vm_size}) in {loc}…")
     vm = comp.virtual_machines.begin_create_or_update(rg, name, {
         "location": loc,
+        "tags": {"arkive-role": role, "arkive-managed": "true"},
         "hardware_profile": {"vm_size": vm_size},
         "storage_profile": storage_profile,
         "os_profile": os_profile,
