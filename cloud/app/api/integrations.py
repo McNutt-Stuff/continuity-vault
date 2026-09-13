@@ -94,6 +94,7 @@ def _instance_view(inst: IntegrationInstance) -> dict:
         "health": _instance_health(inst),
         "poll_interval_minutes": inst.poll_interval_minutes,
         "host": (inst.config or {}).get("host", ""),
+        "site": (inst.config or {}).get("site", ""),
         "provision_state": inst.provision_state or "idle",
         "provision_message": inst.provision_message,
         "last_run_at": inst.last_run_at.isoformat() if inst.last_run_at else None,
@@ -230,6 +231,11 @@ def update_instance(iid: str, body: UpdateInstance,
         host = creds.pop("host", None)
         if host is not None:
             inst.config = {**(inst.config or {}), "host": host}
+        # Site is non-secret routing — persist it (blank/"default" re-enables auto-detect).
+        site = creds.pop("site", None)
+        if site is not None:
+            inst.config = {**(inst.config or {}), "site": site.strip() or "default"}
+            inst.status = "pending"
         # Only the fields the user actually filled in are treated as changes.
         creds = {k: v for k, v in creds.items() if v not in (None, "")}
         if creds:
@@ -1180,6 +1186,11 @@ def _ingest_report(db: Session, tid: str, inst: IntegrationInstance,
     inst.repoll_requested = False  # a run just completed; clear any pending re-poll
     if status == "ok":
         inst.last_success_at = now
+    # Persist the site the collector actually resolved (auto-detect) so it's shown
+    # in the UI and reused next poll instead of re-discovering each time.
+    diag_site = ((body.stats or {}).get("diag") or {}).get("site")
+    if diag_site and diag_site != (inst.config or {}).get("site"):
+        inst.config = {**(inst.config or {}), "site": diag_site}
     if body.credentials_update:
         try:
             cur = credstore.decrypt(tid, inst.credentials) if inst.credentials else {}

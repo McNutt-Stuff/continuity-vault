@@ -45,5 +45,9 @@ class UbiquitiIntegration(Integration):
                                 placeholder="admin"),
                 CredentialField("password", "Admin password", type="password",
                                 help="Used once to mint a scoped API key, then discarded."),
+                CredentialField("site", "Site name", type="text", required=False,
+                                placeholder="default (auto-detected)",
+                                help="The UniFi site short-name. Leave blank to auto-detect "
+                                     "(most controllers use 'default')."),
             ],
         )

@@ -19,7 +19,7 @@ interface Instance {
   id: string; integration_type: string; display_name: string; label: string;
   enabled: boolean; runs_on: string; appliance_id: string | null; status: string;
   health: string;
-  poll_interval_minutes: number; host: string; last_run_at: string | null;
+  poll_interval_minutes: number; host: string; site?: string; last_run_at: string | null;
   last_success_at: string | null; last_error: string | null;
   provision_state?: string; provision_message?: string | null;
   last_stats: { clients?: number; apps?: number; bytes_seen?: number; note?: string;
@@ -567,6 +567,7 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
             </div>
             <div className="faint" style={{ fontSize: 12.5 }}>
               {inst.host || inst.integration_type} · polls every {pollLbl}
+              {inst.site ? ` · site ${inst.site}` : ""}
               {lastRun ? ` · last run ${lastRun}` : ""}
             </div>
           </div>
@@ -720,20 +721,25 @@ function EditModal({ inst, spec, onClose, onDone }: {
 }) {
   const [label, setLabel] = useState(inst.label);
   const [host, setHost] = useState(inst.host || "");
+  const [site, setSite] = useState(inst.site || "");
   const [interval, setIntervalM] = useState(inst.poll_interval_minutes);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
-  const secretFields = (spec?.credential_fields || []).filter((f) => f.type !== "host");
+  // Host + site are non-secret config we pre-fill; everything else is a secret
+  // the user only re-enters to change (shown blank).
+  const secretFields = (spec?.credential_fields || []).filter((f) => f.type !== "host" && f.name !== "site");
+  const hasSite = (spec?.credential_fields || []).some((f) => f.name === "site");
 
   async function save() {
     setSaving(true); setErr("");
     try {
       const filled = Object.fromEntries(Object.entries(secrets).filter(([, v]) => v));
       const hostChanged = host.trim() !== (inst.host || "");
+      const siteChanged = hasSite && site.trim() !== (inst.site || "");
       const body: Record<string, unknown> = { label, poll_interval_minutes: interval };
-      if (hostChanged || Object.keys(filled).length > 0) {
-        body.credentials = { host: host.trim(), ...filled };
+      if (hostChanged || siteChanged || Object.keys(filled).length > 0) {
+        body.credentials = { host: host.trim(), ...(hasSite ? { site: site.trim() } : {}), ...filled };
       }
       await api.put(`/integrations/${inst.id}`, body);
       notify({ message: "Integration updated.", tone: "info" });
@@ -760,6 +766,14 @@ function EditModal({ inst, spec, onClose, onDone }: {
             <span className="faint" style={{ fontSize: 11.5 }}>Controller address</span>
             <input className="input" value={host} onChange={(e) => setHost(e.target.value)} />
           </label>
+          {hasSite && (
+            <label className="stack" style={{ marginBottom: 12 }}>
+              <span className="faint" style={{ fontSize: 11.5 }}>Site name</span>
+              <input className="input" value={site} placeholder="default (auto-detected)"
+                     onChange={(e) => setSite(e.target.value)} />
+              <span className="faint" style={{ fontSize: 11 }}>Leave blank to auto-detect the UniFi site short-name.</span>
+            </label>
+          )}
           {secretFields.map((f) => (
             <label key={f.name} className="stack" style={{ marginBottom: 12 }}>
               <span className="faint" style={{ fontSize: 11.5 }}>{f.label}</span>
