@@ -1,0 +1,35 @@
+apiVersion: arkive.integrations/v1
+kind: IntegrationPackage
+metadata:
+  id: microsoft365
+  name: Microsoft 365
+  version: 0.1.0
+spec:
+  status: coming_soon
+  minimumPlatformVersion: 0.0.0
+  plans: [business, enterprise]
+  featureFlag: m365_managed_integration
+  ownershipModels: [managed_user, organization]
+  capabilities:
+    - entra_directory
+    - exchange
+    - onedrive
+    - sharepoint
+    - teams
+    - managed_sources
+    - managed_mappings
+    - managed_rules
+    - compliance_evidence
+  runsOn: node                      # assigned customer node (no appliance)
+  auth:
+    model: oauth_admin_consent      # Arkive multi-tenant Entra app (default)
+    enterpriseModel: customer_owned_app
+    secretsInControlPlane: false    # reusable M365 secrets never in the CP
+  controlPlane:
+    owns: [entitlement, tenant_binding, desired_state, scope, mappings, rules, audit]
+    mustNotOwn: [microsoft_payloads, plaintext_index, customer_private_keys, reusable_credentials]
+  customerNode:
+    owns: [credential_use, discovery, collection, normalization, encryption, local_index, checkpoints, recovery]
+  docs:
+    slug: integration-microsoft365
+    roadmap: docs/roadmaps/m365-managed-integration.md

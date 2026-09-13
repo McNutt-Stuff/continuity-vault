@@ -1127,6 +1127,37 @@ _SOURCE_PAGES = [
             "on-prem appliance for LAN access.\n"
             ":::\n"),
         parent_slug="integrations"),
+    _source_doc(
+        "integration-microsoft365", "Microsoft 365 (Managed Integration)", "cloud", 93,
+        "Administrator-governed protection of Microsoft 365 — Entra users, Exchange, OneDrive, "
+        "SharePoint and Teams — for Business and Enterprise organizations.",
+        "The Microsoft 365 integration turns Microsoft Entra ID into the source for your Arkive "
+        "organization users and lets an administrator centrally protect Microsoft 365 data without "
+        "each employee signing in. It connects with Microsoft admin-consent (OAuth) and runs on your "
+        "assigned Arkive node. Managed sources appear in each user's account as read-only, governed "
+        "by administrator-defined mappings and rules. Microsoft data, plaintext indexes and reusable "
+        "credentials never live in the Arkive control plane.",
+        ["Open **Integrations** and choose **Microsoft 365** (Business/Enterprise).",
+         "A Microsoft organization administrator approves tenant-wide access via admin consent.",
+         "Arkive discovers Entra users and proposes mappings to your Arkive users.",
+         "Review the proposed scope and managed sources, then activate — nothing collects until you approve."],
+        ["**Managed protection** — Exchange, OneDrive, SharePoint and Teams governed by the "
+         "organization (not per-user backups). Feeds coverage and compliance evidence."],
+        ["Business/Enterprise plans only; enforced server-side.",
+         "Uses Microsoft admin-consent OAuth — no per-employee sign-in and no stored password.",
+         "Currently in active development; the card appears but setup opens when it ships."],
+        required_plan="business",
+        extra=(
+            "\n## Status\n"
+            "This integration is being delivered in phases. The card is visible to eligible "
+            "Business/Enterprise organizations; guided setup (Microsoft admin consent, user "
+            "discovery and mapping, managed sources) becomes available as each phase ships.\n"
+            "\n## Availability\n"
+            "::: plan business\n"
+            "The Microsoft 365 Managed Integration is a Business/Enterprise capability, enforced on "
+            "the server. Personal and Family accounts cannot access managed or organization sources.\n"
+            ":::\n"),
+        parent_slug="integrations"),
 ]
 
 DEFAULT_SUPPORT_DOCS.extend(_SOURCE_PAGES)

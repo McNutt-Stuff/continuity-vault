@@ -1,13 +1,24 @@
 """Integrations framework.
 
-Integrations unlock *auxiliary intelligence* about a customer's environment
-(e.g. what apps/cloud services their network is using) rather than backing data
-into the vault. They run either on the customer's appliance (LAN-local sources
-like a router/controller) or on a cloud node, per the integration's declared
-``runs_on``. Each integration self-registers so adding one is a single class.
+Integrations are self-contained, extensible packages ("mini apps") that plug into
+the platform without core code needing to know about any specific one. Each lives
+in its own sub-package under ``cloud/app/integrations/<name>/`` and self-registers
+on import. Adding an integration is therefore a new directory — no edits to core
+files, routers, or this module.
+
+Two kinds ship today:
+- auxiliary-intelligence integrations (e.g. UniFi) that run on the customer's
+  appliance and report network/app telemetry;
+- managed, organization-level integrations (e.g. Microsoft 365) that are governed
+  by an org admin and run on the assigned customer node.
 """
 
 from __future__ import annotations
+
+import importlib
+import logging
+import os
+import pkgutil
 
 from .base import (
     CredentialField,
@@ -17,7 +28,24 @@ from .base import (
     get_integration,
     register_integration,
 )
-from . import registry  # noqa: F401  ensure concrete integrations self-register
+
+logger = logging.getLogger("cv.integrations")
+
+
+def _discover() -> None:
+    """Import every integration sub-package so it self-registers. A package is any
+    child directory with an ``__init__.py`` that imports its ``integration`` module."""
+    pkg_dir = os.path.dirname(__file__)
+    for mod in pkgutil.iter_modules([pkg_dir]):
+        if not mod.ispkg or mod.name.startswith("_"):
+            continue
+        try:
+            importlib.import_module(f"{__name__}.{mod.name}")
+        except Exception:  # noqa: BLE001 — one bad package must not break the others
+            logger.exception("integration package failed to load: %s", mod.name)
+
+
+_discover()
 
 __all__ = [
     "CredentialField",

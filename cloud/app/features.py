@@ -25,6 +25,9 @@ FLAGS: dict[str, bool] = {
     # Advanced Ubiquiti/UniFi analytics: per-user + org-level network drilldowns,
     # device→user mapping analytics, and collection-gap detection. OFF by default.
     "advanced_ubiquiti_analytics": False,
+    # Microsoft 365 Managed Integration (Business/Enterprise, admin-governed). Gated
+    # by plan AND this flag; OFF by default until the collection backend ships.
+    "m365_managed_integration": False,
 }
 
 # Human labels for the admin UI.
@@ -35,6 +38,7 @@ LABELS = {
     "integrations_enabled": "Integrations (network intelligence)",
     "rules_enabled": "Rules engine (compliance)",
     "advanced_ubiquiti_analytics": "Advanced Ubiquiti Analytics (per-user & org)",
+    "m365_managed_integration": "Microsoft 365 Managed Integration (Business/Enterprise)",
 }
 
 

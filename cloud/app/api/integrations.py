@@ -58,7 +58,8 @@ def _now() -> datetime:
 # --------------------------------------------------------------------------- #
 # Views                                                                        #
 # --------------------------------------------------------------------------- #
-def _spec_view(spec) -> dict:
+def _spec_view(spec, entitlement: dict | None = None) -> dict:
+    ent = entitlement or {}
     return {
         "integration_type": spec.integration_type,
         "display_name": spec.display_name,
@@ -71,12 +72,43 @@ def _spec_view(spec) -> dict:
         "default_interval_minutes": spec.default_interval_minutes,
         "auto_provision_key": spec.auto_provision_key,
         "provides": spec.provides,
+        # Packaged-integration metadata (each integration is a self-contained app).
+        "version": spec.version,
+        "status": spec.status,               # ga | preview | coming_soon
+        "plans": spec.plans,
+        "min_plan": spec.min_plan,
+        "capabilities": spec.capabilities,
+        "ownership_models": spec.ownership_models,
+        "managed": spec.managed,
+        "workspace": spec.workspace,
+        "docs_slug": spec.docs_slug,
+        # Per-caller entitlement (server-authoritative; UI is advisory only).
+        "entitled": ent.get("entitled", True),
+        "locked_reason": ent.get("locked_reason", ""),
+        "available_to_setup": ent.get("available_to_setup", spec.status == "ga"),
         "credential_fields": [
             {"name": f.name, "label": f.label, "type": f.type,
              "placeholder": f.placeholder, "required": f.required, "help": f.help}
             for f in spec.credential_fields
         ],
     }
+
+
+def _spec_entitlement(db: Session, spec, plan: str, user, tenant) -> dict:
+    """Server-authoritative entitlement for one integration: plan gate + feature
+    flag + release status. Fail-closed — the UI mirrors this but never decides it."""
+    from .. import features
+    entitled = True
+    reason = ""
+    if spec.plans and (plan or "").lower() not in [p.lower() for p in spec.plans]:
+        want = (spec.min_plan or spec.plans[0]).title()
+        entitled = False
+        reason = f"Requires the {want} plan"
+    if entitled and spec.feature_flag and not features.resolve(user, tenant, spec.feature_flag):
+        entitled = False
+        reason = "Not enabled for your organization yet"
+    return {"entitled": entitled, "locked_reason": reason,
+            "available_to_setup": bool(entitled and spec.status == "ga")}
 
 
 def _instance_view(inst: IntegrationInstance) -> dict:
@@ -143,7 +175,11 @@ def _admin_enabled(db: Session, integration_type: str) -> bool:
 def list_integrations(principal: security.Principal = Depends(security.get_principal),
                       db: Session = Depends(get_db)):
     """Available integration types (admin-enabled) + this user's instances."""
-    available = [_spec_view(i.spec()) for i in all_integrations()
+    tenant = db.get(Tenant, principal.tenant_id)
+    user = db.get(User, principal.user_id)
+    plan = (tenant.plan if tenant else "") or ""
+    available = [_spec_view(i.spec(), _spec_entitlement(db, i.spec(), plan, user, tenant))
+                 for i in all_integrations()
                  if _admin_enabled(db, i.integration_type)]
     instances = (db.query(IntegrationInstance)
                  .filter(IntegrationInstance.tenant_id == principal.tenant_id,
@@ -153,7 +189,6 @@ def list_integrations(principal: security.Principal = Depends(security.get_princ
     appliances = (db.query(Appliance)
                   .filter(Appliance.tenant_id == principal.tenant_id,
                           Appliance.state != "retired").all())
-    tenant = db.get(Tenant, principal.tenant_id)
     return {
         "available": available,
         "instances": [_instance_view(i) for i in instances],
@@ -179,6 +214,15 @@ def create_instance(body: CreateInstance,
     if integ is None or not _admin_enabled(db, body.integration_type):
         raise HTTPException(404, "integration not available")
     spec = integ.spec()
+    # Server-authoritative entitlement (plan + feature flag), then release status.
+    tenant = db.get(Tenant, principal.tenant_id)
+    user = db.get(User, principal.user_id)
+    plan = (tenant.plan if tenant else "") or ""
+    ent = _spec_entitlement(db, spec, plan, user, tenant)
+    if not ent["entitled"]:
+        raise HTTPException(403, ent["locked_reason"] or "This integration isn't available on your plan")
+    if spec.status != "ga":
+        raise HTTPException(409, f"{spec.display_name} is coming soon and can't be set up yet.")
     appliance_id = body.appliance_id
     if spec.needs_appliance:
         if not appliance_id:

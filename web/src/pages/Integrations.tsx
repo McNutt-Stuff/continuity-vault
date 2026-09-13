@@ -14,6 +14,10 @@ interface Spec {
   color: string; category: string; runs_on: string; needs_appliance: boolean;
   default_interval_minutes: number; auto_provision_key: boolean; provides: string[];
   credential_fields: CredField[];
+  // Packaged-integration metadata + per-caller entitlement (server-authoritative).
+  version?: string; status?: string; plans?: string[]; min_plan?: string;
+  capabilities?: string[]; ownership_models?: string[]; managed?: boolean; workspace?: boolean;
+  docs_slug?: string; entitled?: boolean; locked_reason?: string; available_to_setup?: boolean;
 }
 interface Instance {
   id: string; integration_type: string; display_name: string; label: string;
@@ -185,12 +189,18 @@ function AddIntegrationModal({ available, hasAppliance, onClose, onPick }: {
                  style={{ marginBottom: 14, width: "100%" }} />
           <div className="grid grid-3">
             {shown.map((s) => {
-              const locked = s.needs_appliance && !hasAppliance;
+              const comingSoon = s.status && s.status !== "ga";
+              const notEntitled = s.entitled === false;
+              const applianceLocked = s.needs_appliance && !hasAppliance;
+              const locked = applianceLocked || comingSoon || notEntitled;
+              const lockMsg = notEntitled ? (s.locked_reason || "Not available on your plan")
+                : comingSoon ? (s.status === "preview" ? "Preview — coming soon" : "Coming soon")
+                : applianceLocked ? "Needs an appliance on your network" : "";
               return (
               <div key={s.integration_type}
                    className="dest-card"
-                   style={locked ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
-                   title={locked ? "Requires an appliance on your network" : undefined}
+                   style={locked ? { opacity: 0.62, cursor: "not-allowed" } : undefined}
+                   title={lockMsg || undefined}
                    onClick={() => { if (!locked) onPick(s); }}>
                 <div className="spread" style={{ marginBottom: 10 }}>
                   <div className="row" style={{ gap: 10, alignItems: "center" }}>
@@ -198,16 +208,22 @@ function AddIntegrationModal({ available, hasAppliance, onClose, onPick }: {
                       <SourceIcon type={s.integration_type} fallback={asIcon(s.icon)} size={19} />
                     </div>
                     <div>
-                      <div style={{ fontWeight: 650 }}>{s.display_name}</div>
+                      <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                        <div style={{ fontWeight: 650 }}>{s.display_name}</div>
+                        {s.managed && <Pill tone="info">Managed</Pill>}
+                      </div>
                       <div className="faint" style={{ fontSize: 11.5 }}>{s.category}</div>
                     </div>
                   </div>
-                  <Pill tone="info">{s.runs_on === "appliance" ? "Appliance" : "Cloud"}</Pill>
+                  <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                    {s.min_plan && <Pill tone="warn">{s.min_plan[0].toUpperCase() + s.min_plan.slice(1)}</Pill>}
+                    <Pill tone="info">{s.runs_on === "appliance" ? "Appliance" : "Cloud"}</Pill>
+                  </div>
                 </div>
                 <div className="faint" style={{ fontSize: 12, lineHeight: 1.45 }}>{s.description}</div>
                 {locked && (
                   <div style={{ fontSize: 11.5, color: "var(--warn)", marginTop: 8, display: "flex", gap: 6, alignItems: "center" }}>
-                    <Icon name="alert" size={12} /> Needs an appliance on your network
+                    <Icon name={comingSoon ? "clock" : "alert"} size={12} /> {lockMsg}
                   </div>
                 )}
               </div>
