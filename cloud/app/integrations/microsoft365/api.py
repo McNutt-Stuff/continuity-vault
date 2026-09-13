@@ -418,3 +418,224 @@ def disconnect(principal: security.Principal = Depends(security.require_passkey)
     audit.record(db, actor=principal.user_id, action="m365.disconnected",
                  category="admin", severity="warning", resource=inst.id)
     return {"ok": True, "note": "Disconnected. Protected data and recovery points are retained."}
+
+
+# --------------------------------------------------------------------------- #
+# Managed rules (immutable versions + activation) + effective policy          #
+# --------------------------------------------------------------------------- #
+class RuleBody(BaseModel):
+    name: str
+    rule_family: str = "collection"
+    spec: dict = {}
+
+
+@router.get("/rules")
+def list_rules(principal: security.Principal = Depends(require_m365),
+               db: Session = Depends(get_db)):
+    inst = _instance(db, principal.tenant_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    rows = (db.query(m.ManagedRule)
+            .filter(m.ManagedRule.integration_instance_id == inst.id)
+            .order_by(m.ManagedRule.created_at.desc()).all())
+    return {"rules": [{"id": r.id, "name": r.name, "rule_family": r.rule_family,
+                       "status": r.status, "active_version": r.active_version} for r in rows]}
+
+
+@router.post("/rules")
+def create_rule(body: RuleBody,
+                principal: security.Principal = Depends(require_m365),
+                db: Session = Depends(get_db)):
+    """Create a managed rule with an immutable draft version 1."""
+    inst = _instance(db, principal.tenant_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    rule = m.ManagedRule(tenant_id=principal.tenant_id, integration_instance_id=inst.id,
+                         name=body.name.strip() or "Rule", rule_family=body.rule_family,
+                         status="draft", active_version=0, created_by=principal.user_id)
+    db.add(rule)
+    db.flush()
+    db.add(m.ManagedRuleVersion(tenant_id=principal.tenant_id, rule_id=rule.id,
+                                version=1, spec=body.spec or {}))
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="m365.rule_created",
+                 category="admin", resource=rule.id, detail={"family": body.rule_family})
+    return {"id": rule.id, "version": 1, "status": "draft"}
+
+
+@router.post("/rules/{rule_id}/activate")
+def activate_rule(rule_id: str,
+                  principal: security.Principal = Depends(require_m365),
+                  db: Session = Depends(get_db)):
+    """Activate a rule's latest version — but only if the compiled effective policy
+    has no invariant conflicts (legal hold / immutable retention / residency)."""
+    from . import policy
+    inst = _instance(db, principal.tenant_id)
+    rule = db.get(m.ManagedRule, rule_id)
+    if inst is None or not rule or rule.integration_instance_id != inst.id:
+        raise HTTPException(404, "rule not found")
+    latest = (db.query(m.ManagedRuleVersion)
+              .filter(m.ManagedRuleVersion.rule_id == rule.id)
+              .order_by(m.ManagedRuleVersion.version.desc()).first())
+    if not latest:
+        raise HTTPException(409, "rule has no version")
+    prev_active = rule.active_version
+    rule.active_version = latest.version
+    rule.status = "active"
+    rule.approved_by = principal.user_id
+    db.flush()
+    result = policy.compile_effective(db, principal.tenant_id, inst.id)
+    if result["conflicts"]:
+        db.rollback()  # never activate a rule that breaks an invariant
+        raise HTTPException(409, {"error": "policy conflict", "conflicts": result["conflicts"]})
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="m365.rule_activated",
+                 category="admin", resource=rule.id,
+                 detail={"version": latest.version, "prev": prev_active})
+    return {"id": rule.id, "active_version": rule.active_version, "status": "active"}
+
+
+class AssignBody(BaseModel):
+    assignee_type: str = "organization"  # organization|group|user|source
+    assignee_id: str = ""
+
+
+@router.post("/rules/{rule_id}/assign")
+def assign_rule(rule_id: str, body: AssignBody,
+                principal: security.Principal = Depends(require_m365),
+                db: Session = Depends(get_db)):
+    inst = _instance(db, principal.tenant_id)
+    rule = db.get(m.ManagedRule, rule_id)
+    if inst is None or not rule or rule.integration_instance_id != inst.id:
+        raise HTTPException(404, "rule not found")
+    db.add(m.ManagedRuleAssignment(tenant_id=principal.tenant_id, rule_id=rule.id,
+                                   assignee_type=body.assignee_type, assignee_id=body.assignee_id))
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/policy")
+def effective_policy(scope_ref: str = "",
+                     principal: security.Principal = Depends(require_m365),
+                     db: Session = Depends(get_db)):
+    """Compile + return the effective policy for a scope (does not persist)."""
+    from . import policy
+    inst = _instance(db, principal.tenant_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    return policy.compile_effective(db, principal.tenant_id, inst.id, scope_ref)
+
+
+# --------------------------------------------------------------------------- #
+# Managed mappings (immutable versions + activation)                          #
+# --------------------------------------------------------------------------- #
+class MappingBody(BaseModel):
+    name: str
+    spec: dict = {}
+    visibility: dict = {}
+
+
+@router.get("/mappings")
+def list_mappings(principal: security.Principal = Depends(require_m365),
+                  db: Session = Depends(get_db)):
+    inst = _instance(db, principal.tenant_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    rows = (db.query(m.ManagedMapping)
+            .filter(m.ManagedMapping.integration_instance_id == inst.id).all())
+    return {"mappings": [{"id": r.id, "name": r.name, "status": r.status,
+                          "active_version": r.active_version} for r in rows]}
+
+
+@router.post("/mappings")
+def create_mapping(body: MappingBody,
+                   principal: security.Principal = Depends(require_m365),
+                   db: Session = Depends(get_db)):
+    inst = _instance(db, principal.tenant_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    mp = m.ManagedMapping(tenant_id=principal.tenant_id, integration_instance_id=inst.id,
+                          name=body.name.strip() or "Mapping", status="draft",
+                          active_version=0, visibility=body.visibility or {},
+                          created_by=principal.user_id)
+    db.add(mp)
+    db.flush()
+    db.add(m.ManagedMappingVersion(tenant_id=principal.tenant_id, mapping_id=mp.id,
+                                   version=1, spec=body.spec or {}))
+    db.commit()
+    return {"id": mp.id, "version": 1, "status": "draft"}
+
+
+@router.post("/mappings/{mapping_id}/activate")
+def activate_mapping(mapping_id: str,
+                     principal: security.Principal = Depends(require_m365),
+                     db: Session = Depends(get_db)):
+    inst = _instance(db, principal.tenant_id)
+    mp = db.get(m.ManagedMapping, mapping_id)
+    if inst is None or not mp or mp.integration_instance_id != inst.id:
+        raise HTTPException(404, "mapping not found")
+    latest = (db.query(m.ManagedMappingVersion)
+              .filter(m.ManagedMappingVersion.mapping_id == mp.id)
+              .order_by(m.ManagedMappingVersion.version.desc()).first())
+    if not latest:
+        raise HTTPException(409, "mapping has no version")
+    mp.active_version = latest.version
+    mp.status = "active"
+    mp.approved_by = principal.user_id
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="m365.mapping_activated",
+                 category="admin", resource=mp.id, detail={"version": latest.version})
+    return {"id": mp.id, "active_version": mp.active_version, "status": "active"}
+
+
+# --------------------------------------------------------------------------- #
+# Managed + organization sources                                              #
+# --------------------------------------------------------------------------- #
+class OrgSourceBody(BaseModel):
+    workload: str                 # sharepoint|teams|exchange(shared)|onedrive(service)
+    name: str
+    source_key: str = ""          # Microsoft resource id
+    custodian_user_ids: list[str] = []
+
+
+@router.get("/sources")
+def list_sources(principal: security.Principal = Depends(require_m365),
+                 db: Session = Depends(get_db)):
+    inst = _instance(db, principal.tenant_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    rows = (db.query(m.ManagedSource)
+            .filter(m.ManagedSource.integration_instance_id == inst.id)
+            .order_by(m.ManagedSource.created_at.desc()).all())
+    return {"sources": [{"id": s.id, "workload": s.workload, "name": s.name,
+                         "ownership_type": s.ownership_type, "owner_user_id": s.owner_user_id,
+                         "state": s.state, "source_key": s.source_key,
+                         "last_collected_at": s.last_collected_at.isoformat() if s.last_collected_at else None}
+                        for s in rows]}
+
+
+@router.post("/organization-sources")
+def create_org_source(body: OrgSourceBody,
+                      principal: security.Principal = Depends(require_m365),
+                      db: Session = Depends(get_db)):
+    """Create an organization-owned source (no individual owner). At least one
+    custodian assignment is expected; a fake user owner is never invented."""
+    inst = _instance(db, principal.tenant_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    src = m.ManagedSource(tenant_id=principal.tenant_id, integration_instance_id=inst.id,
+                          workload=body.workload, ownership_type="organization",
+                          owner_user_id=None, source_key=body.source_key.strip(),
+                          name=body.name.strip() or body.workload, state="planned",
+                          assigned_node_id=inst.node_id)
+    db.add(src)
+    db.flush()
+    for uid in body.custodian_user_ids:
+        member = db.get(User, uid)
+        if member and member.tenant_id == principal.tenant_id:
+            db.add(m.SourceAssignment(tenant_id=principal.tenant_id, managed_source_id=src.id,
+                                      assignee_type="user", assignee_id=uid, role="custodian"))
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="m365.org_source_created",
+                 category="admin", resource=src.id, detail={"workload": body.workload})
+    return {"id": src.id, "state": src.state}

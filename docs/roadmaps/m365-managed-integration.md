@@ -41,7 +41,7 @@
 | P1c | Managed credential/source/org-source/mapping/rule models | Done | `integrations/microsoft365/models.py` (18 `m365_*` tables, auto-created) |
 | P1d | Desired-state federation envelope + node validation | Partial | `IntegrationDesiredState` records written on activate; node validation TBD |
 | P2 | M365 connection + Entra identity (OAuth, discovery, mapping) | In progress | `microsoft365/api.py`: connect/oauth/scope/identities/activate/disconnect (CP records); Entra discovery on node TBD |
-| P3 | Core managed protection (Exchange/OneDrive) | Todo | End-to-end recovery test |
+| P3 | Core managed protection (Exchange/OneDrive) | Partial | CP: rules/mappings/sources CRUD + immutable versions + effective-policy compiler (`policy.py`, conflict-rejecting). Node collectors TBD |
 | P4 | Organization collaboration (SharePoint/Teams) | Todo | Design-partner validation |
 | P5 | Compliance packs + security-source evidence | Todo | Evidence/privacy review |
 | P6 | Broader Microsoft business sources + customer-owned app | Todo | Per-module gates |
