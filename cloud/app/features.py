@@ -22,6 +22,9 @@ FLAGS: dict[str, bool] = {
     # Rules engine (compliance): declarative ingestion rules. OFF by default — an
     # admin enables it per tenant/user; hidden entirely until then.
     "rules_enabled": False,
+    # Advanced Ubiquiti/UniFi analytics: per-user + org-level network drilldowns,
+    # device→user mapping analytics, and collection-gap detection. OFF by default.
+    "advanced_ubiquiti_analytics": False,
 }
 
 # Human labels for the admin UI.
@@ -31,6 +34,7 @@ LABELS = {
     "cloud_storage_enabled": "Cloud Storage (bring-your-own)",
     "integrations_enabled": "Integrations (network intelligence)",
     "rules_enabled": "Rules engine (compliance)",
+    "advanced_ubiquiti_analytics": "Advanced Ubiquiti Analytics (per-user & org)",
 }
 
 

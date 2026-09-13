@@ -41,6 +41,12 @@ logger = logging.getLogger("cv.integrations")
 
 router = APIRouter(prefix="/integrations", tags=["integrations"],
                    dependencies=[Depends(security.require_feature("integrations_enabled"))])
+# Advanced Ubiquiti analytics (per-user + org drilldowns, gap detection) — gated by
+# BOTH integrations and the advanced flag so it stays hidden until enabled.
+advanced_router = APIRouter(
+    prefix="/integrations/advanced", tags=["integrations-advanced"],
+    dependencies=[Depends(security.require_feature("integrations_enabled")),
+                  Depends(security.require_feature("advanced_ubiquiti_analytics"))])
 agent_router = APIRouter(prefix="/appliance/integrations", tags=["appliance-integrations"])
 admin_router = APIRouter(prefix="/admin", tags=["admin-integrations"])
 
@@ -666,6 +672,7 @@ class ClientState(BaseModel):
     of_interest: bool | None = None
     nickname: str | None = None
     ownership: str | None = None  # "" | personal | family | organization
+    owner_user_id: str | None = None  # assign the device to a specific tenant member ("" clears)
 
 
 @router.post("/clients/{cid}")
@@ -686,9 +693,27 @@ def set_client_state(cid: str, body: ClientState,
         if owner not in ("", "personal", "family", "organization"):
             raise HTTPException(400, "invalid ownership")
         c.ownership = owner
-        # "personal" (mine) binds the device to the assigning user; the broader
-        # scopes (family/organization) aren't tied to one person.
-        c.owner_user_id = principal.user_id if owner == "personal" else None
+        # "personal" (mine) binds the device to the assigning user unless an
+        # explicit member is named below; broader scopes aren't tied to a person.
+        if owner == "personal" and body.owner_user_id is None:
+            c.owner_user_id = principal.user_id
+        elif owner != "personal":
+            c.owner_user_id = None
+    # Explicit device -> member mapping (evolution of Me / My Family): assign the
+    # device to a specific tenant user so per-person analytics can attribute it.
+    if body.owner_user_id is not None:
+        uid = (body.owner_user_id or "").strip()
+        if uid:
+            member = db.get(User, uid)
+            if not member or member.tenant_id != principal.tenant_id:
+                raise HTTPException(400, "user is not a member of this tenant")
+            c.owner_user_id = uid
+            if (c.ownership or "") in ("", "family", "organization"):
+                c.ownership = "personal"  # it now belongs to a named person
+        else:
+            c.owner_user_id = None
+            if c.ownership == "personal":
+                c.ownership = ""
     c.updated_at = _now()
     db.commit()
     return _client_view(c)
@@ -732,6 +757,208 @@ def repoll_instance(iid: str,
     inst.updated_at = _now()
     db.commit()
     return {"ok": True}
+
+
+@router.post("/remap-apps")
+def remap_apps(principal: security.Principal = Depends(security.get_principal),
+               db: Session = Depends(get_db)):
+    """Re-run the app→source registry mapping over already-collected apps (and the
+    denormalized daily samples). Use after the registry map is extended so existing
+    telemetry picks up newly-supported sources. Returns how many rows changed and
+    the popular services seen that Arkive doesn't yet have a connector for."""
+    remapped = 0
+    candidates: set[str] = set()
+    for a in (db.query(NetworkApp)
+              .filter(NetworkApp.tenant_id == principal.tenant_id).all()):
+        st = map_app_to_source(a.name, a.category)
+        if st != (a.source_type or ""):
+            a.source_type = st
+            a.updated_at = _now()
+            remapped += 1
+        cand = candidate_service(a.name, a.category)
+        if cand:
+            candidates.add(cand["name"])
+    for s in (db.query(NetworkSample)
+              .filter(NetworkSample.tenant_id == principal.tenant_id,
+                      NetworkSample.dim == "app").all()):
+        st = map_app_to_source(s.name, s.category)
+        if st != (s.source_type or ""):
+            s.source_type = st
+    db.commit()
+    logger.info("remap-apps: tenant=%s remapped=%d candidates=%d",
+                principal.tenant_id, remapped, len(candidates))
+    return {"ok": True, "remapped": remapped, "candidates": sorted(candidates)}
+
+
+# --------------------------------------------------------------------------- #
+# Advanced analytics (per-user + org drilldowns, gap detection) — flag-gated   #
+# --------------------------------------------------------------------------- #
+
+def _tenant_instance_ids(db: Session, tenant_id: str) -> list[str]:
+    """Every integration instance in the tenant (org-wide, not just the caller's)."""
+    return [i.id for i in db.query(IntegrationInstance.id).filter(
+        IntegrationInstance.tenant_id == tenant_id).all()]
+
+
+def _member_name_map(db: Session, tenant_id: str) -> dict:
+    out: dict = {}
+    for u in db.query(User).filter(User.tenant_id == tenant_id).all():
+        out[u.id] = getattr(u, "display_name", None) or getattr(u, "email", None) or u.id
+    return out
+
+
+def _collection_gaps(db: Session, tenant_id: str, iids: list[str], days: int) -> dict:
+    """Detect missing collection days over the window (days with no 'total' sample)
+    plus staleness — the core signal that data is being MISSED."""
+    end_day = _day_bucket(_now())
+    since = end_day - timedelta(days=days - 1)
+    present: set = set()
+    if iids:
+        for (d,) in (db.query(NetworkSample.day)
+                     .filter(NetworkSample.tenant_id == tenant_id,
+                             NetworkSample.integration_id.in_(iids),
+                             NetworkSample.dim == "total",
+                             NetworkSample.day >= since).all()):
+            present.add(d)
+    missing: list = []
+    d = since
+    while d <= end_day:
+        if d not in present:
+            missing.append(d.strftime("%Y-%m-%d"))
+        d += timedelta(days=1)
+    last_day = max(present) if present else None
+    return {"days": days, "collected_days": len(present),
+            "missing_days": missing[-30:], "missing_count": len(missing),
+            "last_data_day": last_day.strftime("%Y-%m-%d") if last_day else None,
+            "stale": bool(last_day is None or (end_day - last_day).days >= 2)}
+
+
+def _advanced_org(db: Session, tenant_id: str, iids: list[str], window: str) -> dict:
+    days = _window_days(window)
+    end_day = _day_bucket(_now())
+    since = end_day - timedelta(days=days - 1)
+    clients = (db.query(NetworkClient)
+               .filter(NetworkClient.tenant_id == tenant_id,
+                       NetworkClient.integration_id.in_(iids)).all()) if iids else []
+    by_user: dict = {}
+    unassigned = {"devices": 0, "bytes": 0}
+    for c in clients:
+        if c.owner_user_id:
+            u = by_user.setdefault(c.owner_user_id,
+                                   {"keys": set(), "devices": 0, "stale_devices": 0, "last_seen": None})
+            u["keys"].add(c.client_key)
+            u["devices"] += 1
+            if c.last_seen and (u["last_seen"] is None or c.last_seen > u["last_seen"]):
+                u["last_seen"] = c.last_seen
+            if c.last_seen and (_now() - c.last_seen).days >= 2:
+                u["stale_devices"] += 1
+        else:
+            unassigned["devices"] += 1
+            unassigned["bytes"] += int(c.total_bytes or 0)
+    cur_bytes_by_key: dict = {}
+    if iids:
+        for s in (db.query(NetworkSample)
+                  .filter(NetworkSample.tenant_id == tenant_id,
+                          NetworkSample.integration_id.in_(iids),
+                          NetworkSample.dim == "client", NetworkSample.day >= since).all()):
+            cur_bytes_by_key[s.key] = cur_bytes_by_key.get(s.key, 0) + int(s.total_bytes or 0)
+    names = _member_name_map(db, tenant_id)
+    users = []
+    for uid, u in by_user.items():
+        wbytes = sum(cur_bytes_by_key.get(k, 0) for k in u["keys"])
+        users.append({"user_id": uid, "name": names.get(uid, uid),
+                      "devices": u["devices"], "stale_devices": u["stale_devices"],
+                      "window_bytes": int(wbytes),
+                      "last_seen": u["last_seen"].isoformat() if u["last_seen"] else None,
+                      "gap": bool(u["stale_devices"])})
+    users.sort(key=lambda x: -x["window_bytes"])
+    return {"window": window, "days": days, "users": users,
+            "unassigned": unassigned,
+            "assigned_devices": sum(u["devices"] for u in by_user.values()),
+            "member_count": len(names),
+            "gaps": _collection_gaps(db, tenant_id, iids, days)}
+
+
+def _advanced_user(db: Session, tenant_id: str, iids: list[str], uid: str,
+                   window: str, category: str = "", source_type: str = "") -> dict:
+    days = _window_days(window)
+    end_day = _day_bucket(_now())
+    since = end_day - timedelta(days=days - 1)
+    clients = (db.query(NetworkClient)
+               .filter(NetworkClient.tenant_id == tenant_id,
+                       NetworkClient.integration_id.in_(iids),
+                       NetworkClient.owner_user_id == uid).all()) if iids else []
+    keys = [c.client_key for c in clients]
+    by_day: dict = {}
+    if keys:
+        for s in (db.query(NetworkSample)
+                  .filter(NetworkSample.tenant_id == tenant_id,
+                          NetworkSample.integration_id.in_(iids),
+                          NetworkSample.dim == "client", NetworkSample.key.in_(keys),
+                          NetworkSample.day >= since).all()):
+            by_day[s.day] = by_day.get(s.day, 0) + int(s.total_bytes or 0)
+    app_bytes: dict = {}
+    if keys:
+        for u in (db.query(NetworkUsage)
+                  .filter(NetworkUsage.tenant_id == tenant_id,
+                          NetworkUsage.integration_id.in_(iids),
+                          NetworkUsage.client_key.in_(keys)).all()):
+            app_bytes[u.app_key] = app_bytes.get(u.app_key, 0) + int(u.total_bytes or 0)
+    apps = []
+    if app_bytes:
+        appmap = {a.app_key: a for a in db.query(NetworkApp).filter(
+            NetworkApp.tenant_id == tenant_id, NetworkApp.integration_id.in_(iids),
+            NetworkApp.app_key.in_(list(app_bytes.keys()))).all()}
+        for ak, b in app_bytes.items():
+            a = appmap.get(ak)
+            cat = (a.category if a else "") or ""
+            st = (a.source_type if a else "") or ""
+            if category and cat != category:
+                continue
+            if source_type and st != source_type:
+                continue
+            apps.append({"app_key": ak, "name": (a.name if a else ak),
+                         "category": cat, "source_type": st, "total_bytes": int(b)})
+        apps.sort(key=lambda x: -x["total_bytes"])
+    devices = [{"id": c.id, "name": c.nickname or c.name or c.hostname or c.mac,
+                "device_type": c.device_type, "ip": c.ip, "mac": c.mac,
+                "total_bytes": int(c.total_bytes or 0),
+                "last_seen": c.last_seen.isoformat() if c.last_seen else None,
+                "stale": bool(c.last_seen and (_now() - c.last_seen).days >= 2),
+                "monitor_state": c.monitor_state}
+               for c in sorted(clients, key=lambda c: -(c.total_bytes or 0))]
+    names = _member_name_map(db, tenant_id)
+    all_cats = sorted({(appmap.get(ak).category if app_bytes and appmap.get(ak) else "")
+                       for ak in app_bytes} - {""}) if app_bytes else []
+    return {"user_id": uid, "name": names.get(uid, uid), "window": window, "days": days,
+            "series": _fill_series(by_day, end_day, days),
+            "total_bytes": int(sum(by_day.values())),
+            "device_count": len(devices), "app_count": len(apps),
+            "devices": devices, "apps": apps[:50], "categories": all_cats,
+            "gaps": _collection_gaps(db, tenant_id, iids, days)}
+
+
+@advanced_router.get("/org")
+def advanced_org(window: str = "30d",
+                 principal: security.Principal = Depends(security.get_principal),
+                 db: Session = Depends(get_db)):
+    """Org-level per-user network rollup: which member uses how much traffic on how
+    many devices, plus unassigned-device and collection-gap signals."""
+    iids = _tenant_instance_ids(db, principal.tenant_id)
+    return _advanced_org(db, principal.tenant_id, iids, window)
+
+
+@advanced_router.get("/users/{uid}")
+def advanced_user(uid: str, window: str = "30d", category: str = "", source_type: str = "",
+                  principal: security.Principal = Depends(security.get_principal),
+                  db: Session = Depends(get_db)):
+    """User-level drilldown: one member's mapped devices, their apps (filterable by
+    category/source), traffic trend, and per-user gaps."""
+    member = db.get(User, uid)
+    if not member or member.tenant_id != principal.tenant_id:
+        raise HTTPException(404, "user not found")
+    iids = _tenant_instance_ids(db, principal.tenant_id)
+    return _advanced_user(db, principal.tenant_id, iids, uid, window, category, source_type)
 
 
 # --------------------------------------------------------------------------- #

@@ -122,6 +122,9 @@ _MANIFEST = {
          "desc": "Cloud cost diagnostics: RAW provider breakdown (by_service/by_role/by_resource), "
                  "category rollup, and per-node/per-bucket mapping analysis with notes explaining "
                  "identical or misattributed prices. Optional ?provider=aws|azure."},
+        {"method": "GET", "path": "/api/debug/integrations",
+         "desc": "Integration collection diagnostics: run history, last success, DPI note, day-coverage "
+                 "gaps, client/app counts, unmapped apps, stale devices. Optional ?tenant=&itype=ubiquiti."},
     ],
     "notes": [
         "All responses are JSON. Query/maintenance are read-only or explicitly guarded — safe on production.",
@@ -355,6 +358,68 @@ def prune_db(db: Session = Depends(get_db)):
     counts = prune_all(db)
     return {"ok": True, "pruned": counts,
             "note": "run VACUUM (ANALYZE) to reclaim the freed space on disk"}
+
+
+@router.get("/integrations", dependencies=[Depends(require_debug_key)])
+def integrations_debug(tenant: str = "", itype: str = "", db: Session = Depends(get_db)):
+    """Integration collection diagnostics: per instance, the run history, last
+    success, DPI note, day-coverage gaps, client/app counts, unmapped apps and
+    stale devices — so you can see WHY telemetry (e.g. UniFi) stopped or is partial.
+    Optional ?tenant=<id>&itype=<ubiquiti>."""
+    from datetime import timedelta, timezone
+    from ..models import (IntegrationInstance, IntegrationRun, NetworkApp,
+                          NetworkClient, NetworkSample)
+    from ..integrations.source_map import map_app_to_source
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    q = db.query(IntegrationInstance)
+    if tenant:
+        q = q.filter(IntegrationInstance.tenant_id == tenant)
+    if itype:
+        q = q.filter(IntegrationInstance.integration_type == itype)
+    out = []
+    for inst in q.order_by(IntegrationInstance.updated_at.desc()).limit(200).all():
+        runs = (db.query(IntegrationRun)
+                .filter(IntegrationRun.integration_id == inst.id)
+                .order_by(IntegrationRun.created_at.desc()).limit(20).all())
+        ok = sum(1 for r in runs if r.status == "ok")
+        err = sum(1 for r in runs if r.status == "error")
+        since = today - timedelta(days=13)
+        present = {d for (d,) in db.query(NetworkSample.day).filter(
+            NetworkSample.integration_id == inst.id, NetworkSample.dim == "total",
+            NetworkSample.day >= since).all()}
+        missing = []
+        d = since
+        while d <= today:
+            if d not in present:
+                missing.append(d.strftime("%m-%d"))
+            d += timedelta(days=1)
+        clients = db.query(NetworkClient).filter(NetworkClient.integration_id == inst.id).all()
+        apps = db.query(NetworkApp).filter(NetworkApp.integration_id == inst.id).all()
+        stale_clients = sum(1 for c in clients if c.last_seen and (now - c.last_seen).days >= 2)
+        unmapped_apps = sum(1 for a in apps
+                            if not (a.source_type or "") and not map_app_to_source(a.name, a.category))
+        mapped_apps = sum(1 for a in apps if a.source_type)
+        out.append({
+            "id": inst.id, "tenant_id": inst.tenant_id, "type": inst.integration_type,
+            "label": inst.label, "enabled": inst.enabled, "status": inst.status,
+            "provision_state": inst.provision_state, "appliance_id": inst.appliance_id,
+            "last_run_at": inst.last_run_at.isoformat() if inst.last_run_at else None,
+            "last_success_at": inst.last_success_at.isoformat() if inst.last_success_at else None,
+            "last_error": (inst.last_error or "")[:300],
+            "last_stats": inst.last_stats or {},
+            "dpi_note": (inst.last_stats or {}).get("note", ""),
+            "runs_recent": {"ok": ok, "error": err, "total": len(runs)},
+            "run_errors": [{"at": r.created_at.isoformat() if r.created_at else None,
+                            "error": (r.error or "")[:200]}
+                           for r in runs if r.status == "error"][:5],
+            "clients": len(clients), "apps": len(apps),
+            "mapped_apps": mapped_apps, "unmapped_apps": unmapped_apps,
+            "assigned_devices": sum(1 for c in clients if c.owner_user_id),
+            "stale_devices": stale_clients,
+            "coverage_14d": {"present": len(present), "missing_days": missing},
+        })
+    return {"generated_at": now.isoformat(), "count": len(out), "integrations": out}
 
 
 @router.get("/costs", dependencies=[Depends(require_debug_key)])
