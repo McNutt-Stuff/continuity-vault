@@ -33,9 +33,11 @@ def _aws() -> dict | None:
             if r.status_code >= 400:
                 return None
             d = r.json()
+            iid = d.get("instanceId")
             return {"provider": "aws", "region": d.get("region"),
                     "zone": d.get("availabilityZone"),
-                    "instance_id": d.get("instanceId"),
+                    "instance_id": iid,
+                    "resource_id": iid,  # EC2 instance id matches Cost Explorer RESOURCE_ID
                     "instance_type": d.get("instanceType"),
                     "account": d.get("accountId")}
     except Exception:
@@ -49,10 +51,12 @@ def _gcp() -> dict | None:
         with httpx.Client(timeout=0.4, headers=h) as c:
             zone = c.get(f"{base}/instance/zone").text.split("/")[-1]
             mt = c.get(f"{base}/instance/machine-type").text.split("/")[-1]
+            iid = c.get(f"{base}/instance/id").text
             return {"provider": "gcp",
                     "region": "-".join(zone.split("-")[:-1]) if zone else "",
                     "zone": zone,
-                    "instance_id": c.get(f"{base}/instance/id").text,
+                    "instance_id": iid,
+                    "resource_id": iid,
                     "instance_type": mt,
                     "account": c.get(f"{base}/project/project-id").text}
     except Exception:
@@ -70,6 +74,8 @@ def _azure() -> dict | None:
             return {"provider": "azure", "region": cm.get("location"),
                     "zone": cm.get("zone"),
                     "instance_id": cm.get("vmId"),
+                    # Cost Management keys spend by the full ARM ResourceId, not the vmId GUID.
+                    "resource_id": cm.get("resourceId") or cm.get("vmId"),
                     "instance_type": cm.get("vmSize"),
                     "account": cm.get("subscriptionId")}
     except Exception:
@@ -100,7 +106,7 @@ def detect(refresh: bool = False) -> dict:
             break
     if not result:
         result = {"provider": "baremetal" if vendor.strip() else "unknown",
-                  "region": "", "zone": "", "instance_id": "",
+                  "region": "", "zone": "", "instance_id": "", "resource_id": "",
                   "instance_type": _dmi("product_name"), "account": ""}
     result["detected_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     _cache = result

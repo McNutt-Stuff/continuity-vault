@@ -1498,6 +1498,16 @@ def _ensure_self_node(db: Session) -> Node:
                 n.region = n.cloud["region"]
         except Exception:
             pass
+    # Auto-fill the self-detected hyperscaler resource id if the admin hasn't set
+    # one (re-detect is cached per process). Never overrides a manual value.
+    if not (n.cloud_resource_id or "").strip():
+        try:
+            from .. import cloud_detect
+            _rid = (n.cloud or {}).get("resource_id") or cloud_detect.detect().get("resource_id")
+            if _rid:
+                n.cloud_resource_id = _rid
+        except Exception:
+            pass
     # Keep the self node's version in sync with the control plane's running build.
     from .. import versions
     cp_ver = versions.control_plane_version()

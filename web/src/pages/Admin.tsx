@@ -2189,6 +2189,9 @@ function Nodes() {
         { name: "endpoint", label: "Endpoint", defaultValue: n.endpoint },
         { name: "status", label: "Status", defaultValue: n.status,
           options: ["active", "draining", "maintenance", "offline"].map((v) => ({ label: v, value: v })) },
+        { name: "cloud_resource_id", label: "Hyperscaler resource id", defaultValue: n.cloud_resource_id || "",
+          placeholder: "e.g. i-0abc123… (EC2) or /subscriptions/…/virtualMachines/<name> (Azure)",
+          hint: "Auto-detected from the node's cloud metadata when it runs on AWS/Azure/GCP; edit to override. Used to attribute its billing and for hyperscaler auto-actions." },
       ],
     });
     if (!r) return;
@@ -5786,7 +5789,7 @@ function FinanceAdmin() {
             <div>
               <h4 style={{ margin: "0 0 2px" }}>Cloud resource mapping</h4>
               <div className="faint" style={{ fontSize: 12 }}>
-                Associate each node and storage service with its hyperscaler resource id (EC2 instance id, Azure VM/storage resource id, S3 bucket) so its cloud spend can be attributed precisely.
+                Associate each node and storage service with its hyperscaler resource id (EC2 instance id, Azure VM/storage resource id, S3 bucket) so its cloud spend can be attributed precisely. Nodes auto-report their own id from cloud metadata; storage services and overrides are set here.
                 {maps.resource_mapped ? " Resource-level billing is available." : " Resource-level billing data isn't available yet — cost is distributed until ids are matched."}
               </div>
             </div>

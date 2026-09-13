@@ -245,6 +245,11 @@ def node_heartbeat(body: NodeHeartbeat,
     node.telemetry = body.telemetry or {}
     node.cloud = body.cloud or {}
     node.region = (body.cloud or {}).get("region") or node.region
+    # Auto-fill the hyperscaler resource id the node self-detected (never override
+    # an admin-set value); drives cost attribution + hyperscaler auto-actions.
+    _rid = (body.cloud or {}).get("resource_id") or ""
+    if _rid and not (node.cloud_resource_id or "").strip():
+        node.cloud_resource_id = _rid
     node.status = "active"
     node.last_heartbeat_at = _now()
     # The node's real public IP as observed by the control plane (behind the TLS
