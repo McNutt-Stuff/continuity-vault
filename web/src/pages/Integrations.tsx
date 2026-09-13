@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { useAuth } from "../auth";
 import { Card, Pill, bytes, Loading, groupScope } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
@@ -497,11 +498,13 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
   inst: Instance; spec?: Spec; plan: string; onBack: () => void; onChanged: () => void;
 }) {
   const [data, setData] = useState<DataResp | null>(null);
-  const [tab, setTab] = useState<"trends" | "apps" | "clients">("trends");
+  const [tab, setTab] = useState<"trends" | "apps" | "clients" | "advanced">("trends");
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [repolling, setRepolling] = useState(false);
   const [shadowDetail, setShadowDetail] = useState<ShadowSource | null>(null);
+  const { me } = useAuth();
+  const advanced = !!me?.features?.advanced_ubiquiti_analytics;
 
   async function loadData() {
     try { setData(await api.get<DataResp>(`/integrations/${inst.id}/data`)); }
@@ -647,12 +650,19 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
           <button className={`chip ${tab === "clients" ? "active" : ""}`} onClick={() => setTab("clients")}>
             Clients & devices
           </button>
+          {advanced && (
+            <button className={`chip ${tab === "advanced" ? "active" : ""}`} onClick={() => setTab("advanced")}>
+              <Icon name="grid" size={12} /> Advanced analytics
+            </button>
+          )}
         </div>
         {tab === "trends"
           ? <TrendsPanel iid={inst.id} />
           : tab === "apps"
           ? <AppsTable iid={inst.id} apps={data?.apps || []} onChanged={loadData} />
-          : <ClientsTable iid={inst.id} plan={plan} clients={data?.clients || []} onChanged={loadData} />}
+          : tab === "clients"
+          ? <ClientsTable iid={inst.id} plan={plan} clients={data?.clients || []} onChanged={loadData} />
+          : <AdvancedPanel />}
       </Card>
 
       {shadowDetail && (
@@ -1104,13 +1114,24 @@ function UsageApps({ iid, clientKey }: { iid: string; clientKey: string }) {
 
 function ClientsTable({ iid, plan, clients, onChanged }: { iid: string; plan: string; clients: NetClient[]; onChanged: () => void }) {
   const [open, setOpen] = useState<string | null>(null);
+  const [members, setMembers] = useState<{ id: string; name: string }[]>([]);
   const group = groupScope(plan);  // null for personal accounts → only "Me"
+  useEffect(() => {
+    // Org members to map a device to a specific person (evolution of Me / My Family).
+    api.get<{ users: { id: string; display_name?: string; email: string }[] }>("/org/users")
+      .then((r) => setMembers((r.users || []).map((u) => ({ id: u.id, name: u.display_name || u.email }))))
+      .catch(() => setMembers([]));
+  }, []);
   async function setState_(c: NetClient, monitor_state: string) {
     try { await api.post(`/integrations/clients/${c.id}`, { monitor_state }); onChanged(); }
     catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
   }
   async function setOwnership(c: NetClient, ownership: string) {
     try { await api.post(`/integrations/clients/${c.id}`, { ownership }); onChanged(); }
+    catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+  }
+  async function assignMember(c: NetClient, owner_user_id: string) {
+    try { await api.post(`/integrations/clients/${c.id}`, { owner_user_id }); onChanged(); }
     catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
   }
   async function renameDevice(c: NetClient) {
@@ -1176,6 +1197,13 @@ function ClientsTable({ iid, plan, clients, onChanged }: { iid: string; plan: st
                       <option value={c.ownership}>{c.ownership === "family" ? "My family" : "My organization"}</option>
                     )}
                   </select>
+                  {members.length > 1 && (
+                    <select className="input sm" value={c.owner_user_id || ""} title="Assign this device to a specific person"
+                            onChange={(e) => void assignMember(c, e.target.value)} style={{ width: 130, marginTop: 4 }}>
+                      <option value="">— person —</option>
+                      {members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                    </select>
+                  )}
                 </td>
                 <td className="faint" style={{ fontSize: 12 }}>{c.ip || "—"}</td>
                 <td>{bytes(c.total_bytes)}</td>
@@ -1205,6 +1233,211 @@ function ClientsTable({ iid, plan, clients, onChanged }: { iid: string; plan: st
         })}
       </tbody>
     </table>
+  );
+}
+
+
+// ---- Advanced Ubiquiti analytics (feature-flag gated) ----------------------
+interface AdvGaps { days: number; collected_days: number; missing_days: string[]; missing_count: number; last_data_day: string | null; stale: boolean }
+interface AdvUser { user_id: string; name: string; devices: number; stale_devices: number; window_bytes: number; last_seen: string | null; gap: boolean }
+interface AdvOrg { window: string; days: number; users: AdvUser[]; unassigned: { devices: number; bytes: number }; assigned_devices: number; member_count: number; gaps: AdvGaps }
+interface AdvDevice { id: string; name: string; device_type: string; ip: string; mac: string; total_bytes: number; last_seen: string | null; stale: boolean; monitor_state: string }
+interface AdvApp { app_key: string; name: string; category: string; source_type: string; total_bytes: number }
+interface AdvUserDetail { user_id: string; name: string; window: string; days: number; series: { day: string; bytes: number }[]; total_bytes: number; device_count: number; app_count: number; devices: AdvDevice[]; apps: AdvApp[]; categories: string[]; gaps: AdvGaps }
+
+const ADV_WINDOWS = ["7d", "30d", "90d"];
+
+function GapBanner({ gaps }: { gaps: AdvGaps }) {
+  if (!gaps || (!gaps.stale && gaps.missing_count === 0)) {
+    return (
+      <div className="faint" style={{ fontSize: 12 }}>
+        <Icon name="check" size={13} /> Continuous collection — {gaps?.collected_days}/{gaps?.days} days covered.
+      </div>
+    );
+  }
+  return (
+    <div className="row" style={{ gap: 8, alignItems: "flex-start", border: "1px solid var(--warn,#f5a623)",
+          borderRadius: 8, padding: "8px 12px", marginBottom: 12 }}>
+      <Icon name="alert" size={15} />
+      <div className="stack" style={{ gap: 2, fontSize: 12.5 }}>
+        <span style={{ fontWeight: 600 }}>Collection gaps detected</span>
+        <span className="faint">
+          {gaps.collected_days}/{gaps.days} days have data
+          {gaps.last_data_day ? ` · last data ${gaps.last_data_day}` : " · no data in window"}
+          {gaps.missing_count ? ` · ${gaps.missing_count} missing day(s)` : ""}.
+          Data may be missed for some people/devices — check the debug integrations diagnostic.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function AdvancedPanel() {
+  const [window, setWindow] = useState("30d");
+  const [org, setOrg] = useState<AdvOrg | null>(null);
+  const [uid, setUid] = useState<string | null>(null);
+  const [remapping, setRemapping] = useState(false);
+  async function load() {
+    try { setOrg(await api.get<AdvOrg>(`/integrations/advanced/org?window=${window}`)); }
+    catch { /* ignore */ }
+  }
+  useEffect(() => { void load(); /* eslint-disable-next-line */ }, [window]);
+  async function remap() {
+    setRemapping(true);
+    try {
+      const r = await api.post<{ remapped: number; candidates: string[] }>("/integrations/remap-apps", {});
+      notify({ message: `Re-mapped ${r.remapped} app(s) to sources.${r.candidates.length ? ` Candidates: ${r.candidates.slice(0, 5).join(", ")}` : ""}`, tone: "info" });
+    } catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+    finally { setRemapping(false); }
+  }
+  if (uid) return <AdvancedUserPanel uid={uid} onBack={() => setUid(null)} />;
+  if (!org) return <div className="muted" style={{ padding: 8 }}>Loading advanced analytics…</div>;
+  return (
+    <div className="stack" style={{ gap: 14 }}>
+      <div className="spread" style={{ alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div className="faint" style={{ fontSize: 12.5, maxWidth: 480 }}>
+          Per-person network usage across all your integrations — map devices to people to close gaps.
+        </div>
+        <div className="row" style={{ gap: 6, alignItems: "center" }}>
+          {ADV_WINDOWS.map((w) => (
+            <button key={w} className={`chip ${window === w ? "active" : ""}`} onClick={() => setWindow(w)}>{w}</button>
+          ))}
+          <button className="btn ghost sm" disabled={remapping} onClick={() => void remap()} title="Re-map observed apps to Arkive sources">
+            <Icon name="repeat" size={12} /> {remapping ? "Mapping…" : "Re-map apps"}
+          </button>
+        </div>
+      </div>
+
+      <GapBanner gaps={org.gaps} />
+
+      <div className="insights-stats">
+        <MiniStat icon="user" label="Members" value={String(org.member_count)} tint="#4f7cff" />
+        <MiniStat icon="shield" label="Mapped devices" value={String(org.assigned_devices)} tint="#2dbe60" />
+        <MiniStat icon="alert" label="Unmapped devices" value={String(org.unassigned.devices)} tint="#f5a623" />
+        <MiniStat icon="cloud" label="Unmapped traffic" value={bytes(org.unassigned.bytes)} tint="#c56cf0" />
+      </div>
+
+      {org.unassigned.devices > 0 && (
+        <div className="faint" style={{ fontSize: 12 }}>
+          <Icon name="info" size={13} /> {org.unassigned.devices} device(s) aren't mapped to a person — assign them under
+          <b> Clients &amp; devices</b> so their traffic is attributed and no one's usage is missed.
+        </div>
+      )}
+
+      {org.users.length === 0 ? (
+        <div className="muted" style={{ padding: 8 }}>No devices mapped to people yet. Assign devices to members to see per-person analytics.</div>
+      ) : (
+        <table className="table">
+          <thead><tr><th>Member</th><th>Devices</th><th>Traffic ({org.window})</th><th>Last seen</th><th></th></tr></thead>
+          <tbody>
+            {org.users.map((u) => (
+              <tr key={u.user_id} style={{ cursor: "pointer" }} onClick={() => setUid(u.user_id)}>
+                <td style={{ fontWeight: 600 }}>{u.name}</td>
+                <td>{u.devices}{u.stale_devices ? <span className="faint"> · {u.stale_devices} stale</span> : ""}</td>
+                <td>{bytes(u.window_bytes)}</td>
+                <td className="faint" style={{ fontSize: 12 }}>{u.last_seen ? fmtAgo(u.last_seen) : "—"}</td>
+                <td style={{ textAlign: "right" }}>
+                  {u.gap ? <Pill tone="warn" dot>gap</Pill> : <Icon name="chevron-right" size={14} />}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function AdvancedUserPanel({ uid, onBack }: { uid: string; onBack: () => void }) {
+  const [window, setWindow] = useState("30d");
+  const [cat, setCat] = useState("");
+  const [d, setD] = useState<AdvUserDetail | null>(null);
+  useEffect(() => {
+    const qs = `window=${window}${cat ? `&category=${encodeURIComponent(cat)}` : ""}`;
+    api.get<AdvUserDetail>(`/integrations/advanced/users/${uid}?${qs}`).then(setD).catch(() => setD(null));
+  }, [uid, window, cat]);
+  const dtIcon = (t: string): IconName =>
+    t === "phone" ? "user" : t === "media" ? "activity" : t === "iot" ? "database" : "server";
+  const series = d?.series || [];
+  const chartData = series.map((p) => p.bytes || 0);
+  const chartLabels = series.map((p) => { const dt = new Date(p.day.endsWith("Z") ? p.day : `${p.day}T00:00:00Z`); return `${dt.getMonth() + 1}/${dt.getDate()}`; });
+  return (
+    <div className="stack" style={{ gap: 14 }}>
+      <div className="spread" style={{ alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <button className="btn ghost sm" onClick={onBack}>← All members</button>
+        <div className="row" style={{ gap: 6 }}>
+          {ADV_WINDOWS.map((w) => (
+            <button key={w} className={`chip ${window === w ? "active" : ""}`} onClick={() => setWindow(w)}>{w}</button>
+          ))}
+        </div>
+      </div>
+      {!d ? <div className="muted" style={{ padding: 8 }}>Loading…</div> : (
+        <>
+          <h3 style={{ margin: 0 }}>{d.name}</h3>
+          <GapBanner gaps={d.gaps} />
+          <div className="insights-stats">
+            <MiniStat icon="server" label="Devices" value={String(d.device_count)} tint="#4f7cff" />
+            <MiniStat icon="activity" label="Apps" value={String(d.app_count)} tint="#c56cf0" />
+            <MiniStat icon="cloud" label={`Traffic (${d.window})`} value={bytes(d.total_bytes)} tint="#f5a623" />
+          </div>
+          {chartData.some((x) => x > 0) && (
+            <Card><AreaChart height={180} unit="" fmt={bytes} labels={chartLabels}
+                             series={[{ name: "traffic", color: "#4f7cff", data: chartData }]} /></Card>
+          )}
+
+          <div className="stack" style={{ gap: 6 }}>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>Devices</span>
+            {d.devices.length === 0 ? <div className="muted" style={{ fontSize: 12.5 }}>No devices mapped to this person.</div> : (
+              <table className="table">
+                <thead><tr><th>Device</th><th>Type</th><th>IP</th><th>Traffic</th><th>Last seen</th></tr></thead>
+                <tbody>
+                  {d.devices.map((dev) => (
+                    <tr key={dev.id} style={{ opacity: dev.monitor_state === "ignored" ? 0.5 : 1 }}>
+                      <td><div className="row" style={{ gap: 6, alignItems: "center" }}><Icon name={dtIcon(dev.device_type)} size={13} /> {dev.name}</div></td>
+                      <td className="faint" style={{ fontSize: 12 }}>{dev.device_type || "—"}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>{dev.ip || "—"}</td>
+                      <td>{bytes(dev.total_bytes)}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>
+                        {dev.last_seen ? fmtAgo(dev.last_seen) : "—"} {dev.stale && <Pill tone="warn">stale</Pill>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          <div className="stack" style={{ gap: 6 }}>
+            <div className="spread" style={{ alignItems: "center" }}>
+              <span style={{ fontWeight: 600, fontSize: 13 }}>Apps &amp; services</span>
+              {d.categories.length > 0 && (
+                <select className="input sm" value={cat} onChange={(e) => setCat(e.target.value)} style={{ width: 170 }}>
+                  <option value="">All categories</option>
+                  {d.categories.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              )}
+            </div>
+            {d.apps.length === 0 ? <div className="muted" style={{ fontSize: 12.5 }}>No app traffic for this person{cat ? " in this category" : ""}.</div> : (
+              <table className="table">
+                <thead><tr><th>App</th><th>Category</th><th>Source</th><th>Traffic</th></tr></thead>
+                <tbody>
+                  {d.apps.map((a) => (
+                    <tr key={a.app_key}>
+                      <td style={{ fontWeight: 600 }}>{a.name}</td>
+                      <td className="faint" style={{ fontSize: 12 }}>{a.category || "—"}</td>
+                      <td>{a.source_type
+                        ? <Pill tone="ok"><SourceIcon type={a.source_type} size={12} /> {a.source_type}</Pill>
+                        : <span className="faint" style={{ fontSize: 12 }}>—</span>}</td>
+                      <td>{bytes(a.total_bytes)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
