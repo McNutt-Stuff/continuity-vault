@@ -22,7 +22,8 @@ interface Instance {
   poll_interval_minutes: number; host: string; last_run_at: string | null;
   last_success_at: string | null; last_error: string | null;
   provision_state?: string; provision_message?: string | null;
-  last_stats: { clients?: number; apps?: number; bytes_seen?: number; note?: string };
+  last_stats: { clients?: number; apps?: number; bytes_seen?: number; note?: string;
+    diag?: { site?: string; auth_mode?: string; devices_http?: number | string | null; traffic_http?: number | string | null } };
 }
 interface ApplianceRef { id: string; name: string; state: string; online: boolean; }
 interface ListResp { available: Spec[]; instances: Instance[]; appliances: ApplianceRef[]; plan: string; }
@@ -506,6 +507,7 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
   const [shadowDetail, setShadowDetail] = useState<ShadowSource | null>(null);
   const { me } = useAuth();
   const advanced = !!me?.features?.advanced_ubiquiti_analytics;
+  const [reauth, setReauth] = useState(false);
 
   async function loadData() {
     try { setData(await api.get<DataResp>(`/integrations/${inst.id}/data`)); }
@@ -574,6 +576,11 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
             {repolling ? <><span className="spinner-dot" /> Re-polling…</> : <><Icon name="repeat" size={13} /> Re-poll</>}
           </button>
           <button className="btn ghost sm" onClick={() => setEditing(true)}><Icon name="edit" size={13} /> Edit</button>
+          {spec?.auto_provision_key && (
+            <button className="btn ghost sm" onClick={() => setReauth(true)} title="Re-run sign-in (with 2-factor) to mint a fresh API key">
+              <Icon name="key" size={13} /> Re-authenticate
+            </button>
+          )}
           <button className="btn ghost sm" disabled={busy} onClick={() => void toggle()}>{inst.enabled ? "Pause" : "Resume"}</button>
           <button className="btn danger sm" onClick={() => void remove()}>Remove</button>
         </div>
@@ -598,14 +605,28 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
         </div>
       )}
       {!inst.last_error && inst.health === "empty" && (
-        <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 12,
+        <div className="row" style={{ gap: 8, alignItems: "flex-start", marginBottom: 12,
               border: "1px solid var(--warn,#f5a623)", borderRadius: 8, padding: "8px 12px" }}>
           <Icon name="alert" size={15} />
-          <span style={{ fontSize: 12.5 }}>
-            Connected, but the last runs collected <b>no devices</b>. The controller may need
-            re-authentication, or its site changed — try <b>Re-poll</b>, then re-check the credentials.
-            {inst.last_stats?.note ? ` ${inst.last_stats.note}` : ""}
-          </span>
+          <div className="stack" style={{ gap: 3, flex: 1 }}>
+            <span style={{ fontSize: 12.5 }}>
+              Connected, but the last runs collected <b>no devices</b>.
+              {inst.last_stats?.note ? ` ${inst.last_stats.note}` : ""}
+            </span>
+            {inst.last_stats?.diag && (
+              <span className="faint" style={{ fontSize: 11 }}>
+                site <b>{inst.last_stats.diag.site || "?"}</b> · auth {inst.last_stats.diag.auth_mode || "?"}
+                {inst.last_stats.diag.devices_http != null ? ` · devices API HTTP ${inst.last_stats.diag.devices_http}` : ""}
+                {inst.last_stats.diag.traffic_http != null ? ` · traffic API HTTP ${inst.last_stats.diag.traffic_http}` : ""}
+              </span>
+            )}
+            {spec?.auto_provision_key && (
+              <div className="row" style={{ gap: 8, marginTop: 2 }}>
+                <button className="btn sm" onClick={() => setReauth(true)}><Icon name="key" size={12} /> Re-authenticate (2FA)</button>
+                <button className="btn ghost sm" disabled={repolling} onClick={() => void repoll()}>Re-poll</button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -679,6 +700,11 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
 
       {shadowDetail && (
         <ShadowDetailModal iid={inst.id} s={shadowDetail} onClose={() => setShadowDetail(null)} />
+      )}
+      {reauth && (
+        <ProvisioningModal instanceId={inst.id} label={inst.label}
+                           onClose={() => setReauth(false)}
+                           onDone={() => { setReauth(false); void loadData(); onChanged(); }} />
       )}
 
       {editing && (

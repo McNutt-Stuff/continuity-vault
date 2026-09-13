@@ -334,8 +334,19 @@ def collect(config: dict, credentials: dict, log) -> dict:
             _fold(_get(c, base, f"/proxy/network/api/s/{site}/rest/user", headers), False)
         except Exception as exc:  # noqa: BLE001
             log.debug("ubiquiti: rest/user failed: %s", exc)
+        # Capture the devices-API HTTP status so a silent empty result (valid key
+        # but wrong site / revoked access) is diagnosable, not just 0 clients.
+        auth_mode = ("apikey" if credentials.get("api_key")
+                     else "session" if credentials.get("cookies") else "password")
+        sta_status: object = None
         try:
-            _fold(_get(c, base, f"/proxy/network/api/s/{site}/stat/sta", headers), True)
+            r = c.get(f"{base}/proxy/network/api/s/{site}/stat/sta", headers=headers)
+            sta_status = r.status_code
+            if r.status_code < 300:
+                body = r.json()
+                _fold(body.get("data", body) if isinstance(body, dict) else body, True)
+            else:
+                log.warning("ubiquiti: stat/sta → HTTP %s", r.status_code)
         except Exception as exc:  # noqa: BLE001
             log.warning("ubiquiti: stat/sta failed: %s", exc)
 
@@ -351,6 +362,7 @@ def collect(config: dict, credentials: dict, log) -> dict:
         # application/category are numeric ids resolved via the DPI catalog.
         apps_agg: dict[str, dict] = {}
         usage: list[dict] = []
+        traffic_status: object = None
 
         def _key(aid, cid) -> str:
             return f"{cid}:{aid}"
@@ -377,6 +389,7 @@ def collect(config: dict, credentials: dict, log) -> dict:
             except Exception as exc:  # noqa: BLE001
                 log.warning("ubiquiti: v2 traffic request failed: %s", exc)
                 break
+            traffic_status = r.status_code
             if r.status_code < 300:
                 traffic = r.json()
                 break
@@ -486,8 +499,18 @@ def collect(config: dict, credentials: dict, log) -> dict:
         total_bytes = sum(a["total_bytes"] for a in apps)
         log.info("ubiquiti: collected %d client(s), %d app(s), %s bytes",
                  len(clients), len(apps), total_bytes)
-        stats = {"clients": len(clients), "apps": len(apps), "bytes_seen": total_bytes}
-        if not apps:
+        stats = {"clients": len(clients), "apps": len(apps), "bytes_seen": total_bytes,
+                 "diag": {"site": site, "auth_mode": auth_mode,
+                          "devices_http": sta_status, "traffic_http": traffic_status}}
+        if not clients:
+            detail = f"site '{site}'"
+            if isinstance(sta_status, int) and sta_status >= 300:
+                detail += f", devices API HTTP {sta_status}"
+            stats["note"] = (
+                f"Reached the controller ({auth_mode}) but it returned no devices "
+                f"({detail}). The API key may have lost access or the site changed — "
+                "use Re-authenticate to mint a fresh key.")
+        elif not apps:
             stats["note"] = ("No application data — enable Deep Packet Inspection "
                              "(Settings → Traffic Identification) on your UniFi controller.")
         return {
