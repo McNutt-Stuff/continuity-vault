@@ -199,7 +199,8 @@ function AddIntegrationModal({ available, hasAppliance, onClose, onPick }: {
               return (
               <div key={s.integration_type}
                    className="dest-card"
-                   style={locked ? { opacity: 0.62, cursor: "not-allowed" } : undefined}
+                   style={{ display: "flex", flexDirection: "column", minHeight: 150,
+                            ...(locked ? { opacity: 0.62, cursor: "not-allowed" } : {}) }}
                    title={lockMsg || undefined}
                    onClick={() => { if (!locked) onPick(s); }}>
                 <div className="spread" style={{ marginBottom: 10 }}>
@@ -220,7 +221,8 @@ function AddIntegrationModal({ available, hasAppliance, onClose, onPick }: {
                     <Pill tone="info">{s.runs_on === "appliance" ? "Appliance" : "Cloud"}</Pill>
                   </div>
                 </div>
-                <div className="faint" style={{ fontSize: 12, lineHeight: 1.45 }}>{s.description}</div>
+                <div className="faint" style={{ fontSize: 12, lineHeight: 1.45, flex: 1,
+                     display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{s.description}</div>
                 {locked && (
                   <div style={{ fontSize: 11.5, color: "var(--warn)", marginTop: 8, display: "flex", gap: 6, alignItems: "center" }}>
                     <Icon name={comingSoon ? "clock" : "alert"} size={12} /> {lockMsg}

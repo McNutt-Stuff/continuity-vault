@@ -164,7 +164,7 @@ _BRAND_ICON_TYPES = {
     "gmail", "onepassword", "outlook", "onedrive", "dropbox", "icloud",
     "google_drive", "slack", "notion", "github", "reddit", "facebook",
     "instagram", "linkedin", "evernote", "google_calendar", "google_contacts",
-    "google_photos", "imessage", "ubiquiti", "aws", "azure", "gcp",
+    "google_photos", "imessage", "ubiquiti", "aws", "azure", "gcp", "microsoft365",
 }
 
 

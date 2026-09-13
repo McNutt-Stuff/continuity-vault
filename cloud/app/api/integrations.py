@@ -103,7 +103,7 @@ def _spec_entitlement(db: Session, spec, plan: str, user, tenant) -> dict:
     if spec.plans and (plan or "").lower() not in [p.lower() for p in spec.plans]:
         want = (spec.min_plan or spec.plans[0]).title()
         entitled = False
-        reason = f"Requires the {want} plan"
+        reason = f"Requires the {want} plan (your organization is on the {plan or 'unknown'} plan)"
     if entitled and spec.feature_flag and not features.resolve(user, tenant, spec.feature_flag):
         entitled = False
         reason = "Not enabled for your organization yet"
