@@ -1389,7 +1389,7 @@ function AdvancedPanel() {
                 <td>{bytes(u.window_bytes)}</td>
                 <td className="faint" style={{ fontSize: 12 }}>{u.last_seen ? fmtAgo(u.last_seen) : "—"}</td>
                 <td style={{ textAlign: "right" }}>
-                  {u.gap ? <Pill tone="warn" dot>gap</Pill> : <Icon name="chevron-right" size={14} />}
+                  {u.gap ? <Pill tone="warn" dot>gap</Pill> : <span className="faint" style={{ fontSize: 16 }}>›</span>}
                 </td>
               </tr>
             ))}
