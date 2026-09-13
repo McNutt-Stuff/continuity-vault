@@ -105,7 +105,7 @@ def _instance_view(inst: IntegrationInstance) -> dict:
 
 def _instance_health(inst: IntegrationInstance) -> str:
     """Coarse health for the card/detail badge: paused | setup | error | stale |
-    pending | ok. Lets the user see at a glance if collection is failing."""
+    empty | pending | ok. Lets the user see at a glance if collection is failing."""
     if not inst.enabled:
         return "paused"
     prov = inst.provision_state or "idle"
@@ -120,6 +120,12 @@ def _instance_health(inst: IntegrationInstance) -> str:
     stale_after = max(30, int(inst.poll_interval_minutes or 30) * 3)
     if (_now() - ref).total_seconds() > stale_after * 60:
         return "stale"
+    # Succeeding but collecting NOTHING: an established integration that reports 0
+    # devices is silently broken (controller/site/credentials), not healthy.
+    stats = inst.last_stats or {}
+    established = bool(inst.created_at and (_now() - inst.created_at).total_seconds() > 6 * 3600)
+    if established and int(stats.get("clients", 0) or 0) == 0:
+        return "empty"
     return "ok"
 
 

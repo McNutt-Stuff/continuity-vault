@@ -353,7 +353,17 @@ def _source_issues(db, user: User) -> list[dict]:
         setup_stuck = bool(prov in ("starting", "verifying", "awaiting_otp")
                            and setup_ref is not None
                            and (now - setup_ref).total_seconds() > 2 * 3600)
-        if not errored and not stale and not setup_stuck:
+        # Successful-but-EMPTY: the run reports ok (last_success stays current) but
+        # collects zero devices — the controller/site/credentials broke silently
+        # (a live network always has clients). last_success stays fresh so the
+        # stale check above can't catch it. Guard on an established integration so
+        # a fresh setup mid-first-poll doesn't false-alarm.
+        stats = inst.last_stats or {}
+        established = bool(inst.created_at and (now - inst.created_at).total_seconds() > 6 * 3600)
+        empty = bool(prov in ("idle", "done") and inst.enabled and established
+                     and inst.last_run_at is not None and not errored
+                     and int(stats.get("clients", 0) or 0) == 0)
+        if not errored and not stale and not setup_stuck and not empty:
             continue
         if errored:
             msg = (inst.last_error or inst.provision_message
@@ -376,6 +386,11 @@ def _source_issues(db, user: User) -> list[dict]:
             msg = f"Setup hasn't finished — {need}. Collection is paused until it's done."
             fails = 0
             reauth = True
+        elif empty:
+            msg = ("Connected but collecting no devices — the controller may need "
+                   "re-authentication, or its site/DPI settings changed.")
+            fails = 0
+            reauth = True
         else:  # stalled — no recent successful collection
             since = ref.strftime("%b %-d") if ref else "recently"
             msg = (f"No data collected since {since} — the integration or its "
@@ -389,7 +404,7 @@ def _source_issues(db, user: User) -> list[dict]:
                     "error": msg.splitlines()[0][:160],
                     "at": ref or inst.updated_at,
                     "fails": fails,
-                    "stale": (not errored and stale),
+                    "stale": (not errored and (stale or empty)),
                     "reauth": reauth})
 
     out.sort(key=lambda i: i.get("at") or datetime.min.replace(tzinfo=None), reverse=True)

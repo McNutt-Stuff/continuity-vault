@@ -53,6 +53,7 @@ const HEALTH: Record<string, { tone: "ok" | "warn" | "info" | "danger"; label: s
   ok: { tone: "ok", label: "Healthy", dot: "#2dbe60" },
   error: { tone: "danger", label: "Failing", dot: "#f2545b" },
   stale: { tone: "warn", label: "Stale", dot: "#f5a623" },
+  empty: { tone: "warn", label: "No data", dot: "#f5a623" },
   pending: { tone: "info", label: "Waiting for first run", dot: "#4f7cff" },
   setup: { tone: "info", label: "Setting up", dot: "#4f7cff" },
   paused: { tone: "warn", label: "Paused", dot: "#8a94a6" },
@@ -594,6 +595,17 @@ function IntegrationDetail({ inst, spec, plan, onBack, onChanged }: {
       {!inst.last_error && inst.health === "stale" && (
         <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>
           <Icon name="alert" size={13} /> No fresh data — last successful collection {fmtAgo(inst.last_success_at)}.
+        </div>
+      )}
+      {!inst.last_error && inst.health === "empty" && (
+        <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 12,
+              border: "1px solid var(--warn,#f5a623)", borderRadius: 8, padding: "8px 12px" }}>
+          <Icon name="alert" size={15} />
+          <span style={{ fontSize: 12.5 }}>
+            Connected, but the last runs collected <b>no devices</b>. The controller may need
+            re-authentication, or its site changed — try <b>Re-poll</b>, then re-check the credentials.
+            {inst.last_stats?.note ? ` ${inst.last_stats.note}` : ""}
+          </span>
         </div>
       )}
 
