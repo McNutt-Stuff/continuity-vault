@@ -1972,8 +1972,14 @@ def node_control(nid: str, body: NodeControl,
                                get_settings().node_role or "control-plane")
     if _remote_capable(n):
         try:
-            return _node_call(n, "/nodes/sync/control", method="POST",
-                              json={"action": body.action, "unit": body.unit})
+            res = _node_call(n, "/nodes/sync/control", method="POST",
+                             json={"action": body.action, "unit": body.unit})
+            # Reflect an intentional "Updating" state right away so the admin sees
+            # progress before the node's next heartbeat (it restarts mid-update).
+            if body.action == "update":
+                n.status = "updating"
+                db.commit()
+            return res
         except Exception:  # noqa: BLE001
             raise HTTPException(502, "node unreachable")
     # Heartbeat-only nodes (e.g. public-web) don't expose an inbound control
@@ -1981,6 +1987,7 @@ def node_control(nid: str, body: NodeControl,
     # self-apply on their next heartbeat.
     if body.action == "update":
         n.pending_update_at = _now()
+        n.status = "updating"
         db.commit()
         return {"ok": True, "queued": True,
                 "note": "Update queued — the node will self-update on its next heartbeat."}

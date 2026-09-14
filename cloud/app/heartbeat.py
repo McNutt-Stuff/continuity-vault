@@ -48,6 +48,19 @@ def _telemetry() -> dict:
         return tel
 
 
+UPDATE_MARKER = "/run/arkive/updating"
+
+
+def _update_in_progress() -> bool:
+    """True while the self-update script is re-installing this node's bundle, so
+    the heartbeat surfaces an intentional 'Updating' state to the admin."""
+    try:
+        import os
+        return os.path.exists(UPDATE_MARKER)
+    except Exception:
+        return False
+
+
 def _version() -> str:
     # Fleet nodes self-update from the control plane's bundle; report that bundle
     # version (matches the CP's served version) so the admin can flag out-of-date
@@ -83,6 +96,7 @@ def send_heartbeat() -> dict | None:
         "endpoint": s.api_base_url,
         "telemetry": _telemetry(),
         "cloud": cloud,
+        "updating": _update_in_progress(),
     }
     url = s.control_plane_url.rstrip("/") + "/api/nodes/heartbeat"
     req = urllib.request.Request(

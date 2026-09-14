@@ -2630,7 +2630,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
           </div>
           <div className="row" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
             <Pill tone={node.online ? "ok" : "warn"} dot>{node.online ? "Online" : "Offline"}</Pill>
-            <Pill tone={node.status === "active" ? "info" : "warn"}>{node.status}</Pill>
+            <Pill tone={node.status === "updating" ? "info" : node.status === "active" ? "info" : "warn"} dot={node.status === "updating"}>{node.status === "updating" ? "updating…" : node.status}</Pill>
             {live?.source === "heartbeat" && <Pill tone="warn">heartbeat only</Pill>}
             <VersionPill version={node.version} updateAvailable={node.update_available} />
           </div>

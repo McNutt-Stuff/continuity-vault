@@ -162,6 +162,7 @@ class NodeHeartbeat(BaseModel):
     endpoint: str = ""
     telemetry: dict = {}
     cloud: dict = {}
+    updating: bool = False
 
 
 def _effective_settings(db: Session, node: Node) -> tuple[dict, list[str]]:
@@ -250,7 +251,9 @@ def node_heartbeat(body: NodeHeartbeat,
     _rid = (body.cloud or {}).get("resource_id") or ""
     if _rid and not (node.cloud_resource_id or "").strip():
         node.cloud_resource_id = _rid
-    node.status = "active"
+    # A node re-installing its own bundle reports updating=true so the admin sees
+    # an intentional "Updating" state instead of a scary offline/restart blip.
+    node.status = "updating" if body.updating else "active"
     node.last_heartbeat_at = _now()
     # The node's real public IP as observed by the control plane (behind the TLS
     # proxy, the original client is the first X-Forwarded-For hop).

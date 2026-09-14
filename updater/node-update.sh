@@ -62,6 +62,11 @@ fi
 log "updating ${current:-none} -> ${remote}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+# Marker the heartbeat reads so the admin console shows an intentional "Updating"
+# state (not a scary offline/restart blip) while we re-install. Cleared on exit.
+mkdir -p /run/arkive 2>/dev/null || true
+: > /run/arkive/updating 2>/dev/null || true
+trap 'rm -rf "$tmp"; rm -f /run/arkive/updating' EXIT
 curl -fsSL "${CP}/api/nodes/bundle" -o "$tmp/bundle.tar.gz"
 # Stage into a fresh dir, then swap, so a bad download never corrupts the source.
 rm -rf "$SRC_DIR.new"; mkdir -p "$SRC_DIR.new"

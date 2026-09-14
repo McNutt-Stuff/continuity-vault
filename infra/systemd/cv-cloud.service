@@ -20,8 +20,9 @@ WorkingDirectory=/opt/continuity-vault/cloud
 ExecStart=/opt/continuity-vault/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 Restart=always
 RestartSec=3
-# Hardening
-NoNewPrivileges=true
+# Hardening. NOTE: NoNewPrivileges is intentionally NOT set — the app shells out
+# to `sudo -n systemctl` (scoped NOPASSWD in /etc/sudoers.d/cv-cloud) so the admin
+# node console can trigger updates/restarts; that flag would block sudo entirely.
 ProtectSystem=strict
 ProtectHome=true
 # Data volume + the served SPA index.html files (the app injects the configured
