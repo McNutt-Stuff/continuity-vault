@@ -75,6 +75,10 @@ def run_due(db) -> int:
             continue
         ds = (db.query(m.IntegrationDesiredState)
               .filter(m.IntegrationDesiredState.integration_instance_id == inst.id).first())
+        # A desired-state change (activation, scope edit, or a "Back up now" that
+        # bumps desired) forces an immediate collection pass this cycle, not just
+        # discovery — otherwise the button did nothing until the next cadence.
+        force_collect = False
         if _due(inst, ds):
             if ds is not None and ds.status != "applied":
                 ds.status = "applying"
@@ -92,6 +96,7 @@ def run_due(db) -> int:
                 inst.provision_message = (f"Discovered {res.get('discovered', 0)} Entra "
                                           f"identities ({res.get('in_scope', 0)} in scope)")
                 inst.status = "active"
+                force_collect = True
                 try:
                     collect.provision_sources(db, inst)  # establish per-user sources
                 except Exception:  # noqa: BLE001
@@ -118,11 +123,11 @@ def run_due(db) -> int:
                     collect.provision_org_sources(db, inst, token)
                 except Exception:  # noqa: BLE001
                     logger.exception("m365 org provisioning failed (instance=%s)", inst.id)
-                _collect_due_sources(db, inst, token)
+                _collect_due_sources(db, inst, token, force=force_collect)
     return ran
 
 
-def _collect_due_sources(db, inst, token: str) -> None:
+def _collect_due_sources(db, inst, token: str, force: bool = False) -> None:
     from . import collect, models as m
     sources = (db.query(m.ManagedSource)
                .filter(m.ManagedSource.integration_instance_id == inst.id,
@@ -130,7 +135,7 @@ def _collect_due_sources(db, inst, token: str) -> None:
     ran = 0
     total = 0
     for src in sources:
-        if not _source_due(src):
+        if not force and not _source_due(src):
             continue
         try:
             res = collect.collect_source(db, inst, src, token)
