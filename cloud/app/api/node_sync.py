@@ -235,6 +235,7 @@ class PushPayload(BaseModel):
     integration_runs: list[dict] = []
     communications: list[dict] = []
     admin_alerts: list[dict] = []
+    log_entries: list[dict] = []
 
 
 _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
@@ -268,7 +269,8 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     counts = {"receipts": 0, "documents": 0, "connector_accounts": 0,
               "jobs": 0, "agents": 0, "appliances": 0, "appliance_storages": 0,
               "insights": 0,
-              "integrations": 0, "network": 0, "communications": 0, "admin_alerts": 0}
+              "integrations": 0, "network": 0, "communications": 0, "admin_alerts": 0,
+              "logs": 0}
     # A node can hold data for a tenant/user that was removed on the control
     # plane; inserting it would violate a FK and abort the whole push. Skip any
     # row whose tenant or owner isn't present here so one orphan can't block sync.
@@ -400,6 +402,23 @@ def push(body: PushPayload, authorization: str = Header(default=""),
                 counts["admin_alerts"] += 1
             except Exception:  # noqa: BLE001 — one bad alert must not fail the push
                 logger.exception("admin alert emit failed (type=%s)", al.get("type"))
+    # Unified logs the node captured (its app logs + managed appliances/agents +
+    # audit dual-writes). Upsert by id; stamp the pushing node so the admin can
+    # attribute + drill down. Record last_log_push_at so node details show the
+    # push freshness.
+    from ..models import LogEntry
+    for le in body.log_entries:
+        if not _known(le) or not _has_pk(LogEntry, le):
+            continue
+        if db.get(LogEntry, le.get("id")) is None:
+            kw = _deser(LogEntry, le)
+            if push_node is not None:
+                kw.setdefault("node_id", push_node.id)
+                kw.setdefault("node_name", push_node.name)
+            db.add(LogEntry(**kw))
+            counts["logs"] += 1
+    if push_node is not None and body.log_entries:
+        push_node.last_log_push_at = datetime.utcnow()
     db.commit()
     return {"ok": True, **counts}
 

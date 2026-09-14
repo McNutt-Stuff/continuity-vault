@@ -39,6 +39,7 @@ from ..models import (
     IntegrationConfig,
     IntegrationInstance,
     IntegrationRun,
+    LogEntry,
     NetworkApp,
     NetworkClient,
     NetworkUsage,
@@ -396,6 +397,15 @@ def _push(s) -> int:
         except ValueError:
             alerts_since = None
     alerts_high = alerts_since
+    log_entries: list = []
+    log_cursor = _read_state().get("logs_cursor")
+    log_since = None
+    if log_cursor:
+        try:
+            log_since = datetime.fromisoformat(log_cursor)
+        except ValueError:
+            log_since = None
+    log_high = log_since
     with SessionLocal() as db:
         rq = db.query(SnapshotReceipt)
         if since is not None:
@@ -474,10 +484,21 @@ def _push(s) -> int:
             alerts.append(_row(row))
             if row.created_at and (alerts_high is None or row.created_at > alerts_high):
                 alerts_high = row.created_at
+        # Unified logs — everything this node captured since the last confirmed
+        # push (app logs + the appliances/agents it manages + audit dual-writes).
+        # The cursor only advances on a confirmed delivery, so a failed push
+        # retries the whole batch next cycle and no log line is ever dropped.
+        lq = db.query(LogEntry)
+        if log_since is not None:
+            lq = lq.filter(LogEntry.created_at > log_since)
+        for row in lq.order_by(LogEntry.created_at.asc()).limit(5000).all():
+            log_entries.append(_row(row))
+            if row.created_at and (log_high is None or row.created_at > log_high):
+                log_high = row.created_at
     if not (receipts or documents or accounts or jobs or agents or appliances
             or appliance_storages or insights
             or integ_instances or net_clients or net_apps or net_usage or integ_runs
-            or communications or alerts):
+            or communications or alerts or log_entries):
         return 0
     res = _post("/nodes/sync/push", {
         "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
@@ -487,6 +508,7 @@ def _push(s) -> int:
         "integration_instances": integ_instances, "network_clients": net_clients,
         "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
         "communications": communications, "admin_alerts": alerts,
+        "log_entries": log_entries,
     })
     if res and res.get("ok"):
         if high is not None:
@@ -505,12 +527,18 @@ def _push(s) -> int:
             st = _read_state()
             st["admin_alerts_cursor"] = alerts_high.isoformat()
             _write_state(st)
+        if log_high is not None:
+            st = _read_state()
+            st["logs_cursor"] = log_high.isoformat()
+            _write_state(st)
         logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d "
-                    "appliances=%d storages=%d insights=%d integrations=%d network=%d",
+                    "appliances=%d storages=%d insights=%d integrations=%d network=%d "
+                    "logs=%d",
                     len(receipts), len(documents), len(jobs), len(agents),
                     len(appliances), len(appliance_storages), len(insights),
                     len(integ_instances),
-                    len(net_clients) + len(net_apps) + len(net_usage))
+                    len(net_clients) + len(net_apps) + len(net_usage),
+                    len(log_entries))
         return len(receipts) + len(documents)
     return 0
 
