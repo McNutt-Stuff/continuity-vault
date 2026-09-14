@@ -287,6 +287,8 @@ def _apply_additive_migrations() -> None:
         # Integrity worker records the last successful verify per replica — added
         # to the model after the table first shipped, so backfill the column.
         "ALTER TABLE index_replicas ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMP",
+        # Compliance rules engine: an object a rule marked restricted/sensitive.
+        "ALTER TABLE search_documents ADD COLUMN IF NOT EXISTS restricted BOOLEAN DEFAULT false",
         "ALTER TABLE purge_requests ADD COLUMN IF NOT EXISTS keep_source BOOLEAN DEFAULT false",
         "ALTER TABLE purge_requests ADD COLUMN IF NOT EXISTS collection_id VARCHAR",
         "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS last_log_push_at TIMESTAMP",

@@ -32,6 +32,7 @@ from cv_crypto.provider import hexdigest
 from cv_crypto.signing import HybridSigner
 
 from .. import audit, credstore, fleet, keybroker, node_config
+from .. import features, rules_engine
 from ..connectors import get_connector
 from ..connectors import oauth
 from ..models import (
@@ -42,6 +43,8 @@ from ..models import (
     ObjectVersion,
     SearchDocument,
     SnapshotReceipt,
+    Tenant,
+    User,
     Vault,
 )
 from ..storage import build_destination
@@ -512,6 +515,33 @@ def _persist_stream_cursor(account: ConnectorAccount, mode: str,
             account.sync_cursor = new_cursor
 
 
+def _load_rules_for(db: Session, collection: Collection, vault: Vault):
+    """Enabled compliance rules that apply to this collection, in priority order —
+    or ([], plan) when the rules engine is off for the tenant. A rule applies when
+    its ``collection_ids`` is empty or contains this collection AND its
+    ``source_types`` is empty or contains this source type. Works for managed M365
+    collections exactly like any other (they are real Collections)."""
+    from ..models import Rule
+    tenant = db.get(Tenant, collection.tenant_id)
+    plan = (tenant.plan if tenant else "personal") or "personal"
+    owner = db.get(User, vault.owner_user_id) if getattr(vault, "owner_user_id", None) else None
+    if not features.resolve(owner, tenant, "rules_enabled"):
+        return [], plan
+    rules = (db.query(Rule)
+             .filter(Rule.tenant_id == collection.tenant_id, Rule.enabled.is_(True))
+             .order_by(Rule.priority.asc(), Rule.created_at.asc()).all())
+    scoped = []
+    for r in rules:
+        cids = r.collection_ids or []
+        stypes = r.source_types or []
+        if cids and collection.id not in cids:
+            continue
+        if stypes and collection.source_type not in stypes:
+            continue
+        scoped.append(r)
+    return scoped, plan
+
+
 def ingest_objects(db: Session, collection: Collection, source_objects,
                    destinations: Optional[List[str]] = None,
                    searchable_fields: Optional[List[str]] = None,
@@ -525,6 +555,11 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     """
     vault = db.get(Vault, collection.vault_id)
     zero_knowledge = vault.key_ownership_model == "zero-knowledge"
+    # Compliance rules (if enabled) are evaluated per object BEFORE it is stored /
+    # indexed, so they can discard, mark restricted, obfuscate, skip indexing or
+    # add labels. Loaded once, scoped to this collection + source type.
+    rules, rule_plan = _load_rules_for(db, collection, vault)
+    rule_stats = {"discarded": 0, "restricted": 0, "no_index": 0, "obfuscated": 0, "labeled": 0}
     # Only the discrete metadata fields the connector declares are indexed or
     # shown in search — never the object's body/content. A per-source override
     # (collection.index_fields, set in the Data Map) wins when present; otherwise
@@ -615,6 +650,21 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
             continue
 
         # New object, or content changed → record a new immutable version.
+        # Compliance rules run first: a ``discard`` skips backup + index entirely.
+        outcome = None
+        if rules:
+            outcome = rules_engine.evaluate(
+                rules,
+                rules_engine.object_fields(
+                    doc_type=src.doc_type, category=src.category,
+                    title=str(src.title) if src.title is not None else "",
+                    source_type=collection.source_type, labels=src.labels, meta=src.meta),
+                plan=rule_plan)
+            if outcome.discard:
+                rule_stats["discarded"] += 1
+                logger.info("rules: discarded object=%s collection=%s rule(s)=%s",
+                            src.object_id, collection.id, outcome.rule_names)
+                continue
         version = (prev.version + 1) if prev is not None else 1
         if prev is not None:
             prev.is_current = False
@@ -646,6 +696,27 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                 str(x) for x in [src.title, *(src.labels or []), *_flatten_values(discrete_meta)]
                 if x is not None
             ).strip()
+        # Fold in any compliance-rule outcome: extra labels, restricted flag, and a
+        # masked preview when obfuscation was requested. ``no_index`` stores the
+        # bytes (recoverable) but writes no search row.
+        row_labels = [] if zero_knowledge else list(src.labels or [])
+        restricted = False
+        if outcome is not None:
+            if outcome.add_labels:
+                for lbl in outcome.add_labels:
+                    if lbl not in row_labels:
+                        row_labels.append(lbl)
+                rule_stats["labeled"] += 1
+            if outcome.restricted:
+                restricted = True
+                rule_stats["restricted"] += 1
+            if outcome.obfuscate and preview:
+                preview = rules_engine.mask(preview)
+                search_blob = str(src.title) if src.title is not None else ""
+                rule_stats["obfuscated"] += 1
+            if outcome.no_index:
+                rule_stats["no_index"] += 1
+                continue  # store-only: bytes are kept, no search document
         index_rows.append(
             SearchDocument(
                 tenant_id=collection.tenant_id,
@@ -659,16 +730,20 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                 title=str(src.title) if src.title is not None else "",
                 preview=preview,
                 meta=discrete_meta,
-                labels=[] if zero_knowledge else (src.labels or []),
+                labels=row_labels,
                 search_blob=search_blob,
                 size_bytes=src.size_bytes,
                 modified_at=src.modified_at,
                 content_hash=content_hash,
                 version=version,
+                restricted=restricted,
             )
         )
 
     n_total = stored
+    if rules and any(rule_stats.values()):
+        logger.info("rules applied on collection=%s (%s): %s",
+                    collection.id, collection.source_type, rule_stats)
     # Nothing changed since the last run — no new recovery point to create.
     if not storage_units:
         logger.info("ingest snapshot skipped: %d object(s) unchanged (deduped) for collection %s",
