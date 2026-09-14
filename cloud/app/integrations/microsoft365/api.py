@@ -1034,64 +1034,55 @@ def _provision_org_now(db: Session, inst) -> None:
 def collect_now(instance_id: str = "",
                 principal: security.Principal = Depends(require_m365),
                 db: Session = Depends(get_db)):
-    """Back up now — run a managed collection pass immediately. Node-hosted tenants
-    reconcile on their node (bumped desired state); CP-hosted tenants run a bounded
-    pass in the background across every active managed source."""
+    """Back up now — trigger an immediate managed backup through the SAME job
+    pipeline as every other source. Each managed source's Collection gets a tracked
+    SyncJob (visible in Activity); node-hosted tenants run the jobs on their node."""
+    from ...models import Collection
+    from ...workers.jobs import start_backup_job
     inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
     cred = _credential(db, inst)
     if not cred or cred.consent_state != "granted":
         raise HTTPException(409, "Microsoft administrator consent is required first")
-    if _node_hosted(db, principal.tenant_id):
+
+    node_hosted = _node_hosted(db, principal.tenant_id)
+    if node_hosted:
+        # Nudge the node to (re)provision + let its scheduler run the managed
+        # collections immediately (the node worker resets their due time on a
+        # desired-state bump). Any managed collections the CP already knows about
+        # are also queued for the node so the run shows up right away.
         _bump_desired(db, inst)
-        db.commit()
-        audit.record(db, actor=principal.user_id, action="m365.collect_now",
-                     category="admin", resource=inst.id, detail={"queued": True})
-        return {"ok": True, "queued": True,
-                "note": "Backup queued on your assigned node — sources update shortly."}
+    else:
+        # CP-hosted: provision now so SharePoint/Teams collections exist, then queue.
+        from . import collect
+        token = _app_token(db, inst)
+        if token:
+            try:
+                collect.provision_sources(db, inst)
+                collect.provision_org_sources(db, inst, token)
+            except Exception:  # noqa: BLE001
+                logger.exception("m365 collect-now provision failed (instance=%s)", inst.id)
 
-    import threading
-    from ...db import WorkerSessionLocal
-    iid = inst.id
-
-    def _run() -> None:
+    colls = [c for c in db.query(Collection)
+             .filter(Collection.tenant_id == inst.tenant_id).all()
+             if (c.config or {}).get("m365_instance_id") == inst.id
+             and (c.config or {}).get("managed")]
+    queued = 0
+    for c in colls:
         try:
-            with WorkerSessionLocal() as wdb:
-                i2 = wdb.get(IntegrationInstance, iid)
-                if i2 is None:
-                    return
-                token = _app_token(wdb, i2)
-                if not token:
-                    logger.warning("m365 collect-now: no app token (instance=%s) — "
-                                   "consent/permissions not effective", iid)
-                    return
-                from . import collect
-                collect.provision_sources(wdb, i2)
-                collect.provision_org_sources(wdb, i2, token)
-                srcs = (wdb.query(m.ManagedSource)
-                        .filter(m.ManagedSource.integration_instance_id == iid,
-                                m.ManagedSource.state.notin_(
-                                    ("decommissioned", "paused_by_admin"))).all())
-                total = 0
-                for s in srcs:
-                    try:
-                        res = collect.collect_source(wdb, i2, s, token)
-                        total += int(res.get("objects") or 0)
-                    except Exception:  # noqa: BLE001
-                        logger.exception("m365 collect-now source failed (source=%s)", s.id)
-                logger.info("m365 collect-now done (instance=%s): %d source(s), %d object(s)",
-                            iid, len(srcs), total)
-                collect.audit_cycle(wdb, i2, objects=total, sources=len(srcs),
-                                    trigger="collect_now")
+            start_backup_job(db, inst.tenant_id, c.id, kind="backup")
+            queued += 1
         except Exception:  # noqa: BLE001
-            logger.exception("m365 collect-now failed (instance=%s)", iid)
-
-    threading.Thread(target=_run, name="cv-m365-collect-now", daemon=True).start()
+            logger.exception("m365 collect-now enqueue failed (collection=%s)", c.id)
+    db.commit()
     audit.record(db, actor=principal.user_id, action="m365.collect_now",
-                 category="admin", resource=inst.id, detail={"started": True})
-    return {"ok": True, "started": True,
-            "note": "Backup started — managed sources will update shortly."}
+                 category="admin", resource=inst.id,
+                 detail={"queued": queued, "node_hosted": node_hosted})
+    note = ("Backup queued on your assigned node — sources update shortly."
+            if node_hosted else
+            f"Backup started for {queued} managed source(s).")
+    return {"ok": True, "queued": queued, "note": note}
 
 
 # --------------------------------------------------------------------------- #

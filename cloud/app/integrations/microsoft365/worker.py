@@ -108,8 +108,12 @@ def run_due(db) -> int:
                     ds.status = "failed"
             db.commit()
 
-        # Admin-approved content protection: collect each managed user's Exchange +
-        # OneDrive with the app-only token (reusing the connector fetchers).
+        # Admin-approved content protection: discover org resources (SharePoint
+        # sites / Teams) into managed sources + their Collections. The ACTUAL
+        # collection now runs through the SHARED scheduler (workers/scheduler.py →
+        # run_backup → collect.run_managed_collection), so managed sources poll,
+        # create SyncJobs and show in Activity exactly like every other source —
+        # this worker only keeps discovery + provisioning current.
         if (inst.config or {}).get("collect_enabled") and client_id and client_secret:
             try:
                 token = graph.app_token(client_id, client_secret, cred.microsoft_tenant_id)
@@ -117,52 +121,36 @@ def run_due(db) -> int:
                 logger.warning("m365 collect token failed (instance=%s): %s", inst.id, e)
                 token = ""
             if token:
-                # Discover org resources (SharePoint sites / Teams) into managed
-                # sources before collecting (needs the app token).
                 try:
                     collect.provision_org_sources(db, inst, token)
                 except Exception:  # noqa: BLE001
                     logger.exception("m365 org provisioning failed (instance=%s)", inst.id)
-                _collect_due_sources(db, inst, token, force=force_collect)
+            # A "Back up now" (or activation) bumps desired state → force_collect:
+            # reset the managed Collections' due time so the SHARED scheduler runs
+            # them on its very next tick instead of waiting for the cadence.
+            if force_collect:
+                try:
+                    _trigger_managed_now(db, inst)
+                except Exception:  # noqa: BLE001
+                    logger.exception("m365 trigger-now failed (instance=%s)", inst.id)
     return ran
 
 
-def _collect_due_sources(db, inst, token: str, force: bool = False) -> None:
-    from . import collect, models as m
-    sources = (db.query(m.ManagedSource)
-               .filter(m.ManagedSource.integration_instance_id == inst.id,
-                       m.ManagedSource.state.notin_(("decommissioned", "paused_by_admin"))).all())
-    ran = 0
-    total = 0
-    for src in sources:
-        if not force and not _source_due(src):
-            continue
-        try:
-            res = collect.collect_source(db, inst, src, token)
-            ran += 1
-            total += int((res or {}).get("objects") or 0)
-        except Exception:  # noqa: BLE001
-            logger.exception("m365 collect_source crashed (source=%s)", src.id)
-    if ran:
-        logger.info("m365 collect cycle (instance=%s): %d source(s), %d object(s)",
-                    inst.id, ran, total)
-        collect.audit_cycle(db, inst, objects=total, sources=ran, trigger="scheduled")
-
-
-def _source_due(src) -> bool:
-    # Mail still backfilling collects every cycle; otherwise on the profile's
-    # schedule (interval_minutes, set from the managed-protection profile) or the
-    # default refresh cadence.
-    if src.workload == "exchange" and (src.config or {}).get("phase", "backfill") == "backfill":
-        return True
-    if src.last_collected_at is None:
-        return True
-    iv = (src.config or {}).get("interval_minutes")
-    try:
-        secs = int(iv) * 60 if iv else _REDISCOVER_SECONDS
-    except (TypeError, ValueError):
-        secs = _REDISCOVER_SECONDS
-    return (_now() - src.last_collected_at).total_seconds() >= max(300, secs)
+def _trigger_managed_now(db, inst) -> None:
+    """Make every managed Collection for this instance due immediately (reset the
+    scheduler watermark) so the shared scheduler backs them up on its next tick."""
+    from ...models import Collection
+    n = 0
+    for c in (db.query(Collection)
+              .filter(Collection.tenant_id == inst.tenant_id).all()):
+        cfg = c.config or {}
+        if cfg.get("m365_instance_id") == inst.id and cfg.get("managed"):
+            c.last_backup_run_at = None
+            n += 1
+    if n:
+        db.commit()
+        logger.info("m365 trigger-now: %d managed collection(s) marked due (instance=%s)",
+                    n, inst.id)
 
 
 def start_m365_worker() -> None:

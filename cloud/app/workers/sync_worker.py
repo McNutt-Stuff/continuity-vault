@@ -270,6 +270,11 @@ def crawl_has_more(db: Session, collection: Collection, mode: str = "recent") ->
     cursor reports has_more. Lets a background job loop chunk by chunk until the
     whole library is captured. ``mode="backfill"`` checks the deep-crawl cursor."""
     if not collection.connector_account_id:
+        # Managed M365 collections have no account; they persist their own drain
+        # signal so the shared job loop keeps pulling until the source is empty.
+        cfg = collection.config or {}
+        if cfg.get("managed") and cfg.get("m365_workload"):
+            return bool(cfg.get("m365_has_more"))
         return False
     acct = db.get(ConnectorAccount, collection.connector_account_id)
     if acct is None:
@@ -343,6 +348,15 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
     ``mode`` selects the track for dual-track connectors: "recent" runs the fast
     forward delta on the schedule; "backfill" runs one resumable chunk of the
     independent backward deep-history crawl (its own cursor)."""
+    # Managed integration collections (Microsoft 365) carry no ConnectorAccount —
+    # the app-only Graph token + per-user/site resource come from the integration.
+    # Delegate so they run through the SAME scheduler / job / activity path as any
+    # other source; only the credential acquisition is integration-specific.
+    cfg0 = collection.config or {}
+    if cfg0.get("managed") and cfg0.get("m365_workload"):
+        from ..integrations.microsoft365 import collect as _m365_collect
+        return _m365_collect.run_managed_collection(db, collection, destinations=destinations,
+                                                    progress=progress)
     account = (
         db.get(ConnectorAccount, collection.connector_account_id)
         if collection.connector_account_id

@@ -282,6 +282,61 @@ def _resolve_vault(db: Session, source):
     return _resolve_vault_for(db, source.tenant_id, source.owner_user_id)
 
 
+def _app_token_for_instance(db: Session, inst) -> str:
+    """Mint the app-only Graph token for an instance's connected org, or "" if the
+    integration isn't configured/consented on this box."""
+    from ... import platform_config
+    from . import graph, models as m
+    vals = platform_config.integration_values("microsoft365")
+    client_id = (vals.get("client_id") or "").strip()
+    client_secret = (vals.get("client_secret") or "").strip()
+    cred = (db.query(m.ManagedCredentialRef)
+            .filter(m.ManagedCredentialRef.integration_instance_id == inst.id).first())
+    if not (client_id and client_secret and cred and cred.consent_state == "granted"
+            and cred.microsoft_tenant_id):
+        return ""
+    try:
+        return graph.app_token(client_id, client_secret, cred.microsoft_tenant_id)
+    except graph.GraphError as e:
+        logger.warning("m365 app token failed (instance=%s): %s", inst.id, e)
+        return ""
+
+
+def run_managed_collection(db: Session, collection, destinations=None, progress=None):
+    """Collect a managed M365 Collection via the SHARED backup path.
+
+    Called by ``sync_worker.run_backup`` when a Collection is a managed M365 source
+    so managed sources run through the standard scheduler / SyncJob / activity
+    pipeline exactly like every other source — only the credential (app-only Graph
+    token + per-user/site resource) is integration-specific. Returns the
+    SnapshotReceipt of the ingested chunk (or None when nothing was collected)."""
+    from ...models import IntegrationInstance
+    from . import models as m
+    cfg = collection.config or {}
+    inst = db.get(IntegrationInstance, cfg.get("m365_instance_id"))
+    source = db.get(m.ManagedSource, cfg.get("m365_source_id"))
+    if inst is None or source is None:
+        logger.warning("m365 managed collection %s missing instance/source", collection.id)
+        collection.config = {**cfg, "m365_has_more": False}
+        return None
+    token = _app_token_for_instance(db, inst)
+    if not token:
+        raise RuntimeError("Microsoft 365 admin consent required (no app token)")
+    if progress:
+        progress(0, 0, f"Backing up {source.name}…")
+    res = collect_source(db, inst, source, token)
+    # Signal the shared job loop to keep chunking while the source still has more.
+    db.refresh(collection)
+    collection.config = {**(collection.config or {}), "m365_has_more": bool(res.get("has_more"))}
+    db.commit()
+    if progress:
+        progress(int(res.get("objects") or 0), int(res.get("objects") or 0),
+                 f"{source.name}: {int(res.get('objects') or 0)} item(s)")
+    if not res.get("ok"):
+        raise RuntimeError(res.get("error") or "managed collection failed")
+    return res.get("receipt")
+
+
 def collect_source(db: Session, inst, source, app_token: str) -> dict:
     """Collect one managed source (a user's Exchange or OneDrive) via the reused
     Graph fetchers with the admin app-only token. Ingests a bounded, resumable
@@ -344,9 +399,11 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
 
     if objs:
         dests = coll.destinations or ["cv-cloud"]
-        sync_worker.ingest_objects(db, coll, objs, destinations=dests,
-                                   searchable_fields=meta["search"], facet_fields=meta["facet"],
-                                   actor="m365")
+        receipt = sync_worker.ingest_objects(db, coll, objs, destinations=dests,
+                                             searchable_fields=meta["search"], facet_fields=meta["facet"],
+                                             actor="m365")
+    else:
+        receipt = None
     # Persist resumable cursor + advance the two-track phase for mail.
     new_cursor = state.get("cursor")
     backfilling = False
@@ -361,6 +418,9 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
             cfg["recent_cursor"] = new_cursor
     else:
         cfg["cursor"] = new_cursor
+    # More to pull this run? (mail still backfilling, or a streaming delta reports
+    # has_more) — lets the shared job loop keep chunking until the source is drained.
+    has_more = backfilling or bool(isinstance(new_cursor, dict) and new_cursor.get("has_more"))
     total = int(cfg.get("objects_total") or 0) + len(objs)
     cfg["objects_total"] = total
     cfg["last_result"] = {"at": _now().isoformat(), "objects": len(objs),
@@ -383,4 +443,5 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
                     len(objs), total)
     db.commit()
     _record_source_activity(db, inst, source, objects=len(objs), error=None)
-    return {"ok": True, "objects": len(objs), "workload": source.workload}
+    return {"ok": True, "objects": len(objs), "workload": source.workload,
+            "has_more": has_more, "receipt": receipt}

@@ -730,10 +730,43 @@ def _maybe_photo_reminder(db, collection, now: datetime) -> None:
     db.commit()
 
 
+def _process_managed_collection(db, c: Collection, now: datetime,
+                                default_minutes: int) -> tuple[int, int, int]:
+    """Schedule a managed Microsoft 365 collection like any other source: due-check
+    on its interval, then start a tracked background backup job (so the run shows in
+    Activity and drains the source chunk-by-chunk with a deadline, exactly like a
+    big standard source). The job runs run_backup, which delegates the app-only
+    Graph fetch. Never let one source abort the cycle."""
+    from .jobs import start_backup_job
+    interval = _effective_interval(c, default_minutes)
+    if not _is_due(c, interval, now):
+        return (1, 0, 0)
+    # Don't stack jobs — one active backup per managed collection at a time.
+    active = (db.query(SyncJob)
+              .filter(SyncJob.collection_id == c.id,
+                      SyncJob.status.in_(("queued", "running"))).first())
+    if active is not None:
+        return (1, 0, 0)
+    logger.info("managed backup starting: %s (%s) → %s interval=%dmin",
+                c.name, c.source_type, c.destinations or ["cv-cloud"], interval)
+    start_backup_job(db, c.tenant_id, c.id, kind="backup",
+                     destinations=c.destinations or None)
+    c.last_backup_run_at = now
+    db.commit()
+    return (1, 1, 1)
+
+
 def _process_collection(db, c: Collection, now: datetime, default_minutes: int) -> tuple[int, int, int]:
     """Handle one mapping for this cycle. Returns (eligible, due, ran) as 0/1
     counters. Raising is fine — the caller isolates it so one broken source can
     never abort the whole scheduling cycle."""
+    # Managed integration collections (Microsoft 365) have no ConnectorAccount and
+    # their source_type may not be a pull connector — schedule them through the SAME
+    # SyncJob + run_backup path (run_backup delegates the app-only fetch), so they
+    # poll, log activity and show in the worker view exactly like any other source.
+    mcfg = c.config or {}
+    if mcfg.get("managed") and mcfg.get("m365_workload"):
+        return _process_managed_collection(db, c, now, default_minutes)
     conn = get_connector(c.source_type)
     if conn is None:
         return (0, 0, 0)

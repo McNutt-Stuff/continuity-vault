@@ -1829,8 +1829,8 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
   async function collectNow() {
     setBusy("collect");
     try {
-      const r = await api.post<{ queued?: boolean; note?: string }>(`/integrations/microsoft365/collect-now?${iq}`, {});
-      notify({ message: r.note || (r.queued ? "Backup queued." : "Backup started."), tone: "ok" });
+      const r = await api.post<{ queued?: number; note?: string }>(`/integrations/microsoft365/collect-now?${iq}`, {});
+      notify({ message: r.note || (r.queued ? "Backup started." : "Backup queued."), tone: "ok" });
       // Collection runs async (background thread on the CP, or the node worker for
       // node-hosted tenants + replication). Poll a few times so the sources table's
       // "Last collected" and counts update without a manual refresh.

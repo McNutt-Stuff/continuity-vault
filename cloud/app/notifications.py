@@ -322,6 +322,27 @@ def _source_issues(db, user: User) -> list[dict]:
                         "fails": int(a.fail_count or 0),
                         "reauth": a.auth_status == "needs-reauth" or _likely_reauth(msg)})
 
+    # Managed Microsoft 365 sources have no ConnectorAccount, but a source stuck in
+    # a permission/credential state is a real problem the owner should see — surface
+    # it alongside standard connector issues so managed sources alert the same way.
+    try:
+        from .integrations.microsoft365 import models as _m365m
+        for s in (db.query(_m365m.ManagedSource)
+                  .filter(_m365m.ManagedSource.tenant_id == user.tenant_id,
+                          _m365m.ManagedSource.state.in_(
+                              ("permission_required", "credential_error"))).all()):
+            if s.owner_user_id and s.owner_user_id != user.id:
+                continue  # a user only sees their own managed sources
+            last = (s.config or {}).get("last_result") or {}
+            out.append({"id": s.id, "kind": "connector",
+                        "name": s.name,
+                        "source_type": "teams" if s.workload == "teams_chat" else s.workload,
+                        "error": (last.get("error") or "Microsoft 365 permission required — "
+                                  "an administrator must grant consent.")[:160],
+                        "at": s.last_collected_at, "fails": 0, "reauth": True})
+    except Exception:  # noqa: BLE001 — notifications must never break on optional models
+        pass
+
     # Integrations (appliance-run, e.g. UniFi): flag explicit errors AND silent
     # STALLS — an enabled, provisioned integration that simply stopped collecting
     # (appliance offline / stopped reporting) freezes last_run_at with no error,
