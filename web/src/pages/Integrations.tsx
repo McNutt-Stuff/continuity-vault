@@ -1866,6 +1866,12 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
               <Icon name="repeat" size={13} /> {busy === "discover" ? "Checking…" : "Re-check"}
             </button>
           )}
+          {connected && (
+            <button className="btn sm ghost" disabled={busy === "consent"} onClick={startConsent}
+                    title="Re-open the Microsoft admin-consent screen to re-authorize or add permissions">
+              <Icon name="key" size={13} /> {busy === "consent" ? "Preparing…" : "Re-authorize"}
+            </button>
+          )}
           {consent === "granted" && (
             <button className="btn sm primary" disabled={busy === "collect"} onClick={collectNow}>
               <Icon name="cloud" size={13} /> {busy === "collect" ? "Backing up…" : "Back up now"}
@@ -1875,6 +1881,41 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
           <Pill tone="info">Managed</Pill>
         </div>
       </div>
+
+      {/* Re-authorization in progress (triggered from the header, independent of
+          any error state) — confirm once the admin approves in the Microsoft tab. */}
+      {consent === "granted" && consentState && !(status?.needs_consent || status?.last_error) && (
+        <Card style={{ marginBottom: 14, borderColor: "var(--accent,#4f7cff)" }}>
+          <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
+            <Icon name="key" size={18} />
+            <div className="flex1">
+              <div style={{ fontWeight: 700, marginBottom: 2 }}>Re-authorize Microsoft 365</div>
+              {consentState.configured === false ? (
+                <div className="faint" style={{ fontSize: 12.5 }}>
+                  {consentState.message || "The platform Microsoft 365 app isn't configured yet."}
+                </div>
+              ) : (
+                <>
+                  <div className="faint" style={{ fontSize: 12.5 }}>
+                    A Microsoft consent window opened. Approve the permissions (or add new ones) there,
+                    then confirm below. Consent uses <code>.default</code>, so it re-grants exactly the
+                    Application permissions configured on the app.
+                  </div>
+                  <div className="row" style={{ gap: 8, marginTop: 10 }}>
+                    <input className="input" style={{ maxWidth: 320 }} placeholder="Directory (tenant) ID"
+                           value={tenantInput} onChange={(e) => setTenantInput(e.target.value)} />
+                    <button className="btn primary sm" disabled={busy === "consent" || !tenantInput.trim()} onClick={confirmConsent}>
+                      {busy === "consent" ? "Confirming…" : "Confirm consent granted"}
+                    </button>
+                    {consentState.url && <a className="btn ghost sm" href={consentState.url} target="_blank" rel="noreferrer">Reopen consent</a>}
+                    <button className="btn ghost sm" onClick={() => setConsentState(null)}>Cancel</button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Consent recorded but the app-only token lacks the granted Application
           roles (403) — surface the exact remediation and a re-consent action. */}
