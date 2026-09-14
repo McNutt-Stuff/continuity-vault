@@ -159,20 +159,17 @@ def _ic(name: str) -> str:
 
 
 # Source types with a brand icon synced into the portal (web/public/source-icons).
-# Keep in sync with scripts/sync_source_icons.py SOURCE_ICONS.
-_BRAND_ICON_TYPES = {
-    "gmail", "onepassword", "outlook", "onedrive", "dropbox", "icloud",
-    "google_drive", "slack", "notion", "github", "reddit", "facebook",
-    "instagram", "linkedin", "evernote", "google_calendar", "google_contacts",
-    "google_photos", "imessage", "ubiquiti", "aws", "azure", "gcp", "microsoft365",
-}
+# Canonical registry lives in source_icons.py (mirrors the frontend), so managed
+# sources like SharePoint/Teams render the SAME brand marks in email as the UI.
+from . import source_icons as _source_icons
 
 
 def _source_icon_url(source_type: str) -> str:
     """Absolute URL to the source's brand icon on the portal — the SAME asset the
     UI renders. Empty when there's no synced brand icon for the type."""
-    if source_type in _BRAND_ICON_TYPES:
-        return f"{_portal_url()}/source-icons/{source_type}.svg"
+    t = _source_icons.icon_source_type(source_type)
+    if t:
+        return f"{_portal_url()}/source-icons/{t}.svg"
     return ""
 
 

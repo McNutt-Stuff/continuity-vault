@@ -1041,6 +1041,60 @@ _SOURCE_PAGES = [
          "Browsable — choose which repositories to include.",
          "Honors GitHub rate limits and resumes automatically."]),
     _source_doc(
+        "source-sharepoint", "SharePoint", "cloud", 84,
+        "Back up your organization's SharePoint site document libraries — a managed source "
+        "protected through the Microsoft 365 integration.",
+        "Documents and files in your organization's SharePoint site libraries, collected at the "
+        "organization level with your admin's Microsoft 365 access — no per-employee sign-in. "
+        "Org content lands in the organization vault and stays searchable and recoverable.",
+        ["This is a **managed source** — it isn't added from the Sources menu.",
+         "A Microsoft administrator connects **Integrations → Microsoft 365** and grants admin consent.",
+         "In the managed protection profile, include the **SharePoint** workload and choose where to store it.",
+         "Arkive discovers your SharePoint sites and protects their document libraries on your schedule."],
+        ["**Files & Storage** — each document as its native type (`pdf`, `document`, "
+         "`spreadsheet`, `presentation`, `image`…), with site, library and path as searchable fields."],
+        ["Managed, organization-level source — collected app-only via Microsoft 365, not directly connectable.",
+         "Requires the Microsoft Graph **Sites.Read.All** application permission (admin-consented).",
+         "Business/Enterprise plans only; enforced server-side."],
+        required_plan="business",
+        extra=(
+            "\n## Availability\n"
+            "::: plan business\n"
+            "SharePoint is a managed, organization-level source delivered by the **Microsoft 365 "
+            "Managed Integration** (Business/Enterprise). It is governed by your administrator and "
+            "is not available from the personal Sources menu.\n"
+            ":::\n"),
+        parent_slug="sources"),
+    _source_doc(
+        "source-teams", "Microsoft Teams", "mail", 85,
+        "Back up your organization's Microsoft Teams conversations — a managed source protected "
+        "through the Microsoft 365 integration.",
+        "Organization Teams **channel conversations** (at the org level) and each protected user's "
+        "**Teams chats**, collected with your admin's Microsoft 365 access — no per-employee "
+        "sign-in. Org channel messages land in the organization vault; a user's chats land in that "
+        "user's vault.",
+        ["This is a **managed source** — it isn't added from the Sources menu.",
+         "A Microsoft administrator connects **Integrations → Microsoft 365** and grants admin consent.",
+         "In the managed protection profile, include the **Teams channels** workload (and **Teams chats** "
+         "for per-user chat protection) and choose where to store them.",
+         "Arkive discovers your Teams and protects their conversations on your schedule."],
+        ["**Messages** — each Teams message as `message` (team, channel or chat, author and date "
+         "as searchable fields)."],
+        ["Managed source — collected app-only via Microsoft 365, not directly connectable.",
+         "Requires the Microsoft Graph **ChannelMessage.Read.All** (channels) and **Chat.Read.All** "
+         "(user chats) application permissions (admin-consented).",
+         "Business/Enterprise plans only; enforced server-side."],
+        required_plan="business",
+        extra=(
+            "\n## Availability\n"
+            "::: plan business\n"
+            "Microsoft Teams is a managed source delivered by the **Microsoft 365 Managed "
+            "Integration** (Business/Enterprise). Organization channels are protected at the org "
+            "level and each protected user's chats in their own vault; it is not available from the "
+            "personal Sources menu.\n"
+            ":::\n"),
+        parent_slug="sources"),
+    _source_doc(
         "source-crossbeam", "Crossbeam", "insights", 86,
         "Back up your Crossbeam partner-ecosystem data: accounts, leads, opportunities, partners, "
         "populations and overlaps.",
