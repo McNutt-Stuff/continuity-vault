@@ -83,16 +83,48 @@ from fastapi import Request as _Request  # noqa: E402
 from fastapi.responses import JSONResponse as _JSONResponse  # noqa: E402
 
 _api_logger = _logging.getLogger("cv.api")
-
+# Stdout/journald copy on a NON-captured logger name (not under cv.*/arkive.*/app.)
+# so the unified store gets exactly ONE, fully-attributed row (via logsink.emit)
+# rather than a duplicate that carries no tenant/node context.
+_api_stderr = _logging.getLogger("api.errors")
 
 @app.exception_handler(Exception)
 async def _log_unhandled(request: _Request, exc: Exception):  # noqa: ANN001
     ref = _uuid.uuid4().hex[:8]
+    # Attribute the failure like every other log: derive the customer/tenant +
+    # actor from the caller's session token, and the source from the path, so the
+    # Platform Logs entry is scoped and drill-downable (never a context-less 500).
+    tenant_id = None
+    actor = ""
+    path = request.url.path
     try:
-        _api_logger.error("unhandled API error [%s] %s %s: %s: %s\n%s",
-                          ref, request.method, request.url.path,
-                          type(exc).__name__, str(exc)[:400], _traceback.format_exc())
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            from . import security
+            principal = security._decode(auth.split(" ", 1)[1])
+            tenant_id = getattr(principal, "tenant_id", None)
+            actor = getattr(principal, "user_id", "") or ""
+    except Exception:  # noqa: BLE001 — fleet/agent/expired tokens aren't user sessions
+        pass
+    source = ("node" if path.startswith("/api/nodes/")
+              else "appliance" if path.startswith("/api/appliance/")
+              else "agent" if path.startswith("/api/agent/")
+              else "auth" if path.startswith("/api/auth")
+              else "cloud")
+    msg = (f"unhandled API error [{ref}] {request.method} {path}: "
+           f"{type(exc).__name__}: {str(exc)[:400]}")
+    try:
+        from . import logsink
+        logsink.emit(level="error", source=source, logger_name="cv.api",
+                     message=f"{msg}\n{_traceback.format_exc()}",
+                     tenant_id=tenant_id, actor=actor, resource=path,
+                     meta={"ref": ref, "method": request.method, "path": path,
+                           "exception": type(exc).__name__})
     except Exception:  # noqa: BLE001 — logging must never mask the original error
+        pass
+    try:
+        _api_stderr.error(msg)  # operational copy to journald (not re-captured)
+    except Exception:  # noqa: BLE001
         pass
     return _JSONResponse(
         status_code=500,
