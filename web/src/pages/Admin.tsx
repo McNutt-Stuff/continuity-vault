@@ -5500,7 +5500,6 @@ function ConfigObjectsAdmin() {
 function SourcesAdmin() {
   const [sources, setSources] = useState<SourceSlot[]>([]);
   const [objects, setObjects] = useState<ConfigObj[]>([]);
-  const [integrations, setIntegrations] = useState<IntegrationSlot[]>([]);
   const [toast, setToast] = useState("");
   const [callback, setCallback] = useState("");
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
@@ -5508,17 +5507,12 @@ function SourcesAdmin() {
   async function load() {
     try { setSources(await api.get<SourceSlot[]>("/admin/sources")); } catch { /* ignore */ }
     try { setObjects(await api.get<ConfigObj[]>("/admin/config-objects")); } catch { /* ignore */ }
-    try { setIntegrations(await api.get<IntegrationSlot[]>("/admin/integration-configs")); } catch { /* ignore */ }
     try { setCallback((await api.get<{ redirect_uri: string }>("/admin/oauth-callback")).redirect_uri); } catch { /* ignore */ }
   }
   useEffect(() => { void load(); }, []);
 
   async function setSource(s: SourceSlot, patch: { enabled?: boolean; config_object_id?: string | null; family?: string; backfill_enabled?: boolean }) {
     try { await api.put(`/admin/sources/${s.type}`, patch); await load(); } catch { flash("Update failed"); }
-  }
-
-  async function setIntegration(it: IntegrationSlot, patch: { enabled?: boolean; config_object_id?: string | null }) {
-    try { await api.put(`/admin/integration-configs/${it.type}`, patch); await load(); } catch { flash("Update failed"); }
   }
 
   async function editFamily(s: SourceSlot) {
@@ -5616,44 +5610,6 @@ function SourcesAdmin() {
           ))}
         </div>
       </Card>
-      {integrations.length > 0 && (
-        <Card style={{ marginTop: 16 }}>
-          <h3 style={{ marginTop: 0 }}>Managed integrations</h3>
-          <div className="muted" style={{ fontSize: 12.5, marginBottom: 16 }}>
-            Platform application credentials for admin-governed integrations (e.g. the Arkive
-            Microsoft 365 Entra app). Link a configuration object holding the app's
-            <code> client_id</code> and <code> client_secret</code>; organizations grant consent to it.
-          </div>
-          <table className="table">
-            <thead><tr><th>Integration</th><th>Enabled</th><th>Configuration</th><th>Status</th></tr></thead>
-            <tbody>
-              {integrations.map((it) => (
-                <tr key={it.type}>
-                  <td>
-                    <div className="row" style={{ gap: 10, alignItems: "center" }}>
-                      <div className="result-icon" style={{ width: 30, height: 30, background: it.color }}>
-                        <Icon name={it.icon as IconName} size={15} />
-                      </div>
-                      <div>
-                        <div style={{ fontWeight: 600 }}>{it.label}</div>
-                        <div className="faint" style={{ fontSize: 11 }}>{it.keys.join(" · ")}</div>
-                      </div>
-                    </div>
-                  </td>
-                  <td><input type="checkbox" checked={it.enabled} onChange={(e) => setIntegration(it, { enabled: e.target.checked })} /></td>
-                  <td>
-                    <select className="input sm" value={it.config_object_id || ""} onChange={(e) => setIntegration(it, { config_object_id: e.target.value })}>
-                      <option value="">— none —</option>
-                      {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-                    </select>
-                  </td>
-                  <td><Pill tone={it.configured ? "ok" : "warn"}>{it.configured ? "Configured" : "Not set"}</Pill></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Card>
-      )}
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
@@ -6906,15 +6862,25 @@ function BackupsAdmin() {
 }
 function IntegrationsAdmin() {
   const [rows, setRows] = useState<any[]>([]);
+  const [credSlots, setCredSlots] = useState<IntegrationSlot[]>([]);
+  const [objects, setObjects] = useState<ConfigObj[]>([]);
   const [loading, setLoading] = useState(true);
   const [flash, setFlash] = useState("");
 
   async function load() {
     setLoading(true);
     try { setRows(await api.get<any[]>("/admin/integrations")); } catch { /* ignore */ }
-    finally { setLoading(false); }
+    try { setCredSlots(await api.get<IntegrationSlot[]>("/admin/integration-configs")); } catch { /* ignore */ }
+    try { setObjects(await api.get<ConfigObj[]>("/admin/config-objects")); } catch { /* ignore */ }
+    setLoading(false);
   }
   useEffect(() => { void load(); }, []);
+
+  const credByType = useMemo(() => {
+    const m: Record<string, IntegrationSlot> = {};
+    for (const s of credSlots) m[s.type] = s;
+    return m;
+  }, [credSlots]);
 
   async function toggle(r: any) {
     try {
@@ -6925,6 +6891,11 @@ function IntegrationsAdmin() {
     } catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
   }
 
+  async function setCred(it: IntegrationSlot, patch: { config_object_id?: string | null }) {
+    try { await api.put(`/admin/integration-configs/${it.type}`, patch); await load(); }
+    catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+  }
+
   return (
     <>
       <div className="spread" style={{ marginBottom: 12 }}>
@@ -6933,9 +6904,11 @@ function IntegrationsAdmin() {
       </div>
       <Card>
         <table className="table">
-          <thead><tr><th>Integration</th><th>Runs on</th><th>Category</th><th>Customers using</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Integration</th><th>Runs on</th><th>Category</th><th>Credentials</th><th>Customers using</th><th>Status</th><th></th></tr></thead>
           <tbody>
-            {rows.map((r) => (
+            {rows.map((r) => {
+              const cred = credByType[r.integration_type];
+              return (
               <tr key={r.integration_type}>
                 <td>
                   <div style={{ fontWeight: 600 }}>{r.display_name}</div>
@@ -6943,16 +6916,37 @@ function IntegrationsAdmin() {
                 </td>
                 <td><Pill tone="info">{r.runs_on}</Pill></td>
                 <td className="faint" style={{ fontSize: 12 }}>{r.category}</td>
+                <td>
+                  {cred ? (
+                    <div className="stack" style={{ gap: 4 }}>
+                      <select className="input sm" value={cred.config_object_id || ""} onChange={(e) => setCred(cred, { config_object_id: e.target.value })}>
+                        <option value="">— none —</option>
+                        {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                      </select>
+                      <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                        <Pill tone={cred.configured ? "ok" : "warn"}>{cred.configured ? "Configured" : "Not set"}</Pill>
+                        <span className="faint" style={{ fontSize: 10.5 }}>{cred.keys.join(" · ")}</span>
+                      </div>
+                    </div>
+                  ) : <span className="faint" style={{ fontSize: 12 }}>—</span>}
+                </td>
                 <td>{r.instances}</td>
                 <td><Pill tone={r.enabled ? "ok" : "warn"}>{r.enabled ? "enabled" : "disabled"}</Pill></td>
                 <td style={{ textAlign: "right" }}>
                   <button className="btn ghost sm" onClick={() => toggle(r)}>{r.enabled ? "Disable" : "Enable"}</button>
                 </td>
               </tr>
-            ))}
-            {rows.length === 0 && <tr><td colSpan={6} className="muted">{loading ? "Loading…" : "No integrations registered."}</td></tr>}
+              );
+            })}
+            {rows.length === 0 && <tr><td colSpan={7} className="muted">{loading ? "Loading…" : "No integrations registered."}</td></tr>}
           </tbody>
         </table>
+        {credSlots.length > 0 && (
+          <div className="faint" style={{ fontSize: 11.5, marginTop: 10 }}>
+            Managed integrations (e.g. Microsoft 365) need a platform application credential — link a
+            Configuration Object holding the app's client id/secret. Create one under <b>Config objects</b>.
+          </div>
+        )}
       </Card>
       {flash && <div className="toast"><Icon name="check" size={15} /> {flash}</div>}
     </>
