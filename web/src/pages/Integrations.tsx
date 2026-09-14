@@ -1551,7 +1551,7 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
 
   async function loadStatus() {
     try { setStatus(await api.get<M365Status>("/integrations/microsoft365")); }
-    catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't load Microsoft 365", tone: "bad" }); }
+    catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't load Microsoft 365", tone: "danger" }); }
     finally { setLoading(false); }
   }
   async function loadIdentities() {
@@ -1570,7 +1570,7 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
   async function connect() {
     setBusy("connect");
     try { setStatus(await api.post<M365Status>("/integrations/microsoft365/connect", { capabilities: ["entra_directory"] })); }
-    catch (e) { notify({ message: (e as { message?: string }).message || "Connect failed", tone: "bad" }); }
+    catch (e) { notify({ message: (e as { message?: string }).message || "Connect failed", tone: "danger" }); }
     finally { setBusy(""); }
   }
   async function startConsent() {
@@ -1579,7 +1579,7 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
       const r = await api.post<{ consent_configured: boolean; consent_url?: string; state?: string; message?: string }>("/integrations/microsoft365/oauth/start", {});
       setConsentState({ url: r.consent_url, state: r.state, configured: r.consent_configured, message: r.message });
       if (r.consent_configured && r.consent_url) window.open(r.consent_url, "_blank", "noopener");
-    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't start consent", tone: "bad" }); }
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't start consent", tone: "danger" }); }
     finally { setBusy(""); }
   }
   async function confirmConsent() {
@@ -1590,7 +1590,7 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
         { state: consentState.state, microsoft_tenant_id: tenantInput.trim(), admin_consent: true });
       setStatus(r); setConsentState(null);
       notify({ message: "Microsoft 365 connected", tone: "ok" });
-    } catch (e) { notify({ message: (e as { message?: string }).message || "Consent confirmation failed", tone: "bad" }); }
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Consent confirmation failed", tone: "danger" }); }
     finally { setBusy(""); }
   }
   async function discover() {
@@ -1601,7 +1601,7 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
       if (r.queued) notify({ message: r.note || "Discovery queued on your node — results appear shortly.", tone: "ok" });
       else notify({ message: `Discovered ${r.discovered ?? 0} identities (${r.in_scope ?? 0} in scope)`, tone: "ok" });
       await loadIdentities();
-    } catch (e) { notify({ message: (e as { message?: string }).message || "Discovery failed", tone: "bad" }); }
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Discovery failed", tone: "danger" }); }
     finally { setBusy(""); }
   }
   async function decide(idn: M365Identity, value: string) {
@@ -1613,7 +1613,7 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
     try {
       await api.post("/integrations/microsoft365/identities/decisions", { decisions: [decision] });
       await loadIdentities();
-    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't apply mapping", tone: "bad" }); }
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't apply mapping", tone: "danger" }); }
   }
   async function toggleCollection(next: boolean) {
     try {
@@ -1621,7 +1621,7 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
       setCollectEnabled(r.collect_enabled);
       await loadIdentities();
       notify({ message: next ? `Protection enabled — ${r.sources_provisioned} source(s) established` : "Protection paused", tone: "ok" });
-    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't update protection", tone: "bad" }); }
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't update protection", tone: "danger" }); }
   }
 
   const connected = !!status?.connected;
