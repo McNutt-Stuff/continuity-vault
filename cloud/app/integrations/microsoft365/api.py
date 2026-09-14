@@ -117,8 +117,12 @@ def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
     mapped = db.query(m.ExternalIdentityBinding).filter(
         m.ExternalIdentityBinding.integration_instance_id == inst.id,
         m.ExternalIdentityBinding.status == "mapped").count()
+    suggested = db.query(m.ExternalIdentityBinding).filter(
+        m.ExternalIdentityBinding.integration_instance_id == inst.id,
+        m.ExternalIdentityBinding.status == "suggested").count()
     sources = db.query(m.ManagedSource).filter(
         m.ManagedSource.integration_instance_id == inst.id).count()
+    cfg = inst.config or {}
     return {
         "connected": True,
         "instance_id": inst.id,
@@ -130,8 +134,11 @@ def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
         "scopes_granted": (cred.scopes_granted if cred else []),
         "identities_discovered": ext_q.count(),
         "identities_mapped": mapped,
+        "identities_suggested": suggested,
         "managed_sources": sources,
-        "collect_enabled": bool((inst.config or {}).get("collect_enabled")),
+        "auto_map": bool(cfg.get("auto_map")),
+        "auto_create": bool(cfg.get("auto_create")),
+        "collect_enabled": bool(cfg.get("collect_enabled")),
         "last_run_at": inst.last_run_at.isoformat() if inst.last_run_at else None,
     }
 
@@ -398,6 +405,49 @@ def set_scope(body: ScopeBody, instance_id: str = "",
 
 
 # --------------------------------------------------------------------------- #
+# Automation settings (auto-map / auto-create)                                #
+# --------------------------------------------------------------------------- #
+class SettingsBody(BaseModel):
+    auto_map: bool | None = None      # auto-accept suggested matches on discovery
+    auto_create: bool | None = None   # auto-create Arkive members for unmatched users
+
+
+@router.get("/settings")
+def m365_get_settings(instance_id: str = "",
+                      principal: security.Principal = Depends(require_m365),
+                      db: Session = Depends(get_db)):
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    cfg = inst.config or {}
+    return {"auto_map": bool(cfg.get("auto_map")), "auto_create": bool(cfg.get("auto_create"))}
+
+
+@router.put("/settings")
+def m365_set_settings(body: SettingsBody, instance_id: str = "",
+                      principal: security.Principal = Depends(require_m365),
+                      db: Session = Depends(get_db)):
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    cfg = dict(inst.config or {})
+    if body.auto_map is not None:
+        cfg["auto_map"] = bool(body.auto_map)
+    if body.auto_create is not None:
+        cfg["auto_create"] = bool(body.auto_create)
+    inst.config = cfg
+    if _node_hosted(db, principal.tenant_id):
+        _bump_desired(db, inst)   # node applies the new automation on its next reconcile
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="m365.settings_updated",
+                 category="admin", resource=inst.id,
+                 detail={"auto_map": cfg.get("auto_map"), "auto_create": cfg.get("auto_create")})
+    logger.info("m365 settings (instance=%s): auto_map=%s auto_create=%s",
+                inst.id, cfg.get("auto_map"), cfg.get("auto_create"))
+    return {"auto_map": bool(cfg.get("auto_map")), "auto_create": bool(cfg.get("auto_create"))}
+
+
+# --------------------------------------------------------------------------- #
 # Identities + mapping decisions                                              #
 # --------------------------------------------------------------------------- #
 @router.get("/identities")
@@ -448,6 +498,7 @@ def identity_decisions(body: IdentityDecisions, instance_id: str = "",
     inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
+    tenant = db.get(Tenant, principal.tenant_id)
     results = []
     for d in body.decisions:
         e = db.get(m.ExternalIdentity, d.external_identity_id)
@@ -485,10 +536,20 @@ def identity_decisions(body: IdentityDecisions, instance_id: str = "",
             e.state = "excluded"
             e.in_scope = False
         elif d.action == "create_user":
-            # Account creation is a distinct, audited flow; record intent as a
-            # candidate for the identity-admin to complete (no silent seat grant).
-            binding.status = "suggested"
-            e.state = "new_user_candidate"
+            # Provision a real Arkive member (member + vault + keys) for this
+            # identity and map it. Runs on the control plane (vault keys live here).
+            from . import provisioning
+            member = provisioning.provision_member(
+                db, tenant, e.email or e.upn, e.display_name) if tenant else None
+            if member is None:
+                results.append({"id": e.id, "ok": False, "error": "could not create member"})
+                continue
+            binding.user_id = member.id
+            binding.protected_only = False
+            binding.status = "mapped"
+            binding.mapping_method = "manual_created"
+            binding.approved_by = principal.user_id
+            e.state = "mapped"
         else:
             results.append({"id": e.id, "ok": False, "error": "unknown action"})
             continue
@@ -510,6 +571,42 @@ def identity_decisions(body: IdentityDecisions, instance_id: str = "",
                  category="admin", resource=inst.id,
                  detail={"count": len(body.decisions)})
     return {"results": results}
+
+
+@router.post("/identities/accept-suggestions")
+def accept_suggestions(instance_id: str = "",
+                       principal: security.Principal = Depends(require_m365),
+                       db: Session = Depends(get_db)):
+    """Accept every auto-suggested match at once (bulk map). Only suggested
+    bindings that already carry a matched user are promoted to 'mapped'."""
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    binds = (db.query(m.ExternalIdentityBinding)
+             .filter(m.ExternalIdentityBinding.integration_instance_id == inst.id,
+                     m.ExternalIdentityBinding.status == "suggested",
+                     m.ExternalIdentityBinding.user_id.isnot(None)).all())
+    accepted = 0
+    for b in binds:
+        b.status = "mapped"
+        b.approved_by = principal.user_id
+        b.updated_at = _now()
+        e = db.get(m.ExternalIdentity, b.external_identity_id)
+        if e is not None:
+            e.state = "mapped"
+        accepted += 1
+    if not _node_hosted(db, principal.tenant_id):
+        try:
+            from . import collect
+            collect.provision_sources(db, inst)
+        except Exception:  # noqa: BLE001
+            logger.exception("m365 provision_sources after accept failed (instance=%s)", inst.id)
+    else:
+        _bump_desired(db, inst)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="m365.suggestions_accepted",
+                 category="admin", resource=inst.id, detail={"accepted": accepted})
+    return {"accepted": accepted}
 
 
 # --------------------------------------------------------------------------- #
@@ -655,7 +752,8 @@ def discover(instance_id: str = "",
     vals = platform_config.integration_values(INTEGRATION_TYPE)
     res = discovery.run_discovery(db, inst,
                                   client_id=(vals.get("client_id") or "").strip(),
-                                  client_secret=(vals.get("client_secret") or "").strip())
+                                  client_secret=(vals.get("client_secret") or "").strip(),
+                                  can_provision=True)
     audit.record(db, actor=principal.user_id, action="m365.discovery_run",
                  category="admin", resource=inst.id,
                  detail={"ok": res.get("ok"), "discovered": res.get("discovered"),

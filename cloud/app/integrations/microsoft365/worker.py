@@ -43,7 +43,7 @@ def run_due(db) -> int:
     from ... import platform_config
     from ...config import get_settings
     from ...models import IntegrationInstance, Tenant
-    from . import collect, discovery, graph, models as m
+    from . import collect, discovery, graph, models as m, provisioning
 
     vals = platform_config.integration_values(INTEGRATION_TYPE)
     client_id = (vals.get("client_id") or "").strip()
@@ -60,6 +60,14 @@ def run_due(db) -> int:
         # reconciles the tenants it hosts itself; the node processes its own local DB.
         tenant = db.get(Tenant, inst.tenant_id)
         if role == "control-plane" and tenant is not None and tenant.node_id:
+            # Member auto-map/auto-create is a CP concern (vault keys live here), so
+            # the CP reconciles bindings from the identities the node pushed back.
+            cfg = inst.config or {}
+            if cfg.get("auto_map") or cfg.get("auto_create"):
+                try:
+                    provisioning.reconcile_bindings(db, inst, can_provision=True)
+                except Exception:  # noqa: BLE001
+                    logger.exception("m365 CP binding reconcile failed (instance=%s)", inst.id)
             continue
         cred = (db.query(m.ManagedCredentialRef)
                 .filter(m.ManagedCredentialRef.integration_instance_id == inst.id).first())
@@ -72,7 +80,8 @@ def run_due(db) -> int:
                 ds.status = "applying"
                 db.commit()
             res = discovery.run_discovery(db, inst, client_id=client_id,
-                                          client_secret=client_secret)
+                                          client_secret=client_secret,
+                                          can_provision=(role == "control-plane"))
             ran += 1
             if res.get("ok"):
                 if ds is not None:

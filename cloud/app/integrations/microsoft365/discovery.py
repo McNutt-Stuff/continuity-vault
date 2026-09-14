@@ -65,12 +65,14 @@ def _in_scope(ident: "m.ExternalIdentity", rules: dict) -> tuple[bool, str]:
     return (bool(ident.account_enabled), "default" if ident.account_enabled else "account_disabled")
 
 
-def run_discovery(db: Session, inst, *, client_id: str, client_secret: str) -> dict:
+def run_discovery(db: Session, inst, *, client_id: str, client_secret: str,
+                  can_provision: bool = False) -> dict:
     """Discover Entra users for one connected instance into ExternalIdentity.
 
     Returns a result dict {ok, discovered, in_scope, error?, http?}. Never raises —
     the worker records the outcome. Requires granted admin consent + the platform
-    Entra app credentials (from the linked ConfigObject)."""
+    Entra app credentials (from the linked ConfigObject). ``can_provision`` allows
+    auto-creating Arkive members (control plane only)."""
     cred = (db.query(m.ManagedCredentialRef)
             .filter(m.ManagedCredentialRef.integration_instance_id == inst.id).first())
     if cred is None or cred.consent_state != "granted" or not cred.microsoft_tenant_id:
@@ -167,6 +169,11 @@ def run_discovery(db: Session, inst, *, client_id: str, client_secret: str) -> d
     inst.last_error = None
     inst.last_stats = {"identities": discovered, "in_scope": in_scope_n}
     db.commit()
-    logger.info("m365 discovery ok (instance=%s): %d identities, %d in scope",
-                inst.id, discovered, in_scope_n)
-    return {"ok": True, "discovered": discovered, "in_scope": in_scope_n}
+    # Auto-suggest/map/create bindings for the in-scope identities.
+    from . import provisioning
+    recon = provisioning.reconcile_bindings(db, inst, can_provision=can_provision)
+    logger.info("m365 discovery ok (instance=%s): %d identities, %d in scope "
+                "(suggested=%d mapped=%d created=%d)",
+                inst.id, discovered, in_scope_n, recon["suggested"], recon["mapped"],
+                recon["created"])
+    return {"ok": True, "discovered": discovered, "in_scope": in_scope_n, **recon}
