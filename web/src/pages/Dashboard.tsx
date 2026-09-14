@@ -10,10 +10,12 @@ import { PhotoPickerModal } from "../components/PhotoPicker";
 
 interface SourceType { type: string; displayName: string; icon: string; color: string; count: number; }
 interface ObjectBucket { key: string; label: string; icon: string; color: string; count: number; }
+interface MemberUsage { user_id: string; name: string; email: string; objects: number; bytes: number; }
 interface StorageDest { id: string; label: string; kind: string; icon: string; provider?: string; }
 interface Overview {
   sources: { count: number; types: SourceType[] };
   objects: { total: number; breakdown: ObjectBucket[]; by_source: ObjectBucket[] };
+  by_user?: MemberUsage[];
   activity_24h?: {
     objects: number; bytes: number; source_count: number;
     sources: { key: string; label: string; icon: string; color: string; objects: number; bytes: number }[];
@@ -316,6 +318,46 @@ export default function Dashboard() {
           </div>
         </Card>
       </div>
+
+      {/* --- Data by member (org scope only) ------------------------------ */}
+      {scope === "org" && (ov?.by_user?.length ?? 0) > 0 && (
+        <Card style={{ marginTop: 16 }}>
+          <div className="spread" style={{ marginBottom: 10 }}>
+            <h2>Data by member</h2>
+            <span className="faint" style={{ fontSize: 11 }}>
+              every member + org-shared managed sources
+            </span>
+          </div>
+          <div className="stack" style={{ gap: 0 }}>
+            {ov!.by_user!.map((m) => {
+              const max = ov!.by_user!.reduce((s, x) => Math.max(s, x.objects), 0) || 1;
+              const org = !m.user_id;
+              return (
+                <div key={m.user_id || "org-shared"} className="row"
+                     style={{ gap: 10, alignItems: "center", padding: "7px 0",
+                              borderBottom: "1px solid var(--border-soft)" }}>
+                  <div className="result-icon" style={{ width: 28, height: 28, background: "var(--inset)" }}>
+                    <Icon name={org ? "grid" : "user"} size={14} />
+                  </div>
+                  <div style={{ minWidth: 180 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{m.name}</div>
+                    {m.email && <div className="faint" style={{ fontSize: 11 }}>{m.email}</div>}
+                  </div>
+                  <div className="flex1" style={{ maxWidth: 260 }}>
+                    <div style={{ height: 7, borderRadius: 999, background: "var(--inset)", overflow: "hidden" }}>
+                      <div style={{ width: `${Math.max(3, (m.objects / max) * 100)}%`, height: "100%",
+                                    background: org ? "#7a5cff" : "linear-gradient(90deg,#4f7cff,#35d0a5)" }} />
+                    </div>
+                  </div>
+                  <div className="faint" style={{ fontSize: 11.5, textAlign: "right", minWidth: 150 }}>
+                    {m.objects.toLocaleString()} item{m.objects === 1 ? "" : "s"} · {bytes(m.bytes)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
 
       {/* --- Second row: what's protected + protection posture ------------ */}
       <div className="grid grid-2" style={{ marginTop: 16 }}>

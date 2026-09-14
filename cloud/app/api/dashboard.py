@@ -26,6 +26,7 @@ from ..models import (
     SearchDocument,
     SnapshotReceipt,
     Tenant,
+    User,
     Vault,
 )
 
@@ -264,10 +265,45 @@ def overview(scope: str = "me",
                                        "objects": n, "bytes": b})
         activity_by_source.sort(key=lambda x: -x["objects"])
 
+    # --- Objects grouped by organization member (org scope only) -------------
+    # An org admin viewing the whole organization sees how protected data is
+    # distributed across members. Managed-source vaults with no individual owner
+    # (SharePoint/Teams and other org-shared workloads) roll up under a single
+    # "Organization (shared)" bucket.
+    by_user: list = []
+    if eff_scope == "org" and vault_ids:
+        vault_owner = {v.id: v.owner_user_id for v in vaults}
+        owner_ids = {oid for oid in vault_owner.values() if oid}
+        members = {u.id: u for u in db.query(User)
+                   .filter(User.id.in_(owner_ids)).all()} if owner_ids else {}
+        agg: dict[str, list[int]] = {}
+        for vid, cnt, sz in (
+                db.query(SearchDocument.vault_id, func.count(),
+                         func.coalesce(func.sum(SearchDocument.size_bytes), 0))
+                .filter(SearchDocument.tenant_id == tenant.id,
+                        SearchDocument.vault_id.in_(vault_ids),
+                        SearchDocument.is_current.is_(True))
+                .group_by(SearchDocument.vault_id).all()):
+            owner = vault_owner.get(vid) or ""
+            e = agg.setdefault(owner, [0, 0])
+            e[0] += int(cnt)
+            e[1] += int(sz or 0)
+        for owner, (objs, byts) in agg.items():
+            u = members.get(owner)
+            if u is not None:
+                name = (getattr(u, "full_name", None) or u.display_name or u.email)
+                email = u.email
+            else:
+                name, email = "Organization (shared)", ""
+            by_user.append({"user_id": owner, "name": name, "email": email,
+                            "objects": objs, "bytes": byts})
+        by_user.sort(key=lambda x: (-x["objects"], x["name"].lower()))
+
     return {
         "sources": {"count": sum(type_counts.values()), "types": source_types},
         "objects": {"total": object_total, "breakdown": object_breakdown,
                     "by_source": object_by_source},
+        "by_user": by_user,
         "activity_24h": {
             "objects": activity_objects, "bytes": activity_bytes,
             "source_count": len(activity_by_source), "sources": activity_by_source,
