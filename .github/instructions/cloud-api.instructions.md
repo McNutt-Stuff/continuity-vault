@@ -20,5 +20,18 @@ description: "Adding or changing FastAPI routers on the control plane / nodes."
   on the node.
 - **Audit destructive/security actions:** `audit.record(db, actor=..., action="noun.verb", tenant_id=...,
   category="security", severity="warning", detail={...})`. Vocabulary: severity info|notice|warning|critical.
+- **ALWAYS log failures so they reach Platform Logs — never a silent "something went wrong".** Every
+  unhandled exception is already caught by the global handler in `main.py` (`@app.exception_handler(Exception)`)
+  which logs `cv.api` ERROR + traceback to the unified store and returns `{detail, ref}` to the client. But
+  do NOT rely on it as the only net:
+  - When you `try/except` in a route/worker, LOG the failure via a `cv.*` logger (`logging.getLogger("cv.<area>")`)
+    at `warning`/`error` (with `logger.exception(...)` to capture the traceback) — a bare `except: pass` or
+    `except: return []` hides the problem and is a bug.
+  - RAISE `HTTPException(status, "<actionable message>")` for expected 4xx (validation, missing consent, plan
+    gate) so the client shows a real reason. For provider/integration failures, include the HTTP status +
+    provider error code/reason + a bounded snippet (see connectors.instructions.md "Logging & error detail").
+  - For tenant-attributed failures also `audit.record(...)` (dual-writes a LogEntry) so it shows per-tenant.
+  - Frontend `notify({...})` MUST pass a non-empty `message` (fallback string) — an empty message renders the
+    bare "Something went wrong" dialog. Prefer `(e as {message?:string}).message || "Couldn't <do X>"`.
 - Use naive-UTC time helpers (`datetime.now(timezone.utc).replace(tzinfo=None)`) for any DateTime compare.
 - After editing: `python3 -c "import ast; ast.parse(open('<file>').read())"` and `get_errors`.

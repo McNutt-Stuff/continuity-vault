@@ -33,6 +33,12 @@ client/server-encrypted; storage holds only ciphertext.
   filters, default warn/error, tenant/node/appliance scoping, drill-down from node/appliance cards). When you
   add a new component or failure path, make sure its logs reach this store (log via a `cv.*` logger, or emit
   via `logsink.emit(...)`), and record `Node.last_log_push_at` visibility. Prune keeps info/debug 7d, warn+ 30d.
+  **Never a silent failure:** any UNHANDLED API exception is caught by the global handler in `main.py`
+  (`@app.exception_handler(Exception)`), which logs `cv.api` ERROR + traceback to Platform Logs and returns
+  `{detail, ref}` to the client (the `ref` ties the toast to the log line). Don't rely on it as the only net —
+  `try/except` blocks must still `logger.exception(...)` and raise an actionable `HTTPException`; a bare
+  `except: pass`/`return []` is a bug. Frontend `notify(...)` must always pass a non-empty message (else the UI
+  shows a bare "Something went wrong").
 - **Granular error detail is a STANDARD for sources/connectors/integrations.** Every source/connector/
   integration failure must be triageable from the admin **Platform Logs** WITHOUT shell access: record the
   HTTP status code, the provider's error code/reason (`invalid_grant`, `quotaExceeded`, …), a bounded

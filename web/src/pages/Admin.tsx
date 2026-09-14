@@ -6879,12 +6879,12 @@ function IntegrationsAdmin() {
       setFlash(`${r.display_name} ${r.enabled ? "disabled" : "enabled"}`);
       setTimeout(() => setFlash(""), 1800);
       await load();
-    } catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+    } catch (e) { notify({ message: (e as Error).message || "Couldn't update the integration", tone: "danger" }); }
   }
 
   async function setCred(r: any, config_object_id: string | null) {
     try { await api.put(`/admin/integration-configs/${r.integration_type}`, { config_object_id }); await load(); }
-    catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+    catch (e) { notify({ message: (e as Error).message || "Couldn't link the credential", tone: "danger" }); }
   }
 
   async function newCred(r: any) {
@@ -6907,7 +6907,7 @@ function IntegrationsAdmin() {
       await api.put(`/admin/integration-configs/${r.integration_type}`, { config_object_id: obj.id });
       await load();
       setFlash("Credentials saved"); setTimeout(() => setFlash(""), 1800);
-    } catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+    } catch (e) { notify({ message: (e as Error).message || "Couldn't save credentials", tone: "danger" }); }
   }
 
   return (

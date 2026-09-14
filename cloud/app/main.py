@@ -72,6 +72,33 @@ app.middleware("http")(node_proxy.middleware)
 from . import activity_logger  # noqa: E402
 app.middleware("http")(activity_logger.middleware)
 
+# Any UNHANDLED exception in an API route is logged to the unified log store
+# (Platform Logs, via the cv.* logger) with a short reference + traceback, and the
+# reference is returned to the client — so a 500 is never a silent "something went
+# wrong". Intentional HTTPExceptions (4xx) keep their own detail and aren't caught.
+import logging as _logging  # noqa: E402
+import traceback as _traceback  # noqa: E402
+import uuid as _uuid  # noqa: E402
+from fastapi import Request as _Request  # noqa: E402
+from fastapi.responses import JSONResponse as _JSONResponse  # noqa: E402
+
+_api_logger = _logging.getLogger("cv.api")
+
+
+@app.exception_handler(Exception)
+async def _log_unhandled(request: _Request, exc: Exception):  # noqa: ANN001
+    ref = _uuid.uuid4().hex[:8]
+    try:
+        _api_logger.error("unhandled API error [%s] %s %s: %s: %s\n%s",
+                          ref, request.method, request.url.path,
+                          type(exc).__name__, str(exc)[:400], _traceback.format_exc())
+    except Exception:  # noqa: BLE001 — logging must never mask the original error
+        pass
+    return _JSONResponse(
+        status_code=500,
+        content={"detail": f"Something went wrong (ref {ref}). The error was logged.",
+                 "ref": ref})
+
 API = "/api"
 app.include_router(auth.router, prefix=API)
 app.include_router(signup.router, prefix=API)
