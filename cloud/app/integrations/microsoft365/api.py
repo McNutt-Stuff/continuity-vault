@@ -582,34 +582,40 @@ def disconnect(instance_id: str = "",
 def remove(instance_id: str = "",
            principal: security.Principal = Depends(require_m365),
            db: Session = Depends(get_db)):
-    """Delete a not-yet-protecting integration instance so it can be re-added
-    cleanly. Refuses if the integration is actively protecting data (managed
-    sources exist) — use disconnect + purge for that. Safe for the common case of
-    a half-finished setup (connected but consent never completed)."""
+    """Purge a Microsoft 365 integration instance — stalled, failed OR active.
+    Deletes the instance and all its control-plane rows (credential, desired
+    state, scope, identities, bindings, managed sources) so it disappears from the
+    portal and the node stops collecting for it. Protected recovery points are
+    retained under their retention policy (a data purge is a separate action)."""
     inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         return {"ok": True, "note": "Nothing to remove."}
+    node_hosted = _node_hosted(db, principal.tenant_id)
     sources = (db.query(m.ManagedSource)
                .filter(m.ManagedSource.integration_instance_id == inst.id).count())
-    if sources > 0:
-        logger.warning("m365 remove refused: instance=%s still has %d managed source(s)",
-                       inst.id, sources)
-        raise HTTPException(
-            409, "This integration is protecting data. Disconnect and purge its "
-                 "protected data before removing it.")
+    # For a node-hosted tenant, disable + bump desired state first so the node
+    # tears down collection on its next reconcile, THEN delete the CP rows.
+    if node_hosted:
+        inst.enabled = False
+        try:
+            _bump_desired(db, inst)
+        except Exception:  # noqa: BLE001 — never block removal on a bump failure
+            logger.warning("m365 remove: desired-state bump failed for instance=%s", inst.id)
     # Delete the child rows first (no cascade guarantee across the m365 tables).
-    for model in (m.ExternalIdentityBinding, m.ExternalIdentity, m.IdentityScopePolicy,
-                  m.IntegrationDesiredState, m.ManagedCredentialRef):
+    for model in (m.ManagedSource, m.ExternalIdentityBinding, m.ExternalIdentity,
+                  m.IdentityScopePolicy, m.IntegrationDesiredState, m.ManagedCredentialRef):
         db.query(model).filter(
             model.integration_instance_id == inst.id).delete(synchronize_session=False)
     inst_id = inst.id
     db.delete(inst)
     db.commit()
     audit.record(db, actor=principal.user_id, action="m365.removed",
-                 category="admin", severity="warning", resource=inst_id)
-    logger.info("m365 remove: deleted half-configured instance=%s (tenant=%s)",
-                inst_id, principal.tenant_id)
-    return {"ok": True, "note": "Removed. You can add Microsoft 365 again from scratch."}
+                 category="admin", severity="warning", resource=inst_id,
+                 detail={"managed_sources": sources, "node_hosted": node_hosted})
+    logger.info("m365 remove: purged instance=%s (%d managed source(s), node_hosted=%s, tenant=%s)",
+                inst_id, sources, node_hosted, principal.tenant_id)
+    return {"ok": True, "note": "Removed. Any protected recovery points are retained "
+                                "under your retention policy."}
 
 
 

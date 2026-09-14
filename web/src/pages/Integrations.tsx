@@ -506,15 +506,41 @@ function ShadowDetailModal({ iid, s, onClose }: { iid: string; s: ShadowSource; 
 function InstanceCard({ inst, spec, onOpen, onChanged }: {
   inst: Instance; spec?: Spec; onOpen: () => void; onChanged: () => void;
 }) {
-  void spec;
   const [resuming, setResuming] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const st = inst.last_stats || {};
   const provisioning = !!inst.provision_state && !["idle", "done"].includes(inst.provision_state);
+  // Managed/workspace integrations (e.g. Microsoft 365) resume setup in their own
+  // workspace — NOT the appliance ProvisioningModal.
+  const isWorkspace = inst.integration_type === "microsoft365" || !!spec?.workspace;
   const h = HEALTH[inst.health] || HEALTH.pending;
+  const clickable = !provisioning || isWorkspace;
+
+  async function removeInst() {
+    const ok = await confirmDialog({
+      title: `Remove ${inst.label}?`,
+      message: "This purges the integration configuration and stops collection. Any "
+        + "protected recovery points are retained under your retention policy.",
+      confirmLabel: "Remove", tone: "danger",
+    });
+    if (!ok) return;
+    setRemoving(true);
+    try {
+      if (inst.integration_type === "microsoft365")
+        await api.post(`/integrations/microsoft365/remove?instance_id=${encodeURIComponent(inst.id)}`, {});
+      else
+        await api.del(`/integrations/${inst.id}`);
+      notify({ message: `${inst.label} removed`, tone: "ok" });
+      onChanged();
+    } catch (e) {
+      notify({ message: (e as { message?: string }).message || "Couldn't remove the integration", tone: "danger" });
+    } finally { setRemoving(false); }
+  }
+
   return (
     <Card className="insight-card">
-      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 8, cursor: provisioning ? "default" : "pointer" }}
-           onClick={() => { if (!provisioning) onOpen(); }}>
+      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 8, cursor: clickable ? "pointer" : "default" }}
+           onClick={() => { if (clickable) onOpen(); }}>
         <div className="insight-card-ic" style={{ background: "#0559c91e", color: "#0559c9" }}>
           <SourceIcon type={inst.integration_type} fallback="activity" size={20} />
         </div>
@@ -533,7 +559,7 @@ function InstanceCard({ inst, spec, onOpen, onChanged }: {
           <span style={{ fontSize: 12.5, flex: 1 }}>
             {inst.provision_state === "error" ? "Setup didn't finish" : "Setup in progress"}
           </span>
-          <button className="btn primary sm" onClick={() => setResuming(true)}>Continue setup</button>
+          <button className="btn primary sm" onClick={() => { if (isWorkspace) onOpen(); else setResuming(true); }}>Continue setup</button>
         </div>
       )}
       {inst.last_error && !provisioning && (
@@ -550,9 +576,13 @@ function InstanceCard({ inst, spec, onOpen, onChanged }: {
       <div className="row" style={{ gap: 8, marginTop: "auto" }}>
         {!provisioning && (
           <button className="btn sm" onClick={onOpen}>
-            <Icon name="search" size={13} /> Details
+            <Icon name={isWorkspace ? "link" : "search"} size={13} /> {isWorkspace ? "Open" : "Details"}
           </button>
         )}
+        <button className="btn sm ghost" disabled={removing} onClick={removeInst}
+                style={{ marginLeft: "auto", color: "var(--danger-c,#f2545b)" }}>
+          <Icon name="trash" size={13} /> {removing ? "Removing…" : "Remove"}
+        </button>
       </div>
       {resuming && (
         <ProvisioningModal instanceId={inst.id} label={inst.label}
