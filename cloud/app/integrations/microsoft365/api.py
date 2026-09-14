@@ -203,6 +203,7 @@ def oauth_start(principal: security.Principal = Depends(require_m365),
     redirect = (vals.get("redirect_uri") or "").strip() or _default_redirect()
     consent_url = ("https://login.microsoftonline.com/organizations/v2.0/adminconsent?"
                    + urlencode({"client_id": client_id, "state": state,
+                                "scope": "https://graph.microsoft.com/.default",
                                 "redirect_uri": redirect}))
     return {"consent_configured": True, "consent_url": consent_url, "state": state,
             "redirect_uri": redirect}
