@@ -153,6 +153,10 @@ def _instance_health(inst: IntegrationInstance) -> str:
     stale_after = max(30, int(inst.poll_interval_minutes or 30) * 3)
     if (_now() - ref).total_seconds() > stale_after * 60:
         return "stale"
+    # Managed identity integrations (Microsoft 365) don't collect "clients"; they
+    # discover identities. A successful run that found identities is healthy.
+    if inst.integration_type == "microsoft365":
+        return "ok" if int((inst.last_stats or {}).get("identities", 0) or 0) > 0 else "empty"
     # Succeeding but collecting NOTHING: an established integration that reports 0
     # devices is silently broken (controller/site/credentials), not healthy.
     stats = inst.last_stats or {}

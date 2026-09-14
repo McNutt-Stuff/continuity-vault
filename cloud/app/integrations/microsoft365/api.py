@@ -123,6 +123,11 @@ def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
     sources = db.query(m.ManagedSource).filter(
         m.ManagedSource.integration_instance_id == inst.id).count()
     cfg = inst.config or {}
+    cmeta = (cred.meta if cred else {}) or {}
+    consent_state = (cred.consent_state if cred else "pending")
+    # Consent is recorded but the app-only token lacks the Application roles, so
+    # collection/discovery 403s until an admin (re-)grants consent for the perms.
+    needs_consent = bool(consent_state == "granted" and cmeta.get("needs_consent"))
     return {
         "connected": True,
         "instance_id": inst.id,
@@ -130,7 +135,7 @@ def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
         "status": inst.status,
         "assigned_node_id": inst.node_id,
         "microsoft_tenant_id": (cred.microsoft_tenant_id if cred else ""),
-        "consent_state": (cred.consent_state if cred else "pending"),
+        "consent_state": consent_state,
         "scopes_granted": (cred.scopes_granted if cred else []),
         "identities_discovered": ext_q.count(),
         "identities_mapped": mapped,
@@ -140,6 +145,10 @@ def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
         "auto_create": bool(cfg.get("auto_create")),
         "collect_enabled": bool(cfg.get("collect_enabled")),
         "last_run_at": inst.last_run_at.isoformat() if inst.last_run_at else None,
+        "last_error": inst.last_error or None,
+        "permissions_ok": bool(cmeta.get("permissions_ok")) if cmeta.get("permissions_ok") is not None or needs_consent else None,
+        "needs_consent": needs_consent,
+        "last_checked_at": cmeta.get("last_checked_at"),
     }
 
 
@@ -163,7 +172,22 @@ def list_instances(principal: security.Principal = Depends(require_m365),
             .filter(IntegrationInstance.tenant_id == principal.tenant_id,
                     IntegrationInstance.integration_type == INTEGRATION_TYPE)
             .order_by(IntegrationInstance.created_at.desc()).all())
-    return {"instances": [_instance_view(i) for i in rows]}
+    # Overlay the managed-integration status so the card shows live M365 data
+    # (consent + identities + sources), not the generic UniFi client/app stats.
+    out = []
+    for i in rows:
+        view = _instance_view(i)
+        sv = _status_view(db, i)
+        view["m365"] = {
+            "consent_state": sv.get("consent_state"),
+            "needs_consent": sv.get("needs_consent"),
+            "identities_discovered": sv.get("identities_discovered"),
+            "identities_mapped": sv.get("identities_mapped"),
+            "managed_sources": sv.get("managed_sources"),
+            "collect_enabled": sv.get("collect_enabled"),
+        }
+        out.append(view)
+    return {"instances": out}
 
 
 # --------------------------------------------------------------------------- #

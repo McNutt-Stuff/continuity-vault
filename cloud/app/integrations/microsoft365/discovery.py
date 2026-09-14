@@ -158,6 +158,14 @@ def run_discovery(db: Session, inst, *, client_id: str, client_secret: str,
         else:
             logger.warning("m365 discovery failed (instance=%s): %s", inst.id, e)
         inst.last_error = msg
+        meta = dict(cred.meta or {})
+        meta["last_checked_at"] = _now().isoformat()
+        if e.status == 403 and not (graph.token_claims(token).get("roles") or []):
+            # Consent recorded but the Application permissions never took effect —
+            # the admin must (re-)grant consent for the app roles.
+            meta["permissions_ok"] = False
+            meta["needs_consent"] = True
+        cred.meta = meta
         db.commit()
         return {"ok": False, "error": msg, "http": e.status}
     except Exception as e:  # noqa: BLE001
@@ -169,6 +177,9 @@ def run_discovery(db: Session, inst, *, client_id: str, client_secret: str,
     inst.last_success_at = _now()
     inst.last_error = None
     inst.last_stats = {"identities": discovered, "in_scope": in_scope_n}
+    # Permissions verified working — clear any stale "needs consent" flag.
+    cred.meta = {**(cred.meta or {}), "permissions_ok": True,
+                 "needs_consent": False, "last_checked_at": _now().isoformat()}
     db.commit()
     # Auto-suggest/map/create bindings for the in-scope identities.
     from . import provisioning

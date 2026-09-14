@@ -28,6 +28,8 @@ interface Instance {
   provision_state?: string; provision_message?: string | null;
   last_stats: { clients?: number; apps?: number; bytes_seen?: number; note?: string;
     diag?: { site?: string; auth_mode?: string; devices_http?: number | string | null; traffic_http?: number | string | null } };
+  m365?: { consent_state?: string; needs_consent?: boolean; identities_discovered?: number;
+    identities_mapped?: number; managed_sources?: number; collect_enabled?: boolean };
 }
 interface ApplianceRef { id: string; name: string; state: string; online: boolean; }
 interface ListResp { available: Spec[]; instances: Instance[]; appliances: ApplianceRef[]; plan: string; }
@@ -570,11 +572,26 @@ function InstanceCard({ inst, spec, onOpen, onChanged }: {
       {inst.last_error && !provisioning && (
         <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 6 }}>{inst.last_error}</div>
       )}
-      <div className="row" style={{ gap: 16, fontSize: 12.5, marginBottom: 6 }}>
-        <span className="faint">Clients <b style={{ color: "var(--text)" }}>{st.clients ?? "—"}</b></span>
-        <span className="faint">Apps <b style={{ color: "var(--text)" }}>{st.apps ?? "—"}</b></span>
-        <span className="faint">Seen <b style={{ color: "var(--text)" }}>{st.bytes_seen ? bytes(st.bytes_seen) : "—"}</b></span>
-      </div>
+      {inst.integration_type === "microsoft365" ? (
+        <>
+          {inst.m365?.needs_consent && !inst.last_error && (
+            <div style={{ color: "var(--warn,#f5a623)", fontSize: 12, marginBottom: 6 }}>
+              More admin consent needed — open to re-grant.
+            </div>
+          )}
+          <div className="row" style={{ gap: 16, fontSize: 12.5, marginBottom: 6 }}>
+            <span className="faint">Identities <b style={{ color: "var(--text)" }}>{inst.m365?.identities_discovered ?? "—"}</b></span>
+            <span className="faint">Mapped <b style={{ color: "var(--text)" }}>{inst.m365?.identities_mapped ?? "—"}</b></span>
+            <span className="faint">Sources <b style={{ color: "var(--text)" }}>{inst.m365?.managed_sources ?? "—"}</b></span>
+          </div>
+        </>
+      ) : (
+        <div className="row" style={{ gap: 16, fontSize: 12.5, marginBottom: 6 }}>
+          <span className="faint">Clients <b style={{ color: "var(--text)" }}>{st.clients ?? "—"}</b></span>
+          <span className="faint">Apps <b style={{ color: "var(--text)" }}>{st.apps ?? "—"}</b></span>
+          <span className="faint">Seen <b style={{ color: "var(--text)" }}>{st.bytes_seen ? bytes(st.bytes_seen) : "—"}</b></span>
+        </div>
+      )}
       <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
         {inst.last_run_at ? `Last checked ${fmtAgo(inst.last_run_at)}` : "Not collected yet"}
       </div>
@@ -1609,6 +1626,8 @@ interface M365Status {
   identities_discovered?: number; identities_mapped?: number; identities_suggested?: number;
   managed_sources?: number; auto_map?: boolean; auto_create?: boolean;
   last_run_at?: string | null;
+  last_error?: string | null; permissions_ok?: boolean | null;
+  needs_consent?: boolean; last_checked_at?: string | null;
 }
 interface M365ScopeRules { domains?: string[]; includes?: string[]; excludes?: string[]; include_guests?: boolean; }
 interface M365Profile {
@@ -1665,7 +1684,11 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
 
   async function loadStatus() {
     if (!activeId) { setLoading(false); return; }  // fresh wizard — nothing to load yet
-    try { setStatus(await api.get<M365Status>(`/integrations/microsoft365?${iq}`)); }
+    try {
+      const s = await api.get<M365Status>(`/integrations/microsoft365?${iq}`);
+      setStatus(s);
+      if (s.microsoft_tenant_id && !tenantInput) setTenantInput(s.microsoft_tenant_id);
+    }
     catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't load Microsoft 365", tone: "danger" }); }
     finally { setLoading(false); }
   }
@@ -1825,6 +1848,11 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
         <button className="btn ghost sm" onClick={onBack}>← Integrations</button>
         <div className="row" style={{ gap: 8, alignItems: "center" }}>
           {consent === "granted" && (
+            <button className="btn sm ghost" disabled={busy === "discover"} onClick={discover}>
+              <Icon name="repeat" size={13} /> {busy === "discover" ? "Checking…" : "Re-check"}
+            </button>
+          )}
+          {consent === "granted" && (
             <button className="btn sm primary" disabled={busy === "collect"} onClick={collectNow}>
               <Icon name="cloud" size={13} /> {busy === "collect" ? "Backing up…" : "Back up now"}
             </button>
@@ -1833,6 +1861,49 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
           <Pill tone="info">Managed</Pill>
         </div>
       </div>
+
+      {/* Consent recorded but the app-only token lacks the granted Application
+          roles (403) — surface the exact remediation and a re-consent action. */}
+      {consent === "granted" && (status?.needs_consent || status?.last_error) && (
+        <Card style={{ marginBottom: 14, borderColor: "var(--warn,#f5a623)" }}>
+          <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
+            <Icon name="alert" size={18} />
+            <div className="flex1">
+              <div style={{ fontWeight: 700, marginBottom: 2 }}>
+                {status?.needs_consent ? "More Microsoft consent is needed" : "Microsoft 365 needs attention"}
+              </div>
+              <div className="faint" style={{ fontSize: 12.5 }}>
+                {status?.last_error
+                  || "The app-only token doesn't carry the granted Application permissions yet. "
+                     + "Re-grant admin consent in Microsoft, then re-check."}
+              </div>
+              <div className="row" style={{ gap: 8, marginTop: 10 }}>
+                <button className="btn sm primary" disabled={busy === "consent"} onClick={startConsent}>
+                  <Icon name="link" size={13} /> {busy === "consent" ? "Preparing…" : "Re-request admin consent"}
+                </button>
+                <button className="btn sm" disabled={busy === "discover"} onClick={discover}>
+                  <Icon name="repeat" size={13} /> {busy === "discover" ? "Checking…" : "Re-check permissions"}
+                </button>
+              </div>
+              {consentState && consent === "granted" && (
+                <div className="stack" style={{ gap: 8, marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
+                  <div className="faint" style={{ fontSize: 12 }}>
+                    A Microsoft consent window opened. After the administrator approves, confirm below.
+                  </div>
+                  <div className="row" style={{ gap: 8 }}>
+                    <input className="input" style={{ maxWidth: 320 }} placeholder="Directory (tenant) ID"
+                           value={tenantInput} onChange={(e) => setTenantInput(e.target.value)} />
+                    <button className="btn primary sm" disabled={busy === "consent" || !tenantInput.trim()} onClick={confirmConsent}>
+                      {busy === "consent" ? "Confirming…" : "Confirm consent granted"}
+                    </button>
+                    {consentState.url && <a className="btn ghost sm" href={consentState.url} target="_blank" rel="noreferrer">Reopen consent</a>}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
 
       <Card style={{ marginBottom: 14 }}>
         <div className="row" style={{ gap: 12, alignItems: "center" }}>
