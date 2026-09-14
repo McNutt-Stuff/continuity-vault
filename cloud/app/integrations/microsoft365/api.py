@@ -516,6 +516,7 @@ def m365_set_profile(body: ProfileBody, instance_id: str = "",
     else:
         try:
             collect.provision_sources(db, inst)
+            _provision_org_now(db, inst)   # discover SharePoint/Teams now
         except Exception:  # noqa: BLE001
             logger.exception("m365 provision after profile update failed (instance=%s)", inst.id)
     prof = collect.profile(inst)
@@ -884,6 +885,7 @@ def set_collection(body: CollectionToggle, instance_id: str = "",
     if body.enabled and not _node_hosted(db, principal.tenant_id):
         from . import collect
         created = collect.provision_sources(db, inst)
+        _provision_org_now(db, inst)   # SharePoint/Teams discovery so they appear now
     if _node_hosted(db, principal.tenant_id):
         _bump_desired(db, inst)
     db.commit()
@@ -891,6 +893,93 @@ def set_collection(body: CollectionToggle, instance_id: str = "",
                  category="admin", severity="notice", resource=inst.id,
                  detail={"enabled": body.enabled, "sources_provisioned": created})
     return {"ok": True, "collect_enabled": body.enabled, "sources_provisioned": created}
+
+
+def _app_token(db: Session, inst) -> str:
+    """Mint a fresh app-only Graph token for this instance, or "" if unavailable."""
+    from ... import platform_config
+    from . import graph
+    vals = platform_config.integration_values(INTEGRATION_TYPE)
+    cid = (vals.get("client_id") or "").strip()
+    csec = (vals.get("client_secret") or "").strip()
+    cred = _credential(db, inst)
+    if not cid or not csec or not cred or cred.consent_state != "granted" or not cred.microsoft_tenant_id:
+        return ""
+    try:
+        return graph.app_token(cid, csec, cred.microsoft_tenant_id, force=True)
+    except Exception:  # noqa: BLE001
+        logger.exception("m365 token mint failed (instance=%s)", inst.id)
+        return ""
+
+
+def _provision_org_now(db: Session, inst) -> None:
+    """CP-hosted: discover org resources (SharePoint sites / Teams) immediately so
+    they appear in the managed-sources table without waiting for the worker."""
+    from . import collect
+    token = _app_token(db, inst)
+    if not token:
+        return
+    try:
+        collect.provision_org_sources(db, inst, token)
+    except Exception:  # noqa: BLE001
+        logger.exception("m365 org provision-now failed (instance=%s)", inst.id)
+
+
+@router.post("/collect-now")
+def collect_now(instance_id: str = "",
+                principal: security.Principal = Depends(require_m365),
+                db: Session = Depends(get_db)):
+    """Back up now — run a managed collection pass immediately. Node-hosted tenants
+    reconcile on their node (bumped desired state); CP-hosted tenants run a bounded
+    pass in the background across every active managed source."""
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    cred = _credential(db, inst)
+    if not cred or cred.consent_state != "granted":
+        raise HTTPException(409, "Microsoft administrator consent is required first")
+    if _node_hosted(db, principal.tenant_id):
+        _bump_desired(db, inst)
+        db.commit()
+        audit.record(db, actor=principal.user_id, action="m365.collect_now",
+                     category="admin", resource=inst.id, detail={"queued": True})
+        return {"ok": True, "queued": True,
+                "note": "Backup queued on your assigned node — sources update shortly."}
+
+    import threading
+    from ...db import WorkerSessionLocal
+    iid = inst.id
+
+    def _run() -> None:
+        try:
+            with WorkerSessionLocal() as wdb:
+                i2 = wdb.get(IntegrationInstance, iid)
+                if i2 is None:
+                    return
+                token = _app_token(wdb, i2)
+                if not token:
+                    return
+                from . import collect
+                collect.provision_sources(wdb, i2)
+                collect.provision_org_sources(wdb, i2, token)
+                srcs = (wdb.query(m.ManagedSource)
+                        .filter(m.ManagedSource.integration_instance_id == iid,
+                                m.ManagedSource.state.notin_(
+                                    ("decommissioned", "paused_by_admin"))).all())
+                for s in srcs:
+                    try:
+                        collect.collect_source(wdb, i2, s, token)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("m365 collect-now source failed (source=%s)", s.id)
+                logger.info("m365 collect-now done (instance=%s): %d source(s)", iid, len(srcs))
+        except Exception:  # noqa: BLE001
+            logger.exception("m365 collect-now failed (instance=%s)", iid)
+
+    threading.Thread(target=_run, name="cv-m365-collect-now", daemon=True).start()
+    audit.record(db, actor=principal.user_id, action="m365.collect_now",
+                 category="admin", resource=inst.id, detail={"started": True})
+    return {"ok": True, "started": True,
+            "note": "Backup started — managed sources will update shortly."}
 
 
 # --------------------------------------------------------------------------- #

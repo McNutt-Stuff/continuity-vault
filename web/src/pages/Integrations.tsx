@@ -1788,6 +1788,15 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
       notify({ message: next ? `Protection enabled — ${r.sources_provisioned} source(s) established` : "Protection paused", tone: "ok" });
     } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't update protection", tone: "danger" }); }
   }
+  async function collectNow() {
+    setBusy("collect");
+    try {
+      const r = await api.post<{ queued?: boolean; note?: string }>(`/integrations/microsoft365/collect-now?${iq}`, {});
+      notify({ message: r.note || (r.queued ? "Backup queued." : "Backup started."), tone: "ok" });
+      setTimeout(() => { void loadIdentities(); }, 4000);
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't start the backup", tone: "danger" }); }
+    finally { setBusy(""); }
+  }
   async function removeSetup() {
     const ok = await confirmDialog({
       title: "Remove Microsoft 365 setup",
@@ -1815,6 +1824,11 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
       <div className="spread" style={{ marginBottom: 14, alignItems: "center" }}>
         <button className="btn ghost sm" onClick={onBack}>← Integrations</button>
         <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          {consent === "granted" && (
+            <button className="btn sm primary" disabled={busy === "collect"} onClick={collectNow}>
+              <Icon name="cloud" size={13} /> {busy === "collect" ? "Backing up…" : "Back up now"}
+            </button>
+          )}
           {spec?.status && spec.status !== "ga" && <Pill tone="info">Preview</Pill>}
           <Pill tone="info">Managed</Pill>
         </div>
