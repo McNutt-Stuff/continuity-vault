@@ -433,6 +433,7 @@ def _push(s) -> int:
     log_high = log_since
     m365_identities: list = []
     m365_sources: list = []
+    managed_collections: list = []
     m365_cursor = _read_state().get("m365_cursor")
     m365_since = None
     if m365_cursor:
@@ -547,6 +548,14 @@ def _push(s) -> int:
                 m365_sources.append(_row(row))
                 if row.updated_at and (m365_high is None or row.updated_at > m365_high):
                     m365_high = row.updated_at
+        # Managed integration Collections are CREATED ON THE NODE (during M365
+        # provisioning) but Collections normally flow CP→node, so the CP never gets
+        # them — and a SnapshotReceipt pushed for one violates the collection FK,
+        # wedging the ENTIRE push. Ship managed collections UP (ahead of receipts on
+        # the CP) so the FK target exists. Bounded + idempotent (few per tenant).
+        for c in db.query(Collection).limit(5000).all():
+            if (c.config or {}).get("managed"):
+                managed_collections.append(_row(c))
     if not (receipts or documents or accounts or jobs or agents or appliances
             or appliance_storages or insights
             or integ_instances or net_clients or net_apps or net_usage or integ_runs
@@ -573,6 +582,7 @@ def _push(s) -> int:
             "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
             "communications": communications, "admin_alerts": alerts,
             "m365_external_identities": m365_identities, "m365_managed_sources": m365_sources,
+            "managed_collections": managed_collections,
         })
         if res and res.get("ok"):
             if high is not None:

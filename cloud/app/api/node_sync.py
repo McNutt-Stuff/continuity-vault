@@ -264,6 +264,9 @@ class PushPayload(BaseModel):
     # node discovers Entra identities + provisions/collects managed sources.
     m365_external_identities: list[dict] = []
     m365_managed_sources: list[dict] = []
+    # Managed integration Collections created on the node (M365) that must exist on
+    # the CP before their receipts (they normally flow CP→node only).
+    managed_collections: list[dict] = []
 
 
 _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
@@ -309,8 +312,25 @@ def push(body: PushPayload, authorization: str = Header(default=""),
         tid = row.get("tenant_id")
         return tid is None or tid in valid_tenants
 
+    # Managed integration Collections (M365) are created on the node but Collections
+    # normally flow only CP→node, so upsert them here FIRST — a receipt referencing a
+    # collection the CP has never seen would otherwise violate the FK and abort the
+    # WHOLE push. Only for a vault that exists here (avoid a vault_id FK violation).
+    valid_vaults = {v for (v,) in db.query(Vault.id).all()}
+    for c in body.managed_collections:
+        if (not _known(c) or not _has_pk(Collection, c)
+                or c.get("vault_id") not in valid_vaults):
+            continue
+        _upsert(db, Collection, c)
+        counts["collections"] = counts.get("collections", 0) + 1
+    db.flush()  # make the new collections visible to the receipt FK below
+
+    # Skip a receipt whose collection isn't present here (even after the upsert
+    # above) so one orphaned receipt can never wedge the entire push again.
+    valid_collections = {c for (c,) in db.query(Collection.id).all()}
     for r in body.receipts:
-        if not _known(r) or not _has_pk(SnapshotReceipt, r):
+        if (not _known(r) or not _has_pk(SnapshotReceipt, r)
+                or r.get("collection_id") not in valid_collections):
             continue
         _upsert(db, SnapshotReceipt, r)
         counts["receipts"] += 1
