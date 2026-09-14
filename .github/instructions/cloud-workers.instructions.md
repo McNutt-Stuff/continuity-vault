@@ -18,7 +18,11 @@ description: "Background workers: scheduler, jobs, replication, pruning, index r
   continuing. Don't hold a transaction open across a long external call (idle-in-transaction blocks autovacuum).
 - **Node→CP propagation:** results a node produces (receipts, documents, jobs, index replicas, insights) are
   pushed to the CP in `node_replication._push`; the CP applies them in `api/node_sync.py`. Add new pushed
-  models to both, guarded by a `valid_tenants` check so an orphan row can't abort the whole push.
+  models to both, guarded by a `valid_tenants` check so an orphan row can't abort the whole push. The push
+  serializes with `json.dumps(..., default=str)` and sends **logs as a SEPARATE request from data**, so one
+  poison/oversized/non-serializable row (e.g. bytes in a log `meta`) can NEVER wedge managed-source/receipt/
+  discovery replication — a symptom that looks like "the node heartbeats but the portal stops seeing
+  collection + logs." Bound anything unbounded before sending (see `_sanitize_log`).
 - **Pruning** (`pruning.py`) bounds high-churn tables; NEVER prune `audit_events` (hash-chained) or
   `search_documents`/`snapshot_receipts` (recovery/history). Free big TOASTed JSON payloads on state
   transition, not via a recurring `col::text <> '{}'` predicate (that detoasts the whole table).

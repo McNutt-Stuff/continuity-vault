@@ -175,12 +175,16 @@ def _post(path: str, payload: dict) -> dict | None:
     if not s.control_plane_url or not s.node_secret:
         return None
     url = s.control_plane_url.rstrip("/") + "/api" + path
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {s.node_secret}"},
-        method="POST")
     try:
+        # default=str so a non-JSON-serializable value (e.g. raw bytes in a log
+        # entry's meta) is coerced to a string instead of raising — a single
+        # poison row must never wedge the whole replication push forever.
+        body = json.dumps(payload, default=str).encode()
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {s.node_secret}"},
+            method="POST")
         with urllib.request.urlopen(req, timeout=60) as resp:
             raw = resp.read().decode(errors="replace")
             try:
@@ -523,7 +527,7 @@ def _push(s) -> int:
         if log_since is not None:
             lq = lq.filter(LogEntry.created_at > log_since)
         for row in lq.order_by(LogEntry.created_at.asc()).limit(5000).all():
-            log_entries.append(_row(row))
+            log_entries.append(_sanitize_log(_row(row)))
             if row.created_at and (log_high is None or row.created_at > log_high):
                 log_high = row.created_at
         # Microsoft 365: Entra identities discovered + managed sources provisioned
@@ -549,52 +553,54 @@ def _push(s) -> int:
             or communications or alerts or log_entries
             or m365_identities or m365_sources):
         return 0
-    res = _post("/nodes/sync/push", {
-        "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
-        "receipts": receipts, "documents": documents, "connector_accounts": accounts,
-        "jobs": jobs, "agents": agents, "appliances": appliances,
-        "appliance_storages": appliance_storages, "insights": insights,
-        "integration_instances": integ_instances, "network_clients": net_clients,
-        "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
-        "communications": communications, "admin_alerts": alerts,
-        "log_entries": log_entries,
-        "m365_external_identities": m365_identities, "m365_managed_sources": m365_sources,
-    })
-    if res and res.get("ok"):
-        if high is not None:
-            _save_cursor(high.isoformat())
-        if ins_high is not None:
-            _save_insights_cursor(ins_high.isoformat())
-        if integ_high is not None:
-            st = _read_state()
-            st["integrations_cursor"] = integ_high.isoformat()
-            _write_state(st)
-        if comm_high is not None:
-            st = _read_state()
-            st["communications_cursor"] = comm_high.isoformat()
-            _write_state(st)
-        if alerts_high is not None:
-            st = _read_state()
-            st["admin_alerts_cursor"] = alerts_high.isoformat()
-            _write_state(st)
-        if log_high is not None:
-            st = _read_state()
-            st["logs_cursor"] = log_high.isoformat()
-            _write_state(st)
-        if m365_high is not None:
-            st = _read_state()
-            st["m365_cursor"] = m365_high.isoformat()
-            _write_state(st)
-        logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d "
-                    "appliances=%d storages=%d insights=%d integrations=%d network=%d "
-                    "logs=%d m365=%d",
-                    len(receipts), len(documents), len(jobs), len(agents),
-                    len(appliances), len(appliance_storages), len(insights),
-                    len(integ_instances),
-                    len(net_clients) + len(net_apps) + len(net_usage),
-                    len(log_entries), len(m365_identities) + len(m365_sources))
-        return len(receipts) + len(documents)
-    return 0
+    node = s.node_name or s.domain
+    role = s.node_role or "customer-tenant"
+    # Push DATA and LOGS as two independent requests so a rejected/poison log
+    # batch can never wedge managed-source / receipt / discovery replication (the
+    # symptom: the portal stops seeing collection + SharePoint/Teams while the
+    # node keeps heartbeating). Each advances only its own cursors on success.
+    has_data = (receipts or documents or accounts or jobs or agents or appliances
+                or appliance_storages or insights or integ_instances or net_clients
+                or net_apps or net_usage or integ_runs or communications or alerts
+                or m365_identities or m365_sources)
+    if has_data:
+        res = _post("/nodes/sync/push", {
+            "node": node, "role": role,
+            "receipts": receipts, "documents": documents, "connector_accounts": accounts,
+            "jobs": jobs, "agents": agents, "appliances": appliances,
+            "appliance_storages": appliance_storages, "insights": insights,
+            "integration_instances": integ_instances, "network_clients": net_clients,
+            "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
+            "communications": communications, "admin_alerts": alerts,
+            "m365_external_identities": m365_identities, "m365_managed_sources": m365_sources,
+        })
+        if res and res.get("ok"):
+            if high is not None:
+                _save_cursor(high.isoformat())
+            if ins_high is not None:
+                _save_insights_cursor(ins_high.isoformat())
+            if integ_high is not None:
+                st = _read_state(); st["integrations_cursor"] = integ_high.isoformat(); _write_state(st)
+            if comm_high is not None:
+                st = _read_state(); st["communications_cursor"] = comm_high.isoformat(); _write_state(st)
+            if alerts_high is not None:
+                st = _read_state(); st["admin_alerts_cursor"] = alerts_high.isoformat(); _write_state(st)
+            if m365_high is not None:
+                st = _read_state(); st["m365_cursor"] = m365_high.isoformat(); _write_state(st)
+            logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d "
+                        "appliances=%d storages=%d insights=%d integrations=%d network=%d m365=%d",
+                        len(receipts), len(documents), len(jobs), len(agents),
+                        len(appliances), len(appliance_storages), len(insights),
+                        len(integ_instances),
+                        len(net_clients) + len(net_apps) + len(net_usage),
+                        len(m365_identities) + len(m365_sources))
+    if log_entries:
+        lres = _post("/nodes/sync/push", {"node": node, "role": role, "log_entries": log_entries})
+        if lres and lres.get("ok"):
+            if log_high is not None:
+                st = _read_state(); st["logs_cursor"] = log_high.isoformat(); _write_state(st)
+            logger.info("replication push: logs=%d", len(log_entries))
+    return len(receipts) + len(documents)
 
 
 def _row(obj) -> dict:
@@ -603,6 +609,25 @@ def _row(obj) -> dict:
         v = getattr(obj, c.name)
         out[c.name] = v.isoformat() if isinstance(v, datetime) else v
     return out
+
+
+def _sanitize_log(d: dict) -> dict:
+    """Bound a log-entry row so one oversized/odd entry can't poison the whole
+    push batch (message capped; meta dropped if huge or non-serializable)."""
+    msg = d.get("message")
+    if isinstance(msg, (bytes, bytearray)):
+        msg = msg.decode(errors="replace")
+        d["message"] = msg
+    if isinstance(msg, str) and len(msg) > 16000:
+        d["message"] = msg[:16000] + "…[truncated]"
+    meta = d.get("meta")
+    if meta is not None:
+        try:
+            if len(json.dumps(meta, default=str)) > 16000:
+                d["meta"] = {"_truncated": True}
+        except Exception:  # noqa: BLE001
+            d["meta"] = {"_unserializable": True}
+    return d
 
 
 def start_replication() -> None:
