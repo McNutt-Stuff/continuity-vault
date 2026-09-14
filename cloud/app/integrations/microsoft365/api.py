@@ -108,6 +108,31 @@ def _credential(db: Session, inst: IntegrationInstance) -> m.ManagedCredentialRe
             .filter(m.ManagedCredentialRef.integration_instance_id == inst.id).first())
 
 
+def _source_object_counts(db: Session, inst: IntegrationInstance) -> dict[str, int]:
+    """Actual protected-object count per managed source = the SearchDocuments in its
+    managed Collection (the true, replicated count) — NOT the runtime objects_total
+    counter, which only counts objects collected since it was introduced and misses
+    everything captured before (and after a delta cursor has advanced)."""
+    from ...models import Collection, SearchDocument
+    from sqlalchemy import func
+    src_by_coll: dict[str, str] = {}
+    for c in db.query(Collection).filter(Collection.tenant_id == inst.tenant_id).all():
+        cfg = c.config or {}
+        if cfg.get("m365_instance_id") == inst.id and cfg.get("managed") and cfg.get("m365_source_id"):
+            src_by_coll[c.id] = cfg["m365_source_id"]
+    if not src_by_coll:
+        return {}
+    counts: dict[str, int] = {}
+    rows = (db.query(SearchDocument.collection_id, func.count(SearchDocument.id))
+            .filter(SearchDocument.collection_id.in_(list(src_by_coll.keys())))
+            .group_by(SearchDocument.collection_id).all())
+    for coll_id, n in rows:
+        sid = src_by_coll.get(coll_id)
+        if sid:
+            counts[sid] = counts.get(sid, 0) + int(n or 0)
+    return counts
+
+
 def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
     if inst is None:
         return {"connected": False, "state": "not_connected"}
@@ -122,10 +147,7 @@ def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
         m.ExternalIdentityBinding.status == "suggested").count()
     sources = db.query(m.ManagedSource).filter(
         m.ManagedSource.integration_instance_id == inst.id).count()
-    protected_objects = 0
-    for s in db.query(m.ManagedSource).filter(
-            m.ManagedSource.integration_instance_id == inst.id).all():
-        protected_objects += int((s.config or {}).get("objects_total") or 0)
+    protected_objects = sum(_source_object_counts(db, inst).values())
     cfg = inst.config or {}
     cmeta = (cred.meta if cred else {}) or {}
     consent_state = (cred.consent_state if cred else "pending")
@@ -891,6 +913,7 @@ def list_managed_sources(instance_id: str = "",
     rows = (db.query(m.ManagedSource)
             .filter(m.ManagedSource.integration_instance_id == inst.id)
             .order_by(m.ManagedSource.workload.asc(), m.ManagedSource.name.asc()).all())
+    obj_counts = _source_object_counts(db, inst)  # actual protected objects per source
     _WL_LABEL = {"exchange": "Exchange Online", "onedrive": "OneDrive",
                  "sharepoint": "SharePoint", "teams": "Teams channels",
                  "teams_chat": "Teams chats"}
@@ -898,12 +921,15 @@ def list_managed_sources(instance_id: str = "",
     rollup: dict[str, dict] = {}
     for s in rows:
         cfg = s.config or {}
-        objects = int(cfg.get("objects_total") or 0)
+        objects = obj_counts.get(s.id, 0)
         last = cfg.get("last_result") or {}
+        # A source with protected objects is active regardless of the last delta
+        # (an incremental run that returns 0 changes must not read as "empty").
+        eff_state = "active" if (objects > 0 and s.state == "empty") else s.state
         sources.append({
             "id": s.id, "workload": s.workload, "name": s.name,
             "ownership_type": s.ownership_type, "owner_user_id": s.owner_user_id,
-            "state": s.state, "source_key": s.source_key, "objects": objects,
+            "state": eff_state, "source_key": s.source_key, "objects": objects,
             "last_collected_at": s.last_collected_at.isoformat() if s.last_collected_at else None,
             "last_error": last.get("error"),
         })
@@ -912,9 +938,9 @@ def list_managed_sources(instance_id: str = "",
             "sources": 0, "active": 0, "objects": 0, "errors": 0})
         r["sources"] += 1
         r["objects"] += objects
-        if s.state == "active":
+        if eff_state == "active":
             r["active"] += 1
-        if s.state in ("permission_required", "credential_error", "delayed"):
+        if eff_state in ("permission_required", "credential_error", "delayed"):
             r["errors"] += 1
     return {"collect_enabled": bool((inst.config or {}).get("collect_enabled")),
             "total_objects": sum(x["objects"] for x in rollup.values()),
