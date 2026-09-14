@@ -75,20 +75,16 @@ def _managed_collection(db: Session, inst, source, vault):
     """Find or create the Collection that routes a managed source into the vault."""
     from ...models import Collection
     st = _WORKLOADS[source.workload]["source_type"]
-    coll = (db.query(Collection)
-            .filter(Collection.tenant_id == source.tenant_id,
-                    Collection.vault_id == vault.id,
-                    Collection.source_type == st,
-                    Collection.config["m365_source_id"].astext == source.id).first()
-            if db.bind.dialect.name == "postgresql" else None)
-    if coll is None:
-        # Portable fallback: match on our config marker in Python.
-        for c in (db.query(Collection)
-                  .filter(Collection.tenant_id == source.tenant_id,
-                          Collection.source_type == st).all()):
-            if (c.config or {}).get("m365_source_id") == source.id:
-                coll = c
-                break
+    coll = None
+    # Match on our config marker in Python (portable across json/jsonb; managed
+    # collections per tenant are few).
+    for c in (db.query(Collection)
+              .filter(Collection.tenant_id == source.tenant_id,
+                      Collection.vault_id == vault.id,
+                      Collection.source_type == st).all()):
+        if (c.config or {}).get("m365_source_id") == source.id:
+            coll = c
+            break
     if coll is None:
         coll = Collection(
             tenant_id=source.tenant_id, vault_id=vault.id, name=source.name,
