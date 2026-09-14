@@ -982,6 +982,8 @@ def collect_now(instance_id: str = "",
                     return
                 token = _app_token(wdb, i2)
                 if not token:
+                    logger.warning("m365 collect-now: no app token (instance=%s) — "
+                                   "consent/permissions not effective", iid)
                     return
                 from . import collect
                 collect.provision_sources(wdb, i2)
@@ -990,12 +992,17 @@ def collect_now(instance_id: str = "",
                         .filter(m.ManagedSource.integration_instance_id == iid,
                                 m.ManagedSource.state.notin_(
                                     ("decommissioned", "paused_by_admin"))).all())
+                total = 0
                 for s in srcs:
                     try:
-                        collect.collect_source(wdb, i2, s, token)
+                        res = collect.collect_source(wdb, i2, s, token)
+                        total += int(res.get("objects") or 0)
                     except Exception:  # noqa: BLE001
                         logger.exception("m365 collect-now source failed (source=%s)", s.id)
-                logger.info("m365 collect-now done (instance=%s): %d source(s)", iid, len(srcs))
+                logger.info("m365 collect-now done (instance=%s): %d source(s), %d object(s)",
+                            iid, len(srcs), total)
+                collect.audit_cycle(wdb, i2, objects=total, sources=len(srcs),
+                                    trigger="collect_now")
         except Exception:  # noqa: BLE001
             logger.exception("m365 collect-now failed (instance=%s)", iid)
 

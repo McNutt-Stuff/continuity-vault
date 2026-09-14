@@ -46,6 +46,22 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def audit_cycle(db: Session, inst, *, objects: int, sources: int, trigger: str,
+                actor: str = "m365") -> None:
+    """Record a managed-collection result to the audit ledger + Platform Logs (and
+    the customer Activity trail) so every M365 backup is observable, not silent."""
+    from ... import audit
+    try:
+        audit.record(db, actor=actor, action="m365.collected",
+                     tenant_id=inst.tenant_id, resource=inst.id,
+                     category="activity",
+                     severity="notice" if objects else "info",
+                     detail={"type": "microsoft365", "trigger": trigger,
+                             "objects": objects, "sources": sources})
+    except Exception:  # noqa: BLE001 — observability must never break collection
+        logger.exception("m365 audit_cycle failed (instance=%s)", inst.id)
+
+
 def profile(inst) -> dict:
     """The org-leader's managed-protection profile (which workloads to protect,
     where to route them, and how often) — the data-map profile applied to every
@@ -176,6 +192,10 @@ def provision_org_sources(db: Session, inst, token: str) -> int:
     from . import graph
     prof = profile(inst)
     org_workloads = [w for w in prof["workloads"] if w in _ORG_WORKLOADS]
+    if not org_workloads:
+        logger.info("m365 org provisioning: no org workloads (SharePoint/Teams) in the "
+                    "managed profile (instance=%s) — profile has %s; nothing to discover",
+                    inst.id, prof["workloads"])
     vault = _resolve_vault_for(db, inst.tenant_id, None)  # tenant/org vault
     created = 0
     kept: set = set()
@@ -194,6 +214,8 @@ def provision_org_sources(db: Session, inst, token: str) -> int:
             logger.warning("m365 org discovery failed (workload=%s instance=%s): %s",
                            w, inst.id, e)
             continue
+        logger.info("m365 org discovery (instance=%s workload=%s): %d resource(s) found",
+                    inst.id, w, len(resources))
         for rid, rname in resources:
             src = (db.query(m.ManagedSource)
                    .filter(m.ManagedSource.integration_instance_id == inst.id,
@@ -315,4 +337,6 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
     source.last_collected_at = _now()
     source.state = "active"
     db.commit()
+    logger.info("m365 collected (instance=%s workload=%s key=%s): %d object(s)",
+                inst.id, source.workload, source.source_key, len(objs))
     return {"ok": True, "objects": len(objs), "workload": source.workload}

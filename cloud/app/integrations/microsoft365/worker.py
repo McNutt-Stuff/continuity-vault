@@ -127,13 +127,21 @@ def _collect_due_sources(db, inst, token: str) -> None:
     sources = (db.query(m.ManagedSource)
                .filter(m.ManagedSource.integration_instance_id == inst.id,
                        m.ManagedSource.state.notin_(("decommissioned", "paused_by_admin"))).all())
+    ran = 0
+    total = 0
     for src in sources:
         if not _source_due(src):
             continue
         try:
-            collect.collect_source(db, inst, src, token)
+            res = collect.collect_source(db, inst, src, token)
+            ran += 1
+            total += int((res or {}).get("objects") or 0)
         except Exception:  # noqa: BLE001
             logger.exception("m365 collect_source crashed (source=%s)", src.id)
+    if ran:
+        logger.info("m365 collect cycle (instance=%s): %d source(s), %d object(s)",
+                    inst.id, ran, total)
+        collect.audit_cycle(db, inst, objects=total, sources=ran, trigger="scheduled")
 
 
 def _source_due(src) -> bool:

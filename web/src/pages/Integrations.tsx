@@ -1816,7 +1816,10 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
     try {
       const r = await api.post<{ queued?: boolean; note?: string }>(`/integrations/microsoft365/collect-now?${iq}`, {});
       notify({ message: r.note || (r.queued ? "Backup queued." : "Backup started."), tone: "ok" });
-      setTimeout(() => { void loadIdentities(); }, 4000);
+      // Collection runs async (background thread on the CP, or the node worker for
+      // node-hosted tenants + replication). Poll a few times so the sources table's
+      // "Last collected" and counts update without a manual refresh.
+      [4000, 10000, 20000, 35000].forEach((ms) => setTimeout(() => { void loadIdentities(); void loadStatus(); }, ms));
     } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't start the backup", tone: "danger" }); }
     finally { setBusy(""); }
   }
