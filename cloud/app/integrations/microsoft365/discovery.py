@@ -32,10 +32,14 @@ def _friendly_graph_error(e: "graph.GraphError") -> str:
     reason = (e.reason or "").strip()
     if e.status == 403 or reason in ("Authorization_RequestDenied", "Authorization_IdentityNotFound"):
         return ("The Arkive Microsoft 365 app is missing directory permissions. In the Azure "
-                "portal → App registrations → (the Arkive app) → API permissions, add the "
-                "APPLICATION permissions User.Read.All (and Mail.Read, Files.Read.All for content "
-                "backup; Sites.Read.All for SharePoint; ChannelMessage.Read.All + Chat.Read.All for "
-                "Teams), then click 'Grant admin consent'. Re-run discovery afterwards.")
+                "portal → App registrations → (the Arkive app) → API permissions → Add a permission "
+                "→ Microsoft Graph → APPLICATION permissions, add User.Read.All (and Mail.Read, "
+                "Files.Read.All for content backup; Sites.Read.All for SharePoint; "
+                "ChannelMessage.Read.All + Chat.Read.All for Teams — under the ChannelMessage and Chat "
+                "groups), then click 'Grant admin consent'. Note: app-only reading of Teams channel/chat "
+                "messages is a Microsoft 'protected API' — it also requires completing Microsoft's "
+                "'Request access to protected APIs' process, or Teams stays 403 even after consent. "
+                "Re-run discovery afterwards.")
     if e.status == 401 or reason == "InvalidAuthenticationToken":
         return ("Microsoft rejected the app credentials. Re-check the client id/secret linked in "
                 "Admin → Integrations, then reconnect and grant admin consent again.")
