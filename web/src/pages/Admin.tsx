@@ -6896,6 +6896,29 @@ function IntegrationsAdmin() {
     catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
   }
 
+  async function newCred(it: IntegrationSlot) {
+    const r = await formDialog({
+      title: `${it.label} application credentials`,
+      message: "The Arkive Entra application (app-only, admin-consented). Organizations grant consent to this app.",
+      confirmLabel: "Save credentials",
+      fields: [
+        { name: "client_id", label: "Client ID (Application ID)", placeholder: "00000000-0000-0000-0000-000000000000" },
+        { name: "client_secret", label: "Client secret" },
+        { name: "redirect_uri", label: "Redirect URI (optional)", placeholder: "https://vault.arkive.life/api/integrations/microsoft365/oauth/redirect" },
+      ],
+    });
+    if (!r || !r.client_id || !r.client_secret) return;
+    try {
+      const obj = await api.post<{ id: string }>("/admin/config-objects", {
+        name: `${it.label} (Entra app)`, kind: "oauth",
+        values: { client_id: r.client_id.trim(), client_secret: r.client_secret.trim(), redirect_uri: (r.redirect_uri || "").trim() },
+      });
+      await api.put(`/admin/integration-configs/${it.type}`, { config_object_id: obj.id });
+      await load();
+      setFlash("Credentials saved"); setTimeout(() => setFlash(""), 1800);
+    } catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
+  }
+
   return (
     <>
       <div className="spread" style={{ marginBottom: 12 }}>
@@ -6919,9 +6942,11 @@ function IntegrationsAdmin() {
                 <td>
                   {cred ? (
                     <div className="stack" style={{ gap: 4 }}>
-                      <select className="input sm" value={cred.config_object_id || ""} onChange={(e) => setCred(cred, { config_object_id: e.target.value })}>
+                      <select className="input sm" value={cred.config_object_id || ""}
+                              onChange={(e) => { if (e.target.value === "__new__") void newCred(cred); else void setCred(cred, { config_object_id: e.target.value }); }}>
                         <option value="">— none —</option>
                         {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                        <option value="__new__">＋ New credentials…</option>
                       </select>
                       <div className="row" style={{ gap: 6, alignItems: "center" }}>
                         <Pill tone={cred.configured ? "ok" : "warn"}>{cred.configured ? "Configured" : "Not set"}</Pill>
