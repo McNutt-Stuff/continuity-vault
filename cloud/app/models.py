@@ -860,6 +860,9 @@ class Node(Base):
     backup_service_ids = Column(JSON, default=list)
     last_heartbeat_at = Column(DateTime, nullable=True)
     last_log_push_at = Column(DateTime, nullable=True)  # last time this node pushed its logs to the CP
+    # Set when an admin requests a self-update on a heartbeat-only node (public-web);
+    # delivered as a one-shot directive on the node's next heartbeat, then cleared.
+    pending_update_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
 
 

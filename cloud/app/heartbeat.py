@@ -103,12 +103,33 @@ def send_heartbeat() -> dict | None:
     # Persist the config layers this node was assigned (bound profiles + per-node
     # overrides) so the running processes (scheduler, notifications) apply them.
     _apply_settings(data.get("config") or data.get("settings") or {})
+    # One-shot directives the control plane queued for this node (e.g. an admin
+    # "update now" from node management). Heartbeat-only nodes have no inbound
+    # control channel, so they self-apply here.
+    for act in (data.get("actions") or []):
+        try:
+            _run_action(s, act)
+        except Exception as e:  # noqa: BLE001
+            print(f"[heartbeat] action {act!r} failed: {e}", file=sys.stderr)
     # Public-web nodes mirror the published site content locally so the site is
     # served same-origin and survives control-plane downtime.
     if s.node_role == "public-web":
         _mirror_site_content(s)
         _mirror_support_content(s)
     return data
+
+
+def _run_action(s, act: dict) -> None:
+    """Apply a control-plane heartbeat directive. Currently only 'self-update',
+    which triggers this node's self-update service (same unit the update timer
+    uses), so an admin-triggered update lands without an inbound control channel."""
+    if act.get("type") == "self-update":
+        from . import sysinfo
+        res = sysinfo.control("update", "", s.node_role or "public-web")
+        if res.get("ok"):
+            print(f"[heartbeat] self-update triggered ({res.get('unit')})", file=sys.stderr)
+        else:
+            print(f"[heartbeat] self-update failed: {res.get('error')}", file=sys.stderr)
 
 
 def _mirror_support_content(s) -> None:

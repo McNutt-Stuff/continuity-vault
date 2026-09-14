@@ -281,9 +281,20 @@ def node_heartbeat(body: NodeHeartbeat,
         interval = max(15, int(effective.get("CV_HEARTBEAT_INTERVAL_SECONDS", 60)))
     except (TypeError, ValueError):
         interval = 60
+    # One-shot directives an admin queued for this heartbeat-only node (e.g. a
+    # "self-update now" from node management). Deliver once, then clear so the node
+    # doesn't loop on it — the admin can re-trigger if a run is missed.
+    actions: list[dict] = []
+    if node.pending_update_at is not None:
+        actions.append({"type": "self-update"})
+        node.pending_update_at = None
+        db.commit()
+        logger.info("node %s (%s): delivered queued self-update directive",
+                    node.name, node.role)
     return {"ok": True, "node_id": node.id, "settings": effective,
             "config": {"profiles": merged, "overrides": overrides},
-            "applied_profiles": applied, "heartbeat_interval_seconds": interval}
+            "applied_profiles": applied, "heartbeat_interval_seconds": interval,
+            "actions": actions}
 
 
 class BackupReport(BaseModel):

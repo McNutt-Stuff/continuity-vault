@@ -1976,6 +1976,14 @@ def node_control(nid: str, body: NodeControl,
                               json={"action": body.action, "unit": body.unit})
         except Exception:  # noqa: BLE001
             raise HTTPException(502, "node unreachable")
+    # Heartbeat-only nodes (e.g. public-web) don't expose an inbound control
+    # channel, but they poll the CP. Queue an update directive they pick up and
+    # self-apply on their next heartbeat.
+    if body.action == "update":
+        n.pending_update_at = _now()
+        db.commit()
+        return {"ok": True, "queued": True,
+                "note": "Update queued — the node will self-update on its next heartbeat."}
     raise HTTPException(400, "controls are not available for this node type")
 
 

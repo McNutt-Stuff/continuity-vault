@@ -2572,7 +2572,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
     if (confirmMsg && !await confirmDialog({ title: "Confirm", message: confirmMsg, tone: "danger", confirmLabel: action })) return;
     try {
       const r = await api.post<any>(`/admin/nodes/${id}/control`, { action, unit });
-      flash(r.ok ? `${action} ${unit || ""} ok` : `Failed: ${r.error || "control error"}`);
+      flash(r.note || (r.ok ? `${action} ${unit || ""} ok` : `Failed: ${r.error || "control error"}`));
       setTimeout(loadLive, 1500);
     } catch (e) { flash((e as { message?: string }).message || "Control failed"); }
   }
