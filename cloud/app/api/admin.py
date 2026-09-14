@@ -38,6 +38,7 @@ from ..models import (
     ConfigProfile,
     ConnectorAccount,
     DesktopAgent,
+    IntegrationConfig,
     Node,
     PricingConfig,
     SearchDocument,
