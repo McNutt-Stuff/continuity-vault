@@ -1148,11 +1148,15 @@ _SOURCE_PAGES = [
          "**Map** each Microsoft identity to an Arkive member — Arkive auto-suggests matches by email, "
          "and you can **Accept** them individually or all at once. Optionally enable **Auto-map matched "
          "users** and **Auto-create accounts for new users** so mapping keeps itself up to date. "
-         "Then turn on **Protect mapped users** to collect their Exchange Online + OneDrive."],
+         "Then turn on **Protect mapped users** and set the **managed protection profile** (which "
+         "workloads — Exchange Online / OneDrive — to protect, where to store them, and how often) to "
+         "collect each user's data on their behalf."],
         ["**Entra identity discovery + mapping (preview)** — read-only discovery of your Microsoft 365 "
          "users and mapping to Arkive members.",
          "**Managed Exchange Online + OneDrive (preview)** — organization admin-level collection of each "
          "mapped user's mailbox and files, with no per-employee sign-in.",
+         "**Managed protection profile** — one org-wide profile (workloads, storage destination, "
+         "schedule) that establishes a Data Map profile per protected user and collects on their behalf.",
          "**Managed protection (coming next)** — SharePoint and Teams, compliance evidence."],
         ["Business/Enterprise plans only; enforced server-side.",
          "Uses Microsoft admin-consent OAuth (app-only) — no per-employee sign-in and no stored password.",

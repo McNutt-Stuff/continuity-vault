@@ -1611,6 +1611,11 @@ interface M365Status {
   last_run_at?: string | null;
 }
 interface M365ScopeRules { domains?: string[]; includes?: string[]; excludes?: string[]; include_guests?: boolean; }
+interface M365Profile {
+  workloads: string[]; destinations: string[]; backup_interval_minutes: number | null;
+  workload_catalog?: { id: string; label: string; description?: string }[]; active_sources?: number;
+}
+interface StorageTarget { id: string; label: string; kind?: string; }
 interface M365Identity {
   id: string; display_name: string; upn: string; email: string; entra_object_id: string;
   account_enabled: boolean; user_type: string; in_scope: boolean; state: string; scope_reason?: string;
@@ -1648,6 +1653,8 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
   const [tenantInput, setTenantInput] = useState("");
   const [scope, setScope] = useState<M365ScopeRules>({});
   const [scopeOpen, setScopeOpen] = useState(false);
+  const [profile, setProfile] = useState<M365Profile | null>(null);
+  const [targets, setTargets] = useState<StorageTarget[]>([]);
 
   const iq = activeId ? `instance_id=${encodeURIComponent(activeId)}` : "";
 
@@ -1668,10 +1675,28 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
       setSources(s.sources || []); setCollectEnabled(!!s.collect_enabled);
       const sc = await api.get<{ rules: M365ScopeRules }>(`/integrations/microsoft365/scope?${iq}`);
       setScope(sc.rules || {});
+      const pr = await api.get<M365Profile>(`/integrations/microsoft365/profile?${iq}`);
+      setProfile(pr);
+      try {
+        const tg = await api.get<StorageTarget[]>("/tenant/storage-targets");
+        setTargets(tg || []);
+      } catch { /* targets optional */ }
     } catch { /* ignore */ }
   }
   useEffect(() => { void loadStatus(); }, [activeId]);
   useEffect(() => { if (status?.consent_state === "granted") void loadIdentities(); }, [status?.consent_state]);
+
+  async function saveProfile(next: Partial<M365Profile>) {
+    try {
+      const r = await api.put<M365Profile>(`/integrations/microsoft365/profile?${iq}`, {
+        workloads: next.workloads, destinations: next.destinations,
+        backup_interval_minutes: next.backup_interval_minutes,
+      });
+      setProfile((p) => ({ ...(p || { workloads: [], destinations: [] }), ...r }));
+      await loadIdentities();
+      notify({ message: "Managed protection profile saved.", tone: "ok" });
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't save the profile", tone: "danger" }); }
+  }
 
   async function saveScope(next: M365ScopeRules) {
     try {
@@ -1994,6 +2019,63 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
               <span style={{ fontSize: 12.5 }}>{collectEnabled ? "On" : "Off"}</span>
             </label>
           </div>
+
+          {profile && (
+            <div className="stack" style={{ gap: 12, marginTop: 14, padding: 12,
+                 border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Managed protection profile</div>
+              <div className="faint" style={{ fontSize: 11.5, marginTop: -6 }}>
+                Applies to every protected user — Arkive establishes a Data Map profile per user that
+                collects on their behalf.
+              </div>
+              <div className="stack" style={{ gap: 6 }}>
+                <span style={{ fontSize: 12, fontWeight: 600 }}>What to protect</span>
+                <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                  {(profile.workload_catalog || []).map((w) => {
+                    const on = profile.workloads.includes(w.id);
+                    return (
+                      <span key={w.id} className={`chip ${on ? "active" : ""}`} title={w.description}
+                            onClick={() => saveProfile({ workloads: on ? profile.workloads.filter((x) => x !== w.id) : [...profile.workloads, w.id] })}>
+                        {on && <Icon name="check" size={12} />} {w.label}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="stack" style={{ gap: 6 }}>
+                <span style={{ fontSize: 12, fontWeight: 600 }}>Store to</span>
+                <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                  {targets.length === 0 && <span className="faint" style={{ fontSize: 12 }}>No destinations enabled — set them in Protection Setup.</span>}
+                  {targets.map((t) => {
+                    const on = profile.destinations.includes(t.id);
+                    return (
+                      <span key={t.id} className={`chip ${on ? "active" : ""}`}
+                            onClick={() => saveProfile({ destinations: on ? profile.destinations.filter((x) => x !== t.id) : [...profile.destinations, t.id] })}>
+                        {on && <Icon name="check" size={12} />} {t.label}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <span style={{ fontSize: 12, fontWeight: 600 }}>Back up automatically</span>
+                <select className="input sm" style={{ width: 180 }}
+                        value={profile.backup_interval_minutes ?? -1}
+                        onChange={(e) => saveProfile({ backup_interval_minutes: Number(e.target.value) })}>
+                  <option value={-1}>Default cadence</option>
+                  <option value={360}>Every 6 hours</option>
+                  <option value={720}>Every 12 hours</option>
+                  <option value={1440}>Daily</option>
+                  <option value={10080}>Weekly</option>
+                </select>
+                {typeof profile.active_sources === "number" && (
+                  <span className="faint" style={{ fontSize: 11.5, marginLeft: "auto" }}>
+                    {profile.active_sources} managed source(s) active
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
           {sources.length > 0 && (
             <div style={{ overflowX: "auto", marginTop: 12 }}>
               <table className="table">
