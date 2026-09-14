@@ -23,23 +23,35 @@ def _load() -> dict:
     data: dict = {}
     try:
         from .db import SessionLocal
-        from .models import ConfigObject, SourceConfig
+        from .models import ConfigObject, IntegrationConfig, SourceConfig
         from . import credstore
         with SessionLocal() as db:
             objs = {o.id: o for o in db.query(ConfigObject).all()}
-            for sc in db.query(SourceConfig).all():
-                values: dict = {}
-                obj = objs.get(sc.config_object_id) if sc.config_object_id else None
+
+            def _values(cfg_obj_id):
+                obj = objs.get(cfg_obj_id) if cfg_obj_id else None
                 if obj and obj.encrypted_values:
                     try:
-                        values = credstore.decrypt("platform", obj.encrypted_values)
+                        return credstore.decrypt("platform", obj.encrypted_values)
                     except Exception:
-                        values = {}
+                        return {}
+                return {}
+
+            for sc in db.query(SourceConfig).all():
                 data[sc.connector_type] = {
                     "enabled": bool(sc.enabled),
                     "backfill_enabled": bool(getattr(sc, "backfill_enabled", False)),
                     "config_object_id": sc.config_object_id,
-                    "values": values,
+                    "values": _values(sc.config_object_id),
+                }
+            # Managed integrations resolve their platform app credentials from a
+            # linked ConfigObject too (namespaced key so it can't collide with a
+            # connector_type of the same name).
+            for ic in db.query(IntegrationConfig).all():
+                data[f"integration:{ic.integration_type}"] = {
+                    "enabled": bool(ic.enabled),
+                    "config_object_id": getattr(ic, "config_object_id", None),
+                    "values": _values(getattr(ic, "config_object_id", None)),
                 }
     except Exception:
         pass  # DB not ready / migration pending — fall back to env
@@ -60,6 +72,17 @@ def source_backfill_enabled(connector_type: str) -> bool:
     """Whether an admin has opted this source into the deep-history backfill."""
     row = _load().get(connector_type)
     return bool(row and row.get("backfill_enabled"))
+
+
+def integration_values(integration_type: str) -> dict:
+    """Decrypted platform-app credentials for a managed integration (e.g. the
+    Arkive Microsoft 365 Entra app: client_id/client_secret)."""
+    return (_load().get(f"integration:{integration_type}") or {}).get("values") or {}
+
+
+def integration_config_object_id(integration_type: str) -> str | None:
+    row = _load().get(f"integration:{integration_type}")
+    return row.get("config_object_id") if row else None
 
 
 def invalidate() -> None:

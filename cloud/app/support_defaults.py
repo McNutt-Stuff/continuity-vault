@@ -1138,20 +1138,28 @@ _SOURCE_PAGES = [
         "by administrator-defined mappings and rules. Microsoft data, plaintext indexes and reusable "
         "credentials never live in the Arkive control plane.",
         ["Open **Integrations** and choose **Microsoft 365** (Business/Enterprise).",
-         "A Microsoft organization administrator approves tenant-wide access via admin consent.",
-         "Arkive discovers Entra users and proposes mappings to your Arkive users.",
-         "Review the proposed scope and managed sources, then activate — nothing collects until you approve."],
-        ["**Managed protection** — Exchange, OneDrive, SharePoint and Teams governed by the "
-         "organization (not per-user backups). Feeds coverage and compliance evidence."],
+         "**Connect** your organization, then have a Microsoft Global Administrator grant admin consent.",
+         "**Discover users** pulls your Entra directory; review who is in scope.",
+         "**Map** each Microsoft identity to an Arkive member (or mark it protected-only / excluded). "
+         "Mapping does not grant portal access."],
+        ["**Entra identity discovery (available now, preview)** — read-only discovery of your "
+         "Microsoft 365 users and mapping to Arkive members.",
+         "**Managed protection (coming next)** — Exchange, OneDrive, SharePoint and Teams governed by "
+         "the organization (not per-user backups). Feeds coverage and compliance evidence."],
         ["Business/Enterprise plans only; enforced server-side.",
-         "Uses Microsoft admin-consent OAuth — no per-employee sign-in and no stored password.",
-         "Currently in active development; the card appears but setup opens when it ships."],
+         "Uses Microsoft admin-consent OAuth (app-only) — no per-employee sign-in and no stored password.",
+         "Identity discovery is live in preview; content collection ships in a later phase."],
         required_plan="business",
         extra=(
-            "\n## Status\n"
-            "This integration is being delivered in phases. The card is visible to eligible "
-            "Business/Enterprise organizations; guided setup (Microsoft admin consent, user "
-            "discovery and mapping, managed sources) becomes available as each phase ships.\n"
+            "\n## What works today (preview)\n"
+            "Connect your organization, grant Microsoft administrator consent, discover your Entra "
+            "users, and map them to Arkive members. Content collection (Exchange/OneDrive/SharePoint/"
+            "Teams) is delivered in a later phase.\n"
+            "\n## Platform administrator setup\n"
+            "A platform administrator registers the Arkive Microsoft 365 (Entra) application once and "
+            "links its credentials in **Admin → Sources → Managed integrations**: create a "
+            "Configuration Object holding the app's `client_id` and `client_secret`, then select it "
+            "for Microsoft 365. Organizations grant admin consent to that shared application.\n"
             "\n## Availability\n"
             "::: plan business\n"
             "The Microsoft 365 Managed Integration is a Business/Enterprise capability, enforced on "

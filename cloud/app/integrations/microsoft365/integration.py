@@ -50,8 +50,8 @@ class Microsoft365Integration(Integration):
             default_interval_minutes=360,
             auto_provision_key=False,
             provides=["users", "email", "files", "sites", "teams"],
-            version="0.1.0",
-            status="coming_soon",              # gated until the backend ships
+            version="0.2.0",
+            status="preview",                  # connect + Entra identity discovery
             plans=["business", "enterprise"],  # server-enforced entitlement
             min_plan="business",
             capabilities=CAPABILITIES,

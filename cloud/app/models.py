@@ -1503,6 +1503,9 @@ class IntegrationConfig(Base):
     integration_type = Column(String, primary_key=True)
     enabled = Column(Boolean, default=True)
     config = Column(JSON, default=dict)  # platform defaults (interval overrides, etc.)
+    # Managed integrations (e.g. Microsoft 365) resolve their platform app
+    # credentials from a linked ConfigObject, mirroring SourceConfig.
+    config_object_id = Column(String, nullable=True)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 

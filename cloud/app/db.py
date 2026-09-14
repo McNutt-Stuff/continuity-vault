@@ -294,6 +294,8 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS public_ip VARCHAR DEFAULT ''",
         "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_resource_id VARCHAR DEFAULT ''",
         "ALTER TABLE nodes ADD COLUMN version_updated_at TIMESTAMP",
+        # Managed integration (e.g. Microsoft 365) platform-app credential link.
+        "ALTER TABLE integration_configs ADD COLUMN IF NOT EXISTS config_object_id VARCHAR",
         # Cloud-billing resource mapping (per-object hyperscaler id, editable by admin).
         "ALTER TABLE service_objects ADD COLUMN IF NOT EXISTS cloud_resource_id VARCHAR DEFAULT ''",
         "ALTER TABLE cloud_cost_samples ADD COLUMN IF NOT EXISTS cloud_resource_id VARCHAR DEFAULT ''",

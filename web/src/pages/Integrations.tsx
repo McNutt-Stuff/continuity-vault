@@ -80,6 +80,7 @@ export default function Integrations() {
   const [setupSpec, setSetupSpec] = useState<Spec | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [m365Open, setM365Open] = useState(false);
 
   async function load() {
     try { setList(await api.get<ListResp>("/integrations")); }
@@ -95,6 +96,11 @@ export default function Integrations() {
   }, [list]);
 
   if (loading) return <Loading label="Loading integrations…" />;
+
+  if (m365Open) {
+    return <M365Workspace spec={specByType["microsoft365"]}
+                          onBack={() => { setM365Open(false); void load(); }} />;
+  }
 
   const detailInst = detailId ? list?.instances.find((i) => i.id === detailId) : null;
   if (detailId && detailInst) {
@@ -124,7 +130,7 @@ export default function Integrations() {
         <div className="insights-cards" style={{ marginBottom: 20 }}>
           {list.instances.map((i) => (
             <InstanceCard key={i.id} inst={i} spec={specByType[i.integration_type]}
-                          onOpen={() => setDetailId(i.id)} onChanged={load} />
+                          onOpen={() => { if (i.integration_type === "microsoft365") setM365Open(true); else setDetailId(i.id); }} onChanged={load} />
           ))}
         </div>
       ) : (
@@ -149,7 +155,7 @@ export default function Integrations() {
         <AddIntegrationModal available={list?.available || []}
                              hasAppliance={(list?.appliances || []).length > 0}
                              onClose={() => setShowAdd(false)}
-                             onPick={(s) => { setShowAdd(false); setSetupSpec(s); }} />
+                             onPick={(s) => { setShowAdd(false); if (s.integration_type === "microsoft365") setM365Open(true); else setSetupSpec(s); }} />
       )}
 
       {setupSpec && (
@@ -192,7 +198,10 @@ function AddIntegrationModal({ available, hasAppliance, onClose, onPick }: {
               const comingSoon = s.status && s.status !== "ga";
               const notEntitled = s.entitled === false;
               const applianceLocked = s.needs_appliance && !hasAppliance;
-              const locked = applianceLocked || comingSoon || notEntitled;
+              // A managed workspace integration (e.g. Microsoft 365) can be opened
+              // in preview once entitled — the workspace itself gates each step.
+              const openable = !!s.workspace && !notEntitled && !applianceLocked;
+              const locked = applianceLocked || notEntitled || (!!comingSoon && !openable);
               const lockMsg = notEntitled ? (s.locked_reason || "Not available on your plan")
                 : comingSoon ? (s.status === "preview" ? "Preview — coming soon" : "Coming soon")
                 : applianceLocked ? "Needs an appliance on your network" : "";
@@ -218,6 +227,7 @@ function AddIntegrationModal({ available, hasAppliance, onClose, onPick }: {
                   </div>
                   <div className="row" style={{ gap: 6, alignItems: "center" }}>
                     {s.min_plan && <Pill tone="warn">{s.min_plan[0].toUpperCase() + s.min_plan.slice(1)}</Pill>}
+                    {comingSoon && openable && <Pill tone="info">Preview</Pill>}
                     <Pill tone="info">{s.runs_on === "appliance" ? "Appliance" : "Cloud"}</Pill>
                   </div>
                 </div>
@@ -1508,6 +1518,234 @@ function AdvancedUserPanel({ uid, onBack }: { uid: string; onBack: () => void })
         </>
       )}
     </div>
+  );
+}
+
+// --------------------------------------------------------------------------- //
+// Microsoft 365 managed workspace — connect, admin consent, Entra discovery    //
+// and identity mapping. Content collection is a later phase.                   //
+// --------------------------------------------------------------------------- //
+interface M365Status {
+  connected: boolean; state?: string; status?: string; consent_state?: string;
+  microsoft_tenant_id?: string; scopes_granted?: string[];
+  identities_discovered?: number; identities_mapped?: number; managed_sources?: number;
+  last_run_at?: string | null;
+}
+interface M365Identity {
+  id: string; display_name: string; upn: string; email: string; entra_object_id: string;
+  account_enabled: boolean; user_type: string; in_scope: boolean; state: string; scope_reason?: string;
+  binding: { user_id: string | null; status: string; protected_only: boolean; mapping_method: string } | null;
+}
+interface M365Member { id: string; name: string; email: string; }
+
+function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
+  const [status, setStatus] = useState<M365Status | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState("");
+  const [identities, setIdentities] = useState<M365Identity[]>([]);
+  const [members, setMembers] = useState<M365Member[]>([]);
+  const [consentState, setConsentState] = useState<{ url?: string; state?: string; configured?: boolean; message?: string } | null>(null);
+  const [tenantInput, setTenantInput] = useState("");
+
+  async function loadStatus() {
+    try { setStatus(await api.get<M365Status>("/integrations/microsoft365")); }
+    catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't load Microsoft 365", tone: "bad" }); }
+    finally { setLoading(false); }
+  }
+  async function loadIdentities() {
+    try {
+      const r = await api.get<{ identities: M365Identity[] }>("/integrations/microsoft365/identities?limit=2000");
+      setIdentities(r.identities || []);
+      const m = await api.get<{ members: M365Member[] }>("/integrations/microsoft365/members");
+      setMembers(m.members || []);
+    } catch { /* ignore */ }
+  }
+  useEffect(() => { void loadStatus(); }, []);
+  useEffect(() => { if (status?.consent_state === "granted") void loadIdentities(); }, [status?.consent_state]);
+
+  async function connect() {
+    setBusy("connect");
+    try { setStatus(await api.post<M365Status>("/integrations/microsoft365/connect", { capabilities: ["entra_directory"] })); }
+    catch (e) { notify({ message: (e as { message?: string }).message || "Connect failed", tone: "bad" }); }
+    finally { setBusy(""); }
+  }
+  async function startConsent() {
+    setBusy("consent");
+    try {
+      const r = await api.post<{ consent_configured: boolean; consent_url?: string; state?: string; message?: string }>("/integrations/microsoft365/oauth/start", {});
+      setConsentState({ url: r.consent_url, state: r.state, configured: r.consent_configured, message: r.message });
+      if (r.consent_configured && r.consent_url) window.open(r.consent_url, "_blank", "noopener");
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't start consent", tone: "bad" }); }
+    finally { setBusy(""); }
+  }
+  async function confirmConsent() {
+    if (!consentState?.state || !tenantInput.trim()) return;
+    setBusy("consent");
+    try {
+      const r = await api.post<M365Status>("/integrations/microsoft365/oauth/callback",
+        { state: consentState.state, microsoft_tenant_id: tenantInput.trim(), admin_consent: true });
+      setStatus(r); setConsentState(null);
+      notify({ message: "Microsoft 365 connected", tone: "ok" });
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Consent confirmation failed", tone: "bad" }); }
+    finally { setBusy(""); }
+  }
+  async function discover() {
+    setBusy("discover");
+    try {
+      const r = await api.post<M365Status & { discovered: number; in_scope: number }>("/integrations/microsoft365/discover", {});
+      setStatus(r);
+      notify({ message: `Discovered ${r.discovered} identities (${r.in_scope} in scope)`, tone: "ok" });
+      await loadIdentities();
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Discovery failed", tone: "bad" }); }
+    finally { setBusy(""); }
+  }
+  async function decide(idn: M365Identity, value: string) {
+    let decision: { external_identity_id: string; action: string; user_id?: string };
+    if (value === "protected_only") decision = { external_identity_id: idn.id, action: "protected_only" };
+    else if (value === "exclude") decision = { external_identity_id: idn.id, action: "exclude" };
+    else if (value.startsWith("map:")) decision = { external_identity_id: idn.id, action: "map", user_id: value.slice(4) };
+    else return;
+    try {
+      await api.post("/integrations/microsoft365/identities/decisions", { decisions: [decision] });
+      await loadIdentities();
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't apply mapping", tone: "bad" }); }
+  }
+
+  const connected = !!status?.connected;
+  const consent = status?.consent_state || "pending";
+  const inScope = identities.filter((i) => i.in_scope);
+
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 14, alignItems: "center" }}>
+        <button className="btn ghost sm" onClick={onBack}>← Integrations</button>
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          {spec?.status && spec.status !== "ga" && <Pill tone="info">Preview</Pill>}
+          <Pill tone="info">Managed</Pill>
+        </div>
+      </div>
+
+      <Card style={{ marginBottom: 14 }}>
+        <div className="row" style={{ gap: 12, alignItems: "center" }}>
+          <div className="insight-card-ic" style={{ background: "#0364B81e", color: "#0364B8", width: 42, height: 42 }}>
+            <SourceIcon type="microsoft365" fallback="cloud" size={22} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <h3 style={{ margin: 0 }}>Microsoft 365</h3>
+            <div className="faint" style={{ fontSize: 12 }}>
+              Turn Microsoft Entra ID into the source for your Arkive organization users —
+              administrator-governed, no per-employee sign-in.
+            </div>
+          </div>
+          <Pill tone={consent === "granted" ? "ok" : connected ? "warn" : "info"} dot>
+            {consent === "granted" ? "Connected" : connected ? "Consent pending" : "Not connected"}
+          </Pill>
+        </div>
+        {connected && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", gap: 12, marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border-soft)" }}>
+            <MiniStat icon="cloud" label="Microsoft tenant" value={status?.microsoft_tenant_id || "—"} tint="#0364B8" />
+            <MiniStat icon="user" label="Identities discovered" value={String(status?.identities_discovered ?? 0)} tint="#3a6df0" />
+            <MiniStat icon="check" label="Mapped" value={String(status?.identities_mapped ?? 0)} tint="#35d0a5" />
+            <MiniStat icon="shield" label="In scope" value={String(inScope.length)} tint="#c56cf0" />
+          </div>
+        )}
+      </Card>
+
+      {loading ? <Loading label="Loading…" /> : !connected ? (
+        <Card>
+          <h3 style={{ marginTop: 0 }}>Connect Microsoft 365</h3>
+          <div className="faint" style={{ fontSize: 12.5, marginBottom: 12, maxWidth: 560 }}>
+            Create the organization connection. A Microsoft administrator then grants Arkive
+            read access to your directory so we can discover users to protect.
+          </div>
+          <button className="btn primary" disabled={busy === "connect"} onClick={connect}>
+            <Icon name="link" size={14} /> {busy === "connect" ? "Connecting…" : "Connect organization"}
+          </button>
+        </Card>
+      ) : consent !== "granted" ? (
+        <Card>
+          <h3 style={{ marginTop: 0 }}>Microsoft administrator consent</h3>
+          <div className="faint" style={{ fontSize: 12.5, marginBottom: 12, maxWidth: 560 }}>
+            A Global Administrator grants Arkive app-only read access to your Microsoft 365
+            directory. No employee passwords are ever used.
+          </div>
+          {!consentState ? (
+            <button className="btn primary" disabled={busy === "consent"} onClick={startConsent}>
+              <Icon name="link" size={14} /> {busy === "consent" ? "Preparing…" : "Get admin consent"}
+            </button>
+          ) : consentState.configured === false ? (
+            <div style={{ fontSize: 12.5, color: "var(--warn)" }}>
+              <Icon name="alert" size={13} /> {consentState.message || "The platform Microsoft 365 app isn't configured yet."}
+            </div>
+          ) : (
+            <div className="stack" style={{ gap: 10, maxWidth: 460 }}>
+              <div className="faint" style={{ fontSize: 12 }}>
+                A Microsoft consent window opened in a new tab. After the administrator approves,
+                paste your Microsoft <b>Directory (tenant) ID</b> to finish connecting.
+              </div>
+              <input className="input" placeholder="Directory (tenant) ID" value={tenantInput}
+                     onChange={(e) => setTenantInput(e.target.value)} />
+              <div className="row" style={{ gap: 8 }}>
+                <button className="btn primary sm" disabled={busy === "consent" || !tenantInput.trim()} onClick={confirmConsent}>
+                  {busy === "consent" ? "Confirming…" : "Confirm consent granted"}
+                </button>
+                {consentState.url && <a className="btn ghost sm" href={consentState.url} target="_blank" rel="noreferrer">Reopen consent</a>}
+              </div>
+            </div>
+          )}
+        </Card>
+      ) : (
+        <Card>
+          <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
+            <div>
+              <h3 style={{ margin: 0 }}>Entra identities</h3>
+              <div className="faint" style={{ fontSize: 12 }}>
+                Map discovered Microsoft users to Arkive members. Mapping doesn't grant portal access.
+              </div>
+            </div>
+            <button className="btn sm" disabled={busy === "discover"} onClick={discover}>
+              <Icon name="activity" size={13} /> {busy === "discover" ? "Discovering…" : "Discover users"}
+            </button>
+          </div>
+          {identities.length === 0 ? (
+            <div className="muted" style={{ padding: "16px 4px" }}>
+              No identities yet. Click <b>Discover users</b> to pull your Entra directory.
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table className="table">
+                <thead><tr><th>Name</th><th>User principal name</th><th>Type</th><th>Scope</th><th>Maps to</th></tr></thead>
+                <tbody>
+                  {identities.map((idn) => {
+                    const cur = idn.binding?.status === "mapped" && idn.binding.user_id ? `map:${idn.binding.user_id}`
+                      : idn.binding?.protected_only ? "protected_only"
+                      : idn.state === "excluded" ? "exclude" : "";
+                    return (
+                      <tr key={idn.id} style={idn.in_scope ? undefined : { opacity: 0.55 }}>
+                        <td style={{ fontWeight: 600 }}>{idn.display_name}{!idn.account_enabled && <span className="faint" style={{ fontWeight: 400 }}> · disabled</span>}</td>
+                        <td className="faint" style={{ fontSize: 12 }}>{idn.upn || idn.email || "—"}</td>
+                        <td><Pill tone={idn.user_type === "guest" ? "warn" : "info"}>{idn.user_type}</Pill></td>
+                        <td><Pill tone={idn.in_scope ? "ok" : "warn"}>{idn.in_scope ? "in scope" : (idn.scope_reason || "out")}</Pill></td>
+                        <td>
+                          <select className="input sm" value={cur} onChange={(e) => decide(idn, e.target.value)}>
+                            <option value="">Unassigned</option>
+                            <option value="protected_only">Protected only</option>
+                            <option value="exclude">Exclude</option>
+                            <optgroup label="Map to member">
+                              {members.map((mem) => <option key={mem.id} value={`map:${mem.id}`}>{mem.name}</option>)}
+                            </optgroup>
+                          </select>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      )}
+    </>
   );
 }
 

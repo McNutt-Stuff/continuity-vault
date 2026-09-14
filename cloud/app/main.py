@@ -208,6 +208,16 @@ def startup() -> None:
     from .workers.queue import start_queue_worker
     start_queue_worker()
 
+    # Managed-integration reconcile (e.g. Microsoft 365 Entra discovery) runs on
+    # whichever box owns the instances — CP for CP-hosted tenants, each node for
+    # its federated ones. Guarded so a package issue can't break startup.
+    try:
+        from .integrations.microsoft365.worker import start_m365_worker
+        start_m365_worker()
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger("cv.integrations.m365").exception("m365 worker start failed")
+
     # The control plane samples the whole fleet's health into 90-day history.
     if role == "control-plane":
         from .workers.telemetry import start_telemetry_sampler

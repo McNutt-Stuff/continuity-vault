@@ -277,6 +277,7 @@ def list_identities(state: str = "", limit: int = 500,
             "id": e.id, "display_name": e.display_name, "upn": e.upn, "email": e.email,
             "entra_object_id": e.entra_object_id, "account_enabled": e.account_enabled,
             "user_type": e.user_type, "in_scope": e.in_scope, "state": e.state,
+            "scope_reason": e.scope_reason,
             "binding": None if not b else {
                 "user_id": b.user_id, "status": b.status, "protected_only": b.protected_only,
                 "mapping_method": b.mapping_method},
@@ -418,6 +419,43 @@ def disconnect(principal: security.Principal = Depends(security.require_passkey)
     audit.record(db, actor=principal.user_id, action="m365.disconnected",
                  category="admin", severity="warning", resource=inst.id)
     return {"ok": True, "note": "Disconnected. Protected data and recovery points are retained."}
+
+
+@router.get("/members")
+def org_members(principal: security.Principal = Depends(require_m365),
+                db: Session = Depends(get_db)):
+    """The organization's Arkive users, for mapping discovered Entra identities."""
+    users = (db.query(User).filter(User.tenant_id == principal.tenant_id)
+             .order_by(User.email.asc()).all())
+    return {"members": [{"id": u.id,
+                         "name": (getattr(u, "full_name", None) or u.display_name or u.email),
+                         "email": u.email} for u in users]}
+
+
+@router.post("/discover")
+def discover(principal: security.Principal = Depends(require_m365),
+             db: Session = Depends(get_db)):
+    """Run Entra identity discovery now (synchronous). Requires granted consent and
+    the platform Microsoft 365 app credentials (admin Config)."""
+    inst = _instance(db, principal.tenant_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    cred = _credential(db, inst)
+    if not cred or cred.consent_state != "granted":
+        raise HTTPException(409, "Microsoft administrator consent is required first")
+    from ... import platform_config
+    from . import discovery
+    vals = platform_config.integration_values(INTEGRATION_TYPE)
+    res = discovery.run_discovery(db, inst,
+                                  client_id=(vals.get("client_id") or "").strip(),
+                                  client_secret=(vals.get("client_secret") or "").strip())
+    audit.record(db, actor=principal.user_id, action="m365.discovery_run",
+                 category="admin", resource=inst.id,
+                 detail={"ok": res.get("ok"), "discovered": res.get("discovered"),
+                         "error": res.get("error")})
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error") or "discovery failed")
+    return {**res, **_status_view(db, inst)}
 
 
 # --------------------------------------------------------------------------- #

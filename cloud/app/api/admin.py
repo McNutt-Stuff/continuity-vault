@@ -2703,6 +2703,63 @@ def update_source(ctype: str, body: SourceUpdate,
             "backfill_enabled": sc.backfill_enabled}
 
 
+# Managed integrations that resolve a PLATFORM app credential from a Config Object
+# (mirrors sources). The Microsoft 365 Entra app's client_id/client_secret are set
+# once by a platform admin and shared by every organization's admin-consent flow.
+_INTEGRATION_CRED_SLOTS = {
+    "microsoft365": {"label": "Microsoft 365", "icon": "cloud", "color": "#0364B8",
+                     "keys": ["client_id", "client_secret", "redirect_uri"],
+                     "required": ["client_id", "client_secret"]},
+}
+
+
+@router.get("/integration-configs")
+def list_integration_configs(db: Session = Depends(get_db)):
+    """Managed integrations whose platform app credentials link to a Config Object
+    (selectable like a source), with their configured state."""
+    rows = {ic.integration_type: ic for ic in db.query(IntegrationConfig).all()}
+    out = []
+    for it, slot in _INTEGRATION_CRED_SLOTS.items():
+        ic = rows.get(it)
+        vals = (_decrypt_values(db.get(ConfigObject, ic.config_object_id))
+                if (ic and ic.config_object_id) else {})
+        out.append({
+            "type": it, "label": slot["label"], "icon": slot["icon"], "color": slot["color"],
+            "keys": slot["keys"],
+            "enabled": True if ic is None else bool(ic.enabled),
+            "config_object_id": (ic.config_object_id if ic else None),
+            "configured": all(vals.get(k) for k in slot["required"]),
+        })
+    return out
+
+
+class IntegrationConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    config_object_id: str | None = None
+
+
+@router.put("/integration-configs/{itype}")
+def update_integration_config(itype: str, body: IntegrationConfigUpdate,
+                              principal: security.Principal = Depends(security.require_platform_admin),
+                              db: Session = Depends(get_db)):
+    if itype not in _INTEGRATION_CRED_SLOTS:
+        raise HTTPException(404, "unknown integration")
+    ic = db.get(IntegrationConfig, itype)
+    if ic is None:
+        ic = IntegrationConfig(integration_type=itype)
+        db.add(ic)
+    if body.enabled is not None:
+        ic.enabled = body.enabled
+    if body.config_object_id is not None:
+        ic.config_object_id = body.config_object_id or None
+    db.commit()
+    platform_config.invalidate()
+    audit.record(db, actor=principal.user_id, action="admin.integration_config_updated",
+                 category="admin", detail={"integration": itype, "enabled": ic.enabled,
+                                           "config_object_id": ic.config_object_id})
+    return {"ok": True, "enabled": ic.enabled, "config_object_id": ic.config_object_id}
+
+
 # =========================================================================== #
 # Service objects (storage + email backends, selectable per node)             #
 # =========================================================================== #

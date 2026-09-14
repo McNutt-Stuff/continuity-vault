@@ -5,9 +5,9 @@
 > architecture. Update this file as slices land.
 
 ## Current summary
-- Overall status: In progress (Phase 0 + architecture foundation)
-- Current phase: Phase 2 — M365 connection + identity (control-plane surface landed)
-- Last updated: 2026-09-13
+- Overall status: In progress (Phase 2 — Entra identity discovery + mapping landed, preview)
+- Current phase: Phase 2 complete (discovery/mapping); Phase 3 next (Exchange/OneDrive collectors)
+- Last updated: 2026-09-14
 - Owner: (assign)
 
 ## Repository findings (gap analysis)
@@ -40,8 +40,8 @@
 | P1b | Entitlement (plan + flag) + fail-closed create guard | Done | `_spec_entitlement`, create 403/409 |
 | P1c | Managed credential/source/org-source/mapping/rule models | Done | `integrations/microsoft365/models.py` (18 `m365_*` tables, auto-created) |
 | P1d | Desired-state federation envelope + node validation | Partial | `IntegrationDesiredState` records written on activate; node validation TBD |
-| P2 | M365 connection + Entra identity (OAuth, discovery, mapping) | In progress | `microsoft365/api.py`: connect/oauth/scope/identities/activate/disconnect (CP records); Entra discovery on node TBD |
-| P3 | Core managed protection (Exchange/OneDrive) | Partial | CP: rules/mappings/sources CRUD + immutable versions + effective-policy compiler (`policy.py`, conflict-rejecting). Node collectors TBD |
+| P2 | M365 connection + Entra identity (OAuth, discovery, mapping) | Done (preview) | `microsoft365/graph.py` (app-only client), `discovery.py` (Entra /users → ExternalIdentity + scope), `worker.py` (reconcile), `api.py` `/discover` + `/members`; Entra app creds via `IntegrationConfig.config_object_id` (admin Sources → Managed integrations); frontend `M365Workspace` (connect/consent/discover/map); status → `preview` |
+| P3 | Core managed protection (Exchange/OneDrive) | Partial | CP: rules/mappings/sources CRUD + immutable versions + effective-policy compiler. Node app-only Graph collectors + desired-state federation TBD |
 | P4 | Organization collaboration (SharePoint/Teams) | Todo | Design-partner validation |
 | P5 | Compliance packs + security-source evidence | Todo | Evidence/privacy review |
 | P6 | Broader Microsoft business sources + customer-owned app | Todo | Per-module gates |
@@ -57,13 +57,15 @@
 | DATA-001 | design invariant | — | — | Todo | Enforced as slices land |
 
 ## Remaining work
-- [ ] P1c data model (spec §19) + additive migrations
-- [ ] P1d federation desired-state envelope + node-side validation
-- [ ] P2 OAuth admin-consent flow (Arkive multi-tenant app), Entra discovery, identity mapping, org-management Microsoft indicator
-- [ ] P3 managed sources + mapping/rule compiler + Exchange/OneDrive collectors (customer node)
+- [x] P2 OAuth admin-consent flow + Entra discovery + identity mapping (preview) + admin Entra-app config (ConfigObject link)
+- [ ] P3 managed sources + mapping/rule compiler + Exchange/OneDrive collectors (customer node, app-only Graph) + desired-state federation to the node + content push-back
 - [ ] P4 organization sources (SharePoint/Teams), custodians
 - [ ] P5 compliance pack engine + Microsoft evidence collectors
 - [ ] P6 broader sources + enterprise customer-owned app + direct restore
+
+### Phase 2 notes (discovery slice)
+- Discovery runs where the instance lives; today M365 endpoints run on the CP (customer-tenant nodes are data-plane only; the portal is CP-served), so discovery = Graph metadata only and runs on the CP — no federation needed for this slice.
+- Content collection (Exchange/OneDrive) DOES touch tenant data + node vault keys → that slice adds desired-state federation CP→node and a node-side collector; the `microsoft365.worker` already runs on both CP and node over the local DB, ready for that.
 
 ## Known gaps and deviations
 | Requirement | Gap/deviation | Reason | Resolution plan |

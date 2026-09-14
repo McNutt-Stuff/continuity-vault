@@ -5329,6 +5329,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 interface ConfigKey { secret: boolean; set: boolean; value: string }
 interface ConfigObj { id: string; name: string; kind: string; keys: Record<string, ConfigKey>; updated_at?: string }
 interface SourceSlot { type: string; label: string; kind: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean; icon: string; color: string; family: string; category: string; backfill_supported?: boolean; backfill_enabled?: boolean }
+interface IntegrationSlot { type: string; label: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean; icon: string; color: string }
 interface DraftRow { key: string; value: string; secret: boolean; set: boolean }
 interface ServiceKind { kind: string; label: string; category: string; credential_keys: string[]; settings: string[]; setting_defaults?: Record<string, string>; required: string[]; capabilities?: string[] }
 interface ServiceObj { id: string; name: string; kind: string; kind_label: string; category: string; enabled: boolean; config_object_id: string | null; settings: Record<string, string>; setting_keys: string[]; credential_keys: string[]; capabilities?: string[]; capability_options?: string[]; configured: boolean; updated_at?: string }
@@ -5499,6 +5500,7 @@ function ConfigObjectsAdmin() {
 function SourcesAdmin() {
   const [sources, setSources] = useState<SourceSlot[]>([]);
   const [objects, setObjects] = useState<ConfigObj[]>([]);
+  const [integrations, setIntegrations] = useState<IntegrationSlot[]>([]);
   const [toast, setToast] = useState("");
   const [callback, setCallback] = useState("");
   function flash(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
@@ -5506,12 +5508,17 @@ function SourcesAdmin() {
   async function load() {
     try { setSources(await api.get<SourceSlot[]>("/admin/sources")); } catch { /* ignore */ }
     try { setObjects(await api.get<ConfigObj[]>("/admin/config-objects")); } catch { /* ignore */ }
+    try { setIntegrations(await api.get<IntegrationSlot[]>("/admin/integration-configs")); } catch { /* ignore */ }
     try { setCallback((await api.get<{ redirect_uri: string }>("/admin/oauth-callback")).redirect_uri); } catch { /* ignore */ }
   }
   useEffect(() => { void load(); }, []);
 
   async function setSource(s: SourceSlot, patch: { enabled?: boolean; config_object_id?: string | null; family?: string; backfill_enabled?: boolean }) {
     try { await api.put(`/admin/sources/${s.type}`, patch); await load(); } catch { flash("Update failed"); }
+  }
+
+  async function setIntegration(it: IntegrationSlot, patch: { enabled?: boolean; config_object_id?: string | null }) {
+    try { await api.put(`/admin/integration-configs/${it.type}`, patch); await load(); } catch { flash("Update failed"); }
   }
 
   async function editFamily(s: SourceSlot) {
@@ -5609,6 +5616,44 @@ function SourcesAdmin() {
           ))}
         </div>
       </Card>
+      {integrations.length > 0 && (
+        <Card style={{ marginTop: 16 }}>
+          <h3 style={{ marginTop: 0 }}>Managed integrations</h3>
+          <div className="muted" style={{ fontSize: 12.5, marginBottom: 16 }}>
+            Platform application credentials for admin-governed integrations (e.g. the Arkive
+            Microsoft 365 Entra app). Link a configuration object holding the app's
+            <code> client_id</code> and <code> client_secret</code>; organizations grant consent to it.
+          </div>
+          <table className="table">
+            <thead><tr><th>Integration</th><th>Enabled</th><th>Configuration</th><th>Status</th></tr></thead>
+            <tbody>
+              {integrations.map((it) => (
+                <tr key={it.type}>
+                  <td>
+                    <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                      <div className="result-icon" style={{ width: 30, height: 30, background: it.color }}>
+                        <Icon name={it.icon as IconName} size={15} />
+                      </div>
+                      <div>
+                        <div style={{ fontWeight: 600 }}>{it.label}</div>
+                        <div className="faint" style={{ fontSize: 11 }}>{it.keys.join(" · ")}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td><input type="checkbox" checked={it.enabled} onChange={(e) => setIntegration(it, { enabled: e.target.checked })} /></td>
+                  <td>
+                    <select className="input sm" value={it.config_object_id || ""} onChange={(e) => setIntegration(it, { config_object_id: e.target.value })}>
+                      <option value="">— none —</option>
+                      {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                    </select>
+                  </td>
+                  <td><Pill tone={it.configured ? "ok" : "warn"}>{it.configured ? "Configured" : "Not set"}</Pill></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
