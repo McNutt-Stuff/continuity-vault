@@ -80,7 +80,7 @@ export default function Integrations() {
   const [setupSpec, setSetupSpec] = useState<Spec | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [m365Open, setM365Open] = useState(false);
+  const [m365Open, setM365Open] = useState<string | null>(null);
 
   async function load() {
     try { setList(await api.get<ListResp>("/integrations")); }
@@ -98,7 +98,7 @@ export default function Integrations() {
     if (!m) return;
     if (m === "connected") {
       notify({ message: "Microsoft 365 connected — administrator consent granted.", tone: "ok" });
-      setM365Open(true);
+      void load();
     } else if (m === "denied") {
       notify({ message: "Microsoft 365 consent was denied or cancelled in the Microsoft window.", tone: "warn" });
     } else if (m === "error") {
@@ -118,8 +118,8 @@ export default function Integrations() {
   if (loading) return <Loading label="Loading integrations…" />;
 
   if (m365Open) {
-    return <M365Workspace spec={specByType["microsoft365"]}
-                          onBack={() => { setM365Open(false); void load(); }} />;
+    return <M365Workspace spec={specByType["microsoft365"]} instanceId={m365Open}
+                          onBack={() => { setM365Open(null); void load(); }} />;
   }
 
   const detailInst = detailId ? list?.instances.find((i) => i.id === detailId) : null;
@@ -150,7 +150,7 @@ export default function Integrations() {
         <div className="insights-cards" style={{ marginBottom: 20 }}>
           {list.instances.map((i) => (
             <InstanceCard key={i.id} inst={i} spec={specByType[i.integration_type]}
-                          onOpen={() => { if (i.integration_type === "microsoft365") setM365Open(true); else setDetailId(i.id); }} onChanged={load} />
+                          onOpen={() => { if (i.integration_type === "microsoft365") setM365Open(i.id); else setDetailId(i.id); }} onChanged={load} />
           ))}
         </div>
       ) : (
@@ -174,9 +174,9 @@ export default function Integrations() {
       {showAdd && (
         <AddIntegrationModal available={list?.available || []}
                              hasAppliance={(list?.appliances || []).length > 0}
-                             addedTypes={new Set((list?.instances || []).map((i) => i.integration_type))}
+                             addedCounts={(list?.instances || []).reduce((acc, i) => { acc[i.integration_type] = (acc[i.integration_type] || 0) + 1; return acc; }, {} as Record<string, number>)}
                              onClose={() => setShowAdd(false)}
-                             onPick={(s) => { setShowAdd(false); if (s.integration_type === "microsoft365") setM365Open(true); else setSetupSpec(s); }} />
+                             onPick={(s) => { setShowAdd(false); if (s.integration_type === "microsoft365") setM365Open("new"); else setSetupSpec(s); }} />
       )}
 
       {setupSpec && (
@@ -189,8 +189,8 @@ export default function Integrations() {
 }
 
 // Catalog modal (mirrors the Sources page): pick an integration to set up.
-function AddIntegrationModal({ available, hasAppliance, addedTypes, onClose, onPick }: {
-  available: Spec[]; hasAppliance: boolean; addedTypes: Set<string>; onClose: () => void; onPick: (s: Spec) => void;
+function AddIntegrationModal({ available, hasAppliance, addedCounts, onClose, onPick }: {
+  available: Spec[]; hasAppliance: boolean; addedCounts: Record<string, number>; onClose: () => void; onPick: (s: Spec) => void;
 }) {
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
@@ -219,9 +219,9 @@ function AddIntegrationModal({ available, hasAppliance, addedTypes, onClose, onP
               const comingSoon = s.status && s.status !== "ga";
               const notEntitled = s.entitled === false;
               const applianceLocked = s.needs_appliance && !hasAppliance;
-              // A managed singleton (e.g. Microsoft 365) already has an instance —
-              // opening it should manage the existing one, not imply a fresh add.
-              const added = !!s.managed && addedTypes.has(s.integration_type);
+              // Informational only — Add always starts a new configuration, even
+              // for managed integrations (an org may connect several tenants).
+              const connectedCount = addedCounts[s.integration_type] || 0;
               // A managed workspace integration (e.g. Microsoft 365) can be opened
               // in preview once entitled — the workspace itself gates each step.
               const openable = !!s.workspace && !notEntitled && !applianceLocked;
@@ -245,7 +245,7 @@ function AddIntegrationModal({ available, hasAppliance, addedTypes, onClose, onP
                       <div className="row" style={{ gap: 6, alignItems: "center" }}>
                         <div style={{ fontWeight: 650 }}>{s.display_name}</div>
                         {s.managed && <Pill tone="info">Managed</Pill>}
-                        {added && <Pill tone="ok">Added</Pill>}
+                        {connectedCount > 0 && <Pill tone="ok">{connectedCount} connected</Pill>}
                       </div>
                       <div className="faint" style={{ fontSize: 11.5 }}>{s.category}</div>
                     </div>
@@ -1552,6 +1552,7 @@ function AdvancedUserPanel({ uid, onBack }: { uid: string; onBack: () => void })
 // --------------------------------------------------------------------------- //
 interface M365Status {
   connected: boolean; state?: string; status?: string; consent_state?: string;
+  instance_id?: string;
   microsoft_tenant_id?: string; scopes_granted?: string[];
   identities_discovered?: number; identities_mapped?: number; managed_sources?: number;
   last_run_at?: string | null;
@@ -1563,9 +1564,11 @@ interface M365Identity {
 }
 interface M365Member { id: string; name: string; email: string; }
 
-function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
+function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: string; onBack: () => void }) {
+  // "new" starts a fresh wizard; an id opens/manages that specific instance.
+  const [activeId, setActiveId] = useState(instanceId === "new" ? "" : instanceId);
   const [status, setStatus] = useState<M365Status | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(instanceId !== "new");
   const [busy, setBusy] = useState("");
   const [identities, setIdentities] = useState<M365Identity[]>([]);
   const [members, setMembers] = useState<M365Member[]>([]);
@@ -1574,34 +1577,42 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
   const [consentState, setConsentState] = useState<{ url?: string; state?: string; configured?: boolean; message?: string } | null>(null);
   const [tenantInput, setTenantInput] = useState("");
 
+  const iq = activeId ? `instance_id=${encodeURIComponent(activeId)}` : "";
+
   async function loadStatus() {
-    try { setStatus(await api.get<M365Status>("/integrations/microsoft365")); }
+    if (!activeId) { setLoading(false); return; }  // fresh wizard — nothing to load yet
+    try { setStatus(await api.get<M365Status>(`/integrations/microsoft365?${iq}`)); }
     catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't load Microsoft 365", tone: "danger" }); }
     finally { setLoading(false); }
   }
   async function loadIdentities() {
+    if (!activeId) return;
     try {
-      const r = await api.get<{ identities: M365Identity[] }>("/integrations/microsoft365/identities?limit=2000");
+      const r = await api.get<{ identities: M365Identity[] }>(`/integrations/microsoft365/identities?limit=2000&${iq}`);
       setIdentities(r.identities || []);
       const m = await api.get<{ members: M365Member[] }>("/integrations/microsoft365/members");
       setMembers(m.members || []);
-      const s = await api.get<{ collect_enabled: boolean; sources: { id: string; workload: string; name: string; state: string; last_collected_at: string | null }[] }>("/integrations/microsoft365/sources");
+      const s = await api.get<{ collect_enabled: boolean; sources: { id: string; workload: string; name: string; state: string; last_collected_at: string | null }[] }>(`/integrations/microsoft365/sources?${iq}`);
       setSources(s.sources || []); setCollectEnabled(!!s.collect_enabled);
     } catch { /* ignore */ }
   }
-  useEffect(() => { void loadStatus(); }, []);
+  useEffect(() => { void loadStatus(); }, [activeId]);
   useEffect(() => { if (status?.consent_state === "granted") void loadIdentities(); }, [status?.consent_state]);
 
   async function connect() {
     setBusy("connect");
-    try { setStatus(await api.post<M365Status>("/integrations/microsoft365/connect", { capabilities: ["entra_directory"] })); }
+    try {
+      const r = await api.post<M365Status>("/integrations/microsoft365/connect", { capabilities: ["entra_directory"] });
+      if (r.instance_id) setActiveId(r.instance_id);
+      setStatus(r);
+    }
     catch (e) { notify({ message: (e as { message?: string }).message || "Connect failed", tone: "danger" }); }
     finally { setBusy(""); }
   }
   async function startConsent() {
     setBusy("consent");
     try {
-      const r = await api.post<{ consent_configured: boolean; consent_url?: string; state?: string; message?: string }>("/integrations/microsoft365/oauth/start", {});
+      const r = await api.post<{ consent_configured: boolean; consent_url?: string; state?: string; message?: string }>(`/integrations/microsoft365/oauth/start?${iq}`, {});
       setConsentState({ url: r.consent_url, state: r.state, configured: r.consent_configured, message: r.message });
       if (r.consent_configured && r.consent_url) window.open(r.consent_url, "_blank", "noopener");
     } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't start consent", tone: "danger" }); }
@@ -1611,7 +1622,7 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
     if (!consentState?.state || !tenantInput.trim()) return;
     setBusy("consent");
     try {
-      const r = await api.post<M365Status>("/integrations/microsoft365/oauth/callback",
+      const r = await api.post<M365Status>(`/integrations/microsoft365/oauth/callback?${iq}`,
         { state: consentState.state, microsoft_tenant_id: tenantInput.trim(), admin_consent: true });
       setStatus(r); setConsentState(null);
       notify({ message: "Microsoft 365 connected", tone: "ok" });
@@ -1621,7 +1632,7 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
   async function discover() {
     setBusy("discover");
     try {
-      const r = await api.post<M365Status & { discovered?: number; in_scope?: number; queued?: boolean; note?: string }>("/integrations/microsoft365/discover", {});
+      const r = await api.post<M365Status & { discovered?: number; in_scope?: number; queued?: boolean; note?: string }>(`/integrations/microsoft365/discover?${iq}`, {});
       setStatus(r);
       if (r.queued) notify({ message: r.note || "Discovery queued on your node — results appear shortly.", tone: "ok" });
       else notify({ message: `Discovered ${r.discovered ?? 0} identities (${r.in_scope ?? 0} in scope)`, tone: "ok" });
@@ -1636,13 +1647,13 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
     else if (value.startsWith("map:")) decision = { external_identity_id: idn.id, action: "map", user_id: value.slice(4) };
     else return;
     try {
-      await api.post("/integrations/microsoft365/identities/decisions", { decisions: [decision] });
+      await api.post(`/integrations/microsoft365/identities/decisions?${iq}`, { decisions: [decision] });
       await loadIdentities();
     } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't apply mapping", tone: "danger" }); }
   }
   async function toggleCollection(next: boolean) {
     try {
-      const r = await api.post<{ collect_enabled: boolean; sources_provisioned: number }>("/integrations/microsoft365/collection", { enabled: next });
+      const r = await api.post<{ collect_enabled: boolean; sources_provisioned: number }>(`/integrations/microsoft365/collection?${iq}`, { enabled: next });
       setCollectEnabled(r.collect_enabled);
       await loadIdentities();
       notify({ message: next ? `Protection enabled — ${r.sources_provisioned} source(s) established` : "Protection paused", tone: "ok" });
@@ -1658,7 +1669,7 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
     if (!ok) return;
     setBusy("remove");
     try {
-      await api.post("/integrations/microsoft365/remove", {});
+      await api.post(`/integrations/microsoft365/remove?${iq}`, {});
       notify({ message: "Microsoft 365 setup removed.", tone: "ok" });
       onBack();
     } catch (e) {

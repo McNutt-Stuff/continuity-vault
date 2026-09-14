@@ -65,7 +65,20 @@ def require_m365(principal: security.Principal = Depends(security.require_org_ad
 def _instance(db: Session, tenant_id: str) -> IntegrationInstance | None:
     return (db.query(IntegrationInstance)
             .filter(IntegrationInstance.tenant_id == tenant_id,
-                    IntegrationInstance.integration_type == INTEGRATION_TYPE).first())
+                    IntegrationInstance.integration_type == INTEGRATION_TYPE)
+            .order_by(IntegrationInstance.created_at.desc()).first())
+
+
+def _resolve(db: Session, tenant_id: str, instance_id: str = "") -> IntegrationInstance | None:
+    """The M365 integration is multi-instance. Resolve the caller's target: an
+    explicit ``instance_id`` (tenant-scoped) when given, else the most recent one
+    for back-compat. Every workspace call passes an explicit id."""
+    q = db.query(IntegrationInstance).filter(
+        IntegrationInstance.tenant_id == tenant_id,
+        IntegrationInstance.integration_type == INTEGRATION_TYPE)
+    if instance_id:
+        return q.filter(IntegrationInstance.id == instance_id).first()
+    return q.order_by(IntegrationInstance.created_at.desc()).first()
 
 
 def _node_hosted(db: Session, tenant_id: str) -> bool:
@@ -124,10 +137,11 @@ def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
 
 
 @router.get("")
-def status(principal: security.Principal = Depends(require_m365),
+def status(instance_id: str = "",
+           principal: security.Principal = Depends(require_m365),
            db: Session = Depends(get_db)):
-    """Connection state, consent, discovery/mapping counts for this organization."""
-    return _status_view(db, _instance(db, principal.tenant_id))
+    """Connection state, consent, discovery/mapping counts for one instance."""
+    return _status_view(db, _resolve(db, principal.tenant_id, instance_id))
 
 
 # --------------------------------------------------------------------------- #
@@ -136,53 +150,60 @@ def status(principal: security.Principal = Depends(require_m365),
 class ConnectBody(BaseModel):
     node_id: str | None = None           # assigned customer node (defaults to routing)
     capabilities: list[str] = []         # bundles to request consent for
+    label: str | None = None             # friendly name (multiple instances allowed)
 
 
 @router.post("/connect")
 def connect(body: ConnectBody,
             principal: security.Principal = Depends(require_m365),
             db: Session = Depends(get_db)):
-    """Create (or return) the org's Microsoft 365 integration instance and its
-    managed-credential reference, ready for admin consent."""
-    inst = _instance(db, principal.tenant_id)
-    if inst is None:
-        tenant = db.get(Tenant, principal.tenant_id)
-        # Assign to the tenant's node (if federated) so discovery/collection run
-        # THERE; a CP-hosted tenant has node_id NULL and runs on the control plane.
-        node_id = body.node_id or (tenant.node_id if tenant else None)
-        inst = IntegrationInstance(
-            tenant_id=principal.tenant_id, owner_user_id=None,
-            integration_type=INTEGRATION_TYPE, label="Microsoft 365",
-            runs_on="node", node_id=node_id, enabled=True,
-            status="pending", provision_state="starting",
-            provision_message="Awaiting Microsoft administrator consent",
-            config={"capabilities": body.capabilities})
-        db.add(inst)
-        db.flush()
-    cred = _credential(db, inst)
-    if cred is None:
-        cred = m.ManagedCredentialRef(
-            tenant_id=principal.tenant_id, integration_instance_id=inst.id,
-            provider="microsoft", auth_model="oauth_admin_consent",
-            consent_state="pending", assigned_node_id=inst.node_id,
-            scopes_granted=[])
-        db.add(cred)
+    """Create a NEW Microsoft 365 integration instance and its managed-credential
+    reference, ready for admin consent. Always creates a fresh instance — an org
+    may connect several Microsoft tenants."""
+    tenant = db.get(Tenant, principal.tenant_id)
+    # Assign to the tenant's node (if federated) so discovery/collection run
+    # THERE; a CP-hosted tenant has node_id NULL and runs on the control plane.
+    node_id = body.node_id or (tenant.node_id if tenant else None)
+    # Number existing instances so the default label is unique-ish.
+    existing = (db.query(IntegrationInstance)
+                .filter(IntegrationInstance.tenant_id == principal.tenant_id,
+                        IntegrationInstance.integration_type == INTEGRATION_TYPE).count())
+    label = (body.label or "").strip() or (
+        "Microsoft 365" if existing == 0 else f"Microsoft 365 #{existing + 1}")
+    inst = IntegrationInstance(
+        tenant_id=principal.tenant_id, owner_user_id=None,
+        integration_type=INTEGRATION_TYPE, label=label,
+        runs_on="node", node_id=node_id, enabled=True,
+        status="pending", provision_state="starting",
+        provision_message="Awaiting Microsoft administrator consent",
+        config={"capabilities": body.capabilities})
+    db.add(inst)
+    db.flush()
+    cred = m.ManagedCredentialRef(
+        tenant_id=principal.tenant_id, integration_instance_id=inst.id,
+        provider="microsoft", auth_model="oauth_admin_consent",
+        consent_state="pending", assigned_node_id=inst.node_id,
+        scopes_granted=[])
+    db.add(cred)
     db.commit()
     audit.record(db, actor=principal.user_id, action="m365.connect_started",
                  category="admin", resource=inst.id,
-                 detail={"capabilities": body.capabilities})
+                 detail={"capabilities": body.capabilities, "label": label})
+    logger.info("m365 connect: created instance=%s label=%s node=%s (tenant=%s)",
+                inst.id, label, node_id or "control-plane", principal.tenant_id)
     return {"ok": True, **_status_view(db, inst)}
 
 
 @router.post("/oauth/start")
-def oauth_start(principal: security.Principal = Depends(require_m365),
+def oauth_start(instance_id: str = "",
+                principal: security.Principal = Depends(require_m365),
                 db: Session = Depends(get_db)):
     """Return the Microsoft admin-consent URL + a signed state to begin consent.
     Uses the Arkive-published Entra application (client_id from the linked Config
     Object). Microsoft redirects the browser to our public callback, which records
     consent — the reusable secret is never held in the control plane per se; it is
     used app-only on the box that collects."""
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
     from ... import platform_config
@@ -287,12 +308,12 @@ class ConsentCallback(BaseModel):
 
 
 @router.post("/oauth/callback")
-def oauth_callback(body: ConsentCallback,
+def oauth_callback(body: ConsentCallback, instance_id: str = "",
                    principal: security.Principal = Depends(require_m365),
                    db: Session = Depends(get_db)):
     """Record a completed admin-consent. Validates the signed state bound to this
     org's credential reference (fail closed on mismatch)."""
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     cred = _credential(db, inst) if inst else None
     if inst is None or cred is None:
         raise HTTPException(409, "connect first")
@@ -325,9 +346,10 @@ class ScopeBody(BaseModel):
 
 
 @router.get("/scope")
-def get_scope(principal: security.Principal = Depends(require_m365),
+def get_scope(instance_id: str = "",
+              principal: security.Principal = Depends(require_m365),
               db: Session = Depends(get_db)):
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
     sp = (db.query(m.IdentityScopePolicy)
@@ -336,10 +358,10 @@ def get_scope(principal: security.Principal = Depends(require_m365),
 
 
 @router.put("/scope")
-def set_scope(body: ScopeBody,
+def set_scope(body: ScopeBody, instance_id: str = "",
               principal: security.Principal = Depends(require_m365),
               db: Session = Depends(get_db)):
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
     sp = (db.query(m.IdentityScopePolicy)
@@ -364,10 +386,10 @@ def set_scope(body: ScopeBody,
 # Identities + mapping decisions                                              #
 # --------------------------------------------------------------------------- #
 @router.get("/identities")
-def list_identities(state: str = "", limit: int = 500,
+def list_identities(state: str = "", limit: int = 500, instance_id: str = "",
                     principal: security.Principal = Depends(require_m365),
                     db: Session = Depends(get_db)):
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
     q = db.query(m.ExternalIdentity).filter(
@@ -403,12 +425,12 @@ class IdentityDecisions(BaseModel):
 
 
 @router.post("/identities/decisions")
-def identity_decisions(body: IdentityDecisions,
+def identity_decisions(body: IdentityDecisions, instance_id: str = "",
                        principal: security.Principal = Depends(require_m365),
                        db: Session = Depends(get_db)):
     """Apply per-identity mapping decisions (idempotent, per-item results). Mapping
     never grants portal access; account creation/invite is a separate action."""
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
     results = []
@@ -479,13 +501,14 @@ def identity_decisions(body: IdentityDecisions,
 # Activation + desired state + disconnect                                     #
 # --------------------------------------------------------------------------- #
 @router.post("/activate")
-def activate(principal: security.Principal = Depends(security.require_passkey),
+def activate(instance_id: str = "",
+             principal: security.Principal = Depends(security.require_passkey),
              db: Session = Depends(get_db)):
     """Approve the activation plan: bump the signed desired-state the assigned node
     reconciles. Passkey step-up required. (Node applies + begins collection.)"""
     # Re-check entitlement explicitly (require_passkey doesn't imply it).
     require_m365(principal, db)
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
     cred = _credential(db, inst)
@@ -519,12 +542,13 @@ def activate(principal: security.Principal = Depends(security.require_passkey),
 
 
 @router.post("/disconnect")
-def disconnect(principal: security.Principal = Depends(security.require_passkey),
+def disconnect(instance_id: str = "",
+               principal: security.Principal = Depends(security.require_passkey),
                db: Session = Depends(get_db)):
     """Safely disconnect: stop future collection, retain protected data + checkpoints.
     Does NOT delete Arkive data (a purge is a separate, audited action)."""
     require_m365(principal, db)
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(404, "not connected")
     inst.enabled = False
@@ -540,13 +564,14 @@ def disconnect(principal: security.Principal = Depends(security.require_passkey)
 
 
 @router.post("/remove")
-def remove(principal: security.Principal = Depends(require_m365),
+def remove(instance_id: str = "",
+           principal: security.Principal = Depends(require_m365),
            db: Session = Depends(get_db)):
     """Delete a not-yet-protecting integration instance so it can be re-added
     cleanly. Refuses if the integration is actively protecting data (managed
     sources exist) — use disconnect + purge for that. Safe for the common case of
     a half-finished setup (connected but consent never completed)."""
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         return {"ok": True, "note": "Nothing to remove."}
     sources = (db.query(m.ManagedSource)
@@ -585,11 +610,12 @@ def org_members(principal: security.Principal = Depends(require_m365),
 
 
 @router.post("/discover")
-def discover(principal: security.Principal = Depends(require_m365),
+def discover(instance_id: str = "",
+             principal: security.Principal = Depends(require_m365),
              db: Session = Depends(get_db)):
     """Run Entra identity discovery now (synchronous). Requires granted consent and
     the platform Microsoft 365 app credentials (admin Config)."""
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
     cred = _credential(db, inst)
@@ -619,10 +645,11 @@ def discover(principal: security.Principal = Depends(require_m365),
 
 
 @router.get("/sources")
-def list_managed_sources(principal: security.Principal = Depends(require_m365),
+def list_managed_sources(instance_id: str = "",
+                         principal: security.Principal = Depends(require_m365),
                          db: Session = Depends(get_db)):
     """The admin-established managed sources (per-user Exchange / OneDrive)."""
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
     rows = (db.query(m.ManagedSource)
@@ -640,13 +667,13 @@ class CollectionToggle(BaseModel):
 
 
 @router.post("/collection")
-def set_collection(body: CollectionToggle,
+def set_collection(body: CollectionToggle, instance_id: str = "",
                    principal: security.Principal = Depends(security.require_passkey),
                    db: Session = Depends(get_db)):
     """Enable/disable admin-level content protection (Exchange + OneDrive) for the
     mapped users. Passkey step-up required. Provisions sources on enable."""
     require_m365(principal, db)
-    inst = _instance(db, principal.tenant_id)
+    inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
     cred = _credential(db, inst)
