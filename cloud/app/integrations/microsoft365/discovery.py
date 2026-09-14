@@ -27,6 +27,22 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _friendly_graph_error(e: "graph.GraphError") -> str:
+    """Turn a raw Graph error into admin-actionable remediation text."""
+    reason = (e.reason or "").strip()
+    if e.status == 403 or reason in ("Authorization_RequestDenied", "Authorization_IdentityNotFound"):
+        return ("The Arkive Microsoft 365 app is missing directory permissions. In the Azure "
+                "portal → App registrations → (the Arkive app) → API permissions, add the "
+                "APPLICATION permissions User.Read.All (and Mail.Read, Files.Read.All for content "
+                "backup), then click 'Grant admin consent'. Re-run discovery afterwards.")
+    if e.status == 401 or reason == "InvalidAuthenticationToken":
+        return ("Microsoft rejected the app credentials. Re-check the client id/secret linked in "
+                "Admin → Integrations, then reconnect and grant admin consent again.")
+    if reason == "quotaExceeded" or e.status == 429:
+        return "Microsoft is throttling requests (quota/429). Wait a few minutes and retry."
+    return f"graph: {reason or e}"
+
+
 def _in_scope(ident: "m.ExternalIdentity", rules: dict) -> tuple[bool, str]:
     """Deterministic scope decision. Precedence: explicit exclude > guest gate >
     explicit include list > domain allow-list > default (enabled members)."""
@@ -66,7 +82,7 @@ def run_discovery(db: Session, inst, *, client_id: str, client_secret: str) -> d
     except graph.GraphError as e:
         logger.warning("m365 token failed (instance=%s tenant=%s): %s",
                        inst.id, cred.microsoft_tenant_id, e)
-        return {"ok": False, "error": f"token: {e.reason or e}", "http": e.status}
+        return {"ok": False, "error": _friendly_graph_error(e), "http": e.status}
 
     scope = (db.query(m.IdentityScopePolicy)
              .filter(m.IdentityScopePolicy.integration_instance_id == inst.id).first())
@@ -106,7 +122,9 @@ def run_discovery(db: Session, inst, *, client_id: str, client_secret: str) -> d
     except graph.GraphError as e:
         db.rollback()
         logger.warning("m365 discovery failed (instance=%s): %s", inst.id, e)
-        return {"ok": False, "error": f"graph: {e.reason or e}", "http": e.status}
+        inst.last_error = _friendly_graph_error(e)
+        db.commit()
+        return {"ok": False, "error": _friendly_graph_error(e), "http": e.status}
     except Exception as e:  # noqa: BLE001
         db.rollback()
         logger.exception("m365 discovery crashed (instance=%s)", inst.id)
