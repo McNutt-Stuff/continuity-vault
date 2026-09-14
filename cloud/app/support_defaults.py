@@ -847,7 +847,10 @@ _SOURCE_PAGES = [
          "**Notes** — Outlook notes as `note`."],
         ["Collected locally by the agent — no mailbox credentials are sent to the cloud.",
          "Requires macOS **Full Disk Access** for the agent.",
-         "Choose which of mail / contacts / calendar / notes to include in the Data Map."]),
+         "Choose which mail folders (Inbox / Sent / Drafts) and data types "
+         "(contacts / calendar / notes) to include in the Data Map. New Outlook stores "
+         "no folder tags, so folders are inferred: Sent = you are the sender, Drafts = "
+         "never sent, otherwise Inbox."]),
     _source_doc(
         "source-onedrive", "OneDrive", "cloud", 56,
         "Back up your OneDrive files and folders, with full version history over time.",

@@ -50,6 +50,13 @@ _MAX_MESSAGES = 500000    # HxStore message fragments scanned per run (grouped a
 _MAX_MIME_BYTES = 100 * 1024 * 1024
 _STATE_VERSION = 3
 
+# Mail folders we surface for New Outlook. HxStore has no folder column, so these
+# are derived heuristically per message: Sent = the account owns the sender
+# address, Drafts = never sent (no send time and no Message-ID), Inbox =
+# everything else. Selecting a subset in the Data Map filters collection to it.
+_MAIL_FOLDERS = ("inbox", "sent", "drafts")
+_FOLDER_LABELS = {"inbox": "Inbox", "sent": "Sent", "drafts": "Drafts"}
+
 # New Outlook (HxStore) discovery roots.
 _HXSTORE_ROOTS = (
     Path.home() / "Library" / "Group Containers" / "UBF8T346G9.Office" / "Outlook",
@@ -340,9 +347,43 @@ def _emit_attachment(path: Path, message_oid: str, subject: str, frm: str,
     return ref
 
 
+def _bare_email(s: Optional[str]) -> str:
+    """Lowercased bare address from ``Name <a@b>`` / ``a@b`` / a run of text."""
+    if not s:
+        return ""
+    m = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", s)
+    return m.group(0).lower() if m else ""
+
+
+def _owner_addresses(freq: Dict[str, int]) -> set:
+    """Best-effort set of the account's own addresses. The owner appears in
+    almost every message (as sender OR recipient), so the most frequent
+    address(es) identify it. Aliases within 60% of the top count are included."""
+    if not freq:
+        return set()
+    top = max(freq.values())
+    if top < 2:
+        return set()
+    cutoff = max(2, int(top * 0.6))
+    owners = sorted((a for a, n in freq.items() if n >= cutoff),
+                    key=lambda a: freq[a], reverse=True)
+    return set(owners[:3])
+
+
+def _classify_folder(sender_addr: str, has_sent: bool, has_mid: bool,
+                     owners: set) -> str:
+    """Derive a mail folder for a New-Outlook message (see ``_MAIL_FOLDERS``)."""
+    if not has_sent and not has_mid:
+        return "drafts"
+    if sender_addr and sender_addr in owners:
+        return "sent"
+    return "inbox"
+
+
 def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                      want, sigs: Dict[str, str], old_sigs: Dict[str, str],
-                     tmpdir: Path) -> dict:
+                     tmpdir: Path, mail_wanted: bool = True,
+                     folder_filter: Optional[set] = None) -> dict:
     """Decode one HxStore via hxprobe and append new/changed objects to ``out``.
     Populates ``sigs`` with the current per-object signatures for delta state."""
     counts = {"mail": 0, "contacts": 0, "calendar": 0, "attachments": 0}
@@ -388,8 +429,9 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
         # plus, often, a full copy) that share a message_id (or block). We group
         # by logical identity and keep the RICHEST fragment so the backed-up email
         # carries the full body/subject/date, not a truncated preview.
-        if want("mail") and "messages" in tables:
+        if mail_wanted and "messages" in tables:
             mcols = [r[1] for r in con.execute("PRAGMA table_info(messages)")]
+            folder_filter = folder_filter or set()
 
             def mget(row, *names):
                 col = _hx_choose(mcols, *names)
@@ -431,10 +473,18 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
             mid_groups: Dict[str, dict] = {}
             subj_index: Dict[str, list] = {}   # normalized subject -> [message_id]
             orphans: list = []
+            addr_freq: Dict[str, int] = {}     # address -> fragment count (owner id)
             # Deterministic row order (by block) so grouping/tie-breaks are stable
             # across runs and the content signature doesn't churn.
             order = "ORDER BY block" if "block" in mcols else ""
             for row in con.execute(f"SELECT rowid AS _rid, * FROM messages {order} LIMIT {_MAX_MESSAGES}"):
+                _snd = _bare_email(mget(row, "sender"))
+                if _snd:
+                    addr_freq[_snd] = addr_freq.get(_snd, 0) + 1
+                for _rc in re.split(r"[,;]", mget(row, "recipients") or ""):
+                    _rb = _bare_email(_rc)
+                    if _rb:
+                        addr_freq[_rb] = addr_freq.get(_rb, 0) + 1
                 mid = (mget(row, "message_id") or "").strip()
                 if mid:
                     g = mid_groups.get(mid)
@@ -476,6 +526,8 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                     key = f"{subj}|{su}" if subj else f"blk{mget(row, 'block') or row['_rid']}"
                     standalone.setdefault(key, []).append(row)
 
+            owner_addrs = _owner_addresses(addr_freq)
+
             def _emit_group(group_key: str, rows: list, mid: str) -> None:
                 # Stable order so max()/attachment tie-breaks are deterministic.
                 rows = sorted(rows, key=lambda r: (mget(r, "block") or 0, r["_rid"]))
@@ -495,6 +547,13 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                 body_kind = (mget(body_row, "body_kind") or "").lower()
                 frm = (f"{sender_name} <{sender}>".strip() if sender_name and sender
                        else (sender or sender_name))
+
+                folder_id = _classify_folder(
+                    _bare_email(sender), bool(mget(env, "sent_unix")), bool(mid),
+                    owner_addrs)
+                if folder_filter and folder_id not in folder_filter:
+                    return
+                folder_label = _FOLDER_LABELS[folder_id]
 
                 names: set = set()
                 ids: set = set()
@@ -530,9 +589,10 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                      "body_kind": body_kind or "preview",
                      "preview_only": body_kind != "full",
                      "subject_inherited": subject_inherited,
+                     "folder": folder_label,
                      "has_attachments": bool(att_refs),
                      "attachments": att_refs, "modified": when},
-                    ["Outlook", "Mail"])
+                    ["Outlook", "Mail", folder_label])
                 if _emit_if_changed(obj, signature):
                     counts["mail"] += 1
 
@@ -812,9 +872,15 @@ def collect(config: Optional[dict] = None,
     config = config or {}
     state = state or {}
     inc = config.get("includeCategories") or []  # optional Data Map filter
+    inc_set = {str(c).lower() for c in inc}
 
     def _want(cat: str) -> bool:
         return (not inc) or (cat in inc)
+
+    # Mail folders (New Outlook only) are selectable alongside the data-type
+    # categories. Selecting a folder implies mail; no folder selected = all mail.
+    folder_filter = {f for f in _MAIL_FOLDERS if f in inc_set}
+    mail_wanted = (not inc) or ("mail" in inc_set) or bool(folder_filter)
 
     old_sigs: Dict[str, str] = (state.get("sigs") or {}) if state.get("v") == _STATE_VERSION else {}
     sigs: Dict[str, str] = {}
@@ -834,7 +900,7 @@ def collect(config: Optional[dict] = None,
         try:
             con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
             con.row_factory = sqlite3.Row
-            mime_idx = _mime_index(data_dir) if _want("mail") else {}
+            mime_idx = _mime_index(data_dir) if mail_wanted else {}
             for table in _tables(con):
                 cols = _cols(con, table)
                 if not cols:
@@ -843,7 +909,7 @@ def collect(config: Optional[dict] = None,
                 before = len(out)
                 cat = None
                 try:
-                    if _want("mail") and ("mail" in t or "message" in t):
+                    if mail_wanted and ("mail" in t or "message" in t):
                         cat = "mail"
                         _collect_mail(con, cols, table, mime_idx, out, seen)
                     elif _want("contacts") and "contact" in t:
@@ -893,7 +959,8 @@ def collect(config: Optional[dict] = None,
                 tmpdir = Path(td)
                 for store in stores:
                     counts = _collect_hxstore(store, hxprobe, out, _want, sigs,
-                                              old_sigs, tmpdir)
+                                              old_sigs, tmpdir, mail_wanted,
+                                              folder_filter)
                     capture_mode = "experimental-hxstore"
                     hxstore_count += 1
                     log.info("outlook_local: HxStore %s — mail=%d contacts=%d "

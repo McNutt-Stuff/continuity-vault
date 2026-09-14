@@ -186,7 +186,9 @@ class OutlookLocalConnector(Connector):
             searchable_fields=["from", "to", "folder", "org", "email", "kind"],
             facet_fields=["kind", "folder"],
             filter_categories=[
-                {"id": "mail", "label": "Email"},
+                {"id": "inbox", "label": "Inbox"},
+                {"id": "sent", "label": "Sent"},
+                {"id": "drafts", "label": "Drafts"},
                 {"id": "contacts", "label": "Contacts"},
                 {"id": "calendar", "label": "Calendar"},
                 {"id": "notes", "label": "Notes"},
