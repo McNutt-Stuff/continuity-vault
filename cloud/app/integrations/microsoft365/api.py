@@ -448,6 +448,76 @@ def m365_set_settings(body: SettingsBody, instance_id: str = "",
 
 
 # --------------------------------------------------------------------------- #
+# Managed protection profile (workloads / destinations / schedule)            #
+# --------------------------------------------------------------------------- #
+class ProfileBody(BaseModel):
+    workloads: list[str] | None = None                 # exchange | onedrive
+    destinations: list[str] | None = None              # cv-cloud | store:<id> | byos:<id> | ...
+    backup_interval_minutes: int | None = None         # <0 clears (use default cadence)
+
+
+_WORKLOAD_CATALOG = [
+    {"id": "exchange", "label": "Exchange Online", "description": "Each protected user's mailbox"},
+    {"id": "onedrive", "label": "OneDrive", "description": "Each protected user's files"},
+]
+
+
+@router.get("/profile")
+def m365_get_profile(instance_id: str = "",
+                     principal: security.Principal = Depends(require_m365),
+                     db: Session = Depends(get_db)):
+    """The org's managed-protection profile + the workload catalog + how many
+    users/sources it currently protects."""
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    from . import collect
+    prof = collect.profile(inst)
+    protected = db.query(m.ManagedSource).filter(
+        m.ManagedSource.integration_instance_id == inst.id,
+        m.ManagedSource.state == "active").count()
+    return {**prof, "workload_catalog": _WORKLOAD_CATALOG, "active_sources": protected}
+
+
+@router.put("/profile")
+def m365_set_profile(body: ProfileBody, instance_id: str = "",
+                     principal: security.Principal = Depends(require_m365),
+                     db: Session = Depends(get_db)):
+    """Update the managed-protection profile and (re)provision the per-user
+    managed sources + Data Map collections to match. Runs on the control plane;
+    node-hosted tenants reconcile on their node via bumped desired state."""
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    from . import collect
+    cfg = dict(inst.config or {})
+    mp = dict(cfg.get("managed_profile") or {})
+    if body.workloads is not None:
+        mp["workloads"] = [w for w in body.workloads if w in ("exchange", "onedrive")]
+    if body.destinations is not None:
+        mp["destinations"] = [str(d) for d in body.destinations if d]
+    if body.backup_interval_minutes is not None:
+        mp["backup_interval_minutes"] = (None if body.backup_interval_minutes < 0
+                                         else int(body.backup_interval_minutes))
+    cfg["managed_profile"] = mp
+    inst.config = cfg
+    db.commit()
+    if _node_hosted(db, principal.tenant_id):
+        _bump_desired(db, inst)   # node re-provisions sources/collections on reconcile
+    else:
+        try:
+            collect.provision_sources(db, inst)
+        except Exception:  # noqa: BLE001
+            logger.exception("m365 provision after profile update failed (instance=%s)", inst.id)
+    prof = collect.profile(inst)
+    audit.record(db, actor=principal.user_id, action="m365.profile_updated",
+                 category="admin", resource=inst.id, detail=prof)
+    logger.info("m365 profile (instance=%s): workloads=%s destinations=%s interval=%s",
+                inst.id, prof["workloads"], prof["destinations"], prof["backup_interval_minutes"])
+    return {**prof, "workload_catalog": _WORKLOAD_CATALOG}
+
+
+# --------------------------------------------------------------------------- #
 # Identities + mapping decisions                                              #
 # --------------------------------------------------------------------------- #
 @router.get("/identities")

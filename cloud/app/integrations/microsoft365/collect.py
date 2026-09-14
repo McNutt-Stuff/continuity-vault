@@ -36,19 +36,89 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def profile(inst) -> dict:
+    """The org-leader's managed-protection profile (which workloads to protect,
+    where to route them, and how often) — the data-map profile applied to every
+    protected user. Normalized with sensible fallbacks."""
+    cfg = inst.config or {}
+    prof = dict(cfg.get("managed_profile") or {})
+    workloads = [w for w in (prof.get("workloads") or []) if w in _WORKLOADS]
+    if not workloads:
+        caps = [c for c in (cfg.get("capabilities") or []) if c in _WORKLOADS]
+        workloads = caps or list(_DEFAULT_WORKLOADS)
+    dests = [str(d) for d in (prof.get("destinations") or []) if d] or ["cv-cloud"]
+    iv = prof.get("backup_interval_minutes")
+    try:
+        interval = int(iv) if iv not in (None, "") else None
+    except (TypeError, ValueError):
+        interval = None
+    return {"workloads": workloads, "destinations": dests,
+            "backup_interval_minutes": interval}
+
+
+def _ensure_managed_collection(db: Session, inst, source, vault, prof: dict):
+    """Create/refresh the Data Map Collection that protects a managed source on
+    the user's behalf — routed + scheduled per the org profile, owned by the
+    user's vault, flagged managed (so the standard connector scheduler skips it;
+    the M365 worker collects it via the admin app-only token)."""
+    from ...models import Collection
+    st = _WORKLOADS[source.workload]["source_type"]
+    coll = None
+    for c in (db.query(Collection)
+              .filter(Collection.tenant_id == source.tenant_id,
+                      Collection.source_type == st).all()):
+        if (c.config or {}).get("m365_source_id") == source.id:
+            coll = c
+            break
+    dests = prof.get("destinations") or ["cv-cloud"]
+    interval = prof.get("backup_interval_minutes")
+    if coll is None:
+        coll = Collection(
+            tenant_id=source.tenant_id, vault_id=vault.id, name=source.name,
+            source_type=st, destinations=list(dests),
+            backup_interval_minutes=interval,
+            config={"m365_source_id": source.id, "managed": True,
+                    "m365_workload": source.workload,
+                    "m365_instance_id": inst.id})
+        db.add(coll)
+        db.flush()
+    else:
+        # Keep the data-map profile in sync with the org settings + mapping.
+        coll.destinations = list(dests)
+        coll.backup_interval_minutes = interval
+        coll.name = source.name
+        if vault is not None and coll.vault_id != vault.id:
+            coll.vault_id = vault.id
+    return coll
+
+
+def _resolve_vault_for(db: Session, tenant_id: str, owner_user_id):
+    from ...models import Vault
+    vault = None
+    if owner_user_id:
+        vault = db.query(Vault).filter(Vault.owner_user_id == owner_user_id).first()
+    if vault is None:
+        vault = db.query(Vault).filter(Vault.tenant_id == tenant_id).first()
+    return vault
+
+
 def provision_sources(db: Session, inst) -> int:
-    """Establish admin-level managed sources (Exchange + OneDrive) for every
-    mapped / protected-only in-scope identity. Idempotent."""
+    """Establish admin-level managed sources (Exchange + OneDrive per the profile)
+    for every mapped / protected-only in-scope identity, AND a Data Map profile
+    (Collection) that protects each on the user's behalf. Idempotent — also pauses
+    sources whose identity/workload is no longer in scope/selected."""
+    prof = profile(inst)
+    workloads = prof["workloads"]
     bindings = (db.query(m.ExternalIdentityBinding)
                 .filter(m.ExternalIdentityBinding.integration_instance_id == inst.id,
                         m.ExternalIdentityBinding.status.in_(("mapped", "protected_only"))).all())
-    caps = [c for c in ((inst.config or {}).get("capabilities") or []) if c in _WORKLOADS]
-    workloads = caps or list(_DEFAULT_WORKLOADS)
     created = 0
+    kept: set = set()
     for b in bindings:
         ident = db.get(m.ExternalIdentity, b.external_identity_id)
         if ident is None or not ident.in_scope:
             continue
+        vault = _resolve_vault_for(db, inst.tenant_id, b.user_id)
         for w in workloads:
             src = (db.query(m.ManagedSource)
                    .filter(m.ManagedSource.integration_instance_id == inst.id,
@@ -56,54 +126,45 @@ def provision_sources(db: Session, inst) -> int:
                            m.ManagedSource.source_key == ident.entra_object_id).first())
             label = f"{_WORKLOADS[w]['label']} — {ident.display_name or ident.upn or ident.entra_object_id}"
             if src is None:
-                db.add(m.ManagedSource(
+                src = m.ManagedSource(
                     tenant_id=inst.tenant_id, integration_instance_id=inst.id,
                     workload=w, ownership_type="managed_user", owner_user_id=b.user_id,
                     source_key=ident.entra_object_id, name=label, state="active",
-                    assigned_node_id=inst.node_id))
+                    assigned_node_id=inst.node_id)
+                db.add(src)
+                db.flush()
                 created += 1
             else:
                 src.owner_user_id = b.user_id
                 src.name = label
-                if src.state in ("planned", "disconnected"):
+                if src.state in ("planned", "disconnected", "paused_by_admin"):
                     src.state = "active"
+            # Denormalize the profile cadence so the worker's due-check is cheap.
+            scfg = dict(src.config or {})
+            scfg["interval_minutes"] = prof["backup_interval_minutes"]
+            src.config = scfg
+            kept.add(src.id)
+            if vault is not None:
+                _ensure_managed_collection(db, inst, src, vault, prof)
+    # Pause sources no longer selected (workload dropped) or whose identity fell
+    # out of scope/mapping — stops collection without deleting protected data.
+    for src in (db.query(m.ManagedSource)
+                .filter(m.ManagedSource.integration_instance_id == inst.id).all()):
+        if src.id not in kept and src.state not in ("decommissioned",):
+            src.state = "paused_by_admin"
     db.commit()
     return created
 
 
+
 def _managed_collection(db: Session, inst, source, vault):
-    """Find or create the Collection that routes a managed source into the vault."""
-    from ...models import Collection
-    st = _WORKLOADS[source.workload]["source_type"]
-    coll = None
-    # Match on our config marker in Python (portable across json/jsonb; managed
-    # collections per tenant are few).
-    for c in (db.query(Collection)
-              .filter(Collection.tenant_id == source.tenant_id,
-                      Collection.vault_id == vault.id,
-                      Collection.source_type == st).all()):
-        if (c.config or {}).get("m365_source_id") == source.id:
-            coll = c
-            break
-    if coll is None:
-        coll = Collection(
-            tenant_id=source.tenant_id, vault_id=vault.id, name=source.name,
-            source_type=st, destinations=["cv-cloud"],
-            config={"m365_source_id": source.id, "managed": True})
-        db.add(coll)
-        db.commit()
-    return coll
+    """Find or create the Collection that routes a managed source into the vault
+    (delegates to the profile-aware builder so routing/schedule stay consistent)."""
+    return _ensure_managed_collection(db, inst, source, vault, profile(inst))
 
 
 def _resolve_vault(db: Session, source):
-    from ...models import Vault
-    vault = None
-    if source.owner_user_id:
-        vault = (db.query(Vault)
-                 .filter(Vault.owner_user_id == source.owner_user_id).first())
-    if vault is None:
-        vault = db.query(Vault).filter(Vault.tenant_id == source.tenant_id).first()
-    return vault
+    return _resolve_vault_for(db, source.tenant_id, source.owner_user_id)
 
 
 def collect_source(db: Session, inst, source, app_token: str) -> dict:
@@ -148,7 +209,8 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
         return {"ok": False, "error": str(e)[:200]}
 
     if objs:
-        sync_worker.ingest_objects(db, coll, objs, destinations=["cv-cloud"],
+        dests = coll.destinations or ["cv-cloud"]
+        sync_worker.ingest_objects(db, coll, objs, destinations=dests,
                                    searchable_fields=meta["search"], facet_fields=meta["facet"],
                                    actor="m365")
     # Persist resumable cursor + advance the two-track phase for mail.

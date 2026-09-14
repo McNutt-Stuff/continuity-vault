@@ -131,12 +131,19 @@ def _collect_due_sources(db, inst, token: str) -> None:
 
 
 def _source_due(src) -> bool:
-    # Mail still backfilling collects every cycle; otherwise on the refresh cadence.
+    # Mail still backfilling collects every cycle; otherwise on the profile's
+    # schedule (interval_minutes, set from the managed-protection profile) or the
+    # default refresh cadence.
     if src.workload == "exchange" and (src.config or {}).get("phase", "backfill") == "backfill":
         return True
     if src.last_collected_at is None:
         return True
-    return (_now() - src.last_collected_at).total_seconds() >= _REDISCOVER_SECONDS
+    iv = (src.config or {}).get("interval_minutes")
+    try:
+        secs = int(iv) * 60 if iv else _REDISCOVER_SECONDS
+    except (TypeError, ValueError):
+        secs = _REDISCOVER_SECONDS
+    return (_now() - src.last_collected_at).total_seconds() >= max(300, secs)
 
 
 def start_m365_worker() -> None:
