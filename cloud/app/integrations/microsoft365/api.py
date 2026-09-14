@@ -189,6 +189,8 @@ def oauth_start(principal: security.Principal = Depends(require_m365),
     vals = platform_config.integration_values(INTEGRATION_TYPE)
     client_id = (vals.get("client_id") or "").strip()
     if not client_id:
+        logger.warning("m365 oauth start: no client_id configured (integration_values "
+                       "for %s is empty) — cannot begin admin consent", INTEGRATION_TYPE)
         return {"consent_configured": False,
                 "message": "The Arkive Microsoft 365 application isn't configured on this "
                            "platform yet. A platform administrator must register it and link "
@@ -200,11 +202,25 @@ def oauth_start(principal: security.Principal = Depends(require_m365),
         meta["oauth_state"] = state
         cred.meta = meta
         db.commit()
+    else:
+        # No credential row to stamp the state on — the redirect can never
+        # correlate consent back. Recreate it rather than fail silently.
+        logger.warning("m365 oauth start: instance=%s had no credential row — "
+                       "recreating so consent can be correlated", inst.id)
+        cred = m.ManagedCredentialRef(
+            tenant_id=inst.tenant_id, integration_instance_id=inst.id,
+            provider="microsoft", auth_model="oauth_admin_consent",
+            consent_state="pending", assigned_node_id=inst.node_id,
+            scopes_granted=[], meta={"oauth_state": state})
+        db.add(cred)
+        db.commit()
     redirect = (vals.get("redirect_uri") or "").strip() or _default_redirect()
     consent_url = ("https://login.microsoftonline.com/organizations/v2.0/adminconsent?"
                    + urlencode({"client_id": client_id, "state": state,
                                 "scope": "https://graph.microsoft.com/.default",
                                 "redirect_uri": redirect}))
+    logger.info("m365 oauth start: instance=%s state=%s redirect_uri=%s",
+                inst.id, state[:8], redirect)
     return {"consent_configured": True, "consent_url": consent_url, "state": state,
             "redirect_uri": redirect}
 
@@ -221,15 +237,23 @@ def oauth_redirect(state: str = "", tenant: str = "", admin_consent: str = "",
     session). Matches the signed state to the pending credential, records consent
     and the Microsoft tenant id, then returns the admin to the portal."""
     portal = f"https://{get_settings().domain}/integrations"
+    logger.info("m365 oauth redirect received: state=%s admin_consent=%s tenant=%s error=%s",
+                (state or "")[:8] or "(none)", admin_consent or "(none)",
+                (tenant or "")[:12] or "(none)", error or "(none)")
     if not state:
+        logger.warning("m365 oauth redirect: no state parameter — cannot correlate consent")
         return RedirectResponse(portal + "?m365=error", status_code=302)
     cred = None
-    for c in (db.query(m.ManagedCredentialRef)
-              .filter(m.ManagedCredentialRef.consent_state != "granted").all()):
+    pending = (db.query(m.ManagedCredentialRef)
+               .filter(m.ManagedCredentialRef.consent_state != "granted").all())
+    for c in pending:
         if (c.meta or {}).get("oauth_state") == state:
             cred = c
             break
     if cred is None:
+        logger.warning("m365 oauth redirect: no pending credential matched state=%s "
+                       "(%d pending credential(s) checked) — consent NOT recorded",
+                       state[:8], len(pending))
         return RedirectResponse(portal + "?m365=error", status_code=302)
     inst = db.get(IntegrationInstance, cred.integration_instance_id)
     if error or (admin_consent and admin_consent.lower() not in ("true", "1")):

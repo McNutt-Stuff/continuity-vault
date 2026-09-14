@@ -89,6 +89,26 @@ export default function Integrations() {
   }
   useEffect(() => { void load(); }, []);
 
+  // Surface the outcome of the Microsoft admin-consent redirect (Microsoft sends
+  // the browser back to /integrations?m365=connected|error|denied). Without this
+  // the redirect landed silently and the integration appeared to never connect.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const m = params.get("m365");
+    if (!m) return;
+    if (m === "connected") {
+      notify({ message: "Microsoft 365 connected — administrator consent granted.", tone: "ok" });
+      setM365Open(true);
+    } else if (m === "denied") {
+      notify({ message: "Microsoft 365 consent was denied or cancelled in the Microsoft window.", tone: "warn" });
+    } else if (m === "error") {
+      notify({ message: "Microsoft 365 consent couldn't be recorded — please try connecting again. If it keeps failing, check Admin → Platform Logs.", tone: "danger" });
+    }
+    params.delete("m365");
+    const qs = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+  }, []);
+
   const specByType = useMemo(() => {
     const m: Record<string, Spec> = {};
     for (const s of (list?.available || [])) m[s.integration_type] = s;
