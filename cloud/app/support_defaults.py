@@ -1138,23 +1138,27 @@ _SOURCE_PAGES = [
         "by administrator-defined mappings and rules. Microsoft data, plaintext indexes and reusable "
         "credentials never live in the Arkive control plane.",
         ["Open **Integrations** and choose **Microsoft 365** (Business/Enterprise).",
-         "**Connect** your organization, then have a Microsoft Global Administrator grant admin consent.",
+         "**Connect** your organization, then have a Microsoft Global Administrator grant admin consent "
+         "(a Microsoft window opens and returns you here automatically).",
          "**Discover users** pulls your Entra directory; review who is in scope.",
-         "**Map** each Microsoft identity to an Arkive member (or mark it protected-only / excluded). "
-         "Mapping does not grant portal access."],
-        ["**Entra identity discovery (available now, preview)** — read-only discovery of your "
-         "Microsoft 365 users and mapping to Arkive members.",
-         "**Managed protection (coming next)** — Exchange, OneDrive, SharePoint and Teams governed by "
-         "the organization (not per-user backups). Feeds coverage and compliance evidence."],
+         "**Map** each Microsoft identity to an Arkive member (or mark it protected-only / excluded), "
+         "then turn on **Protect mapped users** to collect their Exchange Online + OneDrive."],
+        ["**Entra identity discovery + mapping (preview)** — read-only discovery of your Microsoft 365 "
+         "users and mapping to Arkive members.",
+         "**Managed Exchange Online + OneDrive (preview)** — organization admin-level collection of each "
+         "mapped user's mailbox and files, with no per-employee sign-in.",
+         "**Managed protection (coming next)** — SharePoint and Teams, compliance evidence."],
         ["Business/Enterprise plans only; enforced server-side.",
          "Uses Microsoft admin-consent OAuth (app-only) — no per-employee sign-in and no stored password.",
-         "Identity discovery is live in preview; content collection ships in a later phase."],
+         "Each mapped user's data lands in that user's Arkive vault."],
         required_plan="business",
         extra=(
             "\n## What works today (preview)\n"
-            "Connect your organization, grant Microsoft administrator consent, discover your Entra "
-            "users, and map them to Arkive members. Content collection (Exchange/OneDrive/SharePoint/"
-            "Teams) is delivered in a later phase.\n"
+            "Connect your organization, grant Microsoft administrator consent (fully wired — Microsoft "
+            "redirects back automatically), discover your Entra users and map them to Arkive members, "
+            "then enable **Protect mapped users** to collect each mapped user's Exchange Online mailbox "
+            "and OneDrive using your organization's admin access. SharePoint/Teams and compliance evidence "
+            "are delivered in a later phase.\n"
             "\n## Platform administrator setup\n"
             "A platform administrator registers the Arkive Microsoft 365 (Entra) application once and "
             "links its credentials in **Admin → Sources → Managed integrations**: create a "

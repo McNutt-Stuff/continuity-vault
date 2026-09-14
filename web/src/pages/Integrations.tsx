@@ -1544,6 +1544,8 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
   const [busy, setBusy] = useState("");
   const [identities, setIdentities] = useState<M365Identity[]>([]);
   const [members, setMembers] = useState<M365Member[]>([]);
+  const [sources, setSources] = useState<{ id: string; workload: string; name: string; state: string; last_collected_at: string | null }[]>([]);
+  const [collectEnabled, setCollectEnabled] = useState(false);
   const [consentState, setConsentState] = useState<{ url?: string; state?: string; configured?: boolean; message?: string } | null>(null);
   const [tenantInput, setTenantInput] = useState("");
 
@@ -1558,6 +1560,8 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
       setIdentities(r.identities || []);
       const m = await api.get<{ members: M365Member[] }>("/integrations/microsoft365/members");
       setMembers(m.members || []);
+      const s = await api.get<{ collect_enabled: boolean; sources: { id: string; workload: string; name: string; state: string; last_collected_at: string | null }[] }>("/integrations/microsoft365/sources");
+      setSources(s.sources || []); setCollectEnabled(!!s.collect_enabled);
     } catch { /* ignore */ }
   }
   useEffect(() => { void loadStatus(); }, []);
@@ -1609,6 +1613,14 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
       await api.post("/integrations/microsoft365/identities/decisions", { decisions: [decision] });
       await loadIdentities();
     } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't apply mapping", tone: "bad" }); }
+  }
+  async function toggleCollection(next: boolean) {
+    try {
+      const r = await api.post<{ collect_enabled: boolean; sources_provisioned: number }>("/integrations/microsoft365/collection", { enabled: next });
+      setCollectEnabled(r.collect_enabled);
+      await loadIdentities();
+      notify({ message: next ? `Protection enabled — ${r.sources_provisioned} source(s) established` : "Protection paused", tone: "ok" });
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't update protection", tone: "bad" }); }
   }
 
   const connected = !!status?.connected;
@@ -1695,6 +1707,7 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
           )}
         </Card>
       ) : (
+        <>
         <Card>
           <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
             <div>
@@ -1744,6 +1757,39 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
             </div>
           )}
         </Card>
+        <Card style={{ marginTop: 14 }}>
+          <div className="spread" style={{ alignItems: "center" }}>
+            <div>
+              <h3 style={{ margin: 0 }}>Protect mapped users</h3>
+              <div className="faint" style={{ fontSize: 12, maxWidth: 560 }}>
+                Collect each mapped user's <b>Exchange Online</b> mailbox and <b>OneDrive</b> using your
+                organization's admin access — no per-employee sign-in. Data lands in each user's vault.
+              </div>
+            </div>
+            <label className="row" style={{ gap: 8, alignItems: "center" }}>
+              <input type="checkbox" checked={collectEnabled} onChange={(e) => toggleCollection(e.target.checked)} />
+              <span style={{ fontSize: 12.5 }}>{collectEnabled ? "On" : "Off"}</span>
+            </label>
+          </div>
+          {sources.length > 0 && (
+            <div style={{ overflowX: "auto", marginTop: 12 }}>
+              <table className="table">
+                <thead><tr><th>Source</th><th>Workload</th><th>State</th><th>Last collected</th></tr></thead>
+                <tbody>
+                  {sources.map((s) => (
+                    <tr key={s.id}>
+                      <td style={{ fontWeight: 600 }}>{s.name}</td>
+                      <td><Pill tone="info">{s.workload === "exchange" ? "Exchange Online" : "OneDrive"}</Pill></td>
+                      <td><Pill tone={s.state === "active" ? "ok" : s.state === "credential_error" ? "danger" : "warn"}>{s.state}</Pill></td>
+                      <td className="faint" style={{ fontSize: 12 }}>{s.last_collected_at ? new Date(s.last_collected_at.endsWith("Z") ? s.last_collected_at : s.last_collected_at + "Z").toLocaleString() : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+        </>
       )}
     </>
   );

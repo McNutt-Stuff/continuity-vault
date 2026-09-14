@@ -514,9 +514,10 @@ def _graph_iso(since_date: str) -> str:
 _OUTLOOK_CHUNK = 200
 
 
-def _outlook_obj(c: "httpx.Client", headers: dict, m: dict, content_cap: int) -> SourceObject:
+def _outlook_obj(c: "httpx.Client", headers: dict, m: dict, content_cap: int,
+                 resource: str = "me") -> SourceObject:
     sender = (m.get("from") or {}).get("emailAddress", {}).get("address", "")
-    mime = c.get(f"https://graph.microsoft.com/v1.0/me/messages/{m['id']}/$value", headers=headers)
+    mime = c.get(f"https://graph.microsoft.com/v1.0/{resource}/messages/{m['id']}/$value", headers=headers)
     raw = mime.content if mime.status_code < 400 else b""
     content, backed = _capped(raw, content_cap)
     return SourceObject(
@@ -535,8 +536,12 @@ def _outlook_obj(c: "httpx.Client", headers: dict, m: dict, content_cap: int) ->
 
 def stream_outlook(access_token: str, cursor: Optional[dict] = None,
                    content_cap: int = _DEFAULT_CAP, options: Optional[dict] = None,
-                   state: Optional[dict] = None, mode: str = "recent"):
-    """Two-track Outlook/Graph mailbox pull:
+                   state: Optional[dict] = None, mode: str = "recent",
+                   resource: str = "me"):
+    """Two-track Outlook/Exchange-Online mailbox pull.
+
+    ``resource`` selects the Graph mailbox: ``"me"`` for a delegated per-user token,
+    or ``"users/<id|upn>"`` for an app-only (admin) token collecting a managed user.
 
       * ``mode="recent"`` — pulls mail newer than the stored watermark (fast,
         scheduled). The first recent run just records the watermark.
@@ -561,7 +566,7 @@ def stream_outlook(access_token: str, cursor: Optional[dict] = None,
                 params: Optional[dict] = None
             else:
                 since_iso = _graph_iso(options.get("sinceDate") or "")
-                url = "https://graph.microsoft.com/v1.0/me/messages"
+                url = f"https://graph.microsoft.com/v1.0/{resource}/messages"
                 params = {"$top": 50, "$select": select, "$orderby": "receivedDateTime desc"}
                 if since_iso:
                     params["$filter"] = f"receivedDateTime ge {since_iso}"
@@ -572,7 +577,7 @@ def stream_outlook(access_token: str, cursor: Optional[dict] = None,
                 r.raise_for_status()
                 body = r.json()
                 for m in body.get("value", []):
-                    yield _outlook_obj(c, headers, m, content_cap)
+                    yield _outlook_obj(c, headers, m, content_cap, resource)
                     emitted += 1
                 url, params = body.get("@odata.nextLink"), None
                 if not url:
@@ -593,7 +598,7 @@ def stream_outlook(access_token: str, cursor: Optional[dict] = None,
             if state is not None:
                 state["cursor"] = {"last_seen": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
             return
-        url = "https://graph.microsoft.com/v1.0/me/messages"
+        url = f"https://graph.microsoft.com/v1.0/{resource}/messages"
         params = {"$top": 50, "$select": select, "$orderby": "receivedDateTime desc",
                   "$filter": f"receivedDateTime gt {last_seen}"}
         newest = last_seen
@@ -606,7 +611,7 @@ def stream_outlook(access_token: str, cursor: Optional[dict] = None,
             if vals:
                 newest = max(newest, vals[0].get("receivedDateTime") or newest)
             for m in vals:
-                yield _outlook_obj(c, headers, m, content_cap)
+                yield _outlook_obj(c, headers, m, content_cap, resource)
                 emitted += 1
             url, params = body.get("@odata.nextLink"), None
         if state is not None:
@@ -895,10 +900,14 @@ def _onedrive_object(c: httpx.Client, headers: dict, it: dict, cap: int) -> Sour
 
 
 def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = None,
-                    state: Optional[dict] = None, content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
+                    state: Optional[dict] = None, content_cap: int = _DEFAULT_CAP,
+                    resource: str = "me") -> Iterable[SourceObject]:
     """Chunked, resumable, delta OneDrive pull via the Graph delta API. Backs up
     only the selected folders (``config['roots']`` relative to root; empty = whole
-    drive). Persists a per-root delta link so later runs fetch only changes."""
+    drive). Persists a per-root delta link so later runs fetch only changes.
+
+    ``resource`` selects the drive: ``"me"`` (delegated) or ``"users/<id|upn>"``
+    (app-only admin token collecting a managed user's OneDrive)."""
     config = config or {}
     state = state if state is not None else {}
     roots = config.get("roots") or [""]
@@ -923,8 +932,8 @@ def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = Non
             # each run (cheap; content-hash dedup skips unchanged files).
             if root == ROOT_SENTINEL or root.startswith(FLAT_PREFIX):
                 rel = "" if root == ROOT_SENTINEL else root[len(FLAT_PREFIX):].strip("/")
-                base = (f"https://graph.microsoft.com/v1.0/me/drive/root:/{rel}:/children"
-                        if rel else "https://graph.microsoft.com/v1.0/me/drive/root/children")
+                base = (f"https://graph.microsoft.com/v1.0/{resource}/drive/root:/{rel}:/children"
+                        if rel else f"https://graph.microsoft.com/v1.0/{resource}/drive/root/children")
                 url = link or base
                 params = None if link else {"$select": select, "$top": 200}
                 while url:
@@ -955,8 +964,8 @@ def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = Non
                 continue
             rel = (root or "").strip("/")
             if link is None:
-                url: Optional[str] = (f"https://graph.microsoft.com/v1.0/me/drive/root:/{rel}:/delta"
-                                      if rel else "https://graph.microsoft.com/v1.0/me/drive/root/delta")
+                url: Optional[str] = (f"https://graph.microsoft.com/v1.0/{resource}/drive/root:/{rel}:/delta"
+                                      if rel else f"https://graph.microsoft.com/v1.0/{resource}/drive/root/delta")
                 params: Optional[dict] = {"$select": select, "$top": 200}
             else:
                 url, params = link, None

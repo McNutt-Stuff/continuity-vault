@@ -42,7 +42,7 @@ def run_due(db) -> int:
     """Reconcile + discover for every connected M365 instance in the local DB."""
     from ... import platform_config
     from ...models import IntegrationInstance
-    from . import discovery, models as m
+    from . import collect, discovery, graph, models as m
 
     vals = platform_config.integration_values(INTEGRATION_TYPE)
     client_id = (vals.get("client_id") or "").strip()
@@ -59,30 +59,67 @@ def run_due(db) -> int:
             continue
         ds = (db.query(m.IntegrationDesiredState)
               .filter(m.IntegrationDesiredState.integration_instance_id == inst.id).first())
-        if not _due(inst, ds):
-            continue
-        if ds is not None and ds.status != "applied":
-            ds.status = "applying"
+        if _due(inst, ds):
+            if ds is not None and ds.status != "applied":
+                ds.status = "applying"
+                db.commit()
+            res = discovery.run_discovery(db, inst, client_id=client_id,
+                                          client_secret=client_secret)
+            ran += 1
+            if res.get("ok"):
+                if ds is not None:
+                    ds.applied_version = ds.version
+                    ds.applied_at = _now()
+                    ds.status = "applied"
+                inst.provision_state = "done"
+                inst.provision_message = (f"Discovered {res.get('discovered', 0)} Entra "
+                                          f"identities ({res.get('in_scope', 0)} in scope)")
+                inst.status = "active"
+                try:
+                    collect.provision_sources(db, inst)  # establish per-user sources
+                except Exception:  # noqa: BLE001
+                    logger.exception("m365 provision_sources failed (instance=%s)", inst.id)
+            else:
+                inst.last_error = str(res.get("error") or "discovery failed")[:400]
+                inst.status = "error"
+                if ds is not None:
+                    ds.status = "failed"
             db.commit()
-        res = discovery.run_discovery(db, inst, client_id=client_id,
-                                      client_secret=client_secret)
-        ran += 1
-        if res.get("ok"):
-            if ds is not None:
-                ds.applied_version = ds.version
-                ds.applied_at = _now()
-                ds.status = "applied"
-            inst.provision_state = "done"
-            inst.provision_message = (f"Discovered {res.get('discovered', 0)} Entra "
-                                      f"identities ({res.get('in_scope', 0)} in scope)")
-            inst.status = "active"
-        else:
-            inst.last_error = str(res.get("error") or "discovery failed")[:400]
-            inst.status = "error"
-            if ds is not None:
-                ds.status = "failed"
-        db.commit()
+
+        # Admin-approved content protection: collect each managed user's Exchange +
+        # OneDrive with the app-only token (reusing the connector fetchers).
+        if (inst.config or {}).get("collect_enabled") and client_id and client_secret:
+            try:
+                token = graph.app_token(client_id, client_secret, cred.microsoft_tenant_id)
+            except graph.GraphError as e:
+                logger.warning("m365 collect token failed (instance=%s): %s", inst.id, e)
+                token = ""
+            if token:
+                _collect_due_sources(db, inst, token)
     return ran
+
+
+def _collect_due_sources(db, inst, token: str) -> None:
+    from . import collect, models as m
+    sources = (db.query(m.ManagedSource)
+               .filter(m.ManagedSource.integration_instance_id == inst.id,
+                       m.ManagedSource.state.notin_(("decommissioned", "paused_by_admin"))).all())
+    for src in sources:
+        if not _source_due(src):
+            continue
+        try:
+            collect.collect_source(db, inst, src, token)
+        except Exception:  # noqa: BLE001
+            logger.exception("m365 collect_source crashed (source=%s)", src.id)
+
+
+def _source_due(src) -> bool:
+    # Mail still backfilling collects every cycle; otherwise on the refresh cadence.
+    if src.workload == "exchange" and (src.config or {}).get("phase", "backfill") == "backfill":
+        return True
+    if src.last_collected_at is None:
+        return True
+    return (_now() - src.last_collected_at).total_seconds() >= _REDISCOVER_SECONDS
 
 
 def start_m365_worker() -> None:

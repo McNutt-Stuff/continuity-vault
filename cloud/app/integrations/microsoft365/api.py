@@ -15,12 +15,15 @@ from __future__ import annotations
 import logging
 import secrets
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ... import audit, security
+from ...config import get_settings
 from ...db import get_db
 from ...models import IntegrationInstance, SystemSetting, Tenant, User
 from . import models as m
@@ -93,6 +96,7 @@ def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
         "identities_discovered": ext_q.count(),
         "identities_mapped": mapped,
         "managed_sources": sources,
+        "collect_enabled": bool((inst.config or {}).get("collect_enabled")),
         "last_run_at": inst.last_run_at.isoformat() if inst.last_run_at else None,
     }
 
@@ -148,17 +152,21 @@ def connect(body: ConnectBody,
 def oauth_start(principal: security.Principal = Depends(require_m365),
                 db: Session = Depends(get_db)):
     """Return the Microsoft admin-consent URL + a signed state to begin consent.
-    Uses the Arkive-published multi-tenant Entra application; the callback records
-    consent. The reusable secret/token is never held in the control plane."""
+    Uses the Arkive-published Entra application (client_id from the linked Config
+    Object). Microsoft redirects the browser to our public callback, which records
+    consent — the reusable secret is never held in the control plane per se; it is
+    used app-only on the box that collects."""
     inst = _instance(db, principal.tenant_id)
     if inst is None:
         raise HTTPException(409, "connect first")
-    client_id = _setting(db, "m365_client_id").strip()
+    from ... import platform_config
+    vals = platform_config.integration_values(INTEGRATION_TYPE)
+    client_id = (vals.get("client_id") or "").strip()
     if not client_id:
         return {"consent_configured": False,
                 "message": "The Arkive Microsoft 365 application isn't configured on this "
-                           "platform yet. A platform administrator must register it and set "
-                           "m365_client_id before organizations can grant consent."}
+                           "platform yet. A platform administrator must register it and link "
+                           "its client id/secret in Admin → Sources → Managed integrations."}
     state = secrets.token_urlsafe(24)
     cred = _credential(db, inst)
     if cred is not None:
@@ -166,11 +174,59 @@ def oauth_start(principal: security.Principal = Depends(require_m365),
         meta["oauth_state"] = state
         cred.meta = meta
         db.commit()
-    redirect = _setting(db, "m365_redirect_uri").strip()
-    consent_url = ("https://login.microsoftonline.com/organizations/v2.0/adminconsent"
-                   f"?client_id={client_id}&state={state}"
-                   + (f"&redirect_uri={redirect}" if redirect else ""))
-    return {"consent_configured": True, "consent_url": consent_url, "state": state}
+    redirect = (vals.get("redirect_uri") or "").strip() or _default_redirect()
+    consent_url = ("https://login.microsoftonline.com/organizations/v2.0/adminconsent?"
+                   + urlencode({"client_id": client_id, "state": state,
+                                "redirect_uri": redirect}))
+    return {"consent_configured": True, "consent_url": consent_url, "state": state,
+            "redirect_uri": redirect}
+
+
+def _default_redirect() -> str:
+    return f"https://{get_settings().domain}/api/integrations/microsoft365/oauth/redirect"
+
+
+@router.get("/oauth/redirect")
+def oauth_redirect(state: str = "", tenant: str = "", admin_consent: str = "",
+                   error: str = "", error_description: str = "",
+                   db: Session = Depends(get_db)):
+    """Public landing for Microsoft's admin-consent redirect (browser GET, no
+    session). Matches the signed state to the pending credential, records consent
+    and the Microsoft tenant id, then returns the admin to the portal."""
+    portal = f"https://{get_settings().domain}/integrations"
+    if not state:
+        return RedirectResponse(portal + "?m365=error", status_code=302)
+    cred = None
+    for c in (db.query(m.ManagedCredentialRef)
+              .filter(m.ManagedCredentialRef.consent_state != "granted").all()):
+        if (c.meta or {}).get("oauth_state") == state:
+            cred = c
+            break
+    if cred is None:
+        return RedirectResponse(portal + "?m365=error", status_code=302)
+    inst = db.get(IntegrationInstance, cred.integration_instance_id)
+    if error or (admin_consent and admin_consent.lower() not in ("true", "1")):
+        cred.consent_state = "error"
+        db.commit()
+        logger.warning("m365 consent denied (instance=%s): %s %s",
+                       cred.integration_instance_id, error, error_description[:120])
+        return RedirectResponse(portal + "?m365=denied", status_code=302)
+    cred.consent_state = "granted"
+    cred.microsoft_tenant_id = (tenant or "").strip()
+    meta = dict(cred.meta or {})
+    meta.pop("oauth_state", None)
+    cred.meta = meta
+    if inst is not None:
+        inst.provision_state = "done"
+        inst.provision_message = "Connected — ready to discover users"
+        inst.status = "active"
+    db.commit()
+    audit.record(db, actor="microsoft", action="m365.consent_granted",
+                 category="admin", resource=cred.integration_instance_id,
+                 detail={"microsoft_tenant_id": cred.microsoft_tenant_id})
+    logger.info("m365 consent granted (instance=%s tenant=%s)",
+                cred.integration_instance_id, cred.microsoft_tenant_id)
+    return RedirectResponse(portal + "?m365=connected", status_code=302)
 
 
 class ConsentCallback(BaseModel):
@@ -351,6 +407,13 @@ def identity_decisions(body: IdentityDecisions,
         binding.updated_at = _now()
         results.append({"id": e.id, "ok": True, "state": e.state})
     db.commit()
+    # Establish admin-level managed sources for the newly mapped users so protection
+    # can begin (idempotent). Collection itself only runs once an admin enables it.
+    try:
+        from . import collect
+        collect.provision_sources(db, inst)
+    except Exception:  # noqa: BLE001
+        logger.exception("m365 provision_sources after mapping failed (instance=%s)", inst.id)
     audit.record(db, actor=principal.user_id, action="m365.identity_decisions",
                  category="admin", resource=inst.id,
                  detail={"count": len(body.decisions)})
@@ -456,6 +519,54 @@ def discover(principal: security.Principal = Depends(require_m365),
     if not res.get("ok"):
         raise HTTPException(400, res.get("error") or "discovery failed")
     return {**res, **_status_view(db, inst)}
+
+
+@router.get("/sources")
+def list_managed_sources(principal: security.Principal = Depends(require_m365),
+                         db: Session = Depends(get_db)):
+    """The admin-established managed sources (per-user Exchange / OneDrive)."""
+    inst = _instance(db, principal.tenant_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    rows = (db.query(m.ManagedSource)
+            .filter(m.ManagedSource.integration_instance_id == inst.id)
+            .order_by(m.ManagedSource.name.asc()).all())
+    return {"collect_enabled": bool((inst.config or {}).get("collect_enabled")),
+            "sources": [{"id": s.id, "workload": s.workload, "name": s.name,
+                         "owner_user_id": s.owner_user_id, "state": s.state,
+                         "last_collected_at": s.last_collected_at.isoformat() if s.last_collected_at else None}
+                        for s in rows]}
+
+
+class CollectionToggle(BaseModel):
+    enabled: bool
+
+
+@router.post("/collection")
+def set_collection(body: CollectionToggle,
+                   principal: security.Principal = Depends(security.require_passkey),
+                   db: Session = Depends(get_db)):
+    """Enable/disable admin-level content protection (Exchange + OneDrive) for the
+    mapped users. Passkey step-up required. Provisions sources on enable."""
+    require_m365(principal, db)
+    inst = _instance(db, principal.tenant_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    cred = _credential(db, inst)
+    if body.enabled and (not cred or cred.consent_state != "granted"):
+        raise HTTPException(409, "Microsoft administrator consent is required first")
+    cfg = dict(inst.config or {})
+    cfg["collect_enabled"] = bool(body.enabled)
+    inst.config = cfg
+    created = 0
+    if body.enabled:
+        from . import collect
+        created = collect.provision_sources(db, inst)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="m365.collection_toggled",
+                 category="admin", severity="notice", resource=inst.id,
+                 detail={"enabled": body.enabled, "sources_provisioned": created})
+    return {"ok": True, "collect_enabled": body.enabled, "sources_provisioned": created}
 
 
 # --------------------------------------------------------------------------- #
