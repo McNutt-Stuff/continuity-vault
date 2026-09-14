@@ -52,6 +52,13 @@ def _should_proxy(method: str, path: str) -> bool:
         return True
     # Integrations (setup/OTP handshake + network telemetry) run against the
     # node the appliance reports to, so the portal must operate on that same DB.
+    # EXCEPT the Microsoft 365 managed integration, which is control-plane
+    # authoritative: its connect/consent/scope/identity config is authored on the
+    # CP and replicated down to the node (which only does app-only collection).
+    # Proxying it would build the OAuth redirect from the node's domain and store
+    # consent state on the node's DB, breaking the CP-hosted redirect handler.
+    if path.startswith("/api/integrations/microsoft365"):
+        return False
     if path == "/api/integrations" or path.startswith("/api/integrations/"):
         return True
     if path == "/api/recovered" or path.startswith("/api/recovered/"):
