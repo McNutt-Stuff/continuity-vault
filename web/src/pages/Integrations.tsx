@@ -174,6 +174,7 @@ export default function Integrations() {
       {showAdd && (
         <AddIntegrationModal available={list?.available || []}
                              hasAppliance={(list?.appliances || []).length > 0}
+                             addedTypes={new Set((list?.instances || []).map((i) => i.integration_type))}
                              onClose={() => setShowAdd(false)}
                              onPick={(s) => { setShowAdd(false); if (s.integration_type === "microsoft365") setM365Open(true); else setSetupSpec(s); }} />
       )}
@@ -188,8 +189,8 @@ export default function Integrations() {
 }
 
 // Catalog modal (mirrors the Sources page): pick an integration to set up.
-function AddIntegrationModal({ available, hasAppliance, onClose, onPick }: {
-  available: Spec[]; hasAppliance: boolean; onClose: () => void; onPick: (s: Spec) => void;
+function AddIntegrationModal({ available, hasAppliance, addedTypes, onClose, onPick }: {
+  available: Spec[]; hasAppliance: boolean; addedTypes: Set<string>; onClose: () => void; onPick: (s: Spec) => void;
 }) {
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
@@ -218,6 +219,9 @@ function AddIntegrationModal({ available, hasAppliance, onClose, onPick }: {
               const comingSoon = s.status && s.status !== "ga";
               const notEntitled = s.entitled === false;
               const applianceLocked = s.needs_appliance && !hasAppliance;
+              // A managed singleton (e.g. Microsoft 365) already has an instance —
+              // opening it should manage the existing one, not imply a fresh add.
+              const added = !!s.managed && addedTypes.has(s.integration_type);
               // A managed workspace integration (e.g. Microsoft 365) can be opened
               // in preview once entitled — the workspace itself gates each step.
               const openable = !!s.workspace && !notEntitled && !applianceLocked;
@@ -241,6 +245,7 @@ function AddIntegrationModal({ available, hasAppliance, onClose, onPick }: {
                       <div className="row" style={{ gap: 6, alignItems: "center" }}>
                         <div style={{ fontWeight: 650 }}>{s.display_name}</div>
                         {s.managed && <Pill tone="info">Managed</Pill>}
+                        {added && <Pill tone="ok">Added</Pill>}
                       </div>
                       <div className="faint" style={{ fontSize: 11.5 }}>{s.category}</div>
                     </div>
@@ -1643,6 +1648,23 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
       notify({ message: next ? `Protection enabled — ${r.sources_provisioned} source(s) established` : "Protection paused", tone: "ok" });
     } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't update protection", tone: "danger" }); }
   }
+  async function removeSetup() {
+    const ok = await confirmDialog({
+      title: "Remove Microsoft 365 setup",
+      message: "This deletes the half-finished connection so you can start over. It's only "
+        + "available before any data is protected.",
+      confirmLabel: "Remove setup",
+    });
+    if (!ok) return;
+    setBusy("remove");
+    try {
+      await api.post("/integrations/microsoft365/remove", {});
+      notify({ message: "Microsoft 365 setup removed.", tone: "ok" });
+      onBack();
+    } catch (e) {
+      notify({ message: (e as { message?: string }).message || "Couldn't remove the setup", tone: "danger" });
+    } finally { setBusy(""); }
+  }
 
   const connected = !!status?.connected;
   const consent = status?.consent_state || "pending";
@@ -1703,9 +1725,14 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
             directory. No employee passwords are ever used.
           </div>
           {!consentState ? (
-            <button className="btn primary" disabled={busy === "consent"} onClick={startConsent}>
-              <Icon name="link" size={14} /> {busy === "consent" ? "Preparing…" : "Get admin consent"}
-            </button>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <button className="btn primary" disabled={busy === "consent"} onClick={startConsent}>
+                <Icon name="link" size={14} /> {busy === "consent" ? "Preparing…" : "Get admin consent"}
+              </button>
+              <button className="btn ghost sm" disabled={busy === "remove"} onClick={removeSetup}>
+                {busy === "remove" ? "Removing…" : "Remove setup"}
+              </button>
+            </div>
           ) : consentState.configured === false ? (
             <div style={{ fontSize: 12.5, color: "var(--warn)" }}>
               <Icon name="alert" size={13} /> {consentState.message || "The platform Microsoft 365 app isn't configured yet."}

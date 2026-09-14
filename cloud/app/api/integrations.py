@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from .. import credstore, security, audit
@@ -183,7 +183,8 @@ def list_integrations(principal: security.Principal = Depends(security.get_princ
                  if _admin_enabled(db, i.integration_type)]
     instances = (db.query(IntegrationInstance)
                  .filter(IntegrationInstance.tenant_id == principal.tenant_id,
-                         IntegrationInstance.owner_user_id == principal.user_id)
+                         or_(IntegrationInstance.owner_user_id == principal.user_id,
+                             IntegrationInstance.owner_user_id.is_(None)))
                  .order_by(IntegrationInstance.created_at.desc()).all())
     # Appliances the user can run LAN integrations on.
     appliances = (db.query(Appliance)
