@@ -9,11 +9,12 @@ import { JobKindBadge } from "../components/JobKindBadge";
 interface Event {
   kind: string; source: string; source_username?: string | null; source_type?: string; destination?: string;
   destination_label?: string; destination_provider?: string | null; object_count?: number; total_bytes?: number; status: string;
-  snapshot_id?: string; at?: string; command?: string;
+  snapshot_id?: string; at?: string; command?: string; owner?: string | null;
 }
 interface Job {
   id: string; source: string; source_username?: string | null; source_type?: string; kind: string;
-  status: string; processed: number; total: number; message: string;
+  status: string; processed: number; total: number; message: string; error?: string | null;
+  owner?: string | null; at?: string;
 }
 interface SourceError {
   account_id: string; source: string; source_username?: string | null; source_type?: string;
@@ -21,6 +22,7 @@ interface SourceError {
 }
 interface Activity {
   in_flight: Event[]; events: Event[]; jobs: Job[]; source_errors?: SourceError[];
+  scope?: string; can_switch_scope?: boolean;
   summary: { recent: number; pending: number; queued_agents: number; active_jobs: number; source_errors?: number };
 }
 
@@ -53,16 +55,19 @@ function SourceGlyph({ type, size = 16 }: { type?: string; size?: number }) {
 export default function ActivityPage() {
   const [data, setData] = useState<Activity | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [scope, setScope] = useState<"me" | "org">("me");
 
   async function load() {
-    try { setData(await api.get<Activity>("/activity?limit=80")); } catch { /* ignore */ } finally { setLoaded(true); }
+    try { setData(await api.get<Activity>(`/activity?limit=80&scope=${scope}`)); } catch { /* ignore */ } finally { setLoaded(true); }
   }
   useEffect(() => {
     void load();
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
-  }, []);
+  }, [scope]);
 
+  const canSwitch = !!data?.can_switch_scope;
+  const isOrg = scope === "org" && canSwitch;
   const events = data?.events ?? [];
   const bytesTotal = events.reduce((s, e) => s + (e.total_bytes ?? 0), 0);
   const objectsTotal = events.reduce((s, e) => s + (e.object_count ?? 0), 0);
@@ -71,8 +76,18 @@ export default function ActivityPage() {
 
   return (
     <>
+      {canSwitch && (
+        <div className="row" style={{ gap: 6, marginBottom: 14 }}>
+          <button className={`btn sm ${scope === "me" ? "primary" : "ghost"}`} onClick={() => setScope("me")}>
+            <Icon name="user" size={13} /> My activity
+          </button>
+          <button className={`btn sm ${scope === "org" ? "primary" : "ghost"}`} onClick={() => setScope("org")}>
+            <Icon name="shield" size={13} /> Organization
+          </button>
+        </div>
+      )}
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        <Stat label="Recent events" value={data?.summary.recent ?? 0} />
+        <Stat label={isOrg ? "Org events" : "Recent events"} value={data?.summary.recent ?? 0} />
         <Stat label="Running now" value={(data?.summary.active_jobs ?? 0) + (data?.summary.queued_agents ?? 0)}
           hint={(data?.summary.active_jobs || data?.summary.queued_agents) ? "backups in progress" : "idle"} />
         <Stat label="Sealing" value={data?.summary.pending ?? 0} hint="awaiting appliance seal" />
@@ -104,9 +119,11 @@ export default function ActivityPage() {
 
       {data && (data.jobs.length > 0 || data.in_flight.length > 0) && (
         <Card style={{ marginBottom: 16 }}>
-          <h3 style={{ marginBottom: 10 }}>In progress</h3>
+          <h3 style={{ marginBottom: 10 }}>Backup runs</h3>
           {data.jobs.map((j) => {
+            const running = j.status === "running" || j.status === "queued";
             const pct = j.total > 0 ? Math.min(100, (j.processed / j.total) * 100) : 0;
+            const tone = j.status === "done" ? "ok" : j.status === "failed" ? "danger" : running ? "warn" : "info";
             return (
               <div key={j.id} className="result-row" style={{ alignItems: "flex-start" }}>
                 <div className="result-icon" style={{ background: brandForSource(j.source_type || "") ? "var(--inset)" : "linear-gradient(135deg,#4f7cff,#35d0a5)" }}>
@@ -116,16 +133,22 @@ export default function ActivityPage() {
                   <div className="row" style={{ gap: 6, alignItems: "center" }}>
                     <span style={{ fontWeight: 600 }}>{j.source}{j.source_username && j.source_username !== j.source ? <span className="faint" style={{ fontWeight: 400 }}> ({j.source_username})</span> : null}</span>
                     <JobKindBadge kind={j.kind} />
+                    {isOrg && j.owner && <Pill tone="info">{j.owner}</Pill>}
                   </div>
                   <div className="spread faint" style={{ fontSize: 12, margin: "4px 0" }}>
-                    <span>{j.message || (j.kind === "backfill" ? "Crawling history…" : "Working…")}</span>
+                    <span>{j.error || j.message || (j.kind === "backfill" ? "Crawling history…" : running ? "Working…" : "Completed")}</span>
                     {j.total > 0 && <span>{j.processed}/{j.total}</span>}
                   </div>
-                  <div className={`progress ${j.kind === "backfill" ? "backfill" : ""}`}>
-                    <span style={{ width: j.total > 0 ? `${pct}%` : "40%", opacity: j.total > 0 ? 1 : 0.5 }} />
-                  </div>
+                  {running && (
+                    <div className={`progress ${j.kind === "backfill" ? "backfill" : ""}`}>
+                      <span style={{ width: j.total > 0 ? `${pct}%` : "40%", opacity: j.total > 0 ? 1 : 0.5 }} />
+                    </div>
+                  )}
                 </div>
-                <Pill tone="warn">{j.status}</Pill>
+                <div className="stack" style={{ alignItems: "flex-end", gap: 6 }}>
+                  <Pill tone={tone}>{j.status}</Pill>
+                  {j.at && <span className="faint" style={{ fontSize: 11 }}>{ago(j.at)}</span>}
+                </div>
               </div>
             );
           })}
@@ -159,7 +182,10 @@ export default function ActivityPage() {
               <SourceGlyph type={e.source_type} size={18} />
             </div>
             <div className="flex1">
-              <div style={{ fontWeight: 600 }}>{e.source}{e.source_username && e.source_username !== e.source ? <span className="faint" style={{ fontWeight: 400 }}> ({e.source_username})</span> : null}</div>
+              <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                <span style={{ fontWeight: 600 }}>{e.source}{e.source_username && e.source_username !== e.source ? <span className="faint" style={{ fontWeight: 400 }}> ({e.source_username})</span> : null}</span>
+                {isOrg && e.owner && <Pill tone="info">{e.owner}</Pill>}
+              </div>
               <div className="faint" style={{ fontSize: 12.5 }}>
                 <DestIcon dest={e.destination} provider={e.destination_provider || undefined} size={12} /> {destLabel(e)}
                 {" · "}{e.object_count ?? 0} objects · {bytes(e.total_bytes ?? 0)}

@@ -23,9 +23,17 @@ from ..models import (
     SnapshotReceipt,
     SyncJob,
     Tenant,
+    User,
+    Vault,
 )
 
 router = APIRouter(tags=["activity"])
+
+
+def _can_switch(principal: security.Principal, tenant: Tenant) -> bool:
+    """Org admins of an organization tenant may widen the feed to the whole org."""
+    return ((security.is_org_admin(principal.role) or principal.is_platform_admin)
+            and security.org_enabled(getattr(tenant, "tenant_type", "") or ""))
 
 
 def _dest_labeler(db: Session, tenant_id: str):
@@ -63,19 +71,44 @@ def _dest_labeler(db: Session, tenant_id: str):
 
 
 @router.get("/activity")
-def activity(limit: int = 40,
+def activity(limit: int = 40, scope: str = "me",
              principal: security.Principal = Depends(security.get_principal),
              tenant: Tenant = Depends(security.get_tenant),
              db: Session = Depends(get_db)):
-    """Recent + in-flight backup / sync / ingest activity for this user."""
-    # Data partitioning: a member only sees activity from their own vaults.
-    allowed = security.content_vault_ids(db, principal)
+    """Recent + in-flight backup / sync / ingest activity.
+
+    ``scope="me"`` (default) shows the caller's own vaults; ``scope="org"`` widens
+    to the whole organization (all members + org-shared managed sources) for org
+    admins — powers the Activity page's Organization tab."""
+    can_switch = _can_switch(principal, tenant)
+    if scope == "org" and can_switch:
+        allowed, eff_scope = security.scoped_vault_ids(db, principal, "org")
+    else:
+        allowed, eff_scope = security.content_vault_ids(db, principal), "me"
     colls = {c.id: c for c in db.query(Collection)
              .filter(Collection.tenant_id == tenant.id,
                      Collection.vault_id.in_(allowed)).all()} if allowed else {}
     coll_ids = list(colls.keys())
     my_acct_ids = {c.connector_account_id for c in colls.values() if c.connector_account_id}
     my_agent_ids = {c.agent_id for c in colls.values() if c.agent_id}
+
+    # Owner (member) name per vault — shown in the org view so an admin can tell
+    # whose source produced each event. Resolved once, cheap for a tenant.
+    owner_by_vault: dict[str, str] = {}
+    if eff_scope == "org":
+        vaults = {v.id: v for v in db.query(Vault)
+                  .filter(Vault.id.in_(allowed)).all()} if allowed else {}
+        uids = {v.owner_user_id for v in vaults.values() if v.owner_user_id}
+        names = {u.id: (u.display_name or u.email) for u in db.query(User)
+                 .filter(User.id.in_(uids)).all()} if uids else {}
+        for vid, v in vaults.items():
+            owner_by_vault[vid] = names.get(v.owner_user_id, "Organization (shared)")
+
+    def _owner(collection_id: str) -> str | None:
+        if eff_scope != "org":
+            return None
+        c = colls.get(collection_id)
+        return owner_by_vault.get(c.vault_id) if c else None
 
     def _source_label(collection_id: str) -> str:
         c = colls.get(collection_id)
@@ -115,6 +148,7 @@ def activity(limit: int = 40,
         "source": _source_label(rc.collection_id),
         "source_username": _source_username(rc.collection_id),
         "source_type": _source_type(rc.collection_id),
+        "owner": _owner(rc.collection_id),
         "destination": rc.destination,
         "destination_label": dest_label(rc.destination),
         "destination_provider": dest_provider(rc.destination),
@@ -141,26 +175,30 @@ def activity(limit: int = 40,
                 "command": (cmd or {}).get("type"),
             })
 
-    # Tracked connector backup/sync jobs (running + recently finished).
+    # Tracked connector backup/sync jobs — in-flight AND recently finished, so
+    # every run is visible (a managed/standard poll that completes with zero new
+    # objects has no receipt, but its job still shows the attempt + outcome).
     jobs = (db.query(SyncJob)
             .filter(SyncJob.tenant_id == tenant.id,
-                    SyncJob.collection_id.in_(coll_ids),
-                    SyncJob.status.in_(["queued", "running"]))
-            .order_by(SyncJob.created_at.desc()).all()) if coll_ids else []
+                    SyncJob.collection_id.in_(coll_ids))
+            .order_by(SyncJob.created_at.desc()).limit(max(limit, 40)).all()) if coll_ids else []
     job_items = [{
         "id": j.id,
         "collection_id": j.collection_id,
         "source": _source_label(j.collection_id),
         "source_username": _source_username(j.collection_id),
         "source_type": _source_type(j.collection_id),
+        "owner": _owner(j.collection_id),
         "kind": j.kind,
         "status": j.status,
         "processed": j.processed or 0,
         "total": j.total or 0,
         "message": j.message or "",
-        "at": (j.started_at or j.created_at).isoformat(),
+        "error": (j.error or "")[:200] or None,
+        "at": (j.finished_at or j.started_at or j.created_at).isoformat(),
     } for j in jobs]
 
+    active_jobs = sum(1 for j in jobs if j.status in ("queued", "running"))
     pending = sum(1 for e in events if e["status"] == "pending")
 
     # Sources currently in an error / needs-reauth state (from the last sync).
@@ -184,11 +222,13 @@ def activity(limit: int = 40,
         "events": events,
         "jobs": job_items,
         "source_errors": source_errors,
+        "scope": eff_scope,
+        "can_switch_scope": can_switch,
         "summary": {
             "recent": len(events),
             "pending": pending,
             "queued_agents": len(in_flight),
-            "active_jobs": len(job_items),
+            "active_jobs": active_jobs,
             "source_errors": len(source_errors),
         },
     }
