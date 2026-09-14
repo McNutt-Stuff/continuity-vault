@@ -712,6 +712,33 @@ class RecoveredItem(Base):
     destroyed = Column(Boolean, default=False)
 
 
+class AccessApproval(Base):
+    """Dual-control record for an admin accessing ANOTHER member's protected data.
+    When the tenant requires approval for cross-member recovery, the request is
+    parked here (status=pending) until a DIFFERENT org admin approves it; the
+    original admin can then recover the specific object. Every cross-member access
+    is also audited independently of this record."""
+
+    __tablename__ = "access_approvals"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    kind = Column(String, default="recovery")            # recovery (search is audit-only)
+    requested_by = Column(String, index=True)            # the admin requesting access
+    requester_name = Column(String, default="")
+    target_user_id = Column(String, index=True)          # whose data is being accessed
+    target_name = Column(String, default="")
+    object_id = Column(String, default="")
+    snapshot_id = Column(String, default="")
+    destination = Column(String, default="")
+    reason = Column(String, default="")
+    status = Column(String, default="pending", index=True)  # pending|approved|denied|used|expired
+    approved_by = Column(String, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now)
+    expires_at = Column(DateTime, nullable=True)
+
+
+
 class PurgeRequest(Base):
     """A scheduled, irreversible deletion of a source's data from chosen storage
     destinations (and the search index everywhere it lives). Created with a grace

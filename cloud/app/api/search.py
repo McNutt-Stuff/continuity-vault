@@ -21,6 +21,7 @@ from .. import audit, fleet, keybroker, security
 from ..db import get_db
 from ..connectors import get_connector
 from ..models import (
+    AccessApproval,
     Appliance,
     ApplianceCommand,
     ApplianceStorage,
@@ -39,6 +40,11 @@ from ..taxonomy import canonical_attr, category_for_kind, describe, sensitivity_
 
 router = APIRouter(prefix="/search", tags=["search"])
 logger = logging.getLogger("cv.search")
+
+
+def _now() -> datetime:
+    """Naive UTC — Postgres DateTime columns are timezone-naive."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _unb64(s: str) -> bytes:
@@ -207,6 +213,157 @@ def search_scopes(principal: security.Principal = Depends(security.get_principal
             "members": [{"id": u.id,
                          "name": (getattr(u, "full_name", None) or u.display_name or u.email),
                          "email": u.email} for u in members]}
+
+
+# --------------------------------------------------------------------------- #
+# Cross-member access safeguards (gate + audit + dual-control approval)        #
+# --------------------------------------------------------------------------- #
+def _is_org_admin(principal, tenant) -> bool:
+    return ((security.is_org_admin(principal.role) or principal.is_platform_admin)
+            and security.org_enabled(getattr(tenant, "tenant_type", "") or ""))
+
+
+def _receipt_owner(db: Session, receipt) -> str | None:
+    """The member who owns the vault a snapshot lives in (None if indeterminate)."""
+    if receipt is None or not receipt.vault_id:
+        return None
+    v = db.get(Vault, receipt.vault_id)
+    return v.owner_user_id if v else None
+
+
+def _display_name(u) -> str:
+    return (getattr(u, "full_name", None) or (u.display_name if u else "") or (u.email if u else "")) if u else ""
+
+
+def _guard_cross_member_recovery(db, principal, tenant, receipt, *, object_id,
+                                 snapshot_id, destination, reason):
+    """Authorize an admin recovering ANOTHER member's data. Returns None to allow,
+    or a dict {"pending_approval": ...} when a second-admin approval is required.
+    Raises 403 when cross-member access is disabled or the caller isn't an admin.
+    Own-data (or indeterminate) recovery is always allowed (returns None)."""
+    owner = _receipt_owner(db, receipt)
+    if owner is None or owner == principal.user_id:
+        return None  # own data — no safeguard needed
+    from .. import features
+    user = db.get(User, principal.user_id)
+    if not (_is_org_admin(principal, tenant)
+            and features.resolve(user, tenant, "admin_cross_member_access")):
+        raise HTTPException(403, "Cross-member recovery is restricted — you can only "
+                                 "recover your own data.")
+    target = db.get(User, owner)
+    # Dual control: require a standing approval from a DIFFERENT admin.
+    if features.resolve(user, tenant, "cross_member_recovery_approval"):
+        appr = (db.query(AccessApproval)
+                .filter(AccessApproval.tenant_id == tenant.id,
+                        AccessApproval.requested_by == principal.user_id,
+                        AccessApproval.object_id == object_id,
+                        AccessApproval.snapshot_id == snapshot_id,
+                        AccessApproval.status == "approved").first())
+        if appr is None:
+            pending = (db.query(AccessApproval)
+                       .filter(AccessApproval.tenant_id == tenant.id,
+                               AccessApproval.requested_by == principal.user_id,
+                               AccessApproval.object_id == object_id,
+                               AccessApproval.snapshot_id == snapshot_id,
+                               AccessApproval.status == "pending").first())
+            if pending is None:
+                pending = AccessApproval(
+                    tenant_id=tenant.id, kind="recovery",
+                    requested_by=principal.user_id, requester_name=_display_name(user),
+                    target_user_id=owner, target_name=_display_name(target),
+                    object_id=object_id, snapshot_id=snapshot_id, destination=destination,
+                    reason=(reason or "")[:500], status="pending")
+                db.add(pending)
+                db.commit()
+            audit.record(db, actor=principal.user_id, action="recovery.approval_requested",
+                         tenant_id=tenant.id, resource=object_id, category="admin",
+                         severity="warning",
+                         detail={"target_user_id": owner, "reason": (reason or "")[:300],
+                                 "approval_id": pending.id})
+            return {"pending_approval": pending.id, "target": _display_name(target)}
+        appr.status = "used"
+        appr.decided_at = _now()
+        db.commit()
+    # Approved (or approval not required) — record the cross-member access.
+    audit.record(db, actor=principal.user_id, action="recovery.cross_member",
+                 tenant_id=tenant.id, resource=object_id, category="admin",
+                 severity="warning",
+                 detail={"target_user_id": owner, "target": _display_name(target),
+                         "reason": (reason or "")[:300], "destination": destination})
+    return None
+
+
+class ApprovalDecision(BaseModel):
+    note: str = ""
+
+
+@router.get("/access-approvals")
+def list_access_approvals(status_filter: str = "pending",
+                          principal: security.Principal = Depends(security.require_org_admin),
+                          tenant: Tenant = Depends(security.get_tenant),
+                          db: Session = Depends(get_db)):
+    """Cross-member recovery approval requests for org admins to review."""
+    q = db.query(AccessApproval).filter(AccessApproval.tenant_id == tenant.id)
+    if status_filter and status_filter != "all":
+        q = q.filter(AccessApproval.status == status_filter)
+    rows = q.order_by(AccessApproval.created_at.desc()).limit(200).all()
+    return {"approvals": [{
+        "id": a.id, "kind": a.kind, "requested_by": a.requested_by,
+        "requester_name": a.requester_name, "target_user_id": a.target_user_id,
+        "target_name": a.target_name, "object_id": a.object_id, "reason": a.reason,
+        "status": a.status, "approved_by": a.approved_by,
+        "created_at": a.created_at.isoformat() if a.created_at else None,
+        "is_mine": a.requested_by == principal.user_id,
+    } for a in rows]}
+
+
+@router.post("/access-approvals/{approval_id}/approve")
+def approve_access(approval_id: str, body: ApprovalDecision,
+                   principal: security.Principal = Depends(security.require_passkey),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    """A DIFFERENT org admin approves a cross-member recovery request (dual control)."""
+    if not _is_org_admin(principal, tenant):
+        raise HTTPException(403, "organization admin required")
+    a = db.get(AccessApproval, approval_id)
+    if a is None or a.tenant_id != tenant.id:
+        raise HTTPException(404, "approval not found")
+    if a.requested_by == principal.user_id:
+        raise HTTPException(403, "a request must be approved by a DIFFERENT administrator")
+    if a.status != "pending":
+        raise HTTPException(409, f"already {a.status}")
+    a.status = "approved"
+    a.approved_by = principal.user_id
+    a.decided_at = _now()
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="recovery.approval_granted",
+                 tenant_id=tenant.id, resource=a.object_id, category="admin",
+                 severity="warning", detail={"approval_id": a.id, "requested_by": a.requested_by,
+                                             "target_user_id": a.target_user_id, "note": body.note[:200]})
+    return {"ok": True, "status": "approved"}
+
+
+@router.post("/access-approvals/{approval_id}/deny")
+def deny_access(approval_id: str, body: ApprovalDecision,
+                principal: security.Principal = Depends(security.require_org_admin),
+                tenant: Tenant = Depends(security.get_tenant),
+                db: Session = Depends(get_db)):
+    if not _is_org_admin(principal, tenant):
+        raise HTTPException(403, "organization admin required")
+    a = db.get(AccessApproval, approval_id)
+    if a is None or a.tenant_id != tenant.id:
+        raise HTTPException(404, "approval not found")
+    if a.status != "pending":
+        raise HTTPException(409, f"already {a.status}")
+    a.status = "denied"
+    a.approved_by = principal.user_id
+    a.decided_at = _now()
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="recovery.approval_denied",
+                 tenant_id=tenant.id, resource=a.object_id, category="admin",
+                 severity="warning", detail={"approval_id": a.id, "requested_by": a.requested_by,
+                                             "note": body.note[:200]})
+    return {"ok": True, "status": "denied"}
 
 
 @router.get("/thread")
@@ -617,7 +774,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
            attr: list[str] | None = Query(None), limit: int = 50, sort: str = "date",
            direction: str = "desc", date_from: str | None = None,
            date_to: str | None = None, date_field: str | None = None,
-           scope: str = "me",
+           scope: str = "me", reason: str = "",
            principal: security.Principal = Depends(security.require_passkey),
            tenant: Tenant = Depends(security.get_tenant),
            db: Session = Depends(get_db)):
@@ -644,6 +801,19 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     # (scope=org) or a specific member (scope=user:<id>); non-admins are pinned
     # to their own vaults regardless of the requested scope.
     allowed, _eff_scope = security.scoped_vault_ids(db, principal, scope or "me")
+    # Cross-member safeguard: widening scope beyond one's own data (org / another
+    # member) is gated by the ``admin_cross_member_access`` flag (a legal/privacy
+    # hold clears it) and is ALWAYS audited with the caller's stated reason.
+    if _eff_scope not in ("", "me"):
+        from .. import features
+        _user = db.get(User, principal.user_id)
+        if not features.resolve(_user, tenant, "admin_cross_member_access"):
+            raise HTTPException(403, "Cross-member search is disabled for your "
+                                     "organization (privacy/legal hold).")
+        audit.record(db, actor=principal.user_id, action="search.cross_member",
+                     tenant_id=tenant.id, category="admin", severity="warning",
+                     detail={"scope": _eff_scope, "q": (q or "")[:200],
+                             "reason": (reason or "")[:300]})
     # Fast path: for everything except label/attribute filters, faceting and
     # pagination run in the DB against one current row per object (is_current),
     # instead of hauling the whole index into Python. Those two filters need the
@@ -993,6 +1163,7 @@ class RetrieveRequest(BaseModel):
     snapshot_id: str
     object_id: str
     destination: str  # the chosen storage location for this item
+    reason: str = ""  # justification when recovering another member's data
 
 
 @router.post("/retrieve")
@@ -1003,6 +1174,20 @@ def retrieve(body: RetrieveRequest,
     """Retrieve an item from wherever the customer stored it. Cloud/S3 objects are
     read directly (returned client-encrypted); appliance-stored objects are pulled
     via a signed recovery-window command to the offline appliance."""
+    # Cross-member safeguard: recovering ANOTHER member's data is gated by the
+    # ``admin_cross_member_access`` flag, may require a second-admin approval
+    # (``cross_member_recovery_approval``), and is always audited.
+    receipt = (db.query(SnapshotReceipt)
+               .filter(SnapshotReceipt.tenant_id == tenant.id,
+                       SnapshotReceipt.snapshot_id == body.snapshot_id).first())
+    _pending = _guard_cross_member_recovery(
+        db, principal, tenant, receipt, object_id=body.object_id,
+        snapshot_id=body.snapshot_id, destination=body.destination, reason=body.reason)
+    if _pending is not None:
+        return {"status": "pending_approval", "approval_id": _pending["pending_approval"],
+                "message": f"Recovering {_pending['target']}'s data requires approval "
+                           "from another administrator. Your request has been logged "
+                           "for review."}
     base = body.destination.split(":", 1)[0]
     store_labels = _store_label_map(db, tenant.id)
     label = _location_label(body.destination, store_labels)
@@ -1062,9 +1247,7 @@ def retrieve(body: RetrieveRequest,
         raise HTTPException(404, f"object not found at {label}: {exc}")
 
     # Resolve the snapshot's vault/collection to derive the decryption key.
-    receipt = (db.query(SnapshotReceipt)
-               .filter(SnapshotReceipt.tenant_id == tenant.id,
-                       SnapshotReceipt.snapshot_id == body.snapshot_id).first())
+    # (``receipt`` was already resolved above for the cross-member access check.)
     content_b64 = None
     size_bytes = len(data)
     client_encrypted = False

@@ -28,6 +28,14 @@ FLAGS: dict[str, bool] = {
     # Microsoft 365 Managed Integration (Business/Enterprise, admin-governed). Gated
     # by plan AND this flag; OFF by default until the collection backend ships.
     "m365_managed_integration": False,
+    # Org admins may search + recover ANOTHER member's protected data (org-wide /
+    # per-user scope). ON by default for org tenants; clear it for a privacy/legal
+    # hold so admins are confined to their own vaults. Every cross-member access is
+    # audited regardless.
+    "admin_cross_member_access": True,
+    # Require a second org admin to approve a cross-member RECOVERY (dual control /
+    # "break glass") before the data is released. OFF by default.
+    "cross_member_recovery_approval": False,
 }
 
 # Human labels for the admin UI.
@@ -39,6 +47,8 @@ LABELS = {
     "rules_enabled": "Rules engine (compliance)",
     "advanced_ubiquiti_analytics": "Advanced Ubiquiti Analytics (per-user & org)",
     "m365_managed_integration": "Microsoft 365 Managed Integration (Business/Enterprise)",
+    "admin_cross_member_access": "Admin cross-member data access (search & recover)",
+    "cross_member_recovery_approval": "Require approval for cross-member recovery",
 }
 
 

@@ -50,6 +50,10 @@ def _should_proxy(method: str, path: str) -> bool:
         return True
     if path.startswith("/api/search/retrieve-status/"):
         return True
+    # Cross-member recovery approvals are created + reviewed on the node that runs
+    # the retrieval, so the whole dual-control flow stays consistent there.
+    if path == "/api/search/access-approvals" or path.startswith("/api/search/access-approvals/"):
+        return True
     # Integrations (setup/OTP handshake + network telemetry) run against the
     # node the appliance reports to, so the portal must operate on that same DB.
     # EXCEPT the Microsoft 365 managed integration, which is control-plane

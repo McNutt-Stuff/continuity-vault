@@ -6,7 +6,7 @@ import { Card, Pill, bytes, fmtAbsolute, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { DestIcon } from "../components/DestIcon";
-import { notify } from "../components/dialog";
+import { notify, promptDialog } from "../components/dialog";
 
 interface Recovered {
   id: string; object_id: string; title: string; doc_type: string;
@@ -21,6 +21,7 @@ interface RetrieveResp {
   mime?: string; doc_type?: string; size_bytes?: number;
   content_b64?: string | null; filename?: string;
   async?: boolean; command_id?: string; appliance_name?: string;
+  approval_id?: string;
 }
 interface RecoveredUnit {
   object_id: string; recovered_id: string; title: string; mime: string;
@@ -29,6 +30,10 @@ interface RecoveredUnit {
 interface RetrieveStatus {
   status: string; command_status: string; recovered: RecoveredUnit[];
   error?: string | null; message?: string | null;
+}
+interface Approval {
+  id: string; requester_name: string; target_name: string; object_id: string;
+  reason: string; status: string; created_at: string | null; is_mine: boolean;
 }
 interface Retrieving {
   commandId: string; title: string; location: string; stage: string; error?: string;
@@ -548,6 +553,7 @@ export default function Search() {
   const [scope, setScope] = useState("me");                          // me | org | user:<id>
   const [scopeMembers, setScopeMembers] = useState<{ id: string; name: string; email: string }[]>([]);
   const [canOrg, setCanOrg] = useState(false);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
   const [data, setData] = useState<SearchResp | null>(null);
   // Filters apply on demand (explicit "Apply filters" / Enter / search), NOT live:
   // re-running on every checkbox raced and dropped rapid selections. A signature of
@@ -609,11 +615,54 @@ export default function Search() {
     })();
   }, [me?.can_admin]);
 
+  // Pending cross-member recovery approvals awaiting a second admin's decision.
+  async function loadApprovals() {
+    try {
+      const r = await api.get<{ approvals: Approval[] }>("/search/access-approvals?status_filter=pending");
+      setApprovals(r.approvals || []);
+    } catch { /* non-admin / feature off — no approvals surface */ }
+  }
+  useEffect(() => {
+    if (!me?.can_admin) return;
+    void loadApprovals();
+    const t = setInterval(loadApprovals, 15000);
+    return () => clearInterval(t);
+  }, [me?.can_admin]);
+
+  async function decideApproval(id: string, action: "approve" | "deny") {
+    try {
+      await api.post(`/search/access-approvals/${id}/${action}`, {});
+      await loadApprovals();
+    } catch (e) {
+      await notify({ message: (e as ApiError).message || "Could not record decision", tone: "danger" });
+    }
+  }
+
+
   async function retrieve(r: Result, loc: { destination: string; label: string }, snapshotOverride?: string) {
     try {
+      // Recovering another member's data (org / member scope) requires a stated
+      // justification, which is audited and attached to any approval request.
+      let reason = "";
+      if (scope && scope !== "me") {
+        const answer = await promptDialog({
+          title: "Cross-member recovery",
+          message: "You're recovering another member's data. State a reason — this is audited.",
+          placeholder: "e.g. legal hold, offboarding, incident response",
+          confirmLabel: "Recover",
+        });
+        if (answer === null) return;            // cancelled
+        reason = answer.trim();
+        if (!reason) { await notify({ message: "A reason is required.", tone: "danger" }); return; }
+      }
       const res = await api.post<RetrieveResp>("/search/retrieve", {
-        snapshot_id: snapshotOverride || r.snapshot_id, object_id: r.object_id, destination: loc.destination,
+        snapshot_id: snapshotOverride || r.snapshot_id, object_id: r.object_id,
+        destination: loc.destination, reason,
       });
+      if (res.status === "pending_approval") {
+        await notify({ title: "Approval required", message: res.message, tone: "info" });
+        return;
+      }
       if (res.status === "recovered" && res.recovered_id) {
         setMsg(res.message);
         await loadRecovered();
@@ -924,6 +973,34 @@ export default function Search() {
 
   return (
     <>
+      {approvals.length > 0 && (
+        <Card style={{ marginBottom: 12, borderColor: "var(--warn)" }}>
+          <div className="spread" style={{ marginBottom: 8 }}>
+            <h3 style={{ margin: 0 }}><Icon name="shield" size={15} /> Cross-member recovery approvals</h3>
+            <span className="faint" style={{ fontSize: 12 }}>dual control · another admin must approve</span>
+          </div>
+          {approvals.map((a) => (
+            <div key={a.id} className="result-row" style={{ padding: "8px 0", alignItems: "center" }}>
+              <div className="flex1">
+                <div style={{ fontWeight: 600, fontSize: 13 }}>
+                  {a.requester_name || "An admin"} requests {a.target_name || "a member"}'s data
+                </div>
+                <div className="faint" style={{ fontSize: 11.5 }}>
+                  {a.reason ? `Reason: ${a.reason}` : "No reason given"}
+                </div>
+              </div>
+              {a.is_mine ? (
+                <span className="faint" style={{ fontSize: 12 }}>awaiting another admin</span>
+              ) : (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button className="btn sm primary" onClick={() => decideApproval(a.id, "approve")}>Approve</button>
+                  <button className="btn sm danger" onClick={() => decideApproval(a.id, "deny")}>Deny</button>
+                </div>
+              )}
+            </div>
+          ))}
+        </Card>
+      )}
       {recovered.length > 0 && (
         <Card style={{ marginBottom: 12, borderColor: "var(--warn)" }}>
           <div className="spread" style={{ marginBottom: 8 }}>
