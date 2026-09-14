@@ -13,6 +13,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..connectors import get_connector
@@ -418,6 +419,91 @@ def build_payload(db: Session, user: User) -> dict:
         if len(cards) >= _MAX_CARDS:
             break
     cards.extend(network_cards)
+    return {"status": "ready", "stats": stats,
+            "timeline": _build_timeline(objs), "cards": cards}
+
+
+def _card_org_concentration(db: Session, tenant_id: str, vault_ids: list[str]) -> dict | None:
+    """Org card: how protected data is distributed across members."""
+    owner_of = {v.id: v.owner_user_id
+                for v in db.query(Vault).filter(Vault.id.in_(vault_ids)).all()} if vault_ids else {}
+    if not owner_of:
+        return None
+    per_owner: dict[str, int] = defaultdict(int)
+    for vid, cnt in (db.query(SearchDocument.vault_id, func.count())
+                     .filter(SearchDocument.tenant_id == tenant_id,
+                             SearchDocument.vault_id.in_(vault_ids),
+                             SearchDocument.is_current.is_(True))
+                     .group_by(SearchDocument.vault_id).all()):
+        per_owner[owner_of.get(vid) or ""] += int(cnt)
+    total = sum(per_owner.values())
+    if total <= 0:
+        return None
+    member_ids = [oid for oid in per_owner if oid]
+    names = {u.id: (getattr(u, "full_name", None) or u.display_name or u.email)
+             for u in db.query(User).filter(User.id.in_(member_ids)).all()} if member_ids else {}
+    ranked = sorted(per_owner.items(), key=lambda kv: -kv[1])
+    top_id, top_n = ranked[0]
+    top_name = names.get(top_id, "Organization (shared)") if top_id else "Organization (shared)"
+    share = round(top_n / total * 100)
+    member_count = len(member_ids)
+    return {
+        "id": "org_concentration",
+        "icon": "grid",
+        "tone": "info",
+        "title": "How protection is spread across your organization",
+        "headline": f"{top_name} holds {share}% of protected items",
+        "body": (f"Across {member_count} member{'s' if member_count != 1 else ''} and org-shared "
+                 f"managed sources, {top_name} accounts for {top_n:,} of {total:,} protected "
+                 "objects. A heavy concentration in one member is worth reviewing — make sure "
+                 "critical shared data also lives in org-managed sources, not just one person's "
+                 "vault."),
+        "detail": [{"label": "Members", "value": str(member_count)},
+                   {"label": "Top holder", "value": top_name},
+                   {"label": "Their share", "value": f"{share}%"}],
+        "action": {"label": "See data by member", "to": "/"},
+    }
+
+
+def build_org_payload(db: Session, tenant_id: str, vault_ids: list[str]) -> dict:
+    """Compute an organization-wide insights payload across every member's vaults
+    plus org-shared managed sources (SharePoint/Teams). Object-derived only — no
+    per-user network cards — so it is safe to compute from the replicated index."""
+    objs = _collect_objects(db, vault_ids, tenant_id)
+    total_bytes = sum(o.size for o in objs)
+    by_source: dict[str, int] = defaultdict(int)
+    by_category: dict[str, int] = defaultdict(int)
+    for o in objs:
+        by_source[o.source_type] += 1
+        if o.category:
+            by_category[o.category] += 1
+    stats = {
+        "object_count": len(objs),
+        "total_bytes": total_bytes,
+        "source_count": len(by_source),
+        "category_count": len(by_category),
+    }
+    if len(objs) < _MIN_OBJECTS:
+        return {"status": "insufficient_data", "stats": stats,
+                "timeline": _build_timeline(objs), "cards": []}
+    cards: list[dict] = []
+    try:
+        org_card = _card_org_concentration(db, tenant_id, vault_ids)
+    except Exception:  # noqa: BLE001 — one bad card never sinks the report
+        logger.exception("org concentration card failed for tenant %s", tenant_id)
+        org_card = None
+    if org_card:
+        cards.append(org_card)
+    for builder in _CARD_BUILDERS:
+        try:
+            card = builder(objs, stats)
+        except Exception:  # noqa: BLE001
+            logger.exception("insight card %s failed for tenant %s", builder.__name__, tenant_id)
+            card = None
+        if card:
+            cards.append(card)
+        if len(cards) >= _MAX_CARDS:
+            break
     return {"status": "ready", "stats": stats,
             "timeline": _build_timeline(objs), "cards": cards}
 

@@ -34,6 +34,8 @@ interface InsightsResp {
   stats: { object_count?: number; total_bytes?: number; source_count?: number; category_count?: number };
   timeline: Timeline;
   cards: InsightCard[];
+  scope?: "me" | "org";
+  can_switch_scope?: boolean;
 }
 
 const TONE_COLOR: Record<string, string> = {
@@ -45,13 +47,14 @@ export default function Insights() {
   const [data, setData] = useState<InsightsResp | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [scope, setScope] = useState<"me" | "org">("me");
 
   async function load() {
-    try { setData(await api.get<InsightsResp>("/insights")); }
+    try { setData(await api.get<InsightsResp>(`/insights?scope=${scope}`)); }
     catch { setData(null); }
     finally { setLoading(false); }
   }
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void load(); }, [scope]);
 
   // While a node-hosted report is being generated remotely, poll until it lands.
   useEffect(() => {
@@ -62,7 +65,7 @@ export default function Insights() {
 
   async function refresh() {
     setRefreshing(true);
-    try { setData(await api.post<InsightsResp>("/insights/refresh", {})); }
+    try { setData(await api.post<InsightsResp>(`/insights/refresh?scope=${scope}`, {})); }
     catch { /* ignore */ }
     finally { setRefreshing(false); }
   }
@@ -102,14 +105,26 @@ export default function Insights() {
     <>
       <div className="spread" style={{ marginBottom: 18 }}>
         <div className="stack">
-          <h2 style={{ margin: 0 }}>Your digital footprint</h2>
+          <h2 style={{ margin: 0 }}>{scope === "org" ? "Your organization's footprint" : "Your digital footprint"}</h2>
           <div className="faint" style={{ fontSize: 12.5 }}>
             {gen ? `Refreshed ${gen.toLocaleString()}` : "A living view of everything Arkive protects for you"}
           </div>
         </div>
-        <button className="btn ghost sm" disabled={refreshing} onClick={() => void refresh()}>
-          {refreshing ? <><span className="spinner-dot" /> Refreshing…</> : <><Icon name="repeat" size={14} /> Refresh</>}
-        </button>
+        <div className="row" style={{ gap: 10 }}>
+          {data?.can_switch_scope && (
+            <div className="row" style={{ gap: 0, border: "1px solid var(--border-soft)", borderRadius: 8, overflow: "hidden" }}>
+              <button className={`btn sm ${scope === "me" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }} onClick={() => setScope("me")}>
+                <Icon name="user" size={13} /> My footprint
+              </button>
+              <button className={`btn sm ${scope === "org" ? "primary" : "ghost"}`} style={{ borderRadius: 0 }} onClick={() => setScope("org")}>
+                <Icon name="grid" size={13} /> Organization
+              </button>
+            </div>
+          )}
+          <button className="btn ghost sm" disabled={refreshing} onClick={() => void refresh()}>
+            {refreshing ? <><span className="spinner-dot" /> Refreshing…</> : <><Icon name="repeat" size={14} /> Refresh</>}
+          </button>
+        </div>
       </div>
 
       {data && (
@@ -144,7 +159,7 @@ export default function Insights() {
       <div className="spread" style={{ marginBottom: 10 }}>
         <h3 style={{ margin: 0, fontSize: 16 }}>What we found</h3>
         {data && <span className="faint" style={{ fontSize: 12 }}>
-          {data.cards.length} insight{data.cards.length === 1 ? "" : "s"} for you
+          {data.cards.length} insight{data.cards.length === 1 ? "" : "s"} {scope === "org" ? "for your organization" : "for you"}
         </span>}
       </div>
 

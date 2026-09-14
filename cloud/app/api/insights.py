@@ -34,15 +34,35 @@ def _view(row: UserInsights) -> dict:
     }
 
 
+def _can_switch(principal: security.Principal, tenant: Tenant) -> bool:
+    return ((security.is_org_admin(principal.role) or principal.is_platform_admin)
+            and security.org_enabled(getattr(tenant, "tenant_type", "") or ""))
+
+
+def _org_view(db: Session, principal: security.Principal, tenant: Tenant) -> dict:
+    """Live organization-wide insights across every member + org-shared sources.
+    Admin-only; computed on demand (not persisted) from the replicated index."""
+    from datetime import datetime, timezone
+    from ..workers.insights import build_org_payload
+    vault_ids, _eff = security.scoped_vault_ids(db, principal, "org")
+    payload = build_org_payload(db, tenant.id, vault_ids)
+    return {**payload, "generated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+            "scope": "org", "can_switch_scope": True}
+
+
 @router.get("")
-def get_insights(principal: security.Principal = Depends(security.get_principal),
+def get_insights(scope: str = "me",
+                 principal: security.Principal = Depends(security.get_principal),
+                 tenant: Tenant = Depends(security.get_tenant),
                  db: Session = Depends(get_db)):
     if not _enabled(db, principal):
         raise HTTPException(404, "insights are not enabled for this account")
+    can_switch = _can_switch(principal, tenant)
+    if scope == "org" and can_switch:
+        return _org_view(db, principal, tenant)
     row = db.query(UserInsights).filter(UserInsights.user_id == principal.user_id).one_or_none()
     if row is None:
         user = db.get(User, principal.user_id)
-        tenant = db.get(Tenant, principal.tenant_id)
         if tenant is not None and tenant.node_id:
             # Node-hosted: the control plane can't mine the index. Flag it so the
             # assigned node builds and pushes the report back, and report pending.
@@ -52,19 +72,23 @@ def get_insights(principal: security.Principal = Depends(security.get_principal)
             # First visit before the daily job ran — compute this one user's report now.
             from ..workers.insights import generate_for_user
             row = generate_for_user(db, user)
-    return _view(row)
+    return {**_view(row), "scope": "me", "can_switch_scope": can_switch}
 
 
 @router.post("/refresh")
-def refresh_insights(principal: security.Principal = Depends(security.get_principal),
+def refresh_insights(scope: str = "me",
+                     principal: security.Principal = Depends(security.get_principal),
+                     tenant: Tenant = Depends(security.get_tenant),
                      db: Session = Depends(get_db)):
-    """Recompute the signed-in user's insights on demand."""
+    """Recompute the signed-in user's (or the organization's) insights on demand."""
     if not _enabled(db, principal):
         raise HTTPException(404, "insights are not enabled for this account")
+    if scope == "org" and _can_switch(principal, tenant):
+        return _org_view(db, principal, tenant)
     user = db.get(User, principal.user_id)
-    tenant = db.get(Tenant, principal.tenant_id)
     if tenant is not None and tenant.node_id:
         from ..workers.insights import mark_pending
-        return _view(mark_pending(db, user))
+        return {**_view(mark_pending(db, user)), "scope": "me", "can_switch_scope": _can_switch(principal, tenant)}
     from ..workers.insights import generate_for_user
-    return _view(generate_for_user(db, user))
+    return {**_view(generate_for_user(db, user)), "scope": "me", "can_switch_scope": _can_switch(principal, tenant)}
+
