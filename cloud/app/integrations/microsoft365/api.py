@@ -311,16 +311,20 @@ def oauth_redirect(state: str = "", tenant: str = "", admin_consent: str = "",
         logger.warning("m365 oauth redirect: no state parameter — cannot correlate consent")
         return RedirectResponse(portal + "?m365=error", status_code=302)
     cred = None
-    pending = (db.query(m.ManagedCredentialRef)
-               .filter(m.ManagedCredentialRef.consent_state != "granted").all())
-    for c in pending:
+    # Match by the unique one-time state token, regardless of current consent
+    # state — a RE-authorize (adding permissions) happens on an already-"granted"
+    # credential, so filtering to non-granted rows would drop it and never record
+    # the new consent.
+    candidates = (db.query(m.ManagedCredentialRef)
+                  .filter(m.ManagedCredentialRef.provider == "microsoft").all())
+    for c in candidates:
         if (c.meta or {}).get("oauth_state") == state:
             cred = c
             break
     if cred is None:
-        logger.warning("m365 oauth redirect: no pending credential matched state=%s "
-                       "(%d pending credential(s) checked) — consent NOT recorded",
-                       state[:8], len(pending))
+        logger.warning("m365 oauth redirect: no credential matched state=%s "
+                       "(%d candidate(s) checked) — consent NOT recorded",
+                       state[:8], len(candidates))
         return RedirectResponse(portal + "?m365=error", status_code=302)
     inst = db.get(IntegrationInstance, cred.integration_instance_id)
     if error or (admin_consent and admin_consent.lower() not in ("true", "1")):

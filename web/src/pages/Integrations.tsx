@@ -126,7 +126,7 @@ export default function Integrations() {
     } else if (m === "denied") {
       notify({ message: "Microsoft 365 consent was denied or cancelled in the Microsoft window.", tone: "warn" });
     } else if (m === "error") {
-      notify({ message: "Microsoft 365 consent couldn't be recorded — please try connecting again. If it keeps failing, check Admin → Platform Logs.", tone: "danger" });
+      notify({ message: "Microsoft 365 consent couldn't be recorded. Please open Microsoft 365 and try Re-authorize again — it re-opens the Microsoft consent screen.", tone: "danger" });
     }
     params.delete("m365");
     const qs = params.toString();
