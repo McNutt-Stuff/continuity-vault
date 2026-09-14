@@ -54,12 +54,16 @@ def _error(resp) -> GraphError:
     return GraphError(resp.status_code, reason, body)
 
 
-def app_token(client_id: str, client_secret: str, microsoft_tenant_id: str) -> str:
-    """Mint (and briefly cache) an app-only Graph token via client-credentials."""
+def app_token(client_id: str, client_secret: str, microsoft_tenant_id: str,
+              *, force: bool = False) -> str:
+    """Mint (and briefly cache) an app-only Graph token via client-credentials.
+    ``force`` bypasses the cache so a token minted before admin consent took
+    effect isn't reused (that would keep returning 403 until it expired)."""
     now = time.time()
-    cached = _TOKEN_CACHE.get(microsoft_tenant_id)
-    if cached and cached[1] - 60 > now:
-        return cached[0]
+    if not force:
+        cached = _TOKEN_CACHE.get(microsoft_tenant_id)
+        if cached and cached[1] - 60 > now:
+            return cached[0]
     import httpx
     url = f"{_AUTHORITY}/{microsoft_tenant_id}/oauth2/v2.0/token"
     data = {"client_id": client_id, "client_secret": client_secret,
@@ -75,6 +79,20 @@ def app_token(client_id: str, client_secret: str, microsoft_tenant_id: str) -> s
         raise GraphError(r.status_code, "no access_token in token response")
     _TOKEN_CACHE[microsoft_tenant_id] = (tok, now + int(j.get("expires_in", 3600)))
     return tok
+
+
+def token_claims(token: str) -> dict:
+    """Decode a JWT payload WITHOUT verifying it — diagnostics only (no secret).
+    Lets a 403 report the granted ``roles`` and issuing tenant (``tid``)."""
+    try:
+        import base64
+        import json
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001
+        return {}
+
 
 
 def get_paged(token: str, path: str, params: dict | None = None, cap: int = 200000):

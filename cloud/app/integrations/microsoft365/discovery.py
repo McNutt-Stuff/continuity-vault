@@ -78,7 +78,8 @@ def run_discovery(db: Session, inst, *, client_id: str, client_secret: str) -> d
     if not client_id or not client_secret:
         return {"ok": False, "error": "platform microsoft 365 app is not configured"}
     try:
-        token = graph.app_token(client_id, client_secret, cred.microsoft_tenant_id)
+        # force=True: never reuse a token minted before consent took effect.
+        token = graph.app_token(client_id, client_secret, cred.microsoft_tenant_id, force=True)
     except graph.GraphError as e:
         logger.warning("m365 token failed (instance=%s tenant=%s): %s",
                        inst.id, cred.microsoft_tenant_id, e)
@@ -121,10 +122,32 @@ def run_discovery(db: Session, inst, *, client_id: str, client_secret: str) -> d
         db.commit()
     except graph.GraphError as e:
         db.rollback()
-        logger.warning("m365 discovery failed (instance=%s): %s", inst.id, e)
-        inst.last_error = _friendly_graph_error(e)
+        msg = _friendly_graph_error(e)
+        if e.status == 403:
+            # Decode the app-only token to pinpoint WHY: no roles = consent not
+            # effective for this app in this tenant; tid mismatch = wrong tenant.
+            claims = graph.token_claims(token)
+            roles = claims.get("roles") or []
+            tid = claims.get("tid") or ""
+            appid = claims.get("appid") or claims.get("azp") or ""
+            logger.warning("m365 discovery 403 (instance=%s): app appid=%s token_tid=%s "
+                           "connected_tenant=%s roles=%s",
+                           inst.id, appid, tid, cred.microsoft_tenant_id, roles or "[]")
+            if not roles:
+                msg = (f"The app-only token carries NO Graph roles, so admin consent for the "
+                       f"Application permissions (User.Read.All …) has not taken effect for this "
+                       f"app (client {appid or 'unknown'}) in tenant {tid or cred.microsoft_tenant_id}. "
+                       f"In Azure → this app → API permissions, confirm each Application permission "
+                       f"shows 'Granted for <org>' (green check), then wait a few minutes and retry.")
+            elif tid and cred.microsoft_tenant_id and tid.lower() != cred.microsoft_tenant_id.lower():
+                msg = (f"The token was issued for Microsoft tenant {tid}, but this connection "
+                       f"targets {cred.microsoft_tenant_id}. The connected tenant id is wrong — "
+                       f"reconnect Microsoft 365 and confirm the Directory (tenant) ID.")
+        else:
+            logger.warning("m365 discovery failed (instance=%s): %s", inst.id, e)
+        inst.last_error = msg
         db.commit()
-        return {"ok": False, "error": _friendly_graph_error(e), "http": e.status}
+        return {"ok": False, "error": msg, "http": e.status}
     except Exception as e:  # noqa: BLE001
         db.rollback()
         logger.exception("m365 discovery crashed (instance=%s)", inst.id)
