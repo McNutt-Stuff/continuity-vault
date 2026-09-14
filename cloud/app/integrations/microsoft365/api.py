@@ -122,6 +122,10 @@ def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
         m.ExternalIdentityBinding.status == "suggested").count()
     sources = db.query(m.ManagedSource).filter(
         m.ManagedSource.integration_instance_id == inst.id).count()
+    protected_objects = 0
+    for s in db.query(m.ManagedSource).filter(
+            m.ManagedSource.integration_instance_id == inst.id).all():
+        protected_objects += int((s.config or {}).get("objects_total") or 0)
     cfg = inst.config or {}
     cmeta = (cred.meta if cred else {}) or {}
     consent_state = (cred.consent_state if cred else "pending")
@@ -141,6 +145,7 @@ def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
         "identities_mapped": mapped,
         "identities_suggested": suggested,
         "managed_sources": sources,
+        "protected_objects": protected_objects,
         "auto_map": bool(cfg.get("auto_map")),
         "auto_create": bool(cfg.get("auto_create")),
         "collect_enabled": bool(cfg.get("collect_enabled")),
@@ -184,6 +189,7 @@ def list_instances(principal: security.Principal = Depends(require_m365),
             "identities_discovered": sv.get("identities_discovered"),
             "identities_mapped": sv.get("identities_mapped"),
             "managed_sources": sv.get("managed_sources"),
+            "protected_objects": sv.get("protected_objects"),
             "collect_enabled": sv.get("collect_enabled"),
         }
         out.append(view)
@@ -875,18 +881,45 @@ def discover(instance_id: str = "",
 def list_managed_sources(instance_id: str = "",
                          principal: security.Principal = Depends(require_m365),
                          db: Session = Depends(get_db)):
-    """The admin-established managed sources (per-user Exchange / OneDrive)."""
+    """The admin-established managed sources (Exchange / OneDrive / SharePoint /
+    Teams / Teams chats) with per-source status + object counts, plus a per-
+    workload rollup — so the integration shows exactly what's protected and how
+    much, like any standard source."""
     inst = _resolve(db, principal.tenant_id, instance_id)
     if inst is None:
         raise HTTPException(409, "connect first")
     rows = (db.query(m.ManagedSource)
             .filter(m.ManagedSource.integration_instance_id == inst.id)
-            .order_by(m.ManagedSource.name.asc()).all())
+            .order_by(m.ManagedSource.workload.asc(), m.ManagedSource.name.asc()).all())
+    _WL_LABEL = {"exchange": "Exchange Online", "onedrive": "OneDrive",
+                 "sharepoint": "SharePoint", "teams": "Teams channels",
+                 "teams_chat": "Teams chats"}
+    sources = []
+    rollup: dict[str, dict] = {}
+    for s in rows:
+        cfg = s.config or {}
+        objects = int(cfg.get("objects_total") or 0)
+        last = cfg.get("last_result") or {}
+        sources.append({
+            "id": s.id, "workload": s.workload, "name": s.name,
+            "ownership_type": s.ownership_type, "owner_user_id": s.owner_user_id,
+            "state": s.state, "source_key": s.source_key, "objects": objects,
+            "last_collected_at": s.last_collected_at.isoformat() if s.last_collected_at else None,
+            "last_error": last.get("error"),
+        })
+        r = rollup.setdefault(s.workload, {
+            "workload": s.workload, "label": _WL_LABEL.get(s.workload, s.workload),
+            "sources": 0, "active": 0, "objects": 0, "errors": 0})
+        r["sources"] += 1
+        r["objects"] += objects
+        if s.state == "active":
+            r["active"] += 1
+        if s.state in ("permission_required", "credential_error", "delayed"):
+            r["errors"] += 1
     return {"collect_enabled": bool((inst.config or {}).get("collect_enabled")),
-            "sources": [{"id": s.id, "workload": s.workload, "name": s.name,
-                         "owner_user_id": s.owner_user_id, "state": s.state,
-                         "last_collected_at": s.last_collected_at.isoformat() if s.last_collected_at else None}
-                        for s in rows]}
+            "total_objects": sum(x["objects"] for x in rollup.values()),
+            "workloads": list(rollup.values()),
+            "sources": sources}
 
 
 @router.get("/compliance-rules")
@@ -1237,22 +1270,6 @@ class OrgSourceBody(BaseModel):
     name: str
     source_key: str = ""          # Microsoft resource id
     custodian_user_ids: list[str] = []
-
-
-@router.get("/sources")
-def list_sources(principal: security.Principal = Depends(require_m365),
-                 db: Session = Depends(get_db)):
-    inst = _instance(db, principal.tenant_id)
-    if inst is None:
-        raise HTTPException(409, "connect first")
-    rows = (db.query(m.ManagedSource)
-            .filter(m.ManagedSource.integration_instance_id == inst.id)
-            .order_by(m.ManagedSource.created_at.desc()).all())
-    return {"sources": [{"id": s.id, "workload": s.workload, "name": s.name,
-                         "ownership_type": s.ownership_type, "owner_user_id": s.owner_user_id,
-                         "state": s.state, "source_key": s.source_key,
-                         "last_collected_at": s.last_collected_at.isoformat() if s.last_collected_at else None}
-                        for s in rows]}
 
 
 @router.post("/organization-sources")

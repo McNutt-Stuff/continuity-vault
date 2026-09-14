@@ -29,7 +29,7 @@ interface Instance {
   last_stats: { clients?: number; apps?: number; bytes_seen?: number; note?: string;
     diag?: { site?: string; auth_mode?: string; devices_http?: number | string | null; traffic_http?: number | string | null } };
   m365?: { consent_state?: string; needs_consent?: boolean; identities_discovered?: number;
-    identities_mapped?: number; managed_sources?: number; collect_enabled?: boolean };
+    identities_mapped?: number; managed_sources?: number; protected_objects?: number; collect_enabled?: boolean };
 }
 interface ApplianceRef { id: string; name: string; state: string; online: boolean; }
 interface ListResp { available: Spec[]; instances: Instance[]; appliances: ApplianceRef[]; plan: string; }
@@ -583,6 +583,7 @@ function InstanceCard({ inst, spec, onOpen, onChanged }: {
             <span className="faint">Identities <b style={{ color: "var(--text)" }}>{inst.m365?.identities_discovered ?? "—"}</b></span>
             <span className="faint">Mapped <b style={{ color: "var(--text)" }}>{inst.m365?.identities_mapped ?? "—"}</b></span>
             <span className="faint">Sources <b style={{ color: "var(--text)" }}>{inst.m365?.managed_sources ?? "—"}</b></span>
+            <span className="faint">Protected <b style={{ color: "var(--text)" }}>{inst.m365?.protected_objects?.toLocaleString() ?? "—"}</b></span>
           </div>
         </>
       ) : (
@@ -1676,7 +1677,9 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
   const [busy, setBusy] = useState("");
   const [identities, setIdentities] = useState<M365Identity[]>([]);
   const [members, setMembers] = useState<M365Member[]>([]);
-  const [sources, setSources] = useState<{ id: string; workload: string; name: string; state: string; last_collected_at: string | null }[]>([]);
+  const [sources, setSources] = useState<{ id: string; workload: string; name: string; ownership_type?: string; state: string; objects?: number; last_error?: string | null; last_collected_at: string | null }[]>([]);
+  const [workloadRollup, setWorkloadRollup] = useState<{ workload: string; label: string; sources: number; active: number; objects: number; errors: number }[]>([]);
+  const [totalObjects, setTotalObjects] = useState(0);
   const [collectEnabled, setCollectEnabled] = useState(false);
   const [consentState, setConsentState] = useState<{ url?: string; state?: string; configured?: boolean; message?: string } | null>(null);
   const [tenantInput, setTenantInput] = useState("");
@@ -1706,8 +1709,9 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
       setIdentities(r.identities || []);
       const m = await api.get<{ members: M365Member[] }>("/integrations/microsoft365/members");
       setMembers(m.members || []);
-      const s = await api.get<{ collect_enabled: boolean; sources: { id: string; workload: string; name: string; state: string; last_collected_at: string | null }[] }>(`/integrations/microsoft365/sources?${iq}`);
+      const s = await api.get<{ collect_enabled: boolean; total_objects?: number; workloads?: { workload: string; label: string; sources: number; active: number; objects: number; errors: number }[]; sources: { id: string; workload: string; name: string; ownership_type?: string; state: string; objects?: number; last_error?: string | null; last_collected_at: string | null }[] }>(`/integrations/microsoft365/sources?${iq}`);
       setSources(s.sources || []); setCollectEnabled(!!s.collect_enabled);
+      setWorkloadRollup(s.workloads || []); setTotalObjects(s.total_objects || 0);
       const sc = await api.get<{ rules: M365ScopeRules }>(`/integrations/microsoft365/scope?${iq}`);
       setScope(sc.rules || {});
       const pr = await api.get<M365Profile>(`/integrations/microsoft365/profile?${iq}`);
@@ -2222,16 +2226,38 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
               </div>
             </div>
           )}
+          {workloadRollup.length > 0 && (
+            <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+              {workloadRollup.map((w) => (
+                <div key={w.workload} className="card" style={{ padding: "8px 12px", minWidth: 150 }}>
+                  <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                    <SourceIcon type={w.workload === "teams_chat" ? "teams" : w.workload} size={16} />
+                    <span style={{ fontSize: 12.5, fontWeight: 600 }}>{w.label}</span>
+                  </div>
+                  <div style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}>{w.objects.toLocaleString()}</div>
+                  <div className="faint" style={{ fontSize: 11 }}>
+                    objects · {w.active}/{w.sources} active{w.errors ? ` · ${w.errors} need attention` : ""}
+                  </div>
+                </div>
+              ))}
+              <div className="card" style={{ padding: "8px 12px", minWidth: 130, marginLeft: "auto" }}>
+                <div className="faint" style={{ fontSize: 11.5, fontWeight: 600 }}>Total protected</div>
+                <div style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}>{totalObjects.toLocaleString()}</div>
+                <div className="faint" style={{ fontSize: 11 }}>objects</div>
+              </div>
+            </div>
+          )}
           {sources.length > 0 && (
             <div style={{ overflowX: "auto", marginTop: 12 }}>
               <table className="table">
-                <thead><tr><th>Source</th><th>Workload</th><th>State</th><th>Last collected</th></tr></thead>
+                <thead><tr><th>Source</th><th>Workload</th><th>State</th><th style={{ textAlign: "right" }}>Objects</th><th>Last collected</th></tr></thead>
                 <tbody>
                   {sources.map((s) => (
                     <tr key={s.id}>
                       <td style={{ fontWeight: 600 }}>{s.name}</td>
                       <td><Pill tone="info">{WORKLOAD_LABELS[s.workload] || s.workload}</Pill></td>
-                      <td><Pill tone={s.state === "active" ? "ok" : s.state === "credential_error" ? "danger" : "warn"}>{s.state}</Pill></td>
+                      <td title={s.last_error || undefined}><Pill tone={s.state === "active" ? "ok" : (s.state === "credential_error" || s.state === "permission_required") ? "danger" : s.state === "empty" ? "warn" : "warn"}>{s.state}</Pill></td>
+                      <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{(s.objects ?? 0).toLocaleString()}</td>
                       <td className="faint" style={{ fontSize: 12 }}>{s.last_collected_at ? new Date(s.last_collected_at.endsWith("Z") ? s.last_collected_at : s.last_collected_at + "Z").toLocaleString() : "—"}</td>
                     </tr>
                   ))}

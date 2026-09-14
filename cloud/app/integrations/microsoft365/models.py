@@ -139,7 +139,7 @@ class ManagedSource(Base):
     source_key = Column(String, default="", index=True)  # Microsoft resource id
     name = Column(String, default="")
     visibility = Column(JSON, default=dict)      # {source, metadata, content, recovery}
-    state = Column(String, default="planned")    # planned|provisioning|baseline_pending|active|delayed|partial|paused_by_admin|permission_required|credential_error|source_unavailable|retention_hold|disconnected|decommissioned
+    state = Column(String, default="planned")    # planned|provisioning|baseline_pending|active|empty|delayed|partial|paused_by_admin|permission_required|credential_error|source_unavailable|retention_hold|disconnected|decommissioned
     assigned_node_id = Column(String, nullable=True, index=True)
     config = Column(JSON, default=dict)
     last_collected_at = Column(DateTime, nullable=True)

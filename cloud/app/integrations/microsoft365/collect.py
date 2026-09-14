@@ -62,6 +62,25 @@ def audit_cycle(db: Session, inst, *, objects: int, sources: int, trigger: str,
         logger.exception("m365 audit_cycle failed (instance=%s)", inst.id)
 
 
+def _record_source_activity(db: Session, inst, source, *, objects: int,
+                            error: str | None) -> None:
+    """Record a per-source collection result so each managed source shows in the
+    customer Activity trail + Platform Logs exactly like a regular source poll —
+    with its object count and status, never a silent run."""
+    from ... import audit
+    try:
+        audit.record(
+            db, actor="m365", action="m365.source.collected",
+            tenant_id=source.tenant_id, resource=source.id,
+            category="activity",
+            severity="warning" if error else ("notice" if objects else "info"),
+            detail={"type": "microsoft365", "workload": source.workload,
+                    "source": source.name, "state": source.state,
+                    "objects": objects, "error": error})
+    except Exception:  # noqa: BLE001 — observability must never break collection
+        logger.exception("m365 source activity record failed (source=%s)", source.id)
+
+
 def profile(inst) -> dict:
     """The org-leader's managed-protection profile (which workloads to protect,
     where to route them, and how often) — the data-map profile applied to every
@@ -311,10 +330,16 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
                 app_token, cursor=cfg.get("cursor"), content_cap=cap,
                 state=state, resource=f"users/{key}/chats"))
     except Exception as e:  # noqa: BLE001
-        source.state = "credential_error" if "401" in str(e) or "403" in str(e) else "delayed"
+        is_auth = "401" in str(e) or "403" in str(e)
+        source.state = "permission_required" if is_auth else "delayed"
+        cfg["last_result"] = {"at": _now().isoformat(), "objects": 0,
+                              "error": str(e)[:200], "ok": False}
+        source.config = cfg
+        source.last_collected_at = _now()
         db.commit()
-        logger.warning("m365 collect failed (source=%s key=%s): %s",
-                       source.workload, source.source_key, str(e)[:200])
+        logger.warning("m365 collect failed (source=%s key=%s state=%s): %s",
+                       source.workload, source.source_key, source.state, str(e)[:200])
+        _record_source_activity(db, inst, source, objects=0, error=str(e)[:200])
         return {"ok": False, "error": str(e)[:200]}
 
     if objs:
@@ -324,19 +349,38 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
                                    actor="m365")
     # Persist resumable cursor + advance the two-track phase for mail.
     new_cursor = state.get("cursor")
+    backfilling = False
     if source.workload == "exchange":
         if (cfg.get("phase") or "backfill") == "backfill":
             cfg["backfill_cursor"] = new_cursor
             if state.get("done") or (isinstance(new_cursor, dict) and new_cursor.get("done")):
                 cfg["phase"] = "recent"  # history captured — switch to new-mail track
+            else:
+                backfilling = True
         else:
             cfg["recent_cursor"] = new_cursor
     else:
         cfg["cursor"] = new_cursor
+    total = int(cfg.get("objects_total") or 0) + len(objs)
+    cfg["objects_total"] = total
+    cfg["last_result"] = {"at": _now().isoformat(), "objects": len(objs),
+                          "error": None, "ok": True}
     source.config = cfg
     source.last_collected_at = _now()
-    source.state = "active"
+    # A source that has never yielded a single object across its lifetime is almost
+    # certainly a permission/consent gap (Graph 200-but-empty) or an empty mailbox —
+    # surface that as an actionable state instead of a silent "active/0".
+    if total == 0 and not backfilling:
+        source.state = "empty"
+        logger.info("m365 collected (instance=%s workload=%s key=%s): 0 object(s) — "
+                    "Graph returned no items (verify the workload's Application "
+                    "permission is consented and the mailbox/drive/site has data)",
+                    inst.id, source.workload, source.source_key)
+    else:
+        source.state = "active"
+        logger.info("m365 collected (instance=%s workload=%s key=%s): %d object(s) "
+                    "(lifetime %d)", inst.id, source.workload, source.source_key,
+                    len(objs), total)
     db.commit()
-    logger.info("m365 collected (instance=%s workload=%s key=%s): %d object(s)",
-                inst.id, source.workload, source.source_key, len(objs))
+    _record_source_activity(db, inst, source, objects=len(objs), error=None)
     return {"ok": True, "objects": len(objs), "workload": source.workload}
