@@ -93,8 +93,13 @@ export default function Integrations() {
       if (m365Spec) {
         try {
           const r = await api.get<{ instances: Instance[] }>("/integrations/microsoft365/instances");
+          const cpIds = new Set((r.instances || []).map((i) => i.id));
+          // The CP is authoritative for Microsoft 365: drop node-replicated copies
+          // it no longer reports (a removed instance lingers in the node's list
+          // because replication is additive), then overlay the CP's own rows.
           const byId = new Map<string, Instance>();
-          for (const i of base.instances || []) byId.set(i.id, i);
+          for (const i of base.instances || [])
+            if (i.integration_type !== "microsoft365" || cpIds.has(i.id)) byId.set(i.id, i);
           for (const i of r.instances || []) byId.set(i.id, i);  // CP copy wins
           base.instances = Array.from(byId.values());
         } catch { /* not entitled / offline — fall back to the base list */ }
