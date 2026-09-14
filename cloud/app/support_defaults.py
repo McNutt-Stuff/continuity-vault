@@ -393,6 +393,22 @@ Examples: *If **From** contains "rob.mcnutt" then add label "Rob"* · *If
 - Rules run in **priority** order (lowest first); a **Discard** stops the rest.
 - **Rules take precedence** over the basic Data Map settings.
 
+## Managed Microsoft 365 sources
+Managed sources protected through the **Microsoft 365** integration
+(Exchange, OneDrive, SharePoint, Teams) are governed by the SAME rules engine —
+they behave like any other source. You can scope a rule to them two ways:
+
+- In **Rules**, the scope picker lists them under **Microsoft 365 (managed
+  sources)** — pick a specific managed source (e.g. a SharePoint site or a
+  member's Exchange) by name.
+- In **Integrations → Microsoft 365**, the **Compliance rules** card shows every
+  rule that applies to that organization's managed sources and links straight to
+  the rule editor.
+
+Rules run on the node that collects the managed source, at ingest, exactly as
+they do for personal sources — so *discard*, *don't index*, *restrict* and
+*obfuscate* all apply to organization data too.
+
 ## Plans
 Rules degrade gracefully by plan — labelling is available everywhere, while
 restrict/obfuscate and index/discard controls unlock on higher tiers. A rule (or

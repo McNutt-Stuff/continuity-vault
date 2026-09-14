@@ -64,3 +64,17 @@ Node-hosted tenants: config replicates CP→node; the node worker (`worker.run_d
 `node_replication` pushes `ManagedSource` + `ExternalIdentity` back UP (keyed by `updated_at`, so
 `last_collected_at` changes propagate). The CP-authoritative M365 API is NOT proxied to the node (see
 `api/node_proxy.py`); its config is authored on the CP. Never build the OAuth redirect from a node domain.
+
+## Governance / rules — managed sources use the MAIN rules engine
+Managed sources are real `Collection`s, so they are governed by the **main compliance rules engine**
+(`rules_engine` + `api/rules.py`), NOT a separate system — a rule binds to a managed source by its
+`collection_id` or by `source_type`, and is enforced at ingest in `sync_worker.ingest_objects` like any other
+source. When you add a governance surface for managed sources, wire it to the main engine:
+- `/rules/options` marks each collection `managed`/`workload`/`instance_id` so the builder can group them; the
+  Rules page lists managed sources under a "Microsoft 365 (managed sources)" group.
+- `GET /integrations/microsoft365/compliance-rules` returns the rules that apply to an instance's managed
+  collections (unscoped, or matching a managed `collection_id`/`source_type`); the workspace's "Compliance
+  rules" card renders them and deep-links to the Rules tab.
+- The `ManagedRule`/`ManagedRuleVersion`/`ManagedRuleAssignment` models under `microsoft365/` are a SEPARATE,
+  not-yet-enforced org-policy framework — do NOT route ingest-time governance through them; use the main engine.
+

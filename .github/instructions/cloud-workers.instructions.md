@@ -38,3 +38,10 @@ description: "Background workers: scheduler, jobs, replication, pruning, index r
   reason/code, <op context>})` — `audit.record` folds those into the Platform-Logs message + carries the full
   detail in `meta`. Never swallow, never log secrets. See `connectors.instructions.md` → “Logging & error
   detail — STANDARD”.
+- **Rules engine runs at ingest.** `sync_worker.ingest_objects` evaluates the tenant's compliance rules
+  (`rules_engine.evaluate`) per object BEFORE storing/indexing, gated by the `rules_enabled` flag (no-op when
+  off). Outcomes: `discard` skips backup entirely; `no_index` stores the bytes (recoverable) but writes NO
+  `SearchDocument`; `restrict` sets `SearchDocument.restricted`; `obfuscate` masks the preview; `label`/`tag`
+  merge into labels. This is the SINGLE enforcement point — it applies to EVERY source, including managed M365
+  collections (they are real `Collection`s). Preserve it when touching the ingest loop; a per-snapshot summary
+  is logged. Rules are federated to nodes, so evaluation is local to wherever ingest runs.
