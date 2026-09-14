@@ -85,6 +85,15 @@ def run_discovery(db: Session, inst, *, client_id: str, client_secret: str) -> d
                        inst.id, cred.microsoft_tenant_id, e)
         return {"ok": False, "error": _friendly_graph_error(e), "http": e.status}
 
+    # Breadcrumb (no secret): which app + tenant + granted roles this run uses, so
+    # a 403 is triageable even without decoding — the roles claim is decisive.
+    _claims = graph.token_claims(token)
+    logger.info("m365 discovery start (instance=%s): app appid=%s token_tid=%s "
+                "connected_tenant=%s client_id=…%s roles=%s",
+                inst.id, _claims.get("appid") or _claims.get("azp") or "?",
+                _claims.get("tid") or "?", cred.microsoft_tenant_id,
+                (client_id or "")[-6:], _claims.get("roles") or "[]")
+
     scope = (db.query(m.IdentityScopePolicy)
              .filter(m.IdentityScopePolicy.integration_instance_id == inst.id).first())
     rules = (scope.rules if scope else {}) or {}
