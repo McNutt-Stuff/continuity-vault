@@ -161,7 +161,7 @@ def _parse_device_line(line: str) -> tuple[datetime, str, str]:
 
 def ingest_device_logs(db, *, source: str, lines: list[str], tenant_id: Optional[str] = None,
                        appliance_id: Optional[str] = None, agent_id: Optional[str] = None,
-                       device_name: str = "") -> int:
+                       node_id: Optional[str] = None, device_name: str = "") -> int:
     """Ingest an appliance/agent's ``recent_logs`` (rolling last-N lines) into the
     unified store, de-duplicated against what's already recorded for this device in
     the covered window (so repeated heartbeats don't duplicate lines)."""
@@ -178,6 +178,8 @@ def ingest_device_logs(db, *, source: str, lines: list[str], tenant_id: Optional
         q = q.filter(LogEntry.appliance_id == appliance_id)
     if agent_id:
         q = q.filter(LogEntry.agent_id == agent_id)
+    if node_id:
+        q = q.filter(LogEntry.node_id == node_id)
     seen = {(ts, _hash(msg)) for ts, msg in q.all()}
     added = 0
     for dt, lvl, msg in parsed:
@@ -186,7 +188,7 @@ def ingest_device_logs(db, *, source: str, lines: list[str], tenant_id: Optional
         seen.add((dt, _hash(msg)))
         db.add(LogEntry(ts=dt, level=lvl, source=source, logger=device_name,
                         message=msg, tenant_id=tenant_id, appliance_id=appliance_id,
-                        agent_id=agent_id, node_name=device_name))
+                        agent_id=agent_id, node_id=node_id, node_name=device_name))
         added += 1
     if added:
         db.commit()

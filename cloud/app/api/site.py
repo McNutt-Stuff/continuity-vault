@@ -163,6 +163,7 @@ class NodeHeartbeat(BaseModel):
     telemetry: dict = {}
     cloud: dict = {}
     updating: bool = False
+    service_health: dict | None = None
 
 
 def _effective_settings(db: Session, node: Node) -> tuple[dict, list[str]]:
@@ -221,6 +222,47 @@ def provision_progress(body: ProvisionProgress, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+def _handle_service_health(db: Session, node, sh: dict, service_down: bool,
+                           prev_status: str) -> None:
+    """Ingest a down node's crash tail into Platform Logs and alert platform
+    admins on the healthy→down (and down→healthy) transition, deduped."""
+    from .. import admin_notifications, logsink
+    unit = sh.get("unit") or "cv-cloud"
+    if service_down:
+        lines = [str(l) for l in (sh.get("recent_logs") or []) if str(l).strip()]
+        if lines:
+            try:
+                logsink.ingest_device_logs(db, source="node", lines=lines,
+                                           node_id=node.id, device_name=node.name)
+            except Exception:  # noqa: BLE001
+                logger.exception("node %s: crash-log ingest failed", node.name)
+        logger.error("node %s (%s): primary service %s is DOWN (active=%s/%s)",
+                     node.name, node.role, unit, sh.get("active"), sh.get("sub_state"))
+        if prev_status != "degraded":  # first heartbeat of the outage
+            admin_notifications.emit(
+                db, "node_alert", severity="critical",
+                subject=f"[Arkive] Node service DOWN — {node.name}",
+                title="Node primary service is down",
+                intro=(f"The {unit} service on node {node.name} ({node.role}) is not "
+                       "running. The node is still sending heartbeats, but its API / "
+                       "portal is unavailable. Recent logs were captured to Platform Logs."),
+                rows=[{"icon": "server", "name": node.name, "detail": f"{node.role} · {unit}"},
+                      {"icon": "activity", "name": "State",
+                       "detail": f"{sh.get('active')}/{sh.get('sub_state')}"}],
+                cta={"label": "View node logs",
+                     "url": f"https://{get_settings().domain}/admin/logs?node_id={node.id}"},
+                dedupe_key=f"node-service-down:{node.id}", dedupe_within_hours=1)
+    elif prev_status == "degraded":  # recovered
+        logger.info("node %s (%s): primary service %s recovered", node.name, node.role, unit)
+        admin_notifications.emit(
+            db, "node_alert", severity="info",
+            subject=f"[Arkive] Node service recovered — {node.name}",
+            title="Node primary service recovered",
+            intro=f"The {unit} service on node {node.name} ({node.role}) is running again.",
+            rows=[{"icon": "server", "name": node.name, "detail": f"{node.role} · {unit}"}],
+            dedupe_key=f"node-service-recovered:{node.id}", dedupe_within_hours=1)
+
+
 @public_router.post("/nodes/heartbeat")
 def node_heartbeat(body: NodeHeartbeat,
                    request: Request,
@@ -253,7 +295,18 @@ def node_heartbeat(body: NodeHeartbeat,
         node.cloud_resource_id = _rid
     # A node re-installing its own bundle reports updating=true so the admin sees
     # an intentional "Updating" state instead of a scary offline/restart blip.
-    node.status = "updating" if body.updating else "active"
+    # The heartbeat runs as a SEPARATE process from the main service, so it also
+    # reports that service's health — a crash-looping cv-cloud is surfaced here as
+    # "degraded" even though the node keeps heartbeating (was silently "online").
+    sh = body.service_health or {}
+    service_down = bool(sh) and sh.get("healthy") is False
+    prev_status = node.status
+    if body.updating:
+        node.status = "updating"
+    elif service_down:
+        node.status = "degraded"
+    else:
+        node.status = "active"
     node.last_heartbeat_at = _now()
     # The node's real public IP as observed by the control plane (behind the TLS
     # proxy, the original client is the first X-Forwarded-For hop).
@@ -262,6 +315,15 @@ def node_heartbeat(body: NodeHeartbeat,
     if _ip and not _ip.startswith(("127.", "::1")):
         node.public_ip = _ip
     db.commit()
+    # Surface a down/crashing main service: ingest its crash tail into Platform
+    # Logs (the node's own flusher is dead) and alert platform admins on the
+    # healthy→down transition (and on recovery), deduped so a persistent crash
+    # doesn't spam. Never let this fail the heartbeat.
+    if not body.updating:
+        try:
+            _handle_service_health(db, node, sh, service_down, prev_status)
+        except Exception:  # noqa: BLE001
+            logger.exception("node %s: service-health handling failed", node.name)
     merged, applied = _effective_settings(db, node)
     overrides = dict(node.config_overrides or {})
     effective = {**merged, **overrides}  # override wins over profile

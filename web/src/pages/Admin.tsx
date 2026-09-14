@@ -2333,7 +2333,7 @@ function Nodes() {
                         {n.cluster_name && <div className="faint" style={{ fontSize: 10.5 }}><Icon name="grid" size={10} /> {n.cluster_name}</div>}
                       </div>
                     </div>
-                    <span title={n.online ? "Online" : "Offline"} style={{ width: 8, height: 8, borderRadius: 999, background: n.online ? "#35d0a5" : "#8a94a7", flexShrink: 0 }} />
+                    <span title={n.status === "degraded" ? "Primary service down" : n.online ? "Online" : "Offline"} style={{ width: 8, height: 8, borderRadius: 999, background: n.status === "degraded" ? "#f2545b" : n.online ? "#35d0a5" : "#8a94a7", flexShrink: 0 }} />
                   </div>
                   <div className="row" style={{ gap: 8, marginBottom: 10 }}>
                     {hbar("CPU", n.health?.cpu_pct)}
@@ -2630,7 +2630,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
           </div>
           <div className="row" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
             <Pill tone={node.online ? "ok" : "warn"} dot>{node.online ? "Online" : "Offline"}</Pill>
-            <Pill tone={node.status === "updating" ? "info" : node.status === "active" ? "info" : "warn"} dot={node.status === "updating"}>{node.status === "updating" ? "updating…" : node.status}</Pill>
+            <Pill tone={node.status === "updating" ? "info" : node.status === "degraded" ? "danger" : node.status === "active" ? "info" : "warn"} dot={node.status === "updating" || node.status === "degraded"}>{node.status === "updating" ? "updating…" : node.status === "degraded" ? "service down" : node.status}</Pill>
             {live?.source === "heartbeat" && <Pill tone="warn">heartbeat only</Pill>}
             <VersionPill version={node.version} updateAvailable={node.update_available} />
           </div>

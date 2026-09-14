@@ -61,6 +61,45 @@ def _update_in_progress() -> bool:
         return False
 
 
+# The primary service whose health the (independent) heartbeat process reports,
+# per role, so a crash-looping main service is visible on the control plane even
+# though this node still heartbeats. LOG source (sysinfo._LOG_UNITS key) per unit.
+_APP_UNIT_BY_ROLE = {"control-plane": "cv-cloud", "customer-tenant": "cv-cloud",
+                     "public-web": "caddy"}
+_LOG_SOURCE_BY_UNIT = {"cv-cloud": "app", "caddy": "proxy"}
+
+
+def _service_health(role: str) -> dict | None:
+    """Health of THIS node's primary service, probed by the SEPARATE heartbeat
+    process — so if cv-cloud crash-loops (its own log flusher can't run) the
+    control plane still learns the main service is down. Returns None when there's
+    nothing to assert (unit not installed for this role, or probe unavailable)."""
+    unit = _APP_UNIT_BY_ROLE.get(role or "", "cv-cloud")
+    try:
+        from . import sysinfo
+        st = sysinfo.service_status(unit)
+    except Exception:
+        return None
+    if st.get("not_found"):
+        return None
+    active = (st.get("active") or "").lower()
+    sub = (st.get("sub_state") or "").lower()
+    # active/running = healthy; activating(auto-restart)/failed/inactive = down.
+    healthy = active == "active" and sub in ("running", "exited", "")
+    out = {"unit": unit, "active": active, "sub_state": sub,
+           "enabled": st.get("enabled"), "healthy": healthy}
+    if not healthy:
+        # Attach the crash tail so the control plane's Platform Logs shows WHY
+        # (the node's in-process log flusher is dead when cv-cloud is down).
+        try:
+            from . import sysinfo
+            src = _LOG_SOURCE_BY_UNIT.get(unit, "app")
+            out["recent_logs"] = [r.get("text", "") for r in sysinfo.logs(src, 60)]
+        except Exception:
+            out["recent_logs"] = []
+    return out
+
+
 def _version() -> str:
     # Fleet nodes self-update from the control plane's bundle; report that bundle
     # version (matches the CP's served version) so the admin can flag out-of-date
@@ -97,6 +136,7 @@ def send_heartbeat() -> dict | None:
         "telemetry": _telemetry(),
         "cloud": cloud,
         "updating": _update_in_progress(),
+        "service_health": _service_health(s.node_role),
     }
     url = s.control_plane_url.rstrip("/") + "/api/nodes/heartbeat"
     req = urllib.request.Request(
