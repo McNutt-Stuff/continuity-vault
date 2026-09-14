@@ -1596,9 +1596,10 @@ function M365Workspace({ spec, onBack }: { spec?: Spec; onBack: () => void }) {
   async function discover() {
     setBusy("discover");
     try {
-      const r = await api.post<M365Status & { discovered: number; in_scope: number }>("/integrations/microsoft365/discover", {});
+      const r = await api.post<M365Status & { discovered?: number; in_scope?: number; queued?: boolean; note?: string }>("/integrations/microsoft365/discover", {});
       setStatus(r);
-      notify({ message: `Discovered ${r.discovered} identities (${r.in_scope} in scope)`, tone: "ok" });
+      if (r.queued) notify({ message: r.note || "Discovery queued on your node — results appear shortly.", tone: "ok" });
+      else notify({ message: `Discovered ${r.discovered ?? 0} identities (${r.in_scope ?? 0} in scope)`, tone: "ok" });
       await loadIdentities();
     } catch (e) { notify({ message: (e as { message?: string }).message || "Discovery failed", tone: "bad" }); }
     finally { setBusy(""); }

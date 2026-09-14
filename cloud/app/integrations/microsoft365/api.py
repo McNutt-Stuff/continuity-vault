@@ -68,6 +68,28 @@ def _instance(db: Session, tenant_id: str) -> IntegrationInstance | None:
                     IntegrationInstance.integration_type == INTEGRATION_TYPE).first())
 
 
+def _node_hosted(db: Session, tenant_id: str) -> bool:
+    """True when the tenant is assigned to a customer node — its M365 discovery,
+    collection and storage run THERE (this CP only owns config/UI)."""
+    t = db.get(Tenant, tenant_id)
+    return bool(t and t.node_id)
+
+
+def _bump_desired(db: Session, inst) -> None:
+    """Bump the signed desired state so the assigned node reconciles promptly."""
+    ds = (db.query(m.IntegrationDesiredState)
+          .filter(m.IntegrationDesiredState.integration_instance_id == inst.id).first())
+    if ds is None:
+        ds = m.IntegrationDesiredState(
+            tenant_id=inst.tenant_id, integration_instance_id=inst.id,
+            node_id=inst.node_id, version=1, desired={}, status="pending_node")
+        db.add(ds)
+    else:
+        ds.version = int(ds.version or 0) + 1
+        ds.status = "pending_node"
+    db.commit()
+
+
 def _credential(db: Session, inst: IntegrationInstance) -> m.ManagedCredentialRef | None:
     return (db.query(m.ManagedCredentialRef)
             .filter(m.ManagedCredentialRef.integration_instance_id == inst.id).first())
@@ -124,10 +146,14 @@ def connect(body: ConnectBody,
     managed-credential reference, ready for admin consent."""
     inst = _instance(db, principal.tenant_id)
     if inst is None:
+        tenant = db.get(Tenant, principal.tenant_id)
+        # Assign to the tenant's node (if federated) so discovery/collection run
+        # THERE; a CP-hosted tenant has node_id NULL and runs on the control plane.
+        node_id = body.node_id or (tenant.node_id if tenant else None)
         inst = IntegrationInstance(
             tenant_id=principal.tenant_id, owner_user_id=None,
             integration_type=INTEGRATION_TYPE, label="Microsoft 365",
-            runs_on="node", node_id=body.node_id, enabled=True,
+            runs_on="node", node_id=node_id, enabled=True,
             status="pending", provision_state="starting",
             provision_message="Awaiting Microsoft administrator consent",
             config={"capabilities": body.capabilities})
@@ -408,12 +434,16 @@ def identity_decisions(body: IdentityDecisions,
         results.append({"id": e.id, "ok": True, "state": e.state})
     db.commit()
     # Establish admin-level managed sources for the newly mapped users so protection
-    # can begin (idempotent). Collection itself only runs once an admin enables it.
-    try:
-        from . import collect
-        collect.provision_sources(db, inst)
-    except Exception:  # noqa: BLE001
-        logger.exception("m365 provision_sources after mapping failed (instance=%s)", inst.id)
+    # can begin (idempotent). Node-hosted tenants provision on their node (bindings
+    # federate down); only the CP-hosted case provisions here.
+    if not _node_hosted(db, principal.tenant_id):
+        try:
+            from . import collect
+            collect.provision_sources(db, inst)
+        except Exception:  # noqa: BLE001
+            logger.exception("m365 provision_sources after mapping failed (instance=%s)", inst.id)
+    else:
+        _bump_desired(db, inst)
     audit.record(db, actor=principal.user_id, action="m365.identity_decisions",
                  category="admin", resource=inst.id,
                  detail={"count": len(body.decisions)})
@@ -506,6 +536,14 @@ def discover(principal: security.Principal = Depends(require_m365),
     cred = _credential(db, inst)
     if not cred or cred.consent_state != "granted":
         raise HTTPException(409, "Microsoft administrator consent is required first")
+    # Node-hosted tenants discover on their assigned node (polling + storage live
+    # there). Bump the desired state so the node reconciles promptly.
+    if _node_hosted(db, principal.tenant_id):
+        _bump_desired(db, inst)
+        audit.record(db, actor=principal.user_id, action="m365.discovery_queued",
+                     category="admin", resource=inst.id)
+        return {"ok": True, "queued": True, **_status_view(db, inst),
+                "note": "Discovery runs on your assigned node; results appear shortly."}
     from ... import platform_config
     from . import discovery
     vals = platform_config.integration_values(INTEGRATION_TYPE)
@@ -559,9 +597,11 @@ def set_collection(body: CollectionToggle,
     cfg["collect_enabled"] = bool(body.enabled)
     inst.config = cfg
     created = 0
-    if body.enabled:
+    if body.enabled and not _node_hosted(db, principal.tenant_id):
         from . import collect
         created = collect.provision_sources(db, inst)
+    if _node_hosted(db, principal.tenant_id):
+        _bump_desired(db, inst)
     db.commit()
     audit.record(db, actor=principal.user_id, action="m365.collection_toggled",
                  category="admin", severity="notice", resource=inst.id,

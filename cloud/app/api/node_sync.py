@@ -191,6 +191,25 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
                               .filter(IntegrationInstance.tenant_id.in_(tids)).all())
     customer_storages = (db.query(CustomerStorage)
                          .filter(CustomerStorage.tenant_id.in_(tids)).all()) if tids else []
+    # Microsoft 365 managed integration: the CP owns the connection, consent, scope
+    # and identity-mapping decisions (set in the portal); the node runs discovery +
+    # collection. Ship those CP-owned records down so the node can reconcile.
+    m365_instances, m365_credentials, m365_scope = [], [], []
+    m365_bindings, m365_desired = [], []
+    try:
+        from ..integrations.microsoft365 import models as _m365
+        m365_instances = [_ser(i) for i in integration_instances
+                          if i.integration_type == "microsoft365"]
+        m365_credentials = [_ser(c) for c in db.query(_m365.ManagedCredentialRef)
+                            .filter(_m365.ManagedCredentialRef.tenant_id.in_(tids)).all()]
+        m365_scope = [_ser(s) for s in db.query(_m365.IdentityScopePolicy)
+                      .filter(_m365.IdentityScopePolicy.tenant_id.in_(tids)).all()]
+        m365_bindings = [_ser(b) for b in db.query(_m365.ExternalIdentityBinding)
+                         .filter(_m365.ExternalIdentityBinding.tenant_id.in_(tids)).all()]
+        m365_desired = [_ser(d) for d in db.query(_m365.IntegrationDesiredState)
+                        .filter(_m365.IntegrationDesiredState.tenant_id.in_(tids)).all()]
+    except Exception:  # noqa: BLE001 — package optional; never break a pull
+        pass
     return {
         "node_id": node.id,
         "assigned": len(tids),
@@ -208,6 +227,11 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "integration_configs": [_ser(ic) for ic in db.query(IntegrationConfig).all()],
         "integration_instances": [_ser(i) for i in integration_instances],
         "customer_storages": [_ser(s) for s in customer_storages],
+        "m365_instances": m365_instances,
+        "m365_credentials": m365_credentials,
+        "m365_scope_policies": m365_scope,
+        "m365_bindings": m365_bindings,
+        "m365_desired_states": m365_desired,
         "nodes": [_ser(n) for n in db.query(Node).all()],
         "pricing": _ser(pricing) if pricing else None,
         "pending_jobs": [_ser(j) for j in pending_jobs],
@@ -236,6 +260,10 @@ class PushPayload(BaseModel):
     communications: list[dict] = []
     admin_alerts: list[dict] = []
     log_entries: list[dict] = []
+    # Microsoft 365 managed integration (node-owned runtime that flows UP): the
+    # node discovers Entra identities + provisions/collects managed sources.
+    m365_external_identities: list[dict] = []
+    m365_managed_sources: list[dict] = []
 
 
 _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
@@ -441,9 +469,29 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict,
         tid = row.get("tenant_id")
         return tid is None or tid in valid_tenants
 
+    # Microsoft 365 instance config is CP-authoritative (portal-set); only the
+    # node's RUNTIME status flows back up.
+    _M365_RUNTIME = ("status", "provision_state", "provision_message", "last_run_at",
+                     "last_success_at", "last_error", "last_stats")
     for row in body.integration_instances:
         owner = row.get("owner_user_id")
         if not _ok(row) or (owner and owner not in valid_users):
+            continue
+        if row.get("integration_type") == "microsoft365":
+            inst = db.get(IntegrationInstance, row.get("id"))
+            if inst is not None:
+                for f in _M365_RUNTIME:
+                    if f not in row:
+                        continue
+                    val = row[f]
+                    if f.endswith("_at") and isinstance(val, str):
+                        try:
+                            dt = datetime.fromisoformat(val)
+                            val = dt.replace(tzinfo=None) if dt.tzinfo else dt
+                        except ValueError:
+                            val = None
+                    setattr(inst, f, val)
+                counts["integrations"] += 1
             continue
         _upsert(db, IntegrationInstance, row)
         counts["integrations"] += 1
@@ -499,6 +547,23 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict,
         if not db.get(IntegrationRun, row.get("id")):
             db.add(IntegrationRun(**_deser(IntegrationRun, row)))
             counts["network"] += 1
+    # Microsoft 365 node-discovered identities + provisioned managed sources.
+    if body.m365_external_identities or body.m365_managed_sources:
+        try:
+            from ..integrations.microsoft365 import models as _m365
+            for row in body.m365_external_identities:
+                if not _ok(row):
+                    continue
+                _upsert(db, _m365.ExternalIdentity, row)
+                counts["integrations"] += 1
+            for row in body.m365_managed_sources:
+                owner = row.get("owner_user_id")
+                if not _ok(row) or (owner and owner not in valid_users):
+                    continue
+                _upsert(db, _m365.ManagedSource, row)
+                counts["integrations"] += 1
+        except Exception:  # noqa: BLE001 — package optional; never fail the push
+            logger.exception("m365 push ingest failed")
 
 
 # --------------------------------------------------------------------------- #

@@ -41,7 +41,7 @@
 | P1c | Managed credential/source/org-source/mapping/rule models | Done | `integrations/microsoft365/models.py` (18 `m365_*` tables, auto-created) |
 | P1d | Desired-state federation envelope + node validation | Partial | `IntegrationDesiredState` records written on activate; node validation TBD |
 | P2 | M365 connection + Entra identity (OAuth, discovery, mapping) | Done (preview) | `microsoft365/graph.py` (app-only client), `discovery.py` (Entra /users → ExternalIdentity + scope), `worker.py` (reconcile), `api.py` `/discover` + `/members`; Entra app creds via `IntegrationConfig.config_object_id` (admin Sources → Managed integrations); frontend `M365Workspace` (connect/consent/discover/map); status → `preview` |
-| P3 | Core managed protection (Exchange/OneDrive) | In progress (preview) | Auth fully wired (public admin-consent redirect); Outlook/OneDrive fetchers parametrized with `resource=users/<id>` for app-only admin collection; `collect.py` provisions per-user managed sources + ingests via the existing pipeline; workspace "Protect mapped users" toggle. Node desired-state federation for node-hosted tenants TBD |
+| P3 | Core managed protection (Exchange/OneDrive) | In progress (preview) | Auth fully wired; Outlook/OneDrive fetchers parametrized with `resource=users/<id>` for app-only admin collection; `collect.py` provisions per-user managed sources + ingests via the existing pipeline; workspace "Protect mapped users" toggle. **Federation wired**: CP owns connection/consent/scope/mapping (portal), federated CP→node (`m365_instances`/`credentials`/`scope_policies`/`bindings`/`desired_states`); node runs discovery + collection + storage and pushes back identities + managed sources (`m365_external_identities`/`m365_managed_sources`, runtime-only instance fields). CP defers discovery/provisioning to the node for node-hosted tenants |
 | P4 | Organization collaboration (SharePoint/Teams) | Todo | Design-partner validation |
 | P5 | Compliance packs + security-source evidence | Todo | Evidence/privacy review |
 | P6 | Broader Microsoft business sources + customer-owned app | Todo | Per-module gates |
@@ -64,8 +64,13 @@
 - [ ] P6 broader sources + enterprise customer-owned app + direct restore
 
 ### Phase 2 notes (discovery slice)
-- Discovery runs where the instance lives; today M365 endpoints run on the CP (customer-tenant nodes are data-plane only; the portal is CP-served), so discovery = Graph metadata only and runs on the CP — no federation needed for this slice.
-- Content collection (Exchange/OneDrive) DOES touch tenant data + node vault keys → that slice adds desired-state federation CP→node and a node-side collector; the `microsoft365.worker` already runs on both CP and node over the local DB, ready for that.
+- Discovery runs where the instance lives; for CP-hosted tenants that's the CP, for node-hosted tenants the assigned NODE (federated). Discovery = Graph metadata only.
+- Content collection (Exchange/OneDrive) touches tenant data + node vault keys → it runs on the assigned node for node-hosted tenants; the `microsoft365.worker` runs on both CP and node over the local DB, gated by tenant ownership.
+
+### Phase 3 federation (node-hosted tenants)
+- CP is authoritative for connection/consent/scope/identity-mapping/`collect_enabled` (all set in the CP-served portal) and ships them down in the pull bundle: `m365_instances` (config only — runtime excluded), `m365_credentials`, `m365_scope_policies`, `m365_bindings`, `m365_desired_states` (added to `_PULL_ORDER`/`_PULL_EXCLUDE`).
+- Node runs discovery + provisioning + collection over its local DB (polling/storage/vault there) and pushes back `m365_external_identities` + `m365_managed_sources` (new `m365_cursor`) plus runtime-only instance status (M365 excluded from full instance upsert on the CP push handler).
+- CP endpoints defer to the node for node-hosted tenants: `/discover` bumps desired state (returns queued), mapping + `/collection` bump desired state instead of provisioning locally. Ownership gate in `worker.run_due`: CP skips tenants with `node_id` set.
 
 ## Known gaps and deviations
 | Requirement | Gap/deviation | Reason | Resolution plan |

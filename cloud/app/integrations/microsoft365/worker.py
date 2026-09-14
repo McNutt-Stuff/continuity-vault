@@ -41,18 +41,26 @@ def _due(inst, ds) -> bool:
 def run_due(db) -> int:
     """Reconcile + discover for every connected M365 instance in the local DB."""
     from ... import platform_config
-    from ...models import IntegrationInstance
+    from ...config import get_settings
+    from ...models import IntegrationInstance, Tenant
     from . import collect, discovery, graph, models as m
 
     vals = platform_config.integration_values(INTEGRATION_TYPE)
     client_id = (vals.get("client_id") or "").strip()
     client_secret = (vals.get("client_secret") or "").strip()
+    role = (get_settings().node_role or "control-plane")
 
     ran = 0
     insts = (db.query(IntegrationInstance)
              .filter(IntegrationInstance.integration_type == INTEGRATION_TYPE,
                      IntegrationInstance.enabled.is_(True)).all())
     for inst in insts:
+        # Federation ownership: a node-hosted tenant's discovery/collection runs on
+        # its ASSIGNED node (polling + storage live there). The control plane only
+        # reconciles the tenants it hosts itself; the node processes its own local DB.
+        tenant = db.get(Tenant, inst.tenant_id)
+        if role == "control-plane" and tenant is not None and tenant.node_id:
+            continue
         cred = (db.query(m.ManagedCredentialRef)
                 .filter(m.ManagedCredentialRef.integration_instance_id == inst.id).first())
         if cred is None or cred.consent_state != "granted":

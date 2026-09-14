@@ -105,6 +105,27 @@ _PULL_EXCLUDE = {
     # proxied there), so they're node-authoritative and pushed up, never pulled.
 }
 
+# Microsoft 365 managed integration: the CP owns connection/consent/scope/mapping
+# (portal-set) and ships them down; the node runs discovery + collection. Applied
+# AFTER the core tables (tenants/users present) so FKs resolve. Instance runtime is
+# node-owned, so it's excluded on pull (flows UP via the push).
+try:
+    from ..integrations.microsoft365 import models as _m365m
+    _PULL_ORDER += [
+        ("m365_instances", IntegrationInstance),
+        ("m365_credentials", _m365m.ManagedCredentialRef),
+        ("m365_scope_policies", _m365m.IdentityScopePolicy),
+        ("m365_bindings", _m365m.ExternalIdentityBinding),
+        ("m365_desired_states", _m365m.IntegrationDesiredState),
+    ]
+    _PULL_EXCLUDE["m365_instances"] = {"status", "provision_state", "provision_message",
+                                       "last_run_at", "last_success_at", "last_error",
+                                       "last_stats"}
+    # The node acknowledges desired state locally; don't let the CP's copy reset it.
+    _PULL_EXCLUDE["m365_desired_states"] = {"applied_version", "applied_at", "status"}
+except Exception:  # noqa: BLE001 — package optional
+    _m365m = None
+
 
 def _now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -406,6 +427,16 @@ def _push(s) -> int:
         except ValueError:
             log_since = None
     log_high = log_since
+    m365_identities: list = []
+    m365_sources: list = []
+    m365_cursor = _read_state().get("m365_cursor")
+    m365_since = None
+    if m365_cursor:
+        try:
+            m365_since = datetime.fromisoformat(m365_cursor)
+        except ValueError:
+            m365_since = None
+    m365_high = m365_since
     with SessionLocal() as db:
         rq = db.query(SnapshotReceipt)
         if since is not None:
@@ -495,10 +526,28 @@ def _push(s) -> int:
             log_entries.append(_row(row))
             if row.created_at and (log_high is None or row.created_at > log_high):
                 log_high = row.created_at
+        # Microsoft 365: Entra identities discovered + managed sources provisioned
+        # on this node flow UP so the portal (CP) shows discovery + collection state.
+        if _m365m is not None:
+            iq = db.query(_m365m.ExternalIdentity)
+            if m365_since is not None:
+                iq = iq.filter(_m365m.ExternalIdentity.updated_at > m365_since)
+            for row in iq.order_by(_m365m.ExternalIdentity.updated_at.asc()).limit(5000).all():
+                m365_identities.append(_row(row))
+                if row.updated_at and (m365_high is None or row.updated_at > m365_high):
+                    m365_high = row.updated_at
+            sq = db.query(_m365m.ManagedSource)
+            if m365_since is not None:
+                sq = sq.filter(_m365m.ManagedSource.updated_at > m365_since)
+            for row in sq.order_by(_m365m.ManagedSource.updated_at.asc()).limit(5000).all():
+                m365_sources.append(_row(row))
+                if row.updated_at and (m365_high is None or row.updated_at > m365_high):
+                    m365_high = row.updated_at
     if not (receipts or documents or accounts or jobs or agents or appliances
             or appliance_storages or insights
             or integ_instances or net_clients or net_apps or net_usage or integ_runs
-            or communications or alerts or log_entries):
+            or communications or alerts or log_entries
+            or m365_identities or m365_sources):
         return 0
     res = _post("/nodes/sync/push", {
         "node": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
@@ -509,6 +558,7 @@ def _push(s) -> int:
         "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
         "communications": communications, "admin_alerts": alerts,
         "log_entries": log_entries,
+        "m365_external_identities": m365_identities, "m365_managed_sources": m365_sources,
     })
     if res and res.get("ok"):
         if high is not None:
@@ -531,14 +581,18 @@ def _push(s) -> int:
             st = _read_state()
             st["logs_cursor"] = log_high.isoformat()
             _write_state(st)
+        if m365_high is not None:
+            st = _read_state()
+            st["m365_cursor"] = m365_high.isoformat()
+            _write_state(st)
         logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d "
                     "appliances=%d storages=%d insights=%d integrations=%d network=%d "
-                    "logs=%d",
+                    "logs=%d m365=%d",
                     len(receipts), len(documents), len(jobs), len(agents),
                     len(appliances), len(appliance_storages), len(insights),
                     len(integ_instances),
                     len(net_clients) + len(net_apps) + len(net_usage),
-                    len(log_entries))
+                    len(log_entries), len(m365_identities) + len(m365_sources))
         return len(receipts) + len(documents)
     return 0
 
