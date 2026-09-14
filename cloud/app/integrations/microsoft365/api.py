@@ -108,11 +108,12 @@ def _credential(db: Session, inst: IntegrationInstance) -> m.ManagedCredentialRe
             .filter(m.ManagedCredentialRef.integration_instance_id == inst.id).first())
 
 
-def _source_object_counts(db: Session, inst: IntegrationInstance) -> dict[str, int]:
-    """Actual protected-object count per managed source = the SearchDocuments in its
-    managed Collection (the true, replicated count) — NOT the runtime objects_total
-    counter, which only counts objects collected since it was introduced and misses
-    everything captured before (and after a delta cursor has advanced)."""
+def _source_object_counts(db: Session, inst: IntegrationInstance) -> dict[str, dict]:
+    """Actual protected footprint per managed source = the SearchDocuments in its
+    managed Collection (the true, replicated count + byte volume) — NOT the runtime
+    objects_total counter, which only counts objects collected since it was
+    introduced and misses everything captured before (or after a delta advanced).
+    Returns {source_id: {"objects": n, "bytes": b}}."""
     from ...models import Collection, SearchDocument
     from sqlalchemy import func
     src_by_coll: dict[str, str] = {}
@@ -122,15 +123,18 @@ def _source_object_counts(db: Session, inst: IntegrationInstance) -> dict[str, i
             src_by_coll[c.id] = cfg["m365_source_id"]
     if not src_by_coll:
         return {}
-    counts: dict[str, int] = {}
-    rows = (db.query(SearchDocument.collection_id, func.count(SearchDocument.id))
+    out: dict[str, dict] = {}
+    rows = (db.query(SearchDocument.collection_id, func.count(SearchDocument.id),
+                     func.coalesce(func.sum(SearchDocument.size_bytes), 0))
             .filter(SearchDocument.collection_id.in_(list(src_by_coll.keys())))
             .group_by(SearchDocument.collection_id).all())
-    for coll_id, n in rows:
+    for coll_id, n, b in rows:
         sid = src_by_coll.get(coll_id)
         if sid:
-            counts[sid] = counts.get(sid, 0) + int(n or 0)
-    return counts
+            agg = out.setdefault(sid, {"objects": 0, "bytes": 0})
+            agg["objects"] += int(n or 0)
+            agg["bytes"] += int(b or 0)
+    return out
 
 
 def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
@@ -147,7 +151,7 @@ def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
         m.ExternalIdentityBinding.status == "suggested").count()
     sources = db.query(m.ManagedSource).filter(
         m.ManagedSource.integration_instance_id == inst.id).count()
-    protected_objects = sum(_source_object_counts(db, inst).values())
+    protected_objects = sum(v["objects"] for v in _source_object_counts(db, inst).values())
     cfg = inst.config or {}
     cmeta = (cred.meta if cred else {}) or {}
     consent_state = (cred.consent_state if cred else "pending")
@@ -538,9 +542,11 @@ def m365_get_profile(instance_id: str = "",
         raise HTTPException(409, "connect first")
     from . import collect
     prof = collect.profile(inst)
+    # Sources currently under protection = everything not paused/decommissioned
+    # (a source that returned 0 new items on its last delta is still protected).
     protected = db.query(m.ManagedSource).filter(
         m.ManagedSource.integration_instance_id == inst.id,
-        m.ManagedSource.state == "active").count()
+        m.ManagedSource.state.notin_(("paused_by_admin", "decommissioned", "planned"))).count()
     return {**prof, "workload_catalog": _WORKLOAD_CATALOG, "active_sources": protected}
 
 
@@ -913,7 +919,7 @@ def list_managed_sources(instance_id: str = "",
     rows = (db.query(m.ManagedSource)
             .filter(m.ManagedSource.integration_instance_id == inst.id)
             .order_by(m.ManagedSource.workload.asc(), m.ManagedSource.name.asc()).all())
-    obj_counts = _source_object_counts(db, inst)  # actual protected objects per source
+    obj_counts = _source_object_counts(db, inst)  # actual protected objects/bytes per source
     _WL_LABEL = {"exchange": "Exchange Online", "onedrive": "OneDrive",
                  "sharepoint": "SharePoint", "teams": "Teams channels",
                  "teams_chat": "Teams chats"}
@@ -921,7 +927,9 @@ def list_managed_sources(instance_id: str = "",
     rollup: dict[str, dict] = {}
     for s in rows:
         cfg = s.config or {}
-        objects = obj_counts.get(s.id, 0)
+        agg = obj_counts.get(s.id) or {"objects": 0, "bytes": 0}
+        objects = agg["objects"]
+        vbytes = agg["bytes"]
         last = cfg.get("last_result") or {}
         # A source with protected objects is active regardless of the last delta
         # (an incremental run that returns 0 changes must not read as "empty").
@@ -929,21 +937,24 @@ def list_managed_sources(instance_id: str = "",
         sources.append({
             "id": s.id, "workload": s.workload, "name": s.name,
             "ownership_type": s.ownership_type, "owner_user_id": s.owner_user_id,
-            "state": eff_state, "source_key": s.source_key, "objects": objects,
+            "state": eff_state, "source_key": s.source_key,
+            "objects": objects, "bytes": vbytes,
             "last_collected_at": s.last_collected_at.isoformat() if s.last_collected_at else None,
             "last_error": last.get("error"),
         })
         r = rollup.setdefault(s.workload, {
             "workload": s.workload, "label": _WL_LABEL.get(s.workload, s.workload),
-            "sources": 0, "active": 0, "objects": 0, "errors": 0})
+            "sources": 0, "active": 0, "objects": 0, "bytes": 0, "errors": 0})
         r["sources"] += 1
         r["objects"] += objects
+        r["bytes"] += vbytes
         if eff_state == "active":
             r["active"] += 1
         if eff_state in ("permission_required", "credential_error", "delayed"):
             r["errors"] += 1
     return {"collect_enabled": bool((inst.config or {}).get("collect_enabled")),
             "total_objects": sum(x["objects"] for x in rollup.values()),
+            "total_bytes": sum(x["bytes"] for x in rollup.values()),
             "workloads": list(rollup.values()),
             "sources": sources}
 

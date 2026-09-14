@@ -1652,10 +1652,62 @@ function splitLines(v: string): string[] {
   return v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
 }
 
-const WORKLOAD_LABELS: Record<string, string> = {
-  exchange: "Exchange Online", onedrive: "OneDrive", sharepoint: "SharePoint",
-  teams: "Teams channels", teams_chat: "Teams chats",
-};
+// Brand-icon type for a managed workload (exchange has its own mark; the two Teams
+// workloads share the Teams mark).
+function workloadIcon(workload: string): string {
+  if (workload === "teams_chat") return "teams";
+  return workload;
+}
+
+// Microsoft 365 → Overview tab: what's protected, at a glance (per-workload objects
+// + volume rollup and the org total). Grows with later phases of the integration.
+function M365Overview({ workloadRollup, totalObjects, totalBytes, collectEnabled, onManage }: {
+  workloadRollup: { workload: string; label: string; sources: number; active: number; objects: number; bytes: number; errors: number }[];
+  totalObjects: number; totalBytes: number; collectEnabled: boolean; onManage: () => void;
+}) {
+  return (
+    <Card>
+      <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
+        <div>
+          <h3 style={{ margin: 0 }}>Protected footprint</h3>
+          <div className="faint" style={{ fontSize: 12 }}>
+            What Arkive is protecting across your Microsoft 365 organization.
+          </div>
+        </div>
+        <button className="btn sm" onClick={onManage}><Icon name="gear" size={13} /> Manage protection</button>
+      </div>
+      {!collectEnabled && (
+        <div style={{ fontSize: 12.5, color: "var(--warn)", marginBottom: 12 }}>
+          <Icon name="alert" size={13} /> Protection is paused — turn it on under Protection.
+        </div>
+      )}
+      {workloadRollup.length === 0 ? (
+        <div className="muted" style={{ padding: "12px 4px" }}>
+          Nothing protected yet. Enable protection and pick workloads under the Protection tab.
+        </div>
+      ) : (
+        <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "stretch" }}>
+          {workloadRollup.map((w) => (
+            <div key={w.workload} className="card" style={{ padding: "10px 14px", minWidth: 160, flex: "1 1 160px" }}>
+              <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                <SourceIcon type={workloadIcon(w.workload)} size={18} />
+                <span style={{ fontSize: 12.5, fontWeight: 600 }}>{w.label}</span>
+              </div>
+              <div style={{ fontSize: 22, fontWeight: 700, marginTop: 4 }}>{w.objects.toLocaleString()}</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>{bytes(w.bytes)} · {w.active}/{w.sources} active{w.errors ? ` · ${w.errors} need attention` : ""}</div>
+            </div>
+          ))}
+          <div className="card" style={{ padding: "10px 14px", minWidth: 150, flex: "1 1 150px",
+               background: "var(--inset)" }}>
+            <div className="faint" style={{ fontSize: 11.5, fontWeight: 600 }}>Total protected</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 4 }}>{totalObjects.toLocaleString()}</div>
+            <div className="faint" style={{ fontSize: 11.5 }}>objects · {bytes(totalBytes)}</div>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
 
 function ScopeField({ label, help, value, onChange }:
   { label: string; help: string; value: string; onChange: (v: string) => void }) {
@@ -1677,9 +1729,11 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
   const [busy, setBusy] = useState("");
   const [identities, setIdentities] = useState<M365Identity[]>([]);
   const [members, setMembers] = useState<M365Member[]>([]);
-  const [sources, setSources] = useState<{ id: string; workload: string; name: string; ownership_type?: string; state: string; objects?: number; last_error?: string | null; last_collected_at: string | null }[]>([]);
-  const [workloadRollup, setWorkloadRollup] = useState<{ workload: string; label: string; sources: number; active: number; objects: number; errors: number }[]>([]);
+  const [sources, setSources] = useState<{ id: string; workload: string; name: string; ownership_type?: string; state: string; objects?: number; bytes?: number; last_error?: string | null; last_collected_at: string | null }[]>([]);
+  const [workloadRollup, setWorkloadRollup] = useState<{ workload: string; label: string; sources: number; active: number; objects: number; bytes: number; errors: number }[]>([]);
   const [totalObjects, setTotalObjects] = useState(0);
+  const [totalBytes, setTotalBytes] = useState(0);
+  const [tab, setTab] = useState<"overview" | "identities" | "protection" | "compliance">("overview");
   const [collectEnabled, setCollectEnabled] = useState(false);
   const [consentState, setConsentState] = useState<{ url?: string; state?: string; configured?: boolean; message?: string } | null>(null);
   const [tenantInput, setTenantInput] = useState("");
@@ -1709,9 +1763,9 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
       setIdentities(r.identities || []);
       const m = await api.get<{ members: M365Member[] }>("/integrations/microsoft365/members");
       setMembers(m.members || []);
-      const s = await api.get<{ collect_enabled: boolean; total_objects?: number; workloads?: { workload: string; label: string; sources: number; active: number; objects: number; errors: number }[]; sources: { id: string; workload: string; name: string; ownership_type?: string; state: string; objects?: number; last_error?: string | null; last_collected_at: string | null }[] }>(`/integrations/microsoft365/sources?${iq}`);
+      const s = await api.get<{ collect_enabled: boolean; total_objects?: number; total_bytes?: number; workloads?: { workload: string; label: string; sources: number; active: number; objects: number; bytes: number; errors: number }[]; sources: { id: string; workload: string; name: string; ownership_type?: string; state: string; objects?: number; bytes?: number; last_error?: string | null; last_collected_at: string | null }[] }>(`/integrations/microsoft365/sources?${iq}`);
       setSources(s.sources || []); setCollectEnabled(!!s.collect_enabled);
-      setWorkloadRollup(s.workloads || []); setTotalObjects(s.total_objects || 0);
+      setWorkloadRollup(s.workloads || []); setTotalObjects(s.total_objects || 0); setTotalBytes(s.total_bytes || 0);
       const sc = await api.get<{ rules: M365ScopeRules }>(`/integrations/microsoft365/scope?${iq}`);
       setScope(sc.rules || {});
       const pr = await api.get<M365Profile>(`/integrations/microsoft365/profile?${iq}`);
@@ -2041,6 +2095,25 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
         </Card>
       ) : (
         <>
+        {/* Tabbed navigation — grows as later phases of the integration land. */}
+        <div className="row" style={{ gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+          <button className={`chip ${tab === "overview" ? "active" : ""}`} onClick={() => setTab("overview")}>Overview</button>
+          <button className={`chip ${tab === "identities" ? "active" : ""}`} onClick={() => setTab("identities")}>Identities</button>
+          <button className={`chip ${tab === "protection" ? "active" : ""}`} onClick={() => setTab("protection")}>Protection</button>
+          {compliance?.enabled && (
+            <button className={`chip ${tab === "compliance" ? "active" : ""}`} onClick={() => setTab("compliance")}>
+              <Icon name="shield" size={12} /> Compliance
+            </button>
+          )}
+        </div>
+
+        {tab === "overview" && (
+          <M365Overview workloadRollup={workloadRollup} totalObjects={totalObjects}
+                        totalBytes={totalBytes} collectEnabled={collectEnabled}
+                        onManage={() => setTab("protection")} />
+        )}
+
+        {tab === "identities" && (
         <Card>
           <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
             <div>
@@ -2154,7 +2227,10 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
             </div>
           )}
         </Card>
-        <Card style={{ marginTop: 14 }}>
+        )}
+
+        {tab === "protection" && (
+        <Card>
           <div className="spread" style={{ alignItems: "center" }}>
             <div>
               <h3 style={{ margin: 0 }}>Protect mapped users</h3>
@@ -2226,38 +2302,24 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
               </div>
             </div>
           )}
-          {workloadRollup.length > 0 && (
-            <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 12 }}>
-              {workloadRollup.map((w) => (
-                <div key={w.workload} className="card" style={{ padding: "8px 12px", minWidth: 150 }}>
-                  <div className="row" style={{ gap: 6, alignItems: "center" }}>
-                    <SourceIcon type={w.workload === "teams_chat" ? "teams" : w.workload} size={16} />
-                    <span style={{ fontSize: 12.5, fontWeight: 600 }}>{w.label}</span>
-                  </div>
-                  <div style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}>{w.objects.toLocaleString()}</div>
-                  <div className="faint" style={{ fontSize: 11 }}>
-                    objects · {w.active}/{w.sources} active{w.errors ? ` · ${w.errors} need attention` : ""}
-                  </div>
-                </div>
-              ))}
-              <div className="card" style={{ padding: "8px 12px", minWidth: 130, marginLeft: "auto" }}>
-                <div className="faint" style={{ fontSize: 11.5, fontWeight: 600 }}>Total protected</div>
-                <div style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}>{totalObjects.toLocaleString()}</div>
-                <div className="faint" style={{ fontSize: 11 }}>objects</div>
-              </div>
-            </div>
-          )}
           {sources.length > 0 && (
             <div style={{ overflowX: "auto", marginTop: 12 }}>
               <table className="table">
-                <thead><tr><th>Source</th><th>Workload</th><th>State</th><th style={{ textAlign: "right" }}>Objects</th><th>Last collected</th></tr></thead>
+                <thead><tr><th>Source</th><th>State</th><th style={{ textAlign: "right" }}>Objects</th><th>Last collected</th></tr></thead>
                 <tbody>
                   {sources.map((s) => (
                     <tr key={s.id}>
-                      <td style={{ fontWeight: 600 }}>{s.name}</td>
-                      <td><Pill tone="info">{WORKLOAD_LABELS[s.workload] || s.workload}</Pill></td>
-                      <td title={s.last_error || undefined}><Pill tone={s.state === "active" ? "ok" : (s.state === "credential_error" || s.state === "permission_required") ? "danger" : s.state === "empty" ? "warn" : "warn"}>{s.state}</Pill></td>
-                      <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{(s.objects ?? 0).toLocaleString()}</td>
+                      <td>
+                        <span className="row" style={{ gap: 8, alignItems: "center", fontWeight: 600 }}>
+                          <SourceIcon type={workloadIcon(s.workload)} size={18} />
+                          {s.name}
+                        </span>
+                      </td>
+                      <td title={s.last_error || undefined}><Pill tone={s.state === "active" ? "ok" : (s.state === "credential_error" || s.state === "permission_required") ? "danger" : "warn"}>{s.state}</Pill></td>
+                      <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                        <div>{(s.objects ?? 0).toLocaleString()}</div>
+                        <div className="faint" style={{ fontSize: 11 }}>{bytes(s.bytes ?? 0)}</div>
+                      </td>
                       <td className="faint" style={{ fontSize: 12 }}>{s.last_collected_at ? new Date(s.last_collected_at.endsWith("Z") ? s.last_collected_at : s.last_collected_at + "Z").toLocaleString() : "—"}</td>
                     </tr>
                   ))}
@@ -2266,8 +2328,10 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
             </div>
           )}
         </Card>
-        {compliance?.enabled && (
-          <Card style={{ marginTop: 14 }}>
+        )}
+
+        {tab === "compliance" && compliance?.enabled && (
+          <Card>
             <div className="spread" style={{ marginBottom: 8 }}>
               <div className="stack" style={{ gap: 2 }}>
                 <h3 style={{ margin: 0 }}><Icon name="shield" size={15} /> Compliance rules</h3>
