@@ -1143,9 +1143,12 @@ _SOURCE_PAGES = [
         ["Open **Integrations** and choose **Microsoft 365** (Business/Enterprise).",
          "**Connect** your organization, then have a Microsoft Global Administrator grant admin consent "
          "(a Microsoft window opens and returns you here automatically).",
-         "**Discover users** pulls your Entra directory; review who is in scope.",
-         "**Map** each Microsoft identity to an Arkive member (or mark it protected-only / excluded), "
-         "then turn on **Protect mapped users** to collect their Exchange Online + OneDrive."],
+         "**Discover users** pulls your Entra directory; use **Scope** to limit it by domain, "
+         "include/exclude lists or guests, then re-discover.",
+         "**Map** each Microsoft identity to an Arkive member — Arkive auto-suggests matches by email, "
+         "and you can **Accept** them individually or all at once. Optionally enable **Auto-map matched "
+         "users** and **Auto-create accounts for new users** so mapping keeps itself up to date. "
+         "Then turn on **Protect mapped users** to collect their Exchange Online + OneDrive."],
         ["**Entra identity discovery + mapping (preview)** — read-only discovery of your Microsoft 365 "
          "users and mapping to Arkive members.",
          "**Managed Exchange Online + OneDrive (preview)** — organization admin-level collection of each "

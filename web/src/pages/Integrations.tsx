@@ -1606,15 +1606,33 @@ interface M365Status {
   connected: boolean; state?: string; status?: string; consent_state?: string;
   instance_id?: string;
   microsoft_tenant_id?: string; scopes_granted?: string[];
-  identities_discovered?: number; identities_mapped?: number; managed_sources?: number;
+  identities_discovered?: number; identities_mapped?: number; identities_suggested?: number;
+  managed_sources?: number; auto_map?: boolean; auto_create?: boolean;
   last_run_at?: string | null;
 }
+interface M365ScopeRules { domains?: string[]; includes?: string[]; excludes?: string[]; include_guests?: boolean; }
 interface M365Identity {
   id: string; display_name: string; upn: string; email: string; entra_object_id: string;
   account_enabled: boolean; user_type: string; in_scope: boolean; state: string; scope_reason?: string;
   binding: { user_id: string | null; status: string; protected_only: boolean; mapping_method: string } | null;
 }
 interface M365Member { id: string; name: string; email: string; }
+
+function splitLines(v: string): string[] {
+  return v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+}
+
+function ScopeField({ label, help, value, onChange }:
+  { label: string; help: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <label className="stack" style={{ gap: 4 }}>
+      <span style={{ fontSize: 12, fontWeight: 600 }}>{label}</span>
+      <textarea className="input" rows={2} value={value} onChange={(e) => onChange(e.target.value)}
+                style={{ fontFamily: "var(--mono, monospace)", fontSize: 12 }} />
+      <span className="faint" style={{ fontSize: 11 }}>{help}</span>
+    </label>
+  );
+}
 
 function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: string; onBack: () => void }) {
   // "new" starts a fresh wizard; an id opens/manages that specific instance.
@@ -1628,6 +1646,8 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
   const [collectEnabled, setCollectEnabled] = useState(false);
   const [consentState, setConsentState] = useState<{ url?: string; state?: string; configured?: boolean; message?: string } | null>(null);
   const [tenantInput, setTenantInput] = useState("");
+  const [scope, setScope] = useState<M365ScopeRules>({});
+  const [scopeOpen, setScopeOpen] = useState(false);
 
   const iq = activeId ? `instance_id=${encodeURIComponent(activeId)}` : "";
 
@@ -1646,10 +1666,36 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
       setMembers(m.members || []);
       const s = await api.get<{ collect_enabled: boolean; sources: { id: string; workload: string; name: string; state: string; last_collected_at: string | null }[] }>(`/integrations/microsoft365/sources?${iq}`);
       setSources(s.sources || []); setCollectEnabled(!!s.collect_enabled);
+      const sc = await api.get<{ rules: M365ScopeRules }>(`/integrations/microsoft365/scope?${iq}`);
+      setScope(sc.rules || {});
     } catch { /* ignore */ }
   }
   useEffect(() => { void loadStatus(); }, [activeId]);
   useEffect(() => { if (status?.consent_state === "granted") void loadIdentities(); }, [status?.consent_state]);
+
+  async function saveScope(next: M365ScopeRules) {
+    try {
+      await api.put(`/integrations/microsoft365/scope?${iq}`, { rules: next });
+      setScope(next);
+      notify({ message: "Scope saved — re-running discovery to apply.", tone: "ok" });
+      await discover();
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't save scope", tone: "danger" }); }
+  }
+  async function saveSettings(next: { auto_map?: boolean; auto_create?: boolean }) {
+    try {
+      const r = await api.put<{ auto_map: boolean; auto_create: boolean }>(`/integrations/microsoft365/settings?${iq}`, next);
+      setStatus((s) => s ? { ...s, auto_map: r.auto_map, auto_create: r.auto_create } : s);
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't save settings", tone: "danger" }); }
+  }
+  async function acceptAllSuggestions() {
+    setBusy("accept");
+    try {
+      const r = await api.post<{ accepted: number }>(`/integrations/microsoft365/identities/accept-suggestions?${iq}`, {});
+      notify({ message: r.accepted ? `Accepted ${r.accepted} suggested mapping(s)` : "No suggestions to accept", tone: "ok" });
+      await loadIdentities(); await loadStatus();
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't accept suggestions", tone: "danger" }); }
+    finally { setBusy(""); }
+  }
 
   async function connect() {
     setBusy("connect");
@@ -1696,11 +1742,12 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
     let decision: { external_identity_id: string; action: string; user_id?: string };
     if (value === "protected_only") decision = { external_identity_id: idn.id, action: "protected_only" };
     else if (value === "exclude") decision = { external_identity_id: idn.id, action: "exclude" };
+    else if (value === "create_user") decision = { external_identity_id: idn.id, action: "create_user" };
     else if (value.startsWith("map:")) decision = { external_identity_id: idn.id, action: "map", user_id: value.slice(4) };
     else return;
     try {
       await api.post(`/integrations/microsoft365/identities/decisions?${iq}`, { decisions: [decision] });
-      await loadIdentities();
+      await loadIdentities(); await loadStatus();
     } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't apply mapping", tone: "danger" }); }
   }
   async function toggleCollection(next: boolean) {
@@ -1764,6 +1811,7 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
             <MiniStat icon="cloud" label="Microsoft tenant" value={status?.microsoft_tenant_id || "—"} tint="#0364B8" />
             <MiniStat icon="user" label="Identities discovered" value={String(status?.identities_discovered ?? 0)} tint="#3a6df0" />
             <MiniStat icon="check" label="Mapped" value={String(status?.identities_mapped ?? 0)} tint="#35d0a5" />
+            <MiniStat icon="link" label="Suggested" value={String(status?.identities_suggested ?? 0)} tint="#f5a623" />
             <MiniStat icon="shield" label="In scope" value={String(inScope.length)} tint="#c56cf0" />
           </div>
         )}
@@ -1827,10 +1875,64 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
                 Map discovered Microsoft users to Arkive members. Mapping doesn't grant portal access.
               </div>
             </div>
-            <button className="btn sm" disabled={busy === "discover"} onClick={discover}>
-              <Icon name="activity" size={13} /> {busy === "discover" ? "Discovering…" : "Discover users"}
-            </button>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <button className="btn ghost sm" onClick={() => setScopeOpen((v) => !v)}>
+                <Icon name="shield" size={13} /> Scope
+              </button>
+              <button className="btn sm" disabled={busy === "discover"} onClick={discover}>
+                <Icon name="activity" size={13} /> {busy === "discover" ? "Discovering…" : "Discover users"}
+              </button>
+            </div>
           </div>
+
+          {scopeOpen && (
+            <div className="stack" style={{ gap: 10, marginBottom: 14, padding: 12,
+                 border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+              <div className="faint" style={{ fontSize: 12 }}>
+                Choose which Entra users are in scope. Precedence: exclude &gt; guests &gt; include list &gt;
+                domains &gt; default (enabled members). Leave all blank to protect every enabled member.
+              </div>
+              <ScopeField label="Domains (one per line)" help="Only users in these email domains"
+                          value={(scope.domains || []).join("\n")}
+                          onChange={(v) => setScope({ ...scope, domains: splitLines(v) })} />
+              <ScopeField label="Include (UPN/email or object id)" help="Only these users (overrides domains)"
+                          value={(scope.includes || []).join("\n")}
+                          onChange={(v) => setScope({ ...scope, includes: splitLines(v) })} />
+              <ScopeField label="Exclude (UPN/email or object id)" help="Never in scope"
+                          value={(scope.excludes || []).join("\n")}
+                          onChange={(v) => setScope({ ...scope, excludes: splitLines(v) })} />
+              <label className="row" style={{ gap: 8, alignItems: "center", fontSize: 12.5 }}>
+                <input type="checkbox" checked={!!scope.include_guests}
+                       onChange={(e) => setScope({ ...scope, include_guests: e.target.checked })} />
+                Include guest accounts
+              </label>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="btn primary sm" onClick={() => saveScope(scope)}>Save scope &amp; re-discover</button>
+                <button className="btn ghost sm" onClick={() => setScopeOpen(false)}>Close</button>
+              </div>
+            </div>
+          )}
+
+          <div className="row" style={{ gap: 14, flexWrap: "wrap", alignItems: "center", marginBottom: 12,
+               padding: "8px 12px", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+            <label className="row" style={{ gap: 6, alignItems: "center", fontSize: 12.5 }} title="Automatically map any newly discovered user that matches an existing Arkive member by email">
+              <input type="checkbox" checked={!!status?.auto_map}
+                     onChange={(e) => saveSettings({ auto_map: e.target.checked })} />
+              Auto-map matched users
+            </label>
+            <label className="row" style={{ gap: 6, alignItems: "center", fontSize: 12.5 }} title="Automatically create a new Arkive member for any in-scope user with no existing account">
+              <input type="checkbox" checked={!!status?.auto_create}
+                     onChange={(e) => saveSettings({ auto_create: e.target.checked })} />
+              Auto-create accounts for new users
+            </label>
+            <div style={{ flex: 1 }} />
+            {(status?.identities_suggested ?? 0) > 0 && (
+              <button className="btn primary sm" disabled={busy === "accept"} onClick={acceptAllSuggestions}>
+                <Icon name="check" size={13} /> {busy === "accept" ? "Accepting…" : `Accept ${status?.identities_suggested} suggestion(s)`}
+              </button>
+            )}
+          </div>
+
           {identities.length === 0 ? (
             <div className="muted" style={{ padding: "16px 4px" }}>
               No identities yet. Click <b>Discover users</b> to pull your Entra directory.
@@ -1844,6 +1946,7 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
                     const cur = idn.binding?.status === "mapped" && idn.binding.user_id ? `map:${idn.binding.user_id}`
                       : idn.binding?.protected_only ? "protected_only"
                       : idn.state === "excluded" ? "exclude" : "";
+                    const suggested = idn.binding?.status === "suggested" && idn.binding.user_id;
                     return (
                       <tr key={idn.id} style={idn.in_scope ? undefined : { opacity: 0.55 }}>
                         <td style={{ fontWeight: 600 }}>{idn.display_name}{!idn.account_enabled && <span className="faint" style={{ fontWeight: 400 }}> · disabled</span>}</td>
@@ -1851,14 +1954,23 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
                         <td><Pill tone={idn.user_type === "guest" ? "warn" : "info"}>{idn.user_type}</Pill></td>
                         <td><Pill tone={idn.in_scope ? "ok" : "warn"}>{idn.in_scope ? "in scope" : (idn.scope_reason || "out")}</Pill></td>
                         <td>
-                          <select className="input sm" value={cur} onChange={(e) => decide(idn, e.target.value)}>
-                            <option value="">Unassigned</option>
-                            <option value="protected_only">Protected only</option>
-                            <option value="exclude">Exclude</option>
-                            <optgroup label="Map to member">
-                              {members.map((mem) => <option key={mem.id} value={`map:${mem.id}`}>{mem.name}</option>)}
-                            </optgroup>
-                          </select>
+                          <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                            <select className="input sm" value={suggested ? "" : cur} onChange={(e) => decide(idn, e.target.value)}>
+                              <option value="">{suggested ? "Suggested…" : "Unassigned"}</option>
+                              <option value="protected_only">Protected only</option>
+                              <option value="exclude">Exclude</option>
+                              <option value="create_user">Create new account</option>
+                              <optgroup label="Map to member">
+                                {members.map((mem) => <option key={mem.id} value={`map:${mem.id}`}>{mem.name}</option>)}
+                              </optgroup>
+                            </select>
+                            {suggested && (
+                              <button className="btn primary sm" title="Accept the suggested match"
+                                      onClick={() => decide(idn, `map:${idn.binding!.user_id}`)}>
+                                Accept
+                              </button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
