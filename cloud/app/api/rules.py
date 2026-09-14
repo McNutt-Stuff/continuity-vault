@@ -102,14 +102,21 @@ def options(principal: security.Principal = Depends(security.get_principal),
     colls = (db.query(Collection)
              .filter(Collection.tenant_id == tenant.id)
              .order_by(Collection.name.asc()).all())
+    def _coll(c: Collection) -> dict:
+        cfg = c.config or {}
+        return {"id": c.id, "name": c.name, "source_type": c.source_type,
+                # Managed M365 collections are governed by the integration, not the
+                # Data Map — surface that so the builder can group/label them.
+                "managed": bool(cfg.get("managed")),
+                "workload": cfg.get("m365_workload") or "",
+                "instance_id": cfg.get("m365_instance_id") or ""}
     return {
         "operators": rules_engine.OPERATORS,
         "action_types": rules_engine.ACTION_TYPES,
         "field_suggestions": rules_engine.FIELD_SUGGESTIONS,
         "plans": list(rules_engine.PLAN_RANK),
         "plan": (tenant.plan or "personal"),
-        "collections": [{"id": c.id, "name": c.name, "source_type": c.source_type}
-                        for c in colls],
+        "collections": [_coll(c) for c in colls],
     }
 
 

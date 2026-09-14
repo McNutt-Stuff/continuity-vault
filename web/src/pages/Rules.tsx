@@ -19,8 +19,13 @@ interface Options {
   field_suggestions: string[];
   plans: string[];
   plan: string;
-  collections: { id: string; name: string; source_type: string }[];
+  collections: { id: string; name: string; source_type: string; managed?: boolean; workload?: string; instance_id?: string }[];
 }
+
+const WORKLOAD_LABELS: Record<string, string> = {
+  exchange: "Exchange Online", onedrive: "OneDrive", sharepoint: "SharePoint",
+  teams: "Teams channels", teams_chat: "Teams chats",
+};
 
 const PLAN_RANK: Record<string, number> = { personal: 0, family: 1, business: 2 };
 
@@ -244,7 +249,7 @@ function RuleEditor({ rule, opts, planRank, onChange, onSave, onDelete, saving, 
       <div className="stack" style={{ gap: 6 }}>
         <span className="faint" style={{ fontSize: 11.5 }}>Applies to (leave empty = every source)</span>
         <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-          {opts.collections.map((c) => {
+          {opts.collections.filter((c) => !c.managed).map((c) => {
             const on = rule.collection_ids.includes(c.id);
             return (
               <button key={c.id} className={`chip ${on ? "active" : ""}`}
@@ -255,6 +260,25 @@ function RuleEditor({ rule, opts, planRank, onChange, onSave, onDelete, saving, 
           })}
           {opts.collections.length === 0 && <span className="faint" style={{ fontSize: 12 }}>No Data Map sources yet.</span>}
         </div>
+        {opts.collections.some((c) => c.managed) && (
+          <>
+            <span className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
+              <Icon name="cloud" size={11} /> Microsoft 365 (managed sources)
+            </span>
+            <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+              {opts.collections.filter((c) => c.managed).map((c) => {
+                const on = rule.collection_ids.includes(c.id);
+                return (
+                  <button key={c.id} className={`chip ${on ? "active" : ""}`}
+                          title={`${WORKLOAD_LABELS[c.workload || ""] || c.workload} · ${c.name}`}
+                          onClick={() => onChange("collection_ids", on ? rule.collection_ids.filter((x) => x !== c.id) : [...rule.collection_ids, c.id])}>
+                    {on && <Icon name="check" size={12} />} {c.name}
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
       </div>
 
       {/* IF */}

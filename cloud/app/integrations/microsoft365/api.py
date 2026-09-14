@@ -885,6 +885,50 @@ def list_managed_sources(instance_id: str = "",
                         for s in rows]}
 
 
+@router.get("/compliance-rules")
+def compliance_rules(instance_id: str = "",
+                     principal: security.Principal = Depends(require_m365),
+                     db: Session = Depends(get_db)):
+    """Compliance (rules-engine) rules that apply to THIS integration's managed
+    collections, so the admin can see + manage governance from the workspace.
+    Managed M365 sources are real Data Map Collections, so they use the main
+    rules engine (bind by collection id / source type) — not a separate system."""
+    from ...models import Collection, Rule
+    from ... import features
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    user = db.get(User, principal.user_id)
+    tenant = db.get(Tenant, principal.tenant_id)
+    if not features.resolve(user, tenant, "rules_enabled"):
+        return {"enabled": False, "managed_collections": [], "rules": []}
+    # Managed collections for this instance (Collection.config.m365_instance_id).
+    colls = [c for c in db.query(Collection).filter(Collection.tenant_id == tenant.id).all()
+             if (c.config or {}).get("m365_instance_id") == inst.id]
+    coll_ids = {c.id for c in colls}
+    coll_stypes = {c.source_type for c in colls}
+    rules = (db.query(Rule)
+             .filter(Rule.tenant_id == tenant.id)
+             .order_by(Rule.priority.asc(), Rule.created_at.asc()).all())
+    applies = []
+    for r in rules:
+        cids = set(r.collection_ids or [])
+        stypes = set(r.source_types or [])
+        # A rule applies to a managed source when it's unscoped, or targets one of
+        # these collections, or targets one of their source types.
+        if (not cids and not stypes) or (cids & coll_ids) or (stypes & coll_stypes):
+            applies.append({"id": r.id, "name": r.name, "enabled": bool(r.enabled),
+                            "priority": r.priority, "actions": r.actions or [],
+                            "scoped": bool(cids or stypes)})
+    return {
+        "enabled": True,
+        "managed_collections": [{"id": c.id, "name": c.name, "source_type": c.source_type,
+                                 "workload": (c.config or {}).get("m365_workload") or ""}
+                                for c in colls],
+        "rules": applies,
+    }
+
+
 class CollectionToggle(BaseModel):
     enabled: bool
 

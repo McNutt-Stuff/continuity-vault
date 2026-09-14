@@ -1641,6 +1641,11 @@ interface M365Identity {
   binding: { user_id: string | null; status: string; protected_only: boolean; mapping_method: string } | null;
 }
 interface M365Member { id: string; name: string; email: string; }
+interface M365Compliance {
+  enabled: boolean;
+  managed_collections: { id: string; name: string; source_type: string; workload: string }[];
+  rules: { id: string; name: string; enabled: boolean; priority: number; actions: { type: string; value?: string }[]; scoped: boolean }[];
+}
 
 function splitLines(v: string): string[] {
   return v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
@@ -1679,6 +1684,8 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
   const [scopeOpen, setScopeOpen] = useState(false);
   const [profile, setProfile] = useState<M365Profile | null>(null);
   const [targets, setTargets] = useState<StorageTarget[]>([]);
+  const [compliance, setCompliance] = useState<M365Compliance | null>(null);
+  const nav = useNavigate();
 
   const iq = activeId ? `instance_id=${encodeURIComponent(activeId)}` : "";
 
@@ -1705,6 +1712,10 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
       setScope(sc.rules || {});
       const pr = await api.get<M365Profile>(`/integrations/microsoft365/profile?${iq}`);
       setProfile(pr);
+      try {
+        const cr = await api.get<M365Compliance>(`/integrations/microsoft365/compliance-rules?${iq}`);
+        setCompliance(cr);
+      } catch { /* rules engine off / not entitled */ }
       try {
         const tg = await api.get<StorageTarget[]>("/tenant/storage-targets");
         setTargets(tg || []);
@@ -2188,6 +2199,46 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
             </div>
           )}
         </Card>
+        {compliance?.enabled && (
+          <Card style={{ marginTop: 14 }}>
+            <div className="spread" style={{ marginBottom: 8 }}>
+              <div className="stack" style={{ gap: 2 }}>
+                <h3 style={{ margin: 0 }}><Icon name="shield" size={15} /> Compliance rules</h3>
+                <span className="faint" style={{ fontSize: 12 }}>
+                  Governance rules applied to these managed sources on ingest (label, restrict,
+                  obfuscate, don't-index or discard).
+                </span>
+              </div>
+              <button className="btn sm" onClick={() => nav("/rules")}>
+                <Icon name="link" size={13} /> Manage rules
+              </button>
+            </div>
+            {compliance.rules.length === 0 ? (
+              <div className="faint" style={{ fontSize: 12.5 }}>
+                No rules apply to these managed sources yet.{" "}
+                <a onClick={() => nav("/rules")} style={{ cursor: "pointer", color: "var(--accent,#4f7cff)" }}>
+                  Create a rule
+                </a>{" "}
+                and scope it to a Microsoft 365 managed source.
+              </div>
+            ) : (
+              <div className="stack" style={{ gap: 0 }}>
+                {compliance.rules.map((r) => (
+                  <div key={r.id} className="row" style={{ gap: 10, alignItems: "center", padding: "6px 0", borderBottom: "1px solid var(--border-soft)" }}>
+                    <div className="flex1">
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{r.name}</div>
+                      <div className="faint" style={{ fontSize: 11 }}>
+                        {r.scoped ? "scoped to managed source(s)" : "applies to all sources"}
+                        {" · "}{(r.actions || []).map((a) => a.type).join(", ") || "no actions"}
+                      </div>
+                    </div>
+                    <Pill tone={r.enabled ? "ok" : "warn"}>{r.enabled ? "on" : "off"}</Pill>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        )}
         </>
       )}
     </>
