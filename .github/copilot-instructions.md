@@ -65,6 +65,22 @@ client/server-encrypted; storage holds only ciphertext.
   connect-dialog copy. Bundle any new server dependency in `cloud/requirements.txt` (installer-managed), never
   a manual `pip install`. A feature without its docs update is incomplete. See
   `.github/instructions/connectors.instructions.md` + `support-docs.instructions.md`.
+- **Cross-member data access is gated + audited — NEVER authorize by tenant alone.** A member sees only their
+  OWN vaults; content is not shared across users. An org ADMIN may widen an aggregate/admin view, but any path
+  that reads or recovers ANOTHER member's data (org/user-scope search, `retrieve`, recovered content) MUST:
+  (1) authorize by the object's **vault owner** (`Vault.owner_user_id`), not just `tenant.id` — authorizing by
+  tenant alone is a bug that lets any member reach any object by id; (2) require org-admin + `org_enabled` + the
+  `admin_cross_member_access` flag (a privacy/legal hold clears it) else 403; (3) be **audited** every time
+  (`category="admin"`, `severity="warning"`, with `target_user_id` + the caller's `reason`); (4) honor
+  `cross_member_recovery_approval` (dual control — a DIFFERENT admin approves via `AccessApproval` before
+  release). Own-data access stays frictionless. See `api/search.py` (`_guard_cross_member_recovery`,
+  `access-approvals`) + `security.scoped_vault_ids`.
+- **Aggregate/admin views use `scoped_vault_ids`, never `content_vault_ids`.** Any overview/insights/report that
+  an org admin can widen to the whole org must resolve vaults via `security.scoped_vault_ids(db, principal, scope)`
+  (scope `me` | `org` | `user:<id>`); org scope spans EVERY tenant vault **including managed org-shared vaults**
+  (SharePoint/Teams with `owner_user_id=None`). Expose `can_switch_scope` and a My/Org toggle; break org views
+  down **by member** where it helps (roll owner-less managed vaults up under "Organization (shared)"). Content
+  reads for a single user still use `content_vault_ids`.
 
 
 ## Deploy loop

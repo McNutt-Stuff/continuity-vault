@@ -30,7 +30,11 @@ Rules:
 - OAuth2: add a `ProviderSpec` in `oauth.py` + `client_id/secret` in `config.py`. Token sources: add to
   `oauth.TOKEN_TYPES`. Register in `api/connectors.py` `_SOURCE_FAMILY`/`_SOURCE_TYPE`.
 - Brand icon: add the type to `scripts/sync_source_icons.py` SOURCE_ICONS + the registries in
-  `web/src/components/sourceIcons.ts` AND `cloud/app/source_icons.py`, then run the sync script.
+  `web/src/components/sourceIcons.ts` AND `cloud/app/source_icons.py`, then run the sync script. Notification
+  emails resolve icons through `source_icons` (`notifications._source_icon_url`) — never a private per-file set,
+  so the type renders the same brand mark in email as in the portal. Managed/org sources (M365 SharePoint/Teams)
+  are first-class too — icon + Help Center page even though they're hidden from the connectable catalog; see
+  `.github/instructions/managed-integrations.instructions.md`.
 
 ## Public docs are MANDATORY — update them in the SAME change (not optional)
 
