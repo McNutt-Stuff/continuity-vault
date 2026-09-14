@@ -54,9 +54,18 @@ fi
 
 log "restarting service"
 systemctl restart cv-cloud.service
-sleep 5
 
-if curl -fsS "http://127.0.0.1:8000/api/health" | grep -q '"status":"ok"'; then
+# Poll health for up to ~120s — a single 5s check rolls back almost any real
+# startup (crypto init + workers + first-time table creation).
+healthy=0
+for _ in $(seq 1 60); do
+  if curl -fsS "http://127.0.0.1:8000/api/health" 2>/dev/null | grep -q '"status":"ok"'; then
+    healthy=1; break
+  fi
+  sleep 2
+done
+
+if [[ "$healthy" == 1 ]]; then
   log "update to $VERSION applied and healthy"
 else
   log "HEALTH CHECK FAILED — rolling back"

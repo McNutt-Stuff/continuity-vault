@@ -380,7 +380,9 @@ install_backup() {
 
 health_check() {
   local i
-  for i in $(seq 1 20); do
+  # Up to ~120s: a busy control plane (or a node creating new tables on first
+  # boot) can take well over 40s to answer; a short window spuriously rolls back.
+  for i in $(seq 1 60); do
     if curl -fsS "http://127.0.0.1:8000/api/health" 2>/dev/null | grep -q '"status":"ok"'; then
       return 0
     fi
