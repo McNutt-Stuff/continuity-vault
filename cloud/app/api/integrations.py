@@ -1382,14 +1382,25 @@ def _roll_daily_samples(db: Session, tid: str, inst: IntegrationInstance,
 @admin_router.get("/integrations")
 def admin_list(principal: security.Principal = Depends(security.require_platform_admin),
                db: Session = Depends(get_db)):
+    from .. import platform_config
     rows = []
     for i in all_integrations():
+        spec = i.spec()
         cfg = db.get(IntegrationConfig, i.integration_type)
         used = (db.query(func.count(IntegrationInstance.id))
                 .filter(IntegrationInstance.integration_type == i.integration_type).scalar())
-        rows.append({**_spec_view(i.spec()),
-                     "enabled": True if cfg is None else bool(cfg.enabled),
-                     "instances": int(used or 0)})
+        row = {**_spec_view(spec),
+               "enabled": True if cfg is None else bool(cfg.enabled),
+               "instances": int(used or 0)}
+        # Managed integrations resolve a platform app credential from a Config
+        # Object — surface it on the row so the admin can link/see it inline.
+        if getattr(spec, "managed", False):
+            vals = platform_config.integration_values(i.integration_type)
+            row["needs_credentials"] = True
+            row["credential_keys"] = ["client_id", "client_secret", "redirect_uri"]
+            row["config_object_id"] = getattr(cfg, "config_object_id", None) if cfg else None
+            row["configured"] = bool(vals.get("client_id") and vals.get("client_secret"))
+        rows.append(row)
     return rows
 
 

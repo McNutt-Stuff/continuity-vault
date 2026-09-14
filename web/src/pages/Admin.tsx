@@ -5329,7 +5329,6 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 interface ConfigKey { secret: boolean; set: boolean; value: string }
 interface ConfigObj { id: string; name: string; kind: string; keys: Record<string, ConfigKey>; updated_at?: string }
 interface SourceSlot { type: string; label: string; kind: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean; icon: string; color: string; family: string; category: string; backfill_supported?: boolean; backfill_enabled?: boolean }
-interface IntegrationSlot { type: string; label: string; keys: string[]; enabled: boolean; config_object_id: string | null; configured: boolean; icon: string; color: string }
 interface DraftRow { key: string; value: string; secret: boolean; set: boolean }
 interface ServiceKind { kind: string; label: string; category: string; credential_keys: string[]; settings: string[]; setting_defaults?: Record<string, string>; required: string[]; capabilities?: string[] }
 interface ServiceObj { id: string; name: string; kind: string; kind_label: string; category: string; enabled: boolean; config_object_id: string | null; settings: Record<string, string>; setting_keys: string[]; credential_keys: string[]; capabilities?: string[]; capability_options?: string[]; configured: boolean; updated_at?: string }
@@ -6862,7 +6861,6 @@ function BackupsAdmin() {
 }
 function IntegrationsAdmin() {
   const [rows, setRows] = useState<any[]>([]);
-  const [credSlots, setCredSlots] = useState<IntegrationSlot[]>([]);
   const [objects, setObjects] = useState<ConfigObj[]>([]);
   const [loading, setLoading] = useState(true);
   const [flash, setFlash] = useState("");
@@ -6870,17 +6868,10 @@ function IntegrationsAdmin() {
   async function load() {
     setLoading(true);
     try { setRows(await api.get<any[]>("/admin/integrations")); } catch { /* ignore */ }
-    try { setCredSlots(await api.get<IntegrationSlot[]>("/admin/integration-configs")); } catch { /* ignore */ }
     try { setObjects(await api.get<ConfigObj[]>("/admin/config-objects")); } catch { /* ignore */ }
     setLoading(false);
   }
   useEffect(() => { void load(); }, []);
-
-  const credByType = useMemo(() => {
-    const m: Record<string, IntegrationSlot> = {};
-    for (const s of credSlots) m[s.type] = s;
-    return m;
-  }, [credSlots]);
 
   async function toggle(r: any) {
     try {
@@ -6891,14 +6882,14 @@ function IntegrationsAdmin() {
     } catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
   }
 
-  async function setCred(it: IntegrationSlot, patch: { config_object_id?: string | null }) {
-    try { await api.put(`/admin/integration-configs/${it.type}`, patch); await load(); }
+  async function setCred(r: any, config_object_id: string | null) {
+    try { await api.put(`/admin/integration-configs/${r.integration_type}`, { config_object_id }); await load(); }
     catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
   }
 
-  async function newCred(it: IntegrationSlot) {
-    const r = await formDialog({
-      title: `${it.label} application credentials`,
+  async function newCred(r: any) {
+    const f = await formDialog({
+      title: `${r.display_name} application credentials`,
       message: "The Arkive Entra application (app-only, admin-consented). Organizations grant consent to this app.",
       confirmLabel: "Save credentials",
       fields: [
@@ -6907,13 +6898,13 @@ function IntegrationsAdmin() {
         { name: "redirect_uri", label: "Redirect URI (optional)", placeholder: "https://vault.arkive.life/api/integrations/microsoft365/oauth/redirect" },
       ],
     });
-    if (!r || !r.client_id || !r.client_secret) return;
+    if (!f || !f.client_id || !f.client_secret) return;
     try {
       const obj = await api.post<{ id: string }>("/admin/config-objects", {
-        name: `${it.label} (Entra app)`, kind: "oauth",
-        values: { client_id: r.client_id.trim(), client_secret: r.client_secret.trim(), redirect_uri: (r.redirect_uri || "").trim() },
+        name: `${r.display_name} (Entra app)`, kind: "oauth",
+        values: { client_id: f.client_id.trim(), client_secret: f.client_secret.trim(), redirect_uri: (f.redirect_uri || "").trim() },
       });
-      await api.put(`/admin/integration-configs/${it.type}`, { config_object_id: obj.id });
+      await api.put(`/admin/integration-configs/${r.integration_type}`, { config_object_id: obj.id });
       await load();
       setFlash("Credentials saved"); setTimeout(() => setFlash(""), 1800);
     } catch (e) { notify({ message: (e as Error).message, tone: "danger" }); }
@@ -6929,9 +6920,7 @@ function IntegrationsAdmin() {
         <table className="table">
           <thead><tr><th>Integration</th><th>Runs on</th><th>Category</th><th>Credentials</th><th>Customers using</th><th>Status</th><th></th></tr></thead>
           <tbody>
-            {rows.map((r) => {
-              const cred = credByType[r.integration_type];
-              return (
+            {rows.map((r) => (
               <tr key={r.integration_type}>
                 <td>
                   <div style={{ fontWeight: 600 }}>{r.display_name}</div>
@@ -6940,17 +6929,17 @@ function IntegrationsAdmin() {
                 <td><Pill tone="info">{r.runs_on}</Pill></td>
                 <td className="faint" style={{ fontSize: 12 }}>{r.category}</td>
                 <td>
-                  {cred ? (
+                  {r.needs_credentials ? (
                     <div className="stack" style={{ gap: 4 }}>
-                      <select className="input sm" value={cred.config_object_id || ""}
-                              onChange={(e) => { if (e.target.value === "__new__") void newCred(cred); else void setCred(cred, { config_object_id: e.target.value }); }}>
+                      <select className="input sm" value={r.config_object_id || ""}
+                              onChange={(e) => { if (e.target.value === "__new__") void newCred(r); else void setCred(r, e.target.value || null); }}>
                         <option value="">— none —</option>
                         {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
                         <option value="__new__">＋ New credentials…</option>
                       </select>
                       <div className="row" style={{ gap: 6, alignItems: "center" }}>
-                        <Pill tone={cred.configured ? "ok" : "warn"}>{cred.configured ? "Configured" : "Not set"}</Pill>
-                        <span className="faint" style={{ fontSize: 10.5 }}>{cred.keys.join(" · ")}</span>
+                        <Pill tone={r.configured ? "ok" : "warn"}>{r.configured ? "Configured" : "Not set"}</Pill>
+                        <span className="faint" style={{ fontSize: 10.5 }}>{(r.credential_keys || []).join(" · ")}</span>
                       </div>
                     </div>
                   ) : <span className="faint" style={{ fontSize: 12 }}>—</span>}
@@ -6961,17 +6950,14 @@ function IntegrationsAdmin() {
                   <button className="btn ghost sm" onClick={() => toggle(r)}>{r.enabled ? "Disable" : "Enable"}</button>
                 </td>
               </tr>
-              );
-            })}
+            ))}
             {rows.length === 0 && <tr><td colSpan={7} className="muted">{loading ? "Loading…" : "No integrations registered."}</td></tr>}
           </tbody>
         </table>
-        {credSlots.length > 0 && (
-          <div className="faint" style={{ fontSize: 11.5, marginTop: 10 }}>
-            Managed integrations (e.g. Microsoft 365) need a platform application credential — link a
-            Configuration Object holding the app's client id/secret. Create one under <b>Config objects</b>.
-          </div>
-        )}
+        <div className="faint" style={{ fontSize: 11.5, marginTop: 10 }}>
+          Managed integrations (e.g. Microsoft 365) need a platform application credential — link a
+          Configuration Object holding the app's client id/secret, or add one with <b>＋ New credentials…</b>.
+        </div>
       </Card>
       {flash && <div className="toast"><Icon name="check" size={15} /> {flash}</div>}
     </>
