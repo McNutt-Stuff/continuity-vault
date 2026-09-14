@@ -208,6 +208,59 @@ class OutlookLocalConnector(Connector):
 
 
 @register_connector
+class SharePointConnector(Connector):
+    """Microsoft SharePoint — organization document libraries (site drives),
+    collected app-only by the Microsoft 365 managed integration (no direct
+    connect). Registered so SharePoint content is a first-class searchable source
+    with its own brand mark."""
+
+    connector_type = "sharepoint"
+    display_name = "SharePoint"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            delta=True, streaming=True,
+            searchable_fields=["site", "path", "mime", "from"],
+            facet_fields=["site", "mime"],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="managed", authorize_url="", token_url="", scopes=[],
+            icon="cloud", color="#038387", doc_types=["file", "document"])
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        return iter(())  # collected app-only by the M365 managed integration
+
+
+@register_connector
+class TeamsConnector(Connector):
+    """Microsoft Teams — organization channel conversations and user chats,
+    collected app-only by the Microsoft 365 managed integration (no direct
+    connect). Registered so Teams messages are a first-class searchable source."""
+
+    connector_type = "teams"
+    display_name = "Microsoft Teams"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            delta=True, streaming=True,
+            searchable_fields=["from", "team", "channel", "chat"],
+            facet_fields=["team", "channel"],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type, display_name=self.display_name,
+            auth_type="managed", authorize_url="", token_url="", scopes=[],
+            icon="activity", color="#5059C9", doc_types=["message"])
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        return iter(())  # collected app-only by the M365 managed integration
+
+
+@register_connector
 class GmailConnector(Connector):
     connector_type = "gmail"
     display_name = "Gmail"

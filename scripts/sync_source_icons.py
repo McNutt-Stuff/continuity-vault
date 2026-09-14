@@ -74,6 +74,8 @@ SOURCE_ICONS: dict[str, dict] = {
     "aws":        {"file": "Amazon Web Services Logo.svg", "search": "Amazon Web Services logo"},
     "azure":      {"file": "Microsoft Azure.svg", "search": "Microsoft Azure logo"},
     "microsoft365": {"file": "Microsoft 365 (2022).svg", "search": "Microsoft 365 logo 2022"},
+    "sharepoint": {"file": "Microsoft Office SharePoint (2019–present).svg", "search": "Microsoft SharePoint logo"},
+    "teams":      {"file": "Microsoft Office Teams (2018–present).svg", "search": "Microsoft Teams logo"},
     "gcp":        {"file": "Google Cloud icon (2026).svg", "search": "Google Cloud icon 2026"},
     # Device/endpoint platform marks (Devices page). Brand logos from Commons.
     "macos":      {"file": "Apple logo black.svg", "search": "Apple logo black"},

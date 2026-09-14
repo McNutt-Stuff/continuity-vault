@@ -170,6 +170,7 @@ _SOURCE_FAMILY = {
     "crossbeam": "Crossbeam",
     "evernote": "Evernote",
     "imessage": "Apple", "outlook_local": "Microsoft",
+    "sharepoint": "Microsoft", "teams": "Microsoft",
     "onepassword": "Endpoint Collected", "endpoint_files": "Endpoint Collected",
     "custom": "Custom",
 }
@@ -188,8 +189,13 @@ _SOURCE_TYPE = {
     "crossbeam": "Sales & CRM",
     "evernote": "Notes",
     "imessage": "Messages", "outlook_local": "Email",
+    "sharepoint": "Files & Storage", "teams": "Messages",
     "custom": "Other",
 }
+
+# Managed-only source types — collected app-only by the Microsoft 365 integration,
+# NOT directly connectable, so they're hidden from the customer "Add source" catalog.
+_MANAGED_ONLY = {"sharepoint", "teams"}
 
 
 @router.get("/catalog")
@@ -205,6 +211,8 @@ def catalog(tenant: Tenant = Depends(security.get_tenant),
         spec = c.oauth_spec()
         caps = c.capabilities()
         ctype = spec.connector_type
+        if ctype in _MANAGED_ONLY:
+            continue  # M365-managed; not user-connectable
         is_ev = ctype == "evernote"
         is_oauth_mode = oauth.is_oauth(ctype) or is_ev
         mode = "oauth" if is_oauth_mode else "token"

@@ -112,6 +112,12 @@ def run_due(db) -> int:
                 logger.warning("m365 collect token failed (instance=%s): %s", inst.id, e)
                 token = ""
             if token:
+                # Discover org resources (SharePoint sites / Teams) into managed
+                # sources before collecting (needs the app token).
+                try:
+                    collect.provision_org_sources(db, inst, token)
+                except Exception:  # noqa: BLE001
+                    logger.exception("m365 org provisioning failed (instance=%s)", inst.id)
                 _collect_due_sources(db, inst, token)
     return ran
 

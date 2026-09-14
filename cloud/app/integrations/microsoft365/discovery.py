@@ -34,7 +34,8 @@ def _friendly_graph_error(e: "graph.GraphError") -> str:
         return ("The Arkive Microsoft 365 app is missing directory permissions. In the Azure "
                 "portal → App registrations → (the Arkive app) → API permissions, add the "
                 "APPLICATION permissions User.Read.All (and Mail.Read, Files.Read.All for content "
-                "backup), then click 'Grant admin consent'. Re-run discovery afterwards.")
+                "backup; Sites.Read.All for SharePoint; ChannelMessage.Read.All + Chat.Read.All for "
+                "Teams), then click 'Grant admin consent'. Re-run discovery afterwards.")
     if e.status == 401 or reason == "InvalidAuthenticationToken":
         return ("Microsoft rejected the app credentials. Re-check the client id/secret linked in "
                 "Admin → Integrations, then reconnect and grant admin consent again.")

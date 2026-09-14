@@ -119,3 +119,17 @@ def get_paged(token: str, path: str, params: dict | None = None, cap: int = 2000
                 if n >= cap:
                     return
             url = j.get("@odata.nextLink")
+
+
+def list_sites(token: str, cap: int = 500):
+    """Organization SharePoint sites the app can see (Sites.Read.All, app-only)."""
+    return get_paged(token, "/sites", params={"search": "*", "$top": "100"}, cap=cap)
+
+
+def list_teams(token: str, cap: int = 500):
+    """Microsoft 365 groups that are Teams (app-only). Team id == group id, so the
+    channel/message endpoints use the same id."""
+    return get_paged(token, "/groups", cap=cap, params={
+        "$filter": "resourceProvisioningOptions/Any(x:x eq 'Team')",
+        "$select": "id,displayName", "$top": "100"})
+

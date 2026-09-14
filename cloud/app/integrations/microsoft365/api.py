@@ -451,15 +451,24 @@ def m365_set_settings(body: SettingsBody, instance_id: str = "",
 # Managed protection profile (workloads / destinations / schedule)            #
 # --------------------------------------------------------------------------- #
 class ProfileBody(BaseModel):
-    workloads: list[str] | None = None                 # exchange | onedrive
+    workloads: list[str] | None = None                 # exchange | onedrive | sharepoint | teams | teams_chat
     destinations: list[str] | None = None              # cv-cloud | store:<id> | byos:<id> | ...
     backup_interval_minutes: int | None = None         # <0 clears (use default cadence)
 
 
 _WORKLOAD_CATALOG = [
-    {"id": "exchange", "label": "Exchange Online", "description": "Each protected user's mailbox"},
-    {"id": "onedrive", "label": "OneDrive", "description": "Each protected user's files"},
+    {"id": "exchange", "label": "Exchange Online", "scope": "user",
+     "description": "Each protected user's mailbox"},
+    {"id": "onedrive", "label": "OneDrive", "scope": "user",
+     "description": "Each protected user's files"},
+    {"id": "sharepoint", "label": "SharePoint", "scope": "org",
+     "description": "Organization SharePoint site document libraries"},
+    {"id": "teams", "label": "Teams channels", "scope": "org",
+     "description": "Organization Teams channel conversations"},
+    {"id": "teams_chat", "label": "Teams chats", "scope": "user",
+     "description": "Each protected user's 1:1 and group chats"},
 ]
+_VALID_WORKLOADS = {w["id"] for w in _WORKLOAD_CATALOG}
 
 
 @router.get("/profile")
@@ -493,7 +502,7 @@ def m365_set_profile(body: ProfileBody, instance_id: str = "",
     cfg = dict(inst.config or {})
     mp = dict(cfg.get("managed_profile") or {})
     if body.workloads is not None:
-        mp["workloads"] = [w for w in body.workloads if w in ("exchange", "onedrive")]
+        mp["workloads"] = [w for w in body.workloads if w in _VALID_WORKLOADS]
     if body.destinations is not None:
         mp["destinations"] = [str(d) for d in body.destinations if d]
     if body.backup_interval_minutes is not None:

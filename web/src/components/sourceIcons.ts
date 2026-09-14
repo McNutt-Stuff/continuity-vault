@@ -15,7 +15,7 @@ export const SYNCED_SOURCE_ICONS: ReadonlySet<string> = new Set([
   "google_drive", "slack", "notion", "github", "reddit", "facebook",
   "instagram", "google_calendar", "google_contacts", "google_photos",
   "evernote", "linkedin", "imessage", "ubiquiti", "aws", "azure", "gcp",
-  "salesforce", "crossbeam", "microsoft365",
+  "salesforce", "crossbeam", "microsoft365", "sharepoint", "teams",
   // Device/endpoint platform marks (Devices page).
   "macos", "windows", "ios", "android",
 ]);

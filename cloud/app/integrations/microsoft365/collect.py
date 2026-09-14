@@ -22,14 +22,24 @@ from . import models as m
 
 logger = logging.getLogger("cv.integrations.m365.collect")
 
-# workload -> (source_type used for the managed Collection, index facet/searchable)
+# workload -> (source_type used for the managed Collection, index facet/searchable,
+# scope: "user" = per mapped identity, "org" = per discovered site/team).
 _WORKLOADS = {
-    "exchange": {"source_type": "outlook", "label": "Exchange Online",
+    "exchange": {"source_type": "outlook", "label": "Exchange Online", "scope": "user",
                  "facet": ["from", "folder"], "search": ["from", "subject", "folder"]},
-    "onedrive": {"source_type": "onedrive", "label": "OneDrive",
+    "onedrive": {"source_type": "onedrive", "label": "OneDrive", "scope": "user",
                  "facet": ["mime"], "search": ["mime", "path"]},
+    "sharepoint": {"source_type": "sharepoint", "label": "SharePoint", "scope": "org",
+                   "facet": ["site", "mime"], "search": ["site", "path", "mime"]},
+    "teams": {"source_type": "teams", "label": "Teams channels", "scope": "org",
+              "facet": ["team", "channel"], "search": ["from", "team", "channel"]},
+    "teams_chat": {"source_type": "teams", "label": "Teams chats", "scope": "user",
+                   "facet": ["chat"], "search": ["from", "chat"]},
 }
 _DEFAULT_WORKLOADS = ("exchange", "onedrive")
+_USER_WORKLOADS = frozenset(w for w, v in _WORKLOADS.items() if v["scope"] == "user")
+_ORG_WORKLOADS = frozenset(w for w, v in _WORKLOADS.items() if v["scope"] == "org")
+_ORG_RESOURCE_CAP = 500  # bound org site/team fan-out per instance
 
 
 def _now() -> datetime:
@@ -108,7 +118,7 @@ def provision_sources(db: Session, inst) -> int:
     (Collection) that protects each on the user's behalf. Idempotent — also pauses
     sources whose identity/workload is no longer in scope/selected."""
     prof = profile(inst)
-    workloads = prof["workloads"]
+    workloads = [w for w in prof["workloads"] if w in _USER_WORKLOADS]
     bindings = (db.query(m.ExternalIdentityBinding)
                 .filter(m.ExternalIdentityBinding.integration_instance_id == inst.id,
                         m.ExternalIdentityBinding.status.in_(("mapped", "protected_only"))).all())
@@ -146,13 +156,77 @@ def provision_sources(db: Session, inst) -> int:
             kept.add(src.id)
             if vault is not None:
                 _ensure_managed_collection(db, inst, src, vault, prof)
-    # Pause sources no longer selected (workload dropped) or whose identity fell
-    # out of scope/mapping — stops collection without deleting protected data.
+    # Pause USER sources no longer selected (workload dropped) or whose identity
+    # fell out of scope/mapping — stops collection without deleting protected data.
+    # (Org sources are reconciled separately in provision_org_sources, which has
+    # the Graph token to discover sites/teams.)
     for src in (db.query(m.ManagedSource)
-                .filter(m.ManagedSource.integration_instance_id == inst.id).all()):
+                .filter(m.ManagedSource.integration_instance_id == inst.id,
+                        m.ManagedSource.workload.in_(list(_USER_WORKLOADS))).all()):
         if src.id not in kept and src.state not in ("decommissioned",):
             src.state = "paused_by_admin"
     db.commit()
+    return created
+
+
+def provision_org_sources(db: Session, inst, token: str) -> int:
+    """Discover org resources (SharePoint sites, Teams) with the app-only token and
+    establish an organization managed source + Data Map profile per resource. Needs
+    the token, so it runs in the worker/collection path (not plain provision)."""
+    from . import graph
+    prof = profile(inst)
+    org_workloads = [w for w in prof["workloads"] if w in _ORG_WORKLOADS]
+    vault = _resolve_vault_for(db, inst.tenant_id, None)  # tenant/org vault
+    created = 0
+    kept: set = set()
+    for w in org_workloads:
+        try:
+            if w == "sharepoint":
+                resources = [(s.get("id"), s.get("displayName") or s.get("name")
+                              or s.get("webUrl") or s.get("id"))
+                             for s in graph.list_sites(token, cap=_ORG_RESOURCE_CAP) if s.get("id")]
+            elif w == "teams":
+                resources = [(g.get("id"), g.get("displayName") or g.get("id"))
+                             for g in graph.list_teams(token, cap=_ORG_RESOURCE_CAP) if g.get("id")]
+            else:
+                continue
+        except graph.GraphError as e:
+            logger.warning("m365 org discovery failed (workload=%s instance=%s): %s",
+                           w, inst.id, e)
+            continue
+        for rid, rname in resources:
+            src = (db.query(m.ManagedSource)
+                   .filter(m.ManagedSource.integration_instance_id == inst.id,
+                           m.ManagedSource.workload == w,
+                           m.ManagedSource.source_key == rid).first())
+            label = f"{_WORKLOADS[w]['label']} — {rname}"
+            if src is None:
+                src = m.ManagedSource(
+                    tenant_id=inst.tenant_id, integration_instance_id=inst.id,
+                    workload=w, ownership_type="organization", owner_user_id=None,
+                    source_key=rid, name=label, state="active", assigned_node_id=inst.node_id)
+                db.add(src)
+                db.flush()
+                created += 1
+            else:
+                src.name = label
+                if src.state in ("planned", "disconnected", "paused_by_admin"):
+                    src.state = "active"
+            scfg = dict(src.config or {})
+            scfg["interval_minutes"] = prof["backup_interval_minutes"]
+            src.config = scfg
+            kept.add(src.id)
+            if vault is not None:
+                _ensure_managed_collection(db, inst, src, vault, prof)
+    # Pause org sources for de-selected workloads or resources that vanished.
+    for src in (db.query(m.ManagedSource)
+                .filter(m.ManagedSource.integration_instance_id == inst.id,
+                        m.ManagedSource.workload.in_(list(_ORG_WORKLOADS))).all()):
+        if src.id not in kept and src.state not in ("decommissioned",):
+            src.state = "paused_by_admin"
+    db.commit()
+    if created:
+        logger.info("m365 org sources provisioned (instance=%s): +%d", inst.id, created)
     return created
 
 
@@ -182,12 +256,13 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
         return {"ok": False, "error": "no vault for owner"}
     coll = _managed_collection(db, inst, source, vault)
     cap = get_settings().content_max_bytes
-    resource = f"users/{source.source_key}"
+    key = source.source_key
     cfg = dict(source.config or {})
     meta = _WORKLOADS[source.workload]
     state: dict = {}
     try:
         if source.workload == "exchange":
+            resource = f"users/{key}"
             phase = cfg.get("phase") or "backfill"
             if phase == "backfill":
                 objs = list(live.stream_outlook(
@@ -197,14 +272,26 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
                 objs = list(live.stream_outlook(
                     app_token, cursor=cfg.get("recent_cursor"), content_cap=cap,
                     state=state, mode="recent", resource=resource))
-        else:  # onedrive — delta covers history + changes in one cursor
+        elif source.workload == "onedrive":  # per-user OneDrive (delta)
             objs = list(live.stream_onedrive(
                 app_token, cursor=cfg.get("cursor"), content_cap=cap,
-                state=state, resource=resource))
+                state=state, resource=f"users/{key}"))
+        elif source.workload == "sharepoint":  # org site document library (delta)
+            objs = list(live.stream_onedrive(
+                app_token, cursor=cfg.get("cursor"), content_cap=cap,
+                state=state, resource=f"sites/{key}"))
+        elif source.workload == "teams":  # org team channel conversations
+            objs = list(live.stream_teams(
+                app_token, cursor=cfg.get("cursor"), content_cap=cap,
+                state=state, resource=f"teams/{key}"))
+        else:  # teams_chat — a user's 1:1/group chats
+            objs = list(live.stream_teams(
+                app_token, cursor=cfg.get("cursor"), content_cap=cap,
+                state=state, resource=f"users/{key}/chats"))
     except Exception as e:  # noqa: BLE001
         source.state = "credential_error" if "401" in str(e) or "403" in str(e) else "delayed"
         db.commit()
-        logger.warning("m365 collect failed (source=%s user=%s): %s",
+        logger.warning("m365 collect failed (source=%s key=%s): %s",
                        source.workload, source.source_key, str(e)[:200])
         return {"ok": False, "error": str(e)[:200]}
 

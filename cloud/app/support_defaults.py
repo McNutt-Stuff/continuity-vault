@@ -1157,7 +1157,9 @@ _SOURCE_PAGES = [
          "mapped user's mailbox and files, with no per-employee sign-in.",
          "**Managed protection profile** — one org-wide profile (workloads, storage destination, "
          "schedule) that establishes a Data Map profile per protected user and collects on their behalf.",
-         "**Managed protection (coming next)** — SharePoint and Teams, compliance evidence."],
+         "**SharePoint + Teams (preview)** — organization SharePoint site libraries and Teams channel "
+         "conversations at the org level, plus each protected user's Teams chats.",
+         "**Managed protection (coming next)** — compliance evidence + enterprise customer-owned app."],
         ["Business/Enterprise plans only; enforced server-side.",
          "Uses Microsoft admin-consent OAuth (app-only) — no per-employee sign-in and no stored password.",
          "Each mapped user's data lands in that user's Arkive vault."],
@@ -1181,6 +1183,9 @@ _SOURCE_PAGES = [
             "- `User.Read.All` — discover the organization's Entra users.\n"
             "- `Mail.Read` — back up each mapped user's Exchange Online mailbox.\n"
             "- `Files.Read.All` — back up each mapped user's OneDrive.\n"
+            "- `Sites.Read.All` — back up organization SharePoint site libraries.\n"
+            "- `ChannelMessage.Read.All` — back up Teams channel conversations.\n"
+            "- `Chat.Read.All` — back up each protected user's Teams chats.\n"
             "Add the app's **Web** redirect URI (`https://<your-control-plane>/api/integrations/"
             "microsoft365/oauth/redirect`) and a client secret. Consent uses `.default`, so it grants "
             "exactly the Application permissions configured on the app.\n"

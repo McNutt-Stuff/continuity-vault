@@ -997,6 +997,136 @@ def stream_onedrive(access_token: str, cursor=None, config: Optional[dict] = Non
     state["cursor"] = {"roots": rmap, "has_more": stopped_early}
 
 
+# --------------------------------------------------------------------------- #
+# Microsoft Teams — app-only channel + chat messages (M365 managed)           #
+# --------------------------------------------------------------------------- #
+_TEAMS_MSG_CHUNK = 400  # messages per collection cycle (bounded; worker loops)
+
+
+def _teams_msg_obj(msg: dict, *, team: str = "", channel: str = "",
+                   chat: str = "", cap: int = _DEFAULT_CAP) -> SourceObject:
+    body = msg.get("body") or {}
+    ctype = body.get("contentType") or "text"
+    html_body = body.get("content") or ""
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html_body)).strip()
+    frm = (msg.get("from") or {})
+    sender = ((frm.get("user") or {}).get("displayName")
+              or (frm.get("application") or {}).get("displayName") or "")
+    subject = (msg.get("subject") or "").strip()
+    title = subject or (text[:80] or "(message)")
+    created = msg.get("createdDateTime")
+    raw = html_body.encode("utf-8", "replace") if html_body else json.dumps({"text": text}).encode()
+    content, backed = _capped(raw, cap)
+    meta: dict = {"from": sender, "created": created, "contentType": ctype,
+                  "content_backed_up": backed}
+    labels: List[str] = []
+    if team:
+        meta["team"] = team
+        labels.append(team)
+    if channel:
+        meta["channel"] = channel
+        labels.append(channel)
+    if chat:
+        meta["chat"] = chat
+        labels.append("Chat")
+    return SourceObject(
+        object_id=f"teams:msg:{msg.get('id')}", doc_type="message", category="message",
+        title=title, content=content,
+        preview=(f"{sender}: " if sender else "") + text[:160],
+        meta=meta, labels=labels or ["Teams"], size_bytes=len(content) or None,  # type: ignore
+        modified_at=_parse_dt(created))
+
+
+def _teams_messages(c: httpx.Client, headers: dict, url: str, cap: int,
+                    *, team: str = "", channel: str = "", chat: str = "",
+                    limit: int = _TEAMS_MSG_CHUNK, ctx: str = "") -> Iterable[SourceObject]:
+    params: Optional[dict] = {"$top": 50}
+    n = 0
+    while url and n < limit:
+        r = c.get(url, headers=headers, params=params)
+        if r.status_code >= 400:
+            # Stop this thread on a soft error; raise on auth/5xx so the source flags.
+            if _is_auth_status(r.status_code) or r.status_code >= 500:
+                _raise_api("Teams", r, ctx=ctx)
+            return
+        b = r.json()
+        for msg in b.get("value", []):
+            if msg.get("messageType") not in (None, "message"):
+                continue  # skip system/control messages
+            yield _teams_msg_obj(msg, team=team, channel=channel, chat=chat, cap=cap)
+            n += 1
+            if n >= limit:
+                break
+        url, params = b.get("@odata.nextLink"), None
+
+
+def stream_teams(access_token: str, cursor=None, config: Optional[dict] = None,
+                 state: Optional[dict] = None, content_cap: int = _DEFAULT_CAP,
+                 resource: str = "") -> Iterable[SourceObject]:
+    """App-only Microsoft Teams collection. ``resource`` selects the scope:
+    ``"teams/<id>"`` (an organization team's channel conversations) or
+    ``"users/<id>/chats"`` (a user's 1:1/group chats). Non-delta, bounded pull
+    (~400 msgs/cycle); the ingest content-hash dedup skips unchanged messages so
+    re-listing is cheap, and the worker loops across cycles."""
+    state = state if state is not None else {}
+    base = "https://graph.microsoft.com/v1.0"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    emitted = 0
+    with httpx.Client(timeout=90) as c:
+        if resource.startswith("teams/"):
+            tid = resource.split("/", 1)[1]
+            team_name = ""
+            tr = c.get(f"{base}/teams/{tid}", headers=headers, params={"$select": "displayName"})
+            if tr.status_code == 200:
+                team_name = (tr.json() or {}).get("displayName", "")
+            channels: List[dict] = []
+            url: Optional[str] = f"{base}/teams/{tid}/channels"
+            params: Optional[dict] = {"$select": "id,displayName"}
+            while url:
+                r = c.get(url, headers=headers, params=params)
+                if r.status_code >= 400:
+                    _raise_api("Teams", r, ctx=f"channels team={tid}")
+                b = r.json()
+                channels.extend(b.get("value", []))
+                url, params = b.get("@odata.nextLink"), None
+            for ch in channels:
+                if emitted >= _TEAMS_MSG_CHUNK:
+                    break
+                cid, cname = ch.get("id"), ch.get("displayName", "")
+                for obj in _teams_messages(
+                        c, headers, f"{base}/teams/{tid}/channels/{cid}/messages", content_cap,
+                        team=team_name, channel=cname, limit=_TEAMS_MSG_CHUNK - emitted,
+                        ctx=f"messages team={tid} channel={cid}"):
+                    yield obj
+                    emitted += 1
+        elif "/chats" in resource:
+            uid = resource.split("/")[1]
+            chats: List[dict] = []
+            url = f"{base}/users/{uid}/chats"
+            params = {"$top": 50}
+            while url:
+                r = c.get(url, headers=headers, params=params)
+                if r.status_code >= 400:
+                    if _is_auth_status(r.status_code) or r.status_code >= 500:
+                        _raise_api("Teams", r, ctx=f"chats user={uid}")
+                    break
+                b = r.json()
+                chats.extend(b.get("value", []))
+                url, params = b.get("@odata.nextLink"), None
+            for chat in chats:
+                if emitted >= _TEAMS_MSG_CHUNK:
+                    break
+                chid = chat.get("id")
+                ctitle = chat.get("topic") or (chat.get("chatType") or "chat")
+                for obj in _teams_messages(
+                        c, headers, f"{base}/chats/{chid}/messages", content_cap,
+                        chat=ctitle, limit=_TEAMS_MSG_CHUNK - emitted,
+                        ctx=f"messages chat={chid}"):
+                    yield obj
+                    emitted += 1
+    state["cursor"] = {"done": emitted < _TEAMS_MSG_CHUNK}
+
+
 GDRIVE_API = "https://www.googleapis.com/drive/v3"
 _GDRIVE_EXPORT = {
     "application/vnd.google-apps.document":

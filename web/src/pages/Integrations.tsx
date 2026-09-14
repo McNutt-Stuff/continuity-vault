@@ -1627,6 +1627,11 @@ function splitLines(v: string): string[] {
   return v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
 }
 
+const WORKLOAD_LABELS: Record<string, string> = {
+  exchange: "Exchange Online", onedrive: "OneDrive", sharepoint: "SharePoint",
+  teams: "Teams channels", teams_chat: "Teams chats",
+};
+
 function ScopeField({ label, help, value, onChange }:
   { label: string; help: string; value: string; onChange: (v: string) => void }) {
   return (
@@ -2010,8 +2015,9 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
             <div>
               <h3 style={{ margin: 0 }}>Protect mapped users</h3>
               <div className="faint" style={{ fontSize: 12, maxWidth: 560 }}>
-                Collect each mapped user's <b>Exchange Online</b> mailbox and <b>OneDrive</b> using your
-                organization's admin access — no per-employee sign-in. Data lands in each user's vault.
+                Collect your organization's <b>Exchange Online</b>, <b>OneDrive</b>, <b>SharePoint</b> and
+                <b> Teams</b> using admin access — no per-employee sign-in. User data lands in each
+                user's vault; org data (SharePoint sites, Teams channels) in the organization vault.
               </div>
             </div>
             <label className="row" style={{ gap: 8, alignItems: "center" }}>
@@ -2084,7 +2090,7 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
                   {sources.map((s) => (
                     <tr key={s.id}>
                       <td style={{ fontWeight: 600 }}>{s.name}</td>
-                      <td><Pill tone="info">{s.workload === "exchange" ? "Exchange Online" : "OneDrive"}</Pill></td>
+                      <td><Pill tone="info">{WORKLOAD_LABELS[s.workload] || s.workload}</Pill></td>
                       <td><Pill tone={s.state === "active" ? "ok" : s.state === "credential_error" ? "danger" : "warn"}>{s.state}</Pill></td>
                       <td className="faint" style={{ fontSize: 12 }}>{s.last_collected_at ? new Date(s.last_collected_at.endsWith("Z") ? s.last_collected_at : s.last_collected_at + "Z").toLocaleString() : "—"}</td>
                     </tr>
