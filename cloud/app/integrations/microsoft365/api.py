@@ -144,6 +144,21 @@ def status(instance_id: str = "",
     return _status_view(db, _resolve(db, principal.tenant_id, instance_id))
 
 
+@router.get("/instances")
+def list_instances(principal: security.Principal = Depends(require_m365),
+                   db: Session = Depends(get_db)):
+    """All Microsoft 365 instances for this org, in the shared integration-card
+    shape. Served from the control plane (authoritative for managed integrations),
+    so a just-created instance shows in the portal pane immediately — the generic
+    /api/integrations list is proxied to the node and can lag behind replication."""
+    from ...api.integrations import _instance_view  # lazy: avoid import cycle
+    rows = (db.query(IntegrationInstance)
+            .filter(IntegrationInstance.tenant_id == principal.tenant_id,
+                    IntegrationInstance.integration_type == INTEGRATION_TYPE)
+            .order_by(IntegrationInstance.created_at.desc()).all())
+    return {"instances": [_instance_view(i) for i in rows]}
+
+
 # --------------------------------------------------------------------------- #
 # Connect + OAuth admin consent                                               #
 # --------------------------------------------------------------------------- #

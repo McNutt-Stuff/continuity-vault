@@ -83,7 +83,24 @@ export default function Integrations() {
   const [m365Open, setM365Open] = useState<string | null>(null);
 
   async function load() {
-    try { setList(await api.get<ListResp>("/integrations")); }
+    try {
+      const base = await api.get<ListResp>("/integrations");
+      // Managed integrations (Microsoft 365) are control-plane authoritative; the
+      // generic list is proxied to the node and can lag replication, so a just-
+      // added instance may be missing. Merge the CP's copy so it shows at once.
+      const m365Spec = (base.available || []).find(
+        (s) => s.integration_type === "microsoft365" && s.entitled !== false);
+      if (m365Spec) {
+        try {
+          const r = await api.get<{ instances: Instance[] }>("/integrations/microsoft365/instances");
+          const byId = new Map<string, Instance>();
+          for (const i of base.instances || []) byId.set(i.id, i);
+          for (const i of r.instances || []) byId.set(i.id, i);  // CP copy wins
+          base.instances = Array.from(byId.values());
+        } catch { /* not entitled / offline — fall back to the base list */ }
+      }
+      setList(base);
+    }
     catch { /* ignore */ }
     finally { setLoading(false); }
   }
