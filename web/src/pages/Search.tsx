@@ -545,6 +545,9 @@ export default function Search() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [dateField, setDateField] = useState<"date" | "captured">("date");
+  const [scope, setScope] = useState("me");                          // me | org | user:<id>
+  const [scopeMembers, setScopeMembers] = useState<{ id: string; name: string; email: string }[]>([]);
+  const [canOrg, setCanOrg] = useState(false);
   const [data, setData] = useState<SearchResp | null>(null);
   // Filters apply on demand (explicit "Apply filters" / Enter / search), NOT live:
   // re-running on every checkbox raced and dropped rapid selections. A signature of
@@ -552,6 +555,7 @@ export default function Search() {
   const filterSig = JSON.stringify({
     s: [...sources].sort(), t: [...types].sort(), l: [...labels].sort(),
     a: [...attrs].sort(), sb: sortBy, sd: sortDir, df: dateFrom, dt: dateTo, dfld: dateField,
+    sc: scope,
   });
   const [appliedSig, setAppliedSig] = useState("");
   const filtersDirty = !!data && appliedSig !== filterSig;
@@ -592,6 +596,18 @@ export default function Search() {
     const t = setInterval(loadRecovered, 5000);  // keep the countdown fresh
     return () => clearInterval(t);
   }, []);
+
+  // Org admins can widen search scope to the whole organization or a member.
+  useEffect(() => {
+    if (!me?.can_admin) return;
+    (async () => {
+      try {
+        const r = await api.get<{ can_org: boolean; members: { id: string; name: string; email: string }[] }>("/search/scopes");
+        setCanOrg(!!r.can_org);
+        setScopeMembers(r.members || []);
+      } catch { /* non-admin / offline — stay on personal scope */ }
+    })();
+  }, [me?.can_admin]);
 
   async function retrieve(r: Result, loc: { destination: string; label: string }, snapshotOverride?: string) {
     try {
@@ -863,6 +879,7 @@ export default function Search() {
       if (dateFrom) params.set("date_from", dateFrom);
       if (dateTo) params.set("date_to", dateTo);
       if (dateFrom || dateTo) params.set("date_field", dateField);
+      if (scope && scope !== "me") params.set("scope", scope);
       setData(await api.get<SearchResp>(`/search?${params.toString()}`));
       setAppliedSig(filterSig);  // mark the just-applied selection as current
       setLocked(false);
@@ -1044,6 +1061,22 @@ export default function Search() {
                 )}
               </div>
               <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                {canOrg && (
+                  <label className="filter-select" title="Whose data to search">
+                    <span>Scope</span>
+                    <select value={scope} onChange={(e) => setScope(e.target.value)}>
+                      <option value="me">My data</option>
+                      <option value="org">Whole organization</option>
+                      {scopeMembers.length > 0 && (
+                        <optgroup label="A specific member">
+                          {scopeMembers.map((mem) => (
+                            <option key={mem.id} value={`user:${mem.id}`}>{mem.name}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+                  </label>
+                )}
                 <label className="filter-select">
                   <span>Sort by</span>
                   <div className="row" style={{ gap: 4, alignItems: "stretch" }}>

@@ -244,12 +244,20 @@ def content_vault_ids(db: Session, principal: Principal) -> list[str]:
 
 
 def scoped_vault_ids(db: Session, principal: Principal, scope: str) -> tuple[list[str], str]:
-    """Resolve the vault ids for an *aggregate* view and the effective scope.
-    Org admins requesting ``org`` see every vault in the tenant; everyone else
-    (and admins requesting ``me``) is limited to their own vaults."""
-    if scope == "org" and (is_org_admin(principal.role) or principal.is_platform_admin):
+    """Resolve the vault ids for an *aggregate/admin* view and the effective scope.
+    Org admins (and platform admins) may request ``org`` (every vault in the
+    tenant) or ``user:<id>`` (a specific member's vaults); everyone else — and
+    admins requesting ``me`` — is limited to their own vaults."""
+    admin = is_org_admin(principal.role) or principal.is_platform_admin
+    if scope == "org" and admin:
         rows = db.query(Vault.id).filter(Vault.tenant_id == principal.tenant_id).all()
         return [r[0] for r in rows], "org"
+    if scope and scope.startswith("user:") and admin:
+        uid = scope.split(":", 1)[1]
+        u = db.get(User, uid)
+        if u is not None and u.tenant_id == principal.tenant_id:
+            rows = db.query(Vault.id).filter(Vault.owner_user_id == uid).all()
+            return [r[0] for r in rows], f"user:{uid}"
     return content_vault_ids(db, principal), "me"
 
 

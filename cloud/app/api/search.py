@@ -190,6 +190,25 @@ def taxonomy(principal: security.Principal = Depends(security.get_principal)):
     return describe()
 
 
+@router.get("/scopes")
+def search_scopes(principal: security.Principal = Depends(security.get_principal),
+                  tenant: Tenant = Depends(security.get_tenant),
+                  db: Session = Depends(get_db)):
+    """Search scopes available to the caller. Org admins can search the whole
+    organization or an individual member; everyone else only their own data."""
+    admin = (security.is_org_admin(principal.role) or principal.is_platform_admin) \
+        and security.org_enabled(getattr(tenant, "tenant_type", "") or "")
+    if not admin:
+        return {"can_org": False, "members": []}
+    members = (db.query(User)
+               .filter(User.tenant_id == tenant.id, User.status != "suspended")
+               .order_by(User.email.asc()).all())
+    return {"can_org": True,
+            "members": [{"id": u.id,
+                         "name": (getattr(u, "full_name", None) or u.display_name or u.email),
+                         "email": u.email} for u in members]}
+
+
 @router.get("/thread")
 def thread(chat_id: str, source_type: str = "imessage",
            date_from: str | None = None, date_to: str | None = None,
@@ -598,6 +617,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
            attr: list[str] | None = Query(None), limit: int = 50, sort: str = "date",
            direction: str = "desc", date_from: str | None = None,
            date_to: str | None = None, date_field: str | None = None,
+           scope: str = "me",
            principal: security.Principal = Depends(security.require_passkey),
            tenant: Tenant = Depends(security.get_tenant),
            db: Session = Depends(get_db)):
@@ -619,9 +639,11 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     # snapshot for the same object. The UI must show each object once, so we keep
     # the newest row per (source, object) and remember every snapshot it appeared
     # in (for the "stored at" locations).
-    # Data partitioning: search only ever returns items from the user's own
-    # vaults — never another member's content.
-    allowed = security.content_vault_ids(db, principal)
+    # Data partitioning: search returns items from the user's own vaults by
+    # default. An ORG ADMIN may widen the scope to the whole organization
+    # (scope=org) or a specific member (scope=user:<id>); non-admins are pinned
+    # to their own vaults regardless of the requested scope.
+    allowed, _eff_scope = security.scoped_vault_ids(db, principal, scope or "me")
     # Fast path: for everything except label/attribute filters, faceting and
     # pagination run in the DB against one current row per object (is_current),
     # instead of hauling the whole index into Python. Those two filters need the
