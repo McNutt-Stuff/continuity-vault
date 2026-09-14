@@ -84,9 +84,15 @@ app.include_router(integrations.router, prefix=API)
 app.include_router(integrations.advanced_router, prefix=API)
 app.include_router(integrations.agent_router, prefix=API)
 app.include_router(integrations.admin_router, prefix=API)
-# Microsoft 365 managed integration — self-contained package router.
-from .integrations.microsoft365 import api as m365_api  # noqa: E402
-app.include_router(m365_api.router, prefix=API)
+# Microsoft 365 managed integration — self-contained package router. Registered
+# defensively: a packaged integration must never be able to crash the core
+# control plane (PKG-001). A failure here is logged and skipped, not fatal.
+try:
+    from .integrations.microsoft365 import api as m365_api  # noqa: E402
+    app.include_router(m365_api.router, prefix=API)
+except Exception:  # noqa: BLE001
+    import logging as _logging
+    _logging.getLogger("cv.integrations").exception("microsoft365 router failed to load")
 app.include_router(billing.router, prefix=API)
 app.include_router(billing.admin_router, prefix=API)
 app.include_router(connectors.router, prefix=API)
