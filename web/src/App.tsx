@@ -59,6 +59,19 @@ function LoggedOut() {
 
 export default function App() {
   const { me, loading } = useAuth();
+  const loc = useLocation();
+
+  // Browser tab title: "Arkive - Platform Admin" in the admin console, otherwise
+  // "Arkive - <user's name>" for a signed-in account (plain "Arkive" when signed out).
+  useEffect(() => {
+    let title = "Arkive";
+    if (me) {
+      title = loc.pathname.startsWith("/admin")
+        ? "Arkive - Platform Admin"
+        : `Arkive - ${me.display_name || me.email || "Account"}`;
+    }
+    document.title = title;
+  }, [me, loc.pathname]);
 
   if (loading)
     return (
