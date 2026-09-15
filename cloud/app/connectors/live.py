@@ -1201,6 +1201,129 @@ def stream_copilot(access_token: str, cursor=None, config: Optional[dict] = None
     state["cursor"] = {"next": next_url, "has_more": bool(next_url)}
 
 
+_CAL_CHUNK = 400       # calendar events per collection cycle (bounded; worker loops)
+_CONTACTS_CHUNK = 500  # contacts per collection cycle
+
+
+def _event_obj(ev: dict, cap: int) -> SourceObject:
+    """Normalize one Exchange/Outlook calendar event into a SourceObject."""
+    body = ev.get("body") or {}
+    html_body = body.get("content") or ev.get("bodyPreview") or ""
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html_body)).strip()
+    subject = (ev.get("subject") or "(no subject)").strip()
+    org = (ev.get("organizer") or {}).get("emailAddress") or {}
+    organizer = org.get("name") or org.get("address") or ""
+    start = (ev.get("start") or {}).get("dateTime") or ""
+    end = (ev.get("end") or {}).get("dateTime") or ""
+    loc = (ev.get("location") or {}).get("displayName") or ""
+    raw = (html_body.encode("utf-8", "replace") if html_body
+           else json.dumps({"subject": subject, "start": start, "end": end}).encode())
+    content, backed = _capped(raw, cap)
+    return SourceObject(
+        object_id=f"m365event:{ev.get('id')}", doc_type="event", category="event",
+        title=subject, content=content,
+        preview=(f"{start} · " if start else "") + (loc or text[:120]),
+        meta={"organizer": organizer, "start": start, "end": end, "location": loc,
+              "allDay": ev.get("isAllDay"), "content_backed_up": backed},
+        labels=[l for l in ("Calendar", loc) if l], size_bytes=len(content) or None,  # type: ignore
+        modified_at=_parse_dt(ev.get("lastModifiedDateTime") or start))
+
+
+def stream_calendar(access_token: str, cursor=None, config: Optional[dict] = None,
+                    state: Optional[dict] = None, content_cap: int = _DEFAULT_CAP,
+                    resource: str = "") -> Iterable[SourceObject]:
+    """App-only Exchange Online calendar for one user. ``resource`` is
+    ``"users/<id>"``. Pages ``/users/<id>/events`` in bounded chunks (~400/cycle),
+    persisting the ``@odata.nextLink`` in the cursor so the worker loops; ingest
+    content-hash dedup skips unchanged events. Requires ``Calendars.Read`` (app)."""
+    state = state if state is not None else {}
+    base = "https://graph.microsoft.com/v1.0"
+    start = cursor.get("next") if isinstance(cursor, dict) else None
+    url: Optional[str] = start or f"{base}/{resource}/events"
+    params: Optional[dict] = None if start else {
+        "$top": 50, "$orderby": "lastModifiedDateTime desc",
+        "$select": "id,subject,organizer,start,end,location,bodyPreview,body,isAllDay,lastModifiedDateTime"}
+    headers = {"Authorization": f"Bearer {access_token}"}
+    emitted = 0
+    next_url: Optional[str] = None
+    with httpx.Client(timeout=90) as c:
+        while url:
+            r = c.get(url, headers=headers, params=params)
+            if r.status_code >= 400:
+                if _is_auth_status(r.status_code) or r.status_code >= 500:
+                    _raise_api("Calendar", r, ctx=f"events {resource}")
+                return
+            b = r.json()
+            for ev in b.get("value", []):
+                yield _event_obj(ev, content_cap)
+                emitted += 1
+            next_url = b.get("@odata.nextLink")
+            url, params = next_url, None
+            if emitted >= _CAL_CHUNK:
+                break
+    state["cursor"] = {"next": next_url, "has_more": bool(next_url)}
+
+
+def _contact_obj(ct: dict, cap: int) -> SourceObject:
+    """Normalize one Exchange/Outlook contact (person) into a SourceObject."""
+    name = (ct.get("displayName")
+            or " ".join(x for x in (ct.get("givenName"), ct.get("surname")) if x)
+            or (ct.get("emailAddresses") or [{}])[0].get("address")
+            or "(contact)").strip()
+    emails = [e.get("address") for e in (ct.get("emailAddresses") or []) if e.get("address")]
+    phones = list(ct.get("businessPhones") or []) + ([ct["mobilePhone"]] if ct.get("mobilePhone") else [])
+    company = ct.get("companyName") or ""
+    title = ct.get("jobTitle") or ""
+    record = {"name": name, "emails": emails, "phones": phones,
+              "company": company, "jobTitle": title}
+    content, backed = _capped(json.dumps(record, ensure_ascii=False).encode(), cap)
+    return SourceObject(
+        object_id=f"m365contact:{ct.get('id')}", doc_type="contact", category="contact",
+        title=name, content=content,
+        preview=" · ".join(x for x in (emails[0] if emails else "", company, title) if x),
+        meta={"emails": emails, "company": company, "jobTitle": title,
+              "content_backed_up": backed},
+        labels=[l for l in ("Contacts", company) if l], size_bytes=len(content) or None,  # type: ignore
+        modified_at=_parse_dt(ct.get("lastModifiedDateTime")))
+
+
+def stream_contacts(access_token: str, cursor=None, config: Optional[dict] = None,
+                    state: Optional[dict] = None, content_cap: int = _DEFAULT_CAP,
+                    resource: str = "") -> Iterable[SourceObject]:
+    """App-only Exchange Online contacts for one user. ``resource`` is
+    ``"users/<id>"``. Pages ``/users/<id>/contacts`` in bounded chunks
+    (~500/cycle), persisting the ``@odata.nextLink`` in the cursor so the worker
+    loops; ingest content-hash dedup skips unchanged contacts. Requires
+    ``Contacts.Read`` (app)."""
+    state = state if state is not None else {}
+    base = "https://graph.microsoft.com/v1.0"
+    start = cursor.get("next") if isinstance(cursor, dict) else None
+    url: Optional[str] = start or f"{base}/{resource}/contacts"
+    params: Optional[dict] = None if start else {
+        "$top": 100,
+        "$select": "id,displayName,givenName,surname,emailAddresses,businessPhones,"
+                   "mobilePhone,companyName,jobTitle,lastModifiedDateTime"}
+    headers = {"Authorization": f"Bearer {access_token}"}
+    emitted = 0
+    next_url: Optional[str] = None
+    with httpx.Client(timeout=90) as c:
+        while url:
+            r = c.get(url, headers=headers, params=params)
+            if r.status_code >= 400:
+                if _is_auth_status(r.status_code) or r.status_code >= 500:
+                    _raise_api("Contacts", r, ctx=f"contacts {resource}")
+                return
+            b = r.json()
+            for ct in b.get("value", []):
+                yield _contact_obj(ct, content_cap)
+                emitted += 1
+            next_url = b.get("@odata.nextLink")
+            url, params = next_url, None
+            if emitted >= _CONTACTS_CHUNK:
+                break
+    state["cursor"] = {"next": next_url, "has_more": bool(next_url)}
+
+
 GDRIVE_API = "https://www.googleapis.com/drive/v3"
 _GDRIVE_EXPORT = {
     "application/vnd.google-apps.document":

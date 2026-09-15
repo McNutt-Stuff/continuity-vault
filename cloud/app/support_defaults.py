@@ -1341,6 +1341,7 @@ _SOURCE_PAGES = [
          "1:1 and group chats.",
          "**Microsoft 365 Copilot** — each protected user's Copilot interaction history (the prompts "
          "they sent and the AI responses across Word, Outlook, Teams and the Copilot app).",
+         "**Calendar & Contacts** — each protected user's Outlook/Exchange calendar events and contacts.",
          "Each mapped user's data lands in **that user's** Arkive vault; organization data "
          "(SharePoint sites, Teams channels) lands in the **organization** vault."],
         # Good to know.
@@ -1379,6 +1380,8 @@ _SOURCE_PAGES = [
             "- `Chat.Read.All` — back up each protected user's Teams chats.\n"
             "- `AiEnterpriseInteraction.Read.All` — back up each protected user's Microsoft 365 "
             "Copilot interaction history (optional; only needed if you protect the Copilot workload).\n"
+            "- `Calendars.Read` — back up each protected user's calendar (optional; Calendar workload).\n"
+            "- `Contacts.Read` — back up each protected user's contacts (optional; Contacts workload).\n"
             "\n"
             "Add each permission under *Add a permission → Microsoft Graph → **Application "
             "permissions*** (`Chat.Read.All` and `ChannelMessage.Read.All` live under the *Chat* and "

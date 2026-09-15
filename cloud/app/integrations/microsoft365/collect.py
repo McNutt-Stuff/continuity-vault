@@ -37,6 +37,10 @@ _WORKLOADS = {
                    "facet": ["chat"], "search": ["from", "chat"]},
     "copilot": {"source_type": "copilot", "label": "Microsoft 365 Copilot", "scope": "user",
                 "facet": ["app", "interactionType"], "search": ["app", "from", "interactionType"]},
+    "calendar": {"source_type": "calendar", "label": "Exchange Calendar", "scope": "user",
+                 "facet": ["organizer", "location"], "search": ["organizer", "location"]},
+    "contacts": {"source_type": "contacts", "label": "Exchange Contacts", "scope": "user",
+                 "facet": ["company"], "search": ["emails", "company", "jobTitle"]},
 }
 _DEFAULT_WORKLOADS = ("exchange", "onedrive")
 _USER_WORKLOADS = frozenset(w for w, v in _WORKLOADS.items() if v["scope"] == "user")
@@ -384,6 +388,14 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
                 state=state, resource=f"teams/{key}"))
         elif source.workload == "copilot":  # a user's Microsoft 365 Copilot interactions
             objs = list(live.stream_copilot(
+                app_token, cursor=cfg.get("cursor"), content_cap=cap,
+                state=state, resource=f"users/{key}"))
+        elif source.workload == "calendar":  # a user's Exchange calendar
+            objs = list(live.stream_calendar(
+                app_token, cursor=cfg.get("cursor"), content_cap=cap,
+                state=state, resource=f"users/{key}"))
+        elif source.workload == "contacts":  # a user's Exchange contacts
+            objs = list(live.stream_contacts(
                 app_token, cursor=cfg.get("cursor"), content_cap=cap,
                 state=state, resource=f"users/{key}"))
         else:  # teams_chat — a user's 1:1/group chats

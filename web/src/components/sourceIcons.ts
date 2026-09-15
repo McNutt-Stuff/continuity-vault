@@ -25,6 +25,9 @@ export const SYNCED_SOURCE_ICONS: ReadonlySet<string> = new Set([
 // Outlook store shows the Outlook logo). Keep in sync with the backend map.
 export const SOURCE_ICON_ALIASES: Readonly<Record<string, string>> = {
   outlook_local: "outlook",
+  // Managed Exchange calendar/contacts are Outlook/Exchange data.
+  calendar: "outlook",
+  contacts: "outlook",
   darwin: "macos",
   mac: "macos",
   win: "windows",

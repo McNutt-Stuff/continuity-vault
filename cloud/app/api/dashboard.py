@@ -75,6 +75,13 @@ def _source_meta(source_type: str) -> dict:
     if source_type == "copilot":
         return {"type": "copilot", "displayName": "Microsoft 365 Copilot",
                 "icon": "activity", "color": "#7f56d9"}
+    # Managed Exchange calendar/contacts — no standalone connector; brand as Outlook.
+    if source_type == "calendar":
+        return {"type": "calendar", "displayName": "Exchange Calendar",
+                "icon": "calendar", "color": "#0f6cbd"}
+    if source_type == "contacts":
+        return {"type": "contacts", "displayName": "Exchange Contacts",
+                "icon": "user", "color": "#0f6cbd"}
     conn = get_connector(source_type)
     if not conn:
         return {"type": source_type, "displayName": source_type,

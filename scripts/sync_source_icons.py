@@ -92,6 +92,9 @@ SOURCE_ICONS: dict[str, dict] = {
 # registries: web/src/components/sourceIcons.ts + cloud/app/source_icons.py).
 SOURCE_ICON_ALIASES: dict[str, str] = {
     "outlook_local": "outlook",
+    # Managed Exchange calendar/contacts reuse the Outlook mark.
+    "calendar": "outlook",
+    "contacts": "outlook",
     # iPhone/iPad share Apple's brand mark with the Mac.
     "ios": "macos",
 }
