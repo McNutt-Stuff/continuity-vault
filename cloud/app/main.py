@@ -17,6 +17,7 @@ from .api import (
     collections,
     comms,
     connectors,
+    compliance,
     costs,
     dashboard,
     debug,
@@ -174,6 +175,7 @@ app.include_router(terminal.admin_terminal_router, prefix=API)
 app.include_router(terminal.agent_terminal_router, prefix=API)
 app.include_router(debug.router, prefix=API)
 app.include_router(activity.router, prefix=API)
+app.include_router(compliance.router, prefix=API)
 app.include_router(recovery.router, prefix=API)
 app.include_router(recovery_key.router, prefix=API)
 app.include_router(photos.router, prefix=API)

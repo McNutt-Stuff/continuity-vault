@@ -55,6 +55,7 @@ def get_db() -> Session:
 
 def init_db() -> None:
     from . import models  # noqa: F401  ensure models are registered
+    from . import compliance  # noqa: F401  register compliance tables + core provider
 
     Base.metadata.create_all(bind=engine)
     _apply_additive_migrations()

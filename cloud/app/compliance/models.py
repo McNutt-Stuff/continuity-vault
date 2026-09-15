@@ -1,0 +1,119 @@
+"""Compliance engine — data model (platform-level, integration-driven).
+
+All NEW tables, so SQLAlchemy's ``create_all`` provisions them (no migration) once
+this module is imported — it's imported from ``db.init_db`` before ``create_all``.
+Everything is tenant-scoped. Posture history (`compliance_snapshots`) and a change
+ledger (`compliance_events`) give a trend over time + the details that drove each
+change. Evidence rows record WHICH provider satisfied WHICH capability.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text
+
+from ..db import Base
+
+
+def _uuid() -> str:
+    return uuid.uuid4().hex
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+class CompliancePack(Base):
+    """A framework a tenant has enabled the engine to assess against."""
+
+    __tablename__ = "compliance_packs"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    framework = Column(String, nullable=False, index=True)  # nist_csf|cis|hipaa|…
+    version = Column(String, default="")
+    enabled = Column(Boolean, default=True)
+    config = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class ComplianceControl(Base):
+    """A tenant's live state for one framework control."""
+
+    __tablename__ = "compliance_controls"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    pack_id = Column(String, index=True, nullable=False)
+    framework = Column(String, index=True, default="")
+    control_id = Column(String, default="", index=True)
+    title = Column(String, default="")
+    family = Column(String, default="")
+    # not_assessed|not_applicable|planned|partially_implemented|implemented|operating|exception|failed
+    state = Column(String, default="not_assessed", index=True)
+    score = Column(Integer, default=0)              # 0..100 for this control
+    owner = Column(String, nullable=True)
+    auto = Column(Boolean, default=True)            # engine-assessed vs. manual override
+    capabilities = Column(JSON, default=list)       # capability keys this control needs
+    last_evaluated_at = Column(DateTime, nullable=True)
+    meta = Column(JSON, default=dict)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class ComplianceEvidence(Base):
+    """A provider's assessment of one capability for one control (why a control
+    is met / partial / unmet). Regenerated each evaluation."""
+
+    __tablename__ = "compliance_evidence"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    control_id = Column(String, index=True, nullable=False)  # -> ComplianceControl.id
+    capability = Column(String, default="", index=True)
+    provider = Column(String, default="", index=True)        # arkive|microsoft365|…
+    status = Column(String, default="unknown")               # met|partial|unmet|not_applicable|unknown
+    summary = Column(String, default="")
+    detail = Column(JSON, default=dict)                       # non-secret signal detail
+    observed_at = Column(DateTime, default=_now)
+
+
+class ComplianceException(Base):
+    """A time-boxed, audited exception for a control."""
+
+    __tablename__ = "compliance_exceptions"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    control_id = Column(String, index=True, nullable=False)  # -> ComplianceControl.id
+    reason = Column(Text, default="")
+    approved_by = Column(String, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+
+class ComplianceSnapshot(Base):
+    """Point-in-time posture per framework — powers the trend / improvement view."""
+
+    __tablename__ = "compliance_snapshots"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    framework = Column(String, index=True, default="")
+    score = Column(Integer, default=0)
+    controls_total = Column(Integer, default=0)
+    controls_met = Column(Integer, default=0)
+    exceptions = Column(Integer, default=0)
+    taken_at = Column(DateTime, default=_now, index=True)
+
+
+class ComplianceEvent(Base):
+    """Change ledger — WHAT changed + the detail that drove it (posture history)."""
+
+    __tablename__ = "compliance_events"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    framework = Column(String, index=True, default="")
+    control_id = Column(String, index=True, default="")      # framework control id (human), optional
+    kind = Column(String, default="")   # pack_enabled|pack_disabled|control_state|exception|reassessed|evidence_change
+    actor = Column(String, default="")
+    summary = Column(String, default="")
+    detail = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_now, index=True)

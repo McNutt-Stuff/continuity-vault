@@ -19,9 +19,16 @@ FLAGS: dict[str, bool] = {
     "insights_enabled": True,  # show the Insights page (digital-footprint findings)?
     "cloud_storage_enabled": True,  # show/allow Cloud Storage (bring-your-own buckets)?
     "integrations_enabled": True,   # show/allow Integrations (network intelligence)?
-    # Rules engine (compliance): declarative ingestion rules. OFF by default — an
-    # admin enables it per tenant/user; hidden entirely until then.
+    # Rules engine (data governance): declarative ingestion rules that label,
+    # restrict, obfuscate, don't-index or discard data. OFF by default. NOTE: the
+    # rules engine is a GOVERNANCE tool that can HELP DRIVE compliance (it feeds the
+    # data_classification/data_minimization capabilities) — it is NOT the compliance
+    # feature itself. Compliance posture lives behind `compliance_enabled`.
     "rules_enabled": False,
+    # Compliance engine: framework posture (NIST CSF, CIS, HIPAA, …) scored from
+    # live evidence provided by Arkive + its integrations. OFF by default and
+    # Business/Enterprise only (gated in the API alongside this flag).
+    "compliance_enabled": False,
     # Advanced Ubiquiti/UniFi analytics: per-user + org-level network drilldowns,
     # device→user mapping analytics, and collection-gap detection. OFF by default.
     "advanced_ubiquiti_analytics": False,
@@ -44,7 +51,8 @@ LABELS = {
     "insights_enabled": "Digital-footprint Insights",
     "cloud_storage_enabled": "Cloud Storage (bring-your-own)",
     "integrations_enabled": "Integrations (network intelligence)",
-    "rules_enabled": "Rules engine (compliance)",
+    "rules_enabled": "Rules engine (data governance)",
+    "compliance_enabled": "Compliance engine (framework posture — Business)",
     "advanced_ubiquiti_analytics": "Advanced Ubiquiti Analytics (per-user & org)",
     "m365_managed_integration": "Microsoft 365 Managed Integration (Business/Enterprise)",
     "admin_cross_member_access": "Admin cross-member data access (search & recover)",

@@ -15,5 +15,6 @@ from __future__ import annotations
 
 from . import models  # noqa: F401  register the package's ORM tables (create_all)
 from . import integration  # noqa: F401  triggers self-registration
+from . import compliance_driver  # noqa: F401  register the M365 compliance evidence provider
 
 __all__ = ["integration", "models"]

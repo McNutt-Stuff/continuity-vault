@@ -1652,150 +1652,31 @@ function splitLines(v: string): string[] {
   return v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
 }
 
-interface CPack { framework: string; label: string; version: string; controls: number; enabled: boolean; pack_id: string | null; summary: { total: number; met: number; score: number } | null; }
-interface CControl { id: string; control_id: string; title: string; state: string; owner?: string | null; capability?: string; auto: boolean; exception?: { reason: string; approved_by?: string; expires_at?: string | null } | null; }
-const CTRL_STATES = ["not_assessed", "planned", "partially_implemented", "implemented", "operating", "not_applicable", "failed"];
-const CTRL_TONE = (s: string): "ok" | "warn" | "danger" | "info" =>
-  s === "operating" || s === "implemented" ? "ok" : s === "failed" ? "danger" : s === "exception" ? "warn" : "info";
-
-// Microsoft 365 → Compliance tab: framework posture (packs + controls, auto-assessed
-// from live platform evidence) plus the ingest governance rules that apply.
-function M365CompliancePanel({ instanceId, rules, onManageRules }: {
-  instanceId: string; rules: M365Compliance | null; onManageRules: () => void;
+// Microsoft 365 → Governance tab: the ingest governance RULES that apply to managed
+// sources. Framework COMPLIANCE POSTURE is measured organization-wide under the
+// top-level Compliance feature; Microsoft 365 contributes evidence there via its
+// compliance driver (it is NOT a separate compliance system).
+function M365CompliancePanel({ rules, onManageRules }: {
+  rules: M365Compliance | null; onManageRules: () => void;
 }) {
-  const [packs, setPacks] = useState<CPack[]>([]);
-  const [report, setReport] = useState<{ score: number | null; controls_met: number; controls_total: number; exceptions: number } | null>(null);
-  const [openPack, setOpenPack] = useState<string | null>(null);
-  const [controls, setControls] = useState<CControl[]>([]);
-  const [busy, setBusy] = useState("");
-  const iq = instanceId ? `instance_id=${encodeURIComponent(instanceId)}` : "";
-
-  async function load() {
-    try {
-      const p = await api.get<{ frameworks: CPack[] }>(`/integrations/microsoft365/compliance/packs?${iq}`);
-      setPacks(p.frameworks || []);
-      setReport(await api.get(`/integrations/microsoft365/compliance/report?${iq}`));
-    } catch { /* ignore */ }
-  }
-  useEffect(() => { void load(); }, [instanceId]);
-
-  async function togglePack(fw: string, enabled: boolean) {
-    setBusy(fw);
-    try {
-      await api.post(`/integrations/microsoft365/compliance/packs/${fw}?${iq}`, { enabled });
-      await load();
-      if (!enabled && openPack === fw) setOpenPack(null);
-    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't update the pack", tone: "danger" }); }
-    finally { setBusy(""); }
-  }
-  async function openControls(p: CPack) {
-    if (openPack === p.framework) { setOpenPack(null); return; }
-    if (!p.pack_id) return;
-    setOpenPack(p.framework);
-    try {
-      const r = await api.get<{ controls: CControl[] }>(`/integrations/microsoft365/compliance/controls?pack_id=${p.pack_id}&${iq}`);
-      setControls(r.controls || []);
-    } catch { setControls([]); }
-  }
-  async function setState(c: CControl, state: string) {
-    try {
-      await api.patch(`/integrations/microsoft365/compliance/controls/${c.id}?${iq}`, { state });
-      setControls((cs) => cs.map((x) => x.id === c.id ? { ...x, state, auto: false } : x));
-      await load();
-    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't update", tone: "danger" }); }
-  }
-  async function addException(c: CControl) {
-    const reason = window.prompt(`Reason for the exception on ${c.control_id}:`);
-    if (!reason) return;
-    try {
-      await api.post(`/integrations/microsoft365/compliance/controls/${c.id}/exception?${iq}`, { reason });
-      setControls((cs) => cs.map((x) => x.id === c.id ? { ...x, state: "exception", exception: { reason } } : x));
-      await load();
-    } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't record exception", tone: "danger" }); }
-  }
-  async function reassess() {
-    setBusy("reassess");
-    try { await api.post(`/integrations/microsoft365/compliance/reassess?${iq}`, {}); await load(); if (openPack) { const p = packs.find((x) => x.framework === openPack); if (p) await openControls(p); } }
-    catch { /* ignore */ } finally { setBusy(""); }
-  }
-
+  const nav = useNavigate();
   return (
     <>
-      <Card style={{ marginBottom: 14 }}>
-        <div className="spread" style={{ alignItems: "center", marginBottom: 12 }}>
-          <div>
-            <h3 style={{ margin: 0 }}><Icon name="shield" size={15} /> Compliance posture</h3>
-            <div className="faint" style={{ fontSize: 12 }}>
-              Enable a framework and Arkive auto-assesses the controls it can evidence
-              (backup coverage, quantum-safe encryption, recovery, access governance, audit).
+      <Card style={{ marginBottom: 14, borderColor: "var(--accent,#4f7cff)" }}>
+        <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
+          <Icon name="shield" size={18} />
+          <div className="flex1">
+            <div style={{ fontWeight: 700, marginBottom: 2 }}>Compliance posture is measured organization-wide</div>
+            <div className="faint" style={{ fontSize: 12.5 }}>
+              Enable frameworks (NIST CSF, CIS, HIPAA…) and see your score under <b>Compliance</b>.
+              Microsoft 365 automatically contributes evidence there — protected workloads, backup
+              coverage and source health — alongside Arkive's platform evidence.
             </div>
           </div>
-          <div className="row" style={{ gap: 10, alignItems: "center" }}>
-            {report?.score != null && (
-              <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 22, fontWeight: 700 }}>{report.score}%</div>
-                <div className="faint" style={{ fontSize: 11 }}>{report.controls_met}/{report.controls_total} controls</div>
-              </div>
-            )}
-            <button className="btn sm" disabled={busy === "reassess"} onClick={reassess}>
-              <Icon name="repeat" size={13} /> {busy === "reassess" ? "Assessing…" : "Re-assess"}
-            </button>
-          </div>
+          <button className="btn sm primary" onClick={() => nav("/compliance")}>
+            <Icon name="shield" size={13} /> Open Compliance
+          </button>
         </div>
-        <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "stretch" }}>
-          {packs.map((p) => (
-            <div key={p.framework} className="card" style={{ padding: "10px 14px", minWidth: 210, flex: "1 1 210px",
-                 borderColor: p.enabled ? "var(--accent,#4f7cff)" : undefined }}>
-              <div className="spread" style={{ alignItems: "flex-start" }}>
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 700 }}>{p.label}</div>
-                  <div className="faint" style={{ fontSize: 11 }}>{p.controls} controls · v{p.version}</div>
-                </div>
-                <label className="row" style={{ gap: 6, alignItems: "center" }}>
-                  <input type="checkbox" checked={p.enabled} disabled={busy === p.framework}
-                         onChange={(e) => togglePack(p.framework, e.target.checked)} />
-                </label>
-              </div>
-              {p.enabled && p.summary && (
-                <div style={{ marginTop: 8 }}>
-                  <div className="row" style={{ justifyContent: "space-between", fontSize: 11.5 }}>
-                    <span className="faint">{p.summary.met}/{p.summary.total} met</span>
-                    <span style={{ fontWeight: 700 }}>{p.summary.score}%</span>
-                  </div>
-                  <div className="progress" style={{ marginTop: 4 }}><span style={{ width: `${p.summary.score}%` }} /></div>
-                  <button className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => openControls(p)}>
-                    {openPack === p.framework ? "Hide controls" : "View controls"}
-                  </button>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-        {openPack && controls.length > 0 && (
-          <div style={{ overflowX: "auto", marginTop: 14 }}>
-            <table className="table">
-              <thead><tr><th>Control</th><th>State</th><th>Assessment</th><th></th></tr></thead>
-              <tbody>
-                {controls.map((c) => (
-                  <tr key={c.id}>
-                    <td><div style={{ fontWeight: 600, fontSize: 12.5 }}>{c.control_id}</div><div className="faint" style={{ fontSize: 11.5 }}>{c.title}</div></td>
-                    <td>
-                      {c.state === "exception"
-                        ? <Pill tone="warn" title={c.exception?.reason || undefined}>exception</Pill>
-                        : <select className="input sm" value={c.state} onChange={(e) => setState(c, e.target.value)}>
-                            {CTRL_STATES.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
-                          </select>}
-                    </td>
-                    <td><Pill tone={CTRL_TONE(c.state)}>{c.auto ? "auto" : "manual"}</Pill></td>
-                    <td style={{ textAlign: "right" }}>
-                      {c.state !== "exception" && <button className="btn ghost sm" onClick={() => addException(c)}>Exception</button>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </Card>
 
       <Card>
@@ -1804,7 +1685,8 @@ function M365CompliancePanel({ instanceId, rules, onManageRules }: {
             <h3 style={{ margin: 0 }}><Icon name="shield" size={15} /> Governance rules</h3>
             <span className="faint" style={{ fontSize: 12 }}>
               Rules applied to these managed sources on ingest (label, restrict, obfuscate,
-              don't-index or discard).
+              don't-index or discard). Rules help <i>drive</i> compliance (data classification &
+              minimization) but are not the compliance assessment itself.
             </span>
           </div>
           <button className="btn sm" onClick={onManageRules}><Icon name="link" size={13} /> Manage rules</button>
@@ -2287,7 +2169,7 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
           <button className={`chip ${tab === "identities" ? "active" : ""}`} onClick={() => setTab("identities")}>Identities</button>
           <button className={`chip ${tab === "protection" ? "active" : ""}`} onClick={() => setTab("protection")}>Protection</button>
           <button className={`chip ${tab === "compliance" ? "active" : ""}`} onClick={() => setTab("compliance")}>
-            <Icon name="shield" size={12} /> Compliance
+            <Icon name="shield" size={12} /> Governance
           </button>
         </div>
 
@@ -2517,7 +2399,7 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
         )}
 
         {tab === "compliance" && (
-          <M365CompliancePanel instanceId={activeId} rules={compliance} onManageRules={() => nav("/rules")} />
+          <M365CompliancePanel rules={compliance} onManageRules={() => nav("/rules")} />
         )}
         </>
       )}
