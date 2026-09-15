@@ -133,9 +133,10 @@ export default function Compliance() {
           Enable the frameworks your organization is measured against. Arkive scores the data-protection,
           backup, recovery, access-governance and audit controls of each.
         </div>
-        <div className="row" style={{ gap: 12, flexWrap: "wrap", alignItems: "stretch" }}>
+        <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
+             alignItems: "stretch" }}>
           {frameworks.map((f) => (
-            <div key={f.framework} className="card" style={{ padding: "12px 14px", minWidth: 240, flex: "1 1 240px",
+            <div key={f.framework} className="card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column",
                  borderColor: f.enabled ? "var(--accent,#4f7cff)" : undefined }}>
               <div className="spread" style={{ alignItems: "flex-start" }}>
                 <div>
