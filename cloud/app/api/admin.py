@@ -272,11 +272,19 @@ def email_broadcast(body: EmailBroadcast,
 @router.get("/overview")
 def overview(db: Session = Depends(get_db)):
     provider = get_provider()
+    connectors = int(db.query(func.count(ConnectorAccount.id)).scalar() or 0)
+    try:  # include managed integration sources (M365) that have no ConnectorAccount
+        from ..integrations.microsoft365 import models as _m365m
+        connectors += int(db.query(func.count(_m365m.ManagedSource.id))
+                          .filter(_m365m.ManagedSource.state.notin_(
+                              ("paused_by_admin", "decommissioned", "planned"))).scalar() or 0)
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "tenants": db.query(func.count(Tenant.id)).scalar(),
         "users": db.query(func.count(User.id)).scalar(),
         "appliances": db.query(func.count(Appliance.id)).scalar(),
-        "connectors": db.query(func.count(ConnectorAccount.id)).scalar(),
+        "connectors": connectors,
         "nodes": db.query(func.count(Node.id)).scalar(),
         "snapshots": db.query(func.count(SnapshotReceipt.id)).scalar(),
         "recoverable_snapshots": db.query(func.count(SnapshotReceipt.id))
@@ -303,8 +311,7 @@ def list_tenants(db: Session = Depends(get_db)):
             "users": db.query(func.count(User.id)).filter(User.tenant_id == t.id).scalar(),
             "appliances": db.query(func.count(Appliance.id))
                 .filter(Appliance.tenant_id == t.id).scalar(),
-            "sources": db.query(func.count(ConnectorAccount.id))
-                .filter(ConnectorAccount.tenant_id == t.id).scalar(),
+            "sources": _source_count(db, t.id),
         })
     return out
 
@@ -526,12 +533,29 @@ def audit_log(limit: int = 100, db: Session = Depends(get_db)):
 # Tenant administration                                                       #
 # =========================================================================== #
 
+def _source_count(db: Session, tid: str) -> int:
+    """Sources a tenant protects = linked connector accounts PLUS managed
+    integration sources (Microsoft 365 Exchange/OneDrive/SharePoint/Teams), which
+    have no ConnectorAccount — so reports don't read 0 for a managed-only tenant."""
+    n = int(db.query(func.count(ConnectorAccount.id))
+            .filter(ConnectorAccount.tenant_id == tid).scalar() or 0)
+    try:
+        from ..integrations.microsoft365 import models as _m365m
+        n += int(db.query(func.count(_m365m.ManagedSource.id))
+                 .filter(_m365m.ManagedSource.tenant_id == tid,
+                         _m365m.ManagedSource.state.notin_(
+                             ("paused_by_admin", "decommissioned", "planned"))).scalar() or 0)
+    except Exception:  # noqa: BLE001 — package optional
+        pass
+    return n
+
+
 def _tenant_counts(db: Session, tid: str) -> dict:
     return {
         "users": db.query(func.count(User.id)).filter(User.tenant_id == tid).scalar(),
         "appliances": db.query(func.count(Appliance.id)).filter(Appliance.tenant_id == tid).scalar(),
         "agents": db.query(func.count(DesktopAgent.id)).filter(DesktopAgent.tenant_id == tid).scalar(),
-        "sources": db.query(func.count(ConnectorAccount.id)).filter(ConnectorAccount.tenant_id == tid).scalar(),
+        "sources": _source_count(db, tid),
         "mappings": db.query(func.count(Collection.id)).filter(Collection.tenant_id == tid).scalar(),
         "recovery_points": db.query(func.count(SnapshotReceipt.id)).filter(SnapshotReceipt.tenant_id == tid).scalar(),
         "objects": db.query(func.count(distinct(SearchDocument.object_id))).filter(SearchDocument.tenant_id == tid).scalar(),
