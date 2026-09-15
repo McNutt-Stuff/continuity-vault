@@ -139,7 +139,7 @@ export default function Compliance() {
              alignItems: "stretch" }}>
           {frameworks.map((f) => (
             <div key={f.framework} className="card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column",
-                 borderColor: f.enabled ? "var(--accent,#4f7cff)" : undefined }}>
+                 minHeight: 156, borderColor: f.enabled ? "var(--accent,#4f7cff)" : undefined }}>
               <div className="spread" style={{ alignItems: "flex-start" }}>
                 <div>
                   <div style={{ fontSize: 14, fontWeight: 700 }}>{f.label}</div>
@@ -156,16 +156,18 @@ export default function Compliance() {
                     <span style={{ fontWeight: 700 }}>{f.score ?? "—"}{f.score != null ? "%" : ""}</span>
                   </div>
                   <div className="progress" style={{ marginTop: 4 }}><span style={{ width: `${f.score ?? 0}%` }} /></div>
-                  <div className="row" style={{ gap: 6, marginTop: 8 }}>
-                    <button className="btn ghost sm" onClick={() => openFramework(f.framework)}>
-                      {open === f.framework ? "Hide controls" : "Quick view"}
-                    </button>
-                    <button className="btn sm" onClick={() => navigate(`/compliance/${f.framework}`)}>
-                      Open dashboard →
-                    </button>
-                  </div>
                 </div>
               )}
+              <div className="row" style={{ gap: 6, marginTop: "auto", paddingTop: 10 }}>
+                {f.enabled && (
+                  <button className="btn ghost sm" onClick={() => openFramework(f.framework)}>
+                    {open === f.framework ? "Hide" : "Quick view"}
+                  </button>
+                )}
+                <button className="btn sm" onClick={() => navigate(`/compliance/${f.framework}`)}>
+                  Open dashboard →
+                </button>
+              </div>
             </div>
           ))}
         </div>

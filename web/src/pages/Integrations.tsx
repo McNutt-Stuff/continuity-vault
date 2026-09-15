@@ -1757,7 +1757,7 @@ function M365Overview({ workloadRollup, totalObjects, totalBytes, collectEnabled
         <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
              alignItems: "stretch" }}>
           {workloadRollup.map((w) => (
-            <div key={w.workload} className="card" style={{ padding: "10px 14px", display: "flex", flexDirection: "column" }}>
+            <div key={w.workload} className="card" style={{ padding: "10px 14px", display: "flex", flexDirection: "column", minHeight: 82 }}>
               <div className="row" style={{ gap: 6, alignItems: "center" }}>
                 <SourceIcon type={workloadIcon(w.workload)} size={18} />
                 <span style={{ fontSize: 12.5, fontWeight: 600 }}>{w.label}</span>
@@ -1766,7 +1766,7 @@ function M365Overview({ workloadRollup, totalObjects, totalBytes, collectEnabled
               <div className="faint" style={{ fontSize: 11.5 }}>{bytes(w.bytes)} · {w.active}/{w.sources} active{w.errors ? ` · ${w.errors} need attention` : ""}</div>
             </div>
           ))}
-          <div className="card" style={{ padding: "10px 14px", display: "flex", flexDirection: "column",
+          <div className="card" style={{ padding: "10px 14px", display: "flex", flexDirection: "column", minHeight: 82,
                background: "var(--inset)" }}>
             <div className="faint" style={{ fontSize: 11.5, fontWeight: 600 }}>Total protected</div>
             <div style={{ fontSize: 22, fontWeight: 700, marginTop: 4 }}>{totalObjects.toLocaleString()}</div>
