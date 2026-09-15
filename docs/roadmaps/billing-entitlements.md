@@ -57,8 +57,16 @@ plan names are never hard-coded at call-sites.
    add-on tables replicate CP→node (`_PULL_ORDER`).
 4. **Subscription items** — `Subscription` + `SubscriptionItem` (base/seats/capacity/
    add-ons/appliance/usage), each price-version-referenced; adapter over `BillingProfile`.
-5. **Billing calc service** — deterministic, minor-units, included-vs-billable split,
-   preview API; reproducible line items referencing exact price versions.
+5. **Billing calc service** — **DONE (Phase 5, this change).** `billing_calc.py`:
+   deterministic, minor-unit `calculate(db, tenant, overrides=)` → itemized `Line`s
+   (base, protected data, protected users, family members, non-seat add-ons,
+   appliance lease + one-time setup) with the **included-vs-billable** split
+   (`billable = max(0, licensed − included)`), each line referencing its price
+   version. Seat-granting add-ons fold into the plan-priced seat count (never
+   double-charged). `preview(db, tenant, changes)` returns current vs proposed +
+   delta. APIs: `GET /billing/estimate`, `POST /billing/estimate/preview`,
+   `GET /admin/tenants/{id}/billing-estimate`. Reads catalog `plan_pricing`
+   (Phase 2) so it's reproducible. *(Customer billing-page rendering = Phase 9.)*
 6. **Add-on management** — **DONE (Phase 3, this change).** `AddOn` (immutable
    code, `pricing_model`, minor-unit `price_cents`, `eligible_plans`, `entitlements`
    map, `feature_flags`, provider mappings) + `TenantAddOn` (per-tenant assignment;

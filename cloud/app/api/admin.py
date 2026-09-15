@@ -485,6 +485,16 @@ def get_plan_pricing(code: str, db: Session = Depends(get_db)):
     return catalog.plan_pricing(db, code.strip().lower())
 
 
+@router.get("/tenants/{tid}/billing-estimate")
+def tenant_billing_estimate(tid: str, db: Session = Depends(get_db)):
+    """Deterministic recurring-charge breakdown for a tenant (admin view)."""
+    from .. import billing_calc
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    return billing_calc.calculate(db, t).as_dict()
+
+
 # --- Email: configuration, test, and broadcast ------------------------------
 
 def _email_config(db: Session):

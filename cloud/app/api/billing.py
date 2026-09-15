@@ -473,6 +473,32 @@ def get_addons(principal: security.Principal = Depends(security.get_principal),
     return {"plan": tenant.plan, "active": active, "available": eligible}
 
 
+@router.get("/estimate")
+def billing_estimate(principal: security.Principal = Depends(security.get_principal),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    """Deterministic recurring-charge breakdown (base, capacity, seats, add-ons,
+    appliance) with included-vs-billable line items. Money in minor-units."""
+    from .. import billing_calc
+    return billing_calc.calculate(db, tenant).as_dict()
+
+
+class EstimatePreview(BaseModel):
+    plan: str | None = None
+    licensed_tb: float | None = None
+    addons: list[dict] | None = None
+
+
+@router.post("/estimate/preview")
+def billing_estimate_preview(body: EstimatePreview,
+                             principal: security.Principal = Depends(security.get_principal),
+                             tenant: Tenant = Depends(security.get_tenant),
+                             db: Session = Depends(get_db)):
+    """Current vs proposed recurring total + delta for a hypothetical change."""
+    from .. import billing_calc
+    return billing_calc.preview(db, tenant, body.dict(exclude_none=True))
+
+
 class PlanUpdate(BaseModel):
     options: list[str] | None = None
     licensed_tb: float | None = None
