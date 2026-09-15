@@ -6469,6 +6469,67 @@ interface StorageUsage {
   services: { id: string; name: string; kind: string; kind_label: string; enabled: boolean; nodes: string[]; active: boolean; settings: Record<string, string>; cost_mtd?: number }[];
 }
 
+interface StoragePolicy {
+  plans: string[];
+  classes: { value: string; label: string }[];
+  default: string;
+  policy: Record<string, string>;
+}
+
+// Per-plan Amazon S3 storage class (cost tier) for new Arkive Cloud backups.
+function CloudStorageClassPolicy() {
+  const [d, setD] = useState<StoragePolicy | null>(null);
+  const [policy, setPolicy] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState("");
+  const flash = (m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); };
+  useEffect(() => {
+    api.get<StoragePolicy>("/admin/cloud-storage-policy")
+      .then((r) => { setD(r); setPolicy(r.policy || {}); }).catch(() => {});
+  }, []);
+  if (!d) return null;
+  async function save() {
+    setSaving(true);
+    try { await api.put("/admin/cloud-storage-policy", { policy }); flash("Storage tiers saved"); }
+    catch (e) { flash((e as { message?: string }).message || "Couldn't save"); }
+    finally { setSaving(false); }
+  }
+  return (
+    <Card style={{ marginTop: 16 }}>
+      <h3 style={{ marginTop: 0 }}>Cloud storage cost tier</h3>
+      <div className="muted" style={{ fontSize: 12.5, marginBottom: 12, maxWidth: 680 }}>
+        The Amazon S3 storage class new Arkive Cloud backups are written with, per plan. Defaults to
+        <b> Glacier Instant Retrieval</b> — about 68% cheaper than S3 Standard with the same millisecond reads,
+        so recovery stays instant. Only instant-retrieval classes are offered (archival tiers that need a restore
+        job are intentionally excluded).
+      </div>
+      <table className="table" style={{ maxWidth: 640 }}>
+        <thead><tr><th>Plan</th><th>Storage class</th></tr></thead>
+        <tbody>
+          {d.plans.map((p) => (
+            <tr key={p}>
+              <td style={{ textTransform: "capitalize", fontWeight: 600 }}>{p}</td>
+              <td>
+                <select className="input sm" value={policy[p] || d.default}
+                        onChange={(e) => setPolicy((cur) => ({ ...cur, [p]: e.target.value }))}>
+                  {d.classes.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                </select>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <button className="btn primary sm" style={{ marginTop: 12 }} disabled={saving} onClick={save}>
+        <Icon name="database" size={13} /> {saving ? "Saving…" : "Save storage tiers"}
+      </button>
+      <div className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>
+        Applies to NEW backups going forward; existing objects keep their class until re-written or lifecycle-transitioned.
+      </div>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </Card>
+  );
+}
+
 function StorageUsageAdmin() {
   const [d, setD] = useState<StorageUsage | null>(null);
   useEffect(() => { api.get<StorageUsage>("/admin/storage-usage").then(setD).catch(() => {}); }, []);
@@ -6482,6 +6543,8 @@ function StorageUsageAdmin() {
         <Stat label="Objects" value={t.objects.toLocaleString()} />
         <Stat label="Tenants using cloud" value={t.tenants} />
       </div>
+
+      <CloudStorageClassPolicy />
 
       <Card style={{ marginTop: 16 }}>
         <h3 style={{ marginTop: 0 }}>Storage services</h3>
