@@ -1207,67 +1207,93 @@ _SOURCE_PAGES = [
         "The Microsoft 365 integration turns Microsoft Entra ID into the source for your Arkive "
         "organization users and lets an administrator centrally protect Microsoft 365 data without "
         "each employee signing in. It connects with Microsoft admin-consent (OAuth) and runs on your "
-        "assigned Arkive node. Managed sources appear in each user's account as read-only, governed "
-        "by administrator-defined mappings and rules. Microsoft data, plaintext indexes and reusable "
+        "assigned Arkive node. Managed sources behave like any other source — they appear in search, "
+        "reports, dashboards and the activity log with their own brand icons — but are governed by "
+        "administrator-defined mappings and rules. Microsoft data, plaintext indexes and reusable "
         "credentials never live in the Arkive control plane.",
-        ["Open **Integrations** and choose **Microsoft 365** (Business/Enterprise).",
-         "**Connect** your organization, then have a Microsoft Global Administrator grant admin consent "
-         "(a Microsoft window opens and returns you here automatically).",
-         "**Discover users** pulls your Entra directory; use **Scope** to limit it by domain, "
-         "include/exclude lists or guests, then re-discover.",
-         "**Map** each Microsoft identity to an Arkive member — Arkive auto-suggests matches by email, "
-         "and you can **Accept** them individually or all at once. Optionally enable **Auto-map matched "
-         "users** and **Auto-create accounts for new users** so mapping keeps itself up to date. "
-         "Then turn on **Protect mapped users** and set the **managed protection profile** (which "
-         "workloads — Exchange Online / OneDrive — to protect, where to store them, and how often) to "
-         "collect each user's data on their behalf."],
-        ["**Entra identity discovery + mapping (preview)** — read-only discovery of your Microsoft 365 "
-         "users and mapping to Arkive members.",
-         "**Managed Exchange Online + OneDrive (preview)** — organization admin-level collection of each "
-         "mapped user's mailbox and files, with no per-employee sign-in.",
-         "**Managed protection profile** — one org-wide profile (workloads, storage destination, "
-         "schedule) that establishes a Data Map profile per protected user and collects on their behalf.",
-         "**SharePoint + Teams (preview)** — organization SharePoint site libraries and Teams channel "
-         "conversations at the org level, plus each protected user's Teams chats.",
-         "**Managed protection (coming next)** — compliance evidence + enterprise customer-owned app."],
-        ["Business/Enterprise plans only; enforced server-side.",
-         "Uses Microsoft admin-consent OAuth (app-only) — no per-employee sign-in and no stored password.",
-         "Each mapped user's data lands in that user's Arkive vault."],
+        # How to connect — one clear step per action.
+        ["Open **Integrations → Microsoft 365** (Business / Enterprise) and choose **Connect "
+         "organization**.",
+         "Have a Microsoft **Global Administrator** grant admin consent — a Microsoft window opens "
+         "and returns you here automatically.",
+         "Choose **Discover users** to pull your Entra directory. Use **Scope** to limit it by "
+         "domain, include / exclude lists or guests, then re-discover.",
+         "**Map** each Microsoft identity to an Arkive member — Arkive auto-suggests matches by "
+         "email, and you can **Accept** them individually or all at once. Optionally enable "
+         "**Auto-map matched users** and **Auto-create accounts for new users** so mapping keeps "
+         "itself current.",
+         "Turn on **Protect mapped users** and set the **managed protection profile** — which "
+         "workloads to protect (Exchange, OneDrive, SharePoint, Teams), where to store them, and how "
+         "often to back up (every 30 minutes, hourly, every 6/12 hours, daily or weekly)."],
+        # What's captured & how it maps.
+        ["**Exchange Online** — each mailbox message as `email` (sender, recipients, subject, "
+         "folder, date), with file attachments captured as their own linked objects.",
+         "**OneDrive** — each user's files and folders, backed up incrementally (delta).",
+         "**SharePoint** — organization site document libraries (organization-owned source).",
+         "**Teams** — channel conversations at the organization level, plus each protected user's "
+         "1:1 and group chats.",
+         "Each mapped user's data lands in **that user's** Arkive vault; organization data "
+         "(SharePoint sites, Teams channels) lands in the **organization** vault."],
+        # Good to know.
+        ["Business / Enterprise plans only — enforced server-side.",
+         "Uses Microsoft admin-consent OAuth (**app-only**) — no per-employee sign-in and no stored "
+         "password.",
+         "Read-only — Arkive never sends, deletes or changes Microsoft data.",
+         "Managed sources are first-class: they show in Search, the Dashboard, Reports and Activity "
+         "with their real brand icons, and can be governed by the rules engine and compliance packs."],
         required_plan="business",
         extra=(
             "\n## What works today (preview)\n"
             "Connect your organization, grant Microsoft administrator consent (fully wired — Microsoft "
             "redirects back automatically), discover your Entra users and map them to Arkive members, "
-            "then enable **Protect mapped users** to collect each mapped user's Exchange Online mailbox "
-            "and OneDrive using your organization's admin access. SharePoint/Teams and compliance evidence "
-            "are delivered in a later phase.\n"
-            "\n## Platform administrator setup\n"
+            "then enable **Protect mapped users**. Arkive collects each mapped user's **Exchange "
+            "Online** mailbox and **OneDrive**, plus organization **SharePoint** site libraries and "
+            "**Teams** channels/chats, using your organization's admin access. Backups run on the "
+            "shared scheduler like any other source and appear in the **Activity** log.\n"
+            "\n## Set it up (platform administrator)\n"
             "A platform administrator registers the Arkive Microsoft 365 (Entra) application once and "
             "links its credentials in **Admin → Sources → Managed integrations**: create a "
             "Configuration Object holding the app's `client_id` and `client_secret`, then select it "
-            "for Microsoft 365. Organizations grant admin consent to that shared application.\n"
-            "\n### Required Microsoft Graph permissions (Application)\n"
-            "The Entra app registration must have these **Application** permissions (not Delegated), "
-            "with **admin consent granted** — otherwise discovery/collection fail with `403 "
+            "for Microsoft 365. Every organization then grants admin consent to that shared "
+            "application.\n"
+            "\n### Microsoft Graph permissions (Application)\n"
+            "The Entra app registration needs these **Application** permissions (not Delegated), each "
+            "with **admin consent granted** — otherwise discovery and collection fail with `403 "
             "Authorization_RequestDenied`:\n"
+            "\n"
             "- `User.Read.All` — discover the organization's Entra users.\n"
             "- `Mail.Read` — back up each mapped user's Exchange Online mailbox.\n"
             "- `Files.Read.All` — back up each mapped user's OneDrive.\n"
             "- `Sites.Read.All` — back up organization SharePoint site libraries.\n"
+            "- `Group.Read.All` — list the organization's Teams (required to discover channels).\n"
             "- `ChannelMessage.Read.All` — back up Teams channel conversations.\n"
             "- `Chat.Read.All` — back up each protected user's Teams chats.\n"
-            "All are **Application** permissions (found under *Add a permission → Microsoft Graph → "
-            "Application permissions*; `Chat.Read.All` and `ChannelMessage.Read.All` are under the *Chat* "
-            "and *ChannelMessage* groups). **Teams is a Microsoft 'protected API':** app-only reading of "
-            "Teams channel/chat messages additionally requires completing Microsoft's *Request access to "
-            "protected APIs* process — without it, Teams returns `403 Forbidden — Missing role "
-            "permissions` even after consent. SharePoint (`Sites.Read.All`) has no such requirement.\n"
-            "Add the app's **Web** redirect URI (`https://<your-control-plane>/api/integrations/"
-            "microsoft365/oauth/redirect`) and a client secret. Consent uses `.default`, so it grants "
-            "exactly the Application permissions configured on the app.\n"
+            "\n"
+            "Add each permission under *Add a permission → Microsoft Graph → **Application "
+            "permissions*** (`Chat.Read.All` and `ChannelMessage.Read.All` live under the *Chat* and "
+            "*ChannelMessage* groups), then click **Grant admin consent**.\n"
+            "\n"
+            "> **Teams is a Microsoft \u2018protected API\u2019.** App-only reading of Teams channel / "
+            "chat messages additionally requires completing Microsoft's *Request access to protected "
+            "APIs* process. Without it, Teams returns `403 Forbidden — Missing role permissions` even "
+            "after consent. SharePoint (`Sites.Read.All`) and Exchange (`Mail.Read`) have no such "
+            "requirement.\n"
+            "\n"
+            "Finally, add the app's **Web** redirect URI (`https://<your-control-plane>/api/"
+            "integrations/microsoft365/oauth/redirect`) and a client secret. Consent uses `.default`, "
+            "so it grants exactly the Application permissions configured on the app.\n"
+            "\n## Compliance\n"
+            "Under **Integrations → Microsoft 365 → Compliance**, enable a framework pack (NIST CSF, "
+            "CIS, ISO 27001, SOC 2, HIPAA, GDPR, PCI, CMMC or BMS). Arkive seeds the pack's controls "
+            "and **auto-assesses** the ones it can evidence from your live footprint — backup "
+            "coverage, quantum-safe encryption at rest, recovery capability, gated and audited "
+            "cross-member access, tamper-evident audit logging and retention. You can override any "
+            "control's state, record a time-boxed exception, and re-assess on demand. Ingest-time "
+            "governance (label, restrict, obfuscate, don't-index, discard) is handled separately by "
+            "the **Rules** engine, scoped to a managed source or source type.\n"
             "\n## Availability\n"
             "::: plan business\n"
-            "The Microsoft 365 Managed Integration is a Business/Enterprise capability, enforced on "
+            "The Microsoft 365 Managed Integration is a Business / Enterprise capability, enforced on "
             "the server. Personal and Family accounts cannot access managed or organization sources.\n"
             ":::\n"),
         parent_slug="integrations"),
