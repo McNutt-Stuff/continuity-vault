@@ -157,6 +157,9 @@ def create_user(body: CreateUserRequest,
     # One account per email address, platform-wide (case-insensitive).
     if db.query(User).filter(func.lower(User.email) == email).first():
         raise HTTPException(409, "a user with this email already exists")
+    # Seat/licence limit (no-op unless entitlement enforcement is enabled for the tenant).
+    from .. import entitlements
+    entitlements.require_seat(db, tenant, db.get(User, principal.user_id))
     user = User(tenant_id=tenant.id, email=email,
                 display_name=body.display_name.strip() or email.split("@")[0],
                 role=role, status="active")

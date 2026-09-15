@@ -88,13 +88,20 @@ _DEFAULT_VALUE = {"email": 2, "credential": 50, "document": 15, "photo": 5,
                   "media": 8, "file": 3, "contact": 1}
 
 # Recurring license tiers. Each tenant is on one tier (Tenant.plan == id); the
-# tier sets the per-TB/month data-protection rate and the minimum licensed TB.
+# tier sets the per-TB/month data-protection rate, the minimum licensed TB, and
+# the included user/member allowance (data-driven — the entitlement engine reads
+# included_users / included_members from here).
 _DEFAULT_PLANS = [
-    {"id": "personal", "name": "Personal", "price_per_tb_month": 10.0, "min_tb": 0},
-    {"id": "consumer", "name": "Consumer", "price_per_tb_month": 8.0, "min_tb": 1},
-    {"id": "family", "name": "Family", "price_per_tb_month": 6.0, "min_tb": 2},
-    {"id": "business", "name": "Business", "price_per_tb_month": 5.0, "min_tb": 5},
-    {"id": "enterprise", "name": "Enterprise", "price_per_tb_month": 4.0, "min_tb": 25},
+    {"id": "personal", "name": "Personal", "price_per_tb_month": 10.0, "min_tb": 0,
+     "included_members": 1, "included_users": 1},
+    {"id": "consumer", "name": "Consumer", "price_per_tb_month": 8.0, "min_tb": 1,
+     "included_members": 1, "included_users": 1},
+    {"id": "family", "name": "Family", "price_per_tb_month": 6.0, "min_tb": 2,
+     "included_members": 5, "included_users": 5, "price_per_additional_member": 3.0},
+    {"id": "business", "name": "Business", "price_per_tb_month": 5.0, "min_tb": 5,
+     "included_users": 1, "price_per_user_month": 25.0},
+    {"id": "enterprise", "name": "Enterprise", "price_per_tb_month": 4.0, "min_tb": 25,
+     "included_users": 1, "price_per_user_month": 20.0},
 ]
 
 
@@ -435,6 +442,17 @@ def get_plan(principal: security.Principal = Depends(security.get_principal),
              tenant: Tenant = Depends(security.get_tenant),
              db: Session = Depends(get_db)):
     return plan_view(db, db.get(User, principal.user_id), tenant)
+
+
+@router.get("/entitlements")
+def get_entitlements(principal: security.Principal = Depends(security.get_principal),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    """The caller's tenant entitlements (granted / used / remaining) — the customer
+    view of what their plan includes and how much is in use."""
+    from .. import entitlements
+    user = db.get(User, principal.user_id)
+    return {**entitlements.view(db, tenant, user), "plan": tenant.plan}
 
 
 class PlanUpdate(BaseModel):

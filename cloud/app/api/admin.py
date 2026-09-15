@@ -152,6 +152,96 @@ def set_cloud_storage_policy(body: CloudStoragePolicyUpdate,
     return {"ok": True, "policy": clean}
 
 
+# --- Entitlements: per-tenant view + documented overrides --------------------
+
+def _tenant_owner(db: Session, tid: str):
+    return (db.query(User)
+            .filter(User.tenant_id == tid, User.role.in_(("owner", "admin", "security-admin")))
+            .order_by(User.role.asc()).first())
+
+
+@router.get("/tenants/{tid}/entitlements")
+def get_tenant_entitlements(tid: str, db: Session = Depends(get_db)):
+    """A tenant's effective entitlements (granted / used / remaining + source)."""
+    from .. import entitlements
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    return {**entitlements.view(db, t, _tenant_owner(db, tid)),
+            "plan": t.plan, "enforced": entitlements.enforcement_on(db, t, _tenant_owner(db, tid))}
+
+
+class EntitlementOverrideBody(BaseModel):
+    key: str
+    value: str            # "true"/"false" for booleans, an integer for quantities
+    reason: str
+    expires_at: str | None = None
+
+
+@router.post("/tenants/{tid}/entitlements/override")
+def set_tenant_entitlement_override(tid: str, body: EntitlementOverrideBody,
+                                    principal: security.Principal = Depends(security.require_platform_admin),
+                                    db: Session = Depends(get_db)):
+    """Apply a documented, time-boxed entitlement override (adjusts ACCESS, not the
+    billed subscription). Labelled + audited."""
+    from .. import entitlements
+    from ..entitlements import registry as ent_registry
+    from ..entitlements.models import EntitlementOverride
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    if ent_registry.definition(body.key) is None:
+        raise HTTPException(400, f"unknown entitlement '{body.key}'")
+    if not (body.reason or "").strip():
+        raise HTTPException(400, "a reason is required for an override")
+    exp = None
+    if body.expires_at:
+        try:
+            exp = datetime.fromisoformat(body.expires_at.replace("Z", "+00:00"))
+            exp = exp.replace(tzinfo=None) if exp.tzinfo else exp
+        except ValueError:
+            raise HTTPException(400, "invalid expires_at")
+    for o in (db.query(EntitlementOverride)
+              .filter(EntitlementOverride.tenant_id == tid,
+                      EntitlementOverride.key == body.key,
+                      EntitlementOverride.active.is_(True)).all()):
+        o.active = False
+    db.add(EntitlementOverride(tenant_id=tid, key=body.key, value=str(body.value),
+                               reason=body.reason.strip(), created_by=principal.user_id,
+                               expires_at=exp, active=True))
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.entitlement_override",
+                 tenant_id=tid, category="admin", severity="notice",
+                 detail={"key": body.key, "value": body.value,
+                         "reason": body.reason.strip()[:200],
+                         "expires_at": exp.isoformat() if exp else None})
+    return {**entitlements.view(db, t, _tenant_owner(db, tid)), "plan": t.plan}
+
+
+@router.delete("/tenants/{tid}/entitlements/override/{key}")
+def clear_tenant_entitlement_override(tid: str, key: str,
+                                      principal: security.Principal = Depends(security.require_platform_admin),
+                                      db: Session = Depends(get_db)):
+    """Revoke any active override for an entitlement (reverts to the derived value)."""
+    from .. import entitlements
+    from ..entitlements.models import EntitlementOverride
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    n = 0
+    for o in (db.query(EntitlementOverride)
+              .filter(EntitlementOverride.tenant_id == tid,
+                      EntitlementOverride.key == key,
+                      EntitlementOverride.active.is_(True)).all()):
+        o.active = False
+        n += 1
+    db.commit()
+    if n:
+        audit.record(db, actor=principal.user_id, action="admin.entitlement_override_cleared",
+                     tenant_id=tid, category="admin", severity="notice", detail={"key": key})
+    return {**entitlements.view(db, t, _tenant_owner(db, tid)), "plan": t.plan}
+
+
 # --- Email: configuration, test, and broadcast ------------------------------
 
 def _email_config(db: Session):

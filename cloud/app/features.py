@@ -43,6 +43,11 @@ FLAGS: dict[str, bool] = {
     # Require a second org admin to approve a cross-member RECOVERY (dual control /
     # "break glass") before the data is released. OFF by default.
     "cross_member_recovery_approval": False,
+    # Hard-enforce entitlement quantities (e.g. reject inviting a member over the
+    # licensed-seat allowance). OFF by default so the entitlements rollout is
+    # visibility-only until a cohort is switched on. Derivation + the admin view
+    # are always available regardless of this flag.
+    "entitlements_enforced": False,
 }
 
 # Human labels for the admin UI.
@@ -57,6 +62,7 @@ LABELS = {
     "m365_managed_integration": "Microsoft 365 Managed Integration (Business/Enterprise)",
     "admin_cross_member_access": "Admin cross-member data access (search & recover)",
     "cross_member_recovery_approval": "Require approval for cross-member recovery",
+    "entitlements_enforced": "Enforce entitlement/seat limits (rollout)",
 }
 
 
