@@ -277,6 +277,7 @@ def overview(scope: str = "me",
     activity_objects = 0
     activity_bytes = 0
     if vault_ids:
+        act_counts: dict[str, list[int]] = {}
         for st, cnt, sz in (
                 db.query(SearchDocument.source_type, func.count(),
                          func.coalesce(func.sum(SearchDocument.size_bytes), 0))
@@ -288,6 +289,30 @@ def overview(scope: str = "me",
             b = int(sz or 0)
             activity_objects += n
             activity_bytes += b
+            e = act_counts.setdefault(st, [0, 0])
+            e[0] += n
+            e[1] += b
+        # Reclassify managed Exchange Online activity (source_type "outlook") into
+        # its own "exchange" entry, matching the overview source mix.
+        if mex_ids and act_counts.get("outlook"):
+            mex_n, mex_b = (db.query(func.count(),
+                                     func.coalesce(func.sum(SearchDocument.size_bytes), 0))
+                            .filter(SearchDocument.tenant_id == tenant.id,
+                                    SearchDocument.vault_id.in_(vault_ids),
+                                    SearchDocument.created_at >= day_ago,
+                                    SearchDocument.collection_id.in_(mex_ids)).first()) or (0, 0)
+            mex_n = int(mex_n or 0)
+            mex_b = int(mex_b or 0)
+            if mex_n > 0:
+                ex = act_counts.setdefault("exchange", [0, 0])
+                ex[0] += mex_n
+                ex[1] += mex_b
+                ol = act_counts["outlook"]
+                ol[0] -= mex_n
+                ol[1] -= mex_b
+                if ol[0] <= 0:
+                    act_counts.pop("outlook", None)
+        for st, (n, b) in act_counts.items():
             m = _source_meta(st)
             activity_by_source.append({"key": st, "label": m["displayName"],
                                        "icon": m["icon"], "color": m["color"],
