@@ -250,7 +250,8 @@ def alerts(limit: int = 50,
     """
     rows = (db.query(AuditEvent)
             .filter(AuditEvent.tenant_id == tenant.id,
-                    AuditEvent.severity.in_(_ALERT_SEVERITIES))
+                    AuditEvent.severity.in_(_ALERT_SEVERITIES),
+                    ~AuditEvent.action.like("admin.%"))
             .order_by(AuditEvent.created_at.desc())
             .limit(limit).all())
     items = [{
@@ -274,7 +275,11 @@ def audit_log(limit: int = 200, category: str | None = None,
               tenant: Tenant = Depends(security.get_tenant),
               db: Session = Depends(get_db)):
     """Full, filterable tenant audit log (activity, security, credential access)."""
-    q = db.query(AuditEvent).filter(AuditEvent.tenant_id == tenant.id)
+    # Platform-operator actions (admin console, action prefix "admin.") are attributed
+    # to the tenant for the ADMIN audit, but must NOT appear in the customer's own
+    # audit trail — they live in the admin console + Platform Logs.
+    q = db.query(AuditEvent).filter(AuditEvent.tenant_id == tenant.id,
+                                    ~AuditEvent.action.like("admin.%"))
     if category:
         q = q.filter(AuditEvent.category == category)
     if severity:
@@ -288,7 +293,8 @@ def audit_log(limit: int = 200, category: str | None = None,
     # Category/severity tallies across the tenant's whole ledger (for the header).
     tallies: dict[str, int] = {}
     for e in (db.query(AuditEvent)
-              .filter(AuditEvent.tenant_id == tenant.id).all()):
+              .filter(AuditEvent.tenant_id == tenant.id,
+                      ~AuditEvent.action.like("admin.%")).all()):
         tallies[e.category or "activity"] = tallies.get(e.category or "activity", 0) + 1
 
     return {
