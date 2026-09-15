@@ -6,7 +6,7 @@ import { Card, Pill, bytes, fmtAbsolute, Loading } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { BrandIcon, brandForSource } from "../components/BrandIcon";
 import { DestIcon } from "../components/DestIcon";
-import { notify, promptDialog } from "../components/dialog";
+import { notify, promptDialog, confirmDialog } from "../components/dialog";
 
 interface Recovered {
   id: string; object_id: string; title: string; doc_type: string;
@@ -639,17 +639,19 @@ export default function Search() {
   }
 
 
-  async function retrieve(r: Result, loc: { destination: string; label: string }, snapshotOverride?: string) {
+  async function retrieve(r: Result, loc: { destination: string; label: string }, snapshotOverride?: string, override?: boolean) {
     try {
       // Recovering another member's data (org / member scope) requires a stated
       // justification, which is audited and attached to any approval request.
       let reason = "";
       if (scope && scope !== "me") {
         const answer = await promptDialog({
-          title: "Cross-member recovery",
-          message: "You're recovering another member's data. State a reason — this is audited.",
+          title: override ? "Emergency override — cross-member recovery" : "Cross-member recovery",
+          message: override
+            ? "Break-glass: you're recovering another member's data WITHOUT a second administrator's approval. This is recorded as a critical, audited event. State the emergency reason."
+            : "You're recovering another member's data. State a reason — this is audited.",
           placeholder: "e.g. legal hold, offboarding, incident response",
-          confirmLabel: "Recover",
+          confirmLabel: override ? "Override & recover" : "Recover",
         });
         if (answer === null) return;            // cancelled
         reason = answer.trim();
@@ -657,10 +659,18 @@ export default function Search() {
       }
       const res = await api.post<RetrieveResp>("/search/retrieve", {
         snapshot_id: snapshotOverride || r.snapshot_id, object_id: r.object_id,
-        destination: loc.destination, reason,
+        destination: loc.destination, reason, override: !!override,
       });
       if (res.status === "pending_approval") {
-        await notify({ title: "Approval required", message: res.message, tone: "info" });
+        // Dual control is on: offer to wait for a second admin, or break-glass now.
+        const ok = await confirmDialog({
+          title: "Approval required",
+          message: `${res.message}\n\nIn an emergency you can override and recover now without a second administrator. The override is logged as a critical, audited event.`,
+          tone: "warn",
+          confirmLabel: "Override (emergency)",
+          cancelLabel: "Wait for approval",
+        });
+        if (ok) await retrieve(r, loc, snapshotOverride, true);
         return;
       }
       if (res.status === "recovered" && res.recovered_id) {

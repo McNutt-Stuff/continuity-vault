@@ -236,11 +236,15 @@ def _display_name(u) -> str:
 
 
 def _guard_cross_member_recovery(db, principal, tenant, receipt, *, object_id,
-                                 snapshot_id, destination, reason):
+                                 snapshot_id, destination, reason, override=False):
     """Authorize an admin recovering ANOTHER member's data. Returns None to allow,
     or a dict {"pending_approval": ...} when a second-admin approval is required.
     Raises 403 when cross-member access is disabled or the caller isn't an admin.
-    Own-data (or indeterminate) recovery is always allowed (returns None)."""
+    Own-data (or indeterminate) recovery is always allowed (returns None).
+
+    ``override`` is an emergency break-glass: an authorized admin proceeds WITHOUT
+    the second-admin approval. It still requires cross-member access + a reason and
+    is recorded as a critical, audited event."""
     owner = _receipt_owner(db, receipt)
     if owner is None or owner == principal.user_id:
         return None  # own data — no safeguard needed
@@ -260,36 +264,61 @@ def _guard_cross_member_recovery(db, principal, tenant, receipt, *, object_id,
                         AccessApproval.snapshot_id == snapshot_id,
                         AccessApproval.status == "approved").first())
         if appr is None:
-            pending = (db.query(AccessApproval)
-                       .filter(AccessApproval.tenant_id == tenant.id,
-                               AccessApproval.requested_by == principal.user_id,
-                               AccessApproval.object_id == object_id,
-                               AccessApproval.snapshot_id == snapshot_id,
-                               AccessApproval.status == "pending").first())
-            if pending is None:
-                pending = AccessApproval(
+            if override:
+                # Break-glass: proceed without a second admin in an emergency. The
+                # caller is already an authorized cross-member admin (checked above);
+                # a reason is mandatory and this is logged as a critical event.
+                if not (reason or "").strip():
+                    raise HTTPException(400, "An emergency override requires a stated reason.")
+                rec = AccessApproval(
                     tenant_id=tenant.id, kind="recovery",
                     requested_by=principal.user_id, requester_name=_display_name(user),
                     target_user_id=owner, target_name=_display_name(target),
                     object_id=object_id, snapshot_id=snapshot_id, destination=destination,
-                    reason=(reason or "")[:500], status="pending")
-                db.add(pending)
+                    reason=(reason or "")[:500], status="overridden",
+                    approved_by=principal.user_id, decided_at=_now())
+                db.add(rec)
                 db.commit()
-            audit.record(db, actor=principal.user_id, action="recovery.approval_requested",
-                         tenant_id=tenant.id, resource=object_id, category="admin",
-                         severity="warning",
-                         detail={"target_user_id": owner, "reason": (reason or "")[:300],
-                                 "approval_id": pending.id})
-            return {"pending_approval": pending.id, "target": _display_name(target)}
-        appr.status = "used"
-        appr.decided_at = _now()
-        db.commit()
-    # Approved (or approval not required) — record the cross-member access.
+                audit.record(db, actor=principal.user_id, action="recovery.approval_override",
+                             tenant_id=tenant.id, resource=object_id, category="admin",
+                             severity="critical",
+                             detail={"target_user_id": owner, "target": _display_name(target),
+                                     "reason": (reason or "")[:300], "destination": destination,
+                                     "break_glass": True, "approval_id": rec.id})
+                # fall through to record the cross-member access + allow
+            else:
+                pending = (db.query(AccessApproval)
+                           .filter(AccessApproval.tenant_id == tenant.id,
+                                   AccessApproval.requested_by == principal.user_id,
+                                   AccessApproval.object_id == object_id,
+                                   AccessApproval.snapshot_id == snapshot_id,
+                                   AccessApproval.status == "pending").first())
+                if pending is None:
+                    pending = AccessApproval(
+                        tenant_id=tenant.id, kind="recovery",
+                        requested_by=principal.user_id, requester_name=_display_name(user),
+                        target_user_id=owner, target_name=_display_name(target),
+                        object_id=object_id, snapshot_id=snapshot_id, destination=destination,
+                        reason=(reason or "")[:500], status="pending")
+                    db.add(pending)
+                    db.commit()
+                audit.record(db, actor=principal.user_id, action="recovery.approval_requested",
+                             tenant_id=tenant.id, resource=object_id, category="admin",
+                             severity="warning",
+                             detail={"target_user_id": owner, "reason": (reason or "")[:300],
+                                     "approval_id": pending.id})
+                return {"pending_approval": pending.id, "target": _display_name(target)}
+        else:
+            appr.status = "used"
+            appr.decided_at = _now()
+            db.commit()
+    # Approved (or approval not required / overridden) — record the cross-member access.
     audit.record(db, actor=principal.user_id, action="recovery.cross_member",
                  tenant_id=tenant.id, resource=object_id, category="admin",
                  severity="warning",
                  detail={"target_user_id": owner, "target": _display_name(target),
-                         "reason": (reason or "")[:300], "destination": destination})
+                         "reason": (reason or "")[:300], "destination": destination,
+                         "override": bool(override)})
     return None
 
 
@@ -1164,6 +1193,7 @@ class RetrieveRequest(BaseModel):
     object_id: str
     destination: str  # the chosen storage location for this item
     reason: str = ""  # justification when recovering another member's data
+    override: bool = False  # emergency break-glass: skip second-admin approval (audited)
 
 
 @router.post("/retrieve")
@@ -1182,7 +1212,8 @@ def retrieve(body: RetrieveRequest,
                        SnapshotReceipt.snapshot_id == body.snapshot_id).first())
     _pending = _guard_cross_member_recovery(
         db, principal, tenant, receipt, object_id=body.object_id,
-        snapshot_id=body.snapshot_id, destination=body.destination, reason=body.reason)
+        snapshot_id=body.snapshot_id, destination=body.destination, reason=body.reason,
+        override=body.override)
     if _pending is not None:
         return {"status": "pending_approval", "approval_id": _pending["pending_approval"],
                 "message": f"Recovering {_pending['target']}'s data requires approval "
