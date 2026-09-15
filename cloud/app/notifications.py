@@ -359,8 +359,13 @@ def _source_issues(db, user: User) -> list[dict]:
         ref = inst.last_success_at or inst.last_run_at
         # Stale: provisioned + previously ran, but no success in a while. Use a
         # generous floor (≥3h, or 4× the poll interval) so a single missed poll
-        # doesn't alert — a stall since a past date clearly does.
-        stale_after_min = max(180, int(inst.poll_interval_minutes or 30) * 4)
+        # doesn't alert — a stall since a past date clearly does. Microsoft 365 only
+        # re-runs identity DISCOVERY every ~6h (content backup runs separately on the
+        # shared scheduler), so give it a discovery-aware window to avoid false alerts.
+        if inst.integration_type == "microsoft365":
+            stale_after_min = 13 * 60  # ~2× the 6h identity-refresh cadence
+        else:
+            stale_after_min = max(180, int(inst.poll_interval_minutes or 30) * 4)
         stale = bool(prov in ("idle", "done") and inst.last_run_at is not None
                      and ref is not None
                      and (now - ref).total_seconds() > stale_after_min * 60)

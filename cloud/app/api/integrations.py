@@ -148,9 +148,16 @@ def _instance_health(inst: IntegrationInstance) -> str:
         return "error"
     if inst.last_run_at is None:
         return "pending"
-    # No successful run in a while (3× the poll interval, min 30m) → stale.
+    # No successful run in a while → stale. Managed-identity integrations (Microsoft
+    # 365) only re-run identity DISCOVERY on a slow cadence (~6h) — their actual
+    # content backup runs on the shared scheduler per managed source — so the
+    # poll×3 window would flap them to "stale" for hours mid-cycle even when
+    # everything is healthy. Give them a discovery-aware window instead.
     ref = inst.last_success_at or inst.last_run_at
-    stale_after = max(30, int(inst.poll_interval_minutes or 30) * 3)
+    if inst.integration_type == "microsoft365":
+        stale_after = 13 * 60  # ~2× the 6h identity-refresh cadence (tolerate one miss)
+    else:
+        stale_after = max(30, int(inst.poll_interval_minutes or 30) * 3)
     if (_now() - ref).total_seconds() > stale_after * 60:
         return "stale"
     # Managed identity integrations (Microsoft 365) don't collect "clients"; they
