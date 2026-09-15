@@ -5,7 +5,7 @@
 > architecture. Update this file as slices land.
 
 ## Current summary
-- Overall status: In progress (Phase 2 — Entra identity discovery + mapping landed, preview)
+- Overall status: In progress (Phase 5 — compliance packs preview; P2 identity, P3 Exchange/OneDrive, P4 SharePoint/Teams landed in preview)
 - Current phase: Phase 2 complete (discovery/mapping); Phase 3 next (Exchange/OneDrive collectors)
 - Last updated: 2026-09-14
 - Owner: (assign)
@@ -42,8 +42,8 @@
 | P1d | Desired-state federation envelope + node validation | Partial | `IntegrationDesiredState` records written on activate; node validation TBD |
 | P2 | M365 connection + Entra identity (OAuth, discovery, mapping) | Done (preview) | `microsoft365/graph.py` (app-only client), `discovery.py` (Entra /users → ExternalIdentity + scope), `worker.py` (reconcile), `api.py` `/discover` + `/members`; Entra app creds via `IntegrationConfig.config_object_id` (admin Sources → Managed integrations); frontend `M365Workspace` (connect/consent/discover/map); status → `preview` |
 | P3 | Core managed protection (Exchange/OneDrive) | In progress (preview) | Auth fully wired; Outlook/OneDrive fetchers parametrized with `resource=users/<id>` for app-only admin collection; `collect.py` provisions per-user managed sources + ingests via the existing pipeline; workspace "Protect mapped users" toggle. **Federation wired**: CP owns connection/consent/scope/mapping (portal), federated CP→node (`m365_instances`/`credentials`/`scope_policies`/`bindings`/`desired_states`); node runs discovery + collection + storage and pushes back identities + managed sources (`m365_external_identities`/`m365_managed_sources`, runtime-only instance fields). CP defers discovery/provisioning to the node for node-hosted tenants |
-| P4 | Organization collaboration (SharePoint/Teams) | Todo | Design-partner validation |
-| P5 | Compliance packs + security-source evidence | Todo | Evidence/privacy review |
+| P4 | Organization collaboration (SharePoint/Teams) | In progress (preview) | Org discovery of SharePoint sites + Teams provisions organization managed sources + collections; collected via the shared scheduler like any source. Teams channel/chat reads need Group.Read.All + the Teams protected-API request |
+| P5 | Compliance packs + security-source evidence | In progress (preview) | Framework packs (NIST CSF/CIS/ISO 27001/SOC 2/HIPAA/GDPR/PCI/CMMC/BMS) with controls auto-assessed from live platform evidence (backup coverage, quantum-safe encryption, recovery, gated+audited cross-member access, tamper-evident audit, retention); admin state overrides + time-boxed exceptions; posture report. `microsoft365/compliance.py` + `/compliance/*` endpoints + Compliance tab. Governance/evidence layer only — ingest enforcement stays in the main rules engine |
 | P6 | Broader Microsoft business sources + customer-owned app | Todo | Per-module gates |
 
 ## Requirements traceability (initial)

@@ -78,3 +78,18 @@ source. When you add a governance surface for managed sources, wire it to the ma
 - The `ManagedRule`/`ManagedRuleVersion`/`ManagedRuleAssignment` models under `microsoft365/` are a SEPARATE,
   not-yet-enforced org-policy framework — do NOT route ingest-time governance through them; use the main engine.
 
+## Compliance packs (P5) — posture/evidence, NOT ingest enforcement
+`microsoft365/compliance.py` + `/integrations/microsoft365/compliance/*` are a **governance/evidence layer**,
+never an ingest path. An admin enables a framework pack (`CATALOG`: NIST CSF, CIS, ISO 27001, SOC 2, HIPAA,
+GDPR, PCI, CMMC, BMS); Arkive seeds `m365_compliance_controls` and AUTO-ASSESSES each control from live
+platform evidence (`compliance.evidence()` — backup coverage, quantum-safe encryption, recovery, gated+audited
+cross-member access, tamper-evident audit, retention), so the customer sees a real posture, not an empty
+checklist. Rules:
+- Auto-assessed controls carry `meta.auto=True` + `meta.capability`; a manual state override or an exception
+  clears `auto` so `reassess()` won't clobber it. Exceptions are time-boxed and **audited** (`category=admin`,
+  `severity=warning`).
+- Evidence is derived from the tenant's OWN Arkive footprint (managed sources, SearchDocuments, profile) —
+  never Microsoft payloads or secrets. All endpoints are org-admin gated (`require_m365`).
+- These are all NEW tables (`m365_compliance_packs/controls/exceptions`) — no `db.py` ALTER needed.
+- Ingest-time governance still lives in the main `rules_engine`; compliance packs only TRACK posture.
+
