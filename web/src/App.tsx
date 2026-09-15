@@ -16,6 +16,7 @@ import Connectors from "./pages/Connectors";
 import Mappings from "./pages/Mappings";
 import Rules from "./pages/Rules";
 import Compliance from "./pages/Compliance";
+import ComplianceFramework from "./pages/ComplianceFramework";
 import Appliances from "./pages/Appliances";
 import CloudStorage from "./pages/CloudStorage";
 import Snapshots from "./pages/Snapshots";
@@ -101,6 +102,7 @@ export default function App() {
             <Route path="/mappings" element={<Mappings />} />
             {me.features?.rules_enabled === true && <Route path="/rules" element={<Rules />} />}
             {me.features?.compliance_enabled === true && me.can_admin && <Route path="/compliance" element={<Compliance />} />}
+            {me.features?.compliance_enabled === true && me.can_admin && <Route path="/compliance/:framework" element={<ComplianceFramework />} />}
             <Route path="/activity" element={<ActivityPage />} />
             <Route path="/snapshots" element={<Snapshots />} />
             <Route path="/appliances" element={<Appliances />} />

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { Card, Pill, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
@@ -50,6 +51,7 @@ function ScoreRing({ score, size = 64 }: { score: number | null; size?: number }
 }
 
 export default function Compliance() {
+  const navigate = useNavigate();
   const [frameworks, setFrameworks] = useState<Framework[]>([]);
   const [report, setReport] = useState<Report | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -154,9 +156,14 @@ export default function Compliance() {
                     <span style={{ fontWeight: 700 }}>{f.score ?? "—"}{f.score != null ? "%" : ""}</span>
                   </div>
                   <div className="progress" style={{ marginTop: 4 }}><span style={{ width: `${f.score ?? 0}%` }} /></div>
-                  <button className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => openFramework(f.framework)}>
-                    {open === f.framework ? "Hide controls" : "View controls"}
-                  </button>
+                  <div className="row" style={{ gap: 6, marginTop: 8 }}>
+                    <button className="btn ghost sm" onClick={() => openFramework(f.framework)}>
+                      {open === f.framework ? "Hide controls" : "Quick view"}
+                    </button>
+                    <button className="btn sm" onClick={() => navigate(`/compliance/${f.framework}`)}>
+                      Open dashboard →
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
