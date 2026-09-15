@@ -795,7 +795,14 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         # landing. We only raise if *every* destination fails.
         try:
             if kind in ("cv-cloud", "customer-s3"):
-                dest = build_destination(kind)
+                # Arkive Cloud uses the tenant plan's storage class (cost tier).
+                sc = None
+                if kind == "cv-cloud":
+                    from ..models import Tenant as _Tenant
+                    from .. import storage as _storage
+                    _t = db.get(_Tenant, collection.tenant_id)
+                    sc = _storage.plan_storage_class(db, _t.plan if _t else None)
+                dest = build_destination(kind, storage_class=sc)
                 for obj in storage_units:
                     # Store the full envelope (nonce + wrapped DEK + ciphertext) so
                     # the content can be decrypted on retrieval — not just the ct.

@@ -43,6 +43,40 @@ def _fs_safe_component(part: str) -> str:
     return "h_" + hashlib.sha256(part.encode("utf-8")).hexdigest()
 log = logging.getLogger("arkive.storage")
 
+# --------------------------------------------------------------------------- #
+# Arkive Cloud storage class (cost tier).                                      #
+# We default to S3 Glacier Instant Retrieval — ~68% cheaper than S3 Standard   #
+# with the SAME millisecond reads, so recovery stays instant (unlike GLACIER / #
+# DEEP_ARCHIVE which need an async restore). Admins can customize the class    #
+# per plan (SystemSetting ``cloud_storage_class_policy``).                     #
+# --------------------------------------------------------------------------- #
+DEFAULT_CLOUD_STORAGE_CLASS = "GLACIER_IR"
+# Classes safe for our synchronous retrieve path (instant reads). GLACIER and
+# DEEP_ARCHIVE are intentionally NOT here — they require a restore job first.
+INSTANT_STORAGE_CLASSES = (
+    "STANDARD", "INTELLIGENT_TIERING", "STANDARD_IA", "ONEZONE_IA", "GLACIER_IR")
+_STORAGE_POLICY_KEY = "cloud_storage_class_policy"
+
+
+def plan_storage_class(db, plan: str | None) -> str:
+    """Resolve the Arkive Cloud S3 storage class for a tenant's plan. Reads the
+    admin policy (SystemSetting JSON ``{plan: class}``); falls back to the
+    cost-saving default. Never returns an archival class the read path can't
+    serve instantly."""
+    cls = DEFAULT_CLOUD_STORAGE_CLASS
+    try:
+        from .models import SystemSetting
+        row = db.get(SystemSetting, _STORAGE_POLICY_KEY) if db is not None else None
+        if row and row.value:
+            policy = json.loads(row.value)
+            picked = (policy.get(plan or "") or policy.get("default") or "").strip()
+            if picked:
+                cls = picked
+    except Exception:  # noqa: BLE001 — policy is best-effort; default is safe
+        pass
+    return cls if cls in INSTANT_STORAGE_CLASSES else DEFAULT_CLOUD_STORAGE_CLASS
+
+
 
 class ProtectionDestination(ABC):
     name: str = "base"
@@ -189,7 +223,28 @@ class _S3Base(ProtectionDestination):
 
     def get_object(self, tenant_prefix, key) -> bytes:
         full = f"{tenant_prefix}/{key}"
-        return self._s3.get_object(Bucket=self.bucket, Key=full)["Body"].read()
+        try:
+            return self._s3.get_object(Bucket=self.bucket, Key=full)["Body"].read()
+        except Exception as exc:
+            # Cold archival classes (GLACIER / DEEP_ARCHIVE — NOT GLACIER_IR) aren't
+            # instantly readable: S3 returns InvalidObjectState until a restore runs.
+            # Kick off a restore and surface a clear, retryable error instead of a 500.
+            code = ""
+            try:
+                code = exc.response["Error"]["Code"]  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                code = ""
+            if code == "InvalidObjectState":
+                try:
+                    self._s3.restore_object(
+                        Bucket=self.bucket, Key=full,
+                        RestoreRequest={"Days": 3, "GlacierJobParameters": {"Tier": "Standard"}})
+                except Exception:  # noqa: BLE001 — restore may already be in progress
+                    pass
+                raise RuntimeError(
+                    "This item is in cold archival storage and is being restored "
+                    "(this can take a few hours). Try recovering it again shortly.") from exc
+            raise
 
     def delete_object(self, tenant_prefix, key) -> None:
         self._s3.delete_object(Bucket=self.bucket, Key=f"{tenant_prefix}/{key}")
@@ -372,10 +427,11 @@ def destination_from_customer_storage(provider: str, config: dict,
     return None
 
 
-def destination_from_service(kind: str, cfg: dict) -> Optional[ProtectionDestination]:
+def destination_from_service(kind: str, cfg: dict, storage_class: Optional[str] = None) -> Optional[ProtectionDestination]:
     """Build a storage destination from a ServiceObject's merged config (linked
     ConfigObject credentials + non-secret settings). Returns None if the kind is
-    unknown or required routing is missing."""
+    unknown or required routing is missing. ``storage_class`` (per-plan policy)
+    overrides the service's configured class when provided."""
     if kind == "storage-s3":
         bucket = cfg.get("bucket")
         if not bucket:
@@ -390,7 +446,7 @@ def destination_from_service(kind: str, cfg: dict) -> Optional[ProtectionDestina
             endpoint_url=cfg.get("endpoint_url") or None,
             access_key=cfg.get("aws_access_key_id") or None,
             secret_key=cfg.get("aws_secret_access_key") or None,
-            storage_class=cfg.get("storage_class") or "INTELLIGENT_TIERING",
+            storage_class=storage_class or cfg.get("storage_class") or DEFAULT_CLOUD_STORAGE_CLASS,
         )
     if kind == "storage-azure":
         container = cfg.get("container")
@@ -407,7 +463,7 @@ def destination_from_service(kind: str, cfg: dict) -> Optional[ProtectionDestina
     return None
 
 
-def _cv_cloud_from_service() -> Optional[ProtectionDestination]:
+def _cv_cloud_from_service(storage_class: Optional[str] = None) -> Optional[ProtectionDestination]:
     """Resolve the Arkive Cloud destination from the running node's selected
     storage service object, if any."""
     try:
@@ -415,18 +471,19 @@ def _cv_cloud_from_service() -> Optional[ProtectionDestination]:
         svc = self_storage_service()
         if not svc:
             return None
-        return destination_from_service(svc.get("kind", ""), svc.get("config") or {})
+        return destination_from_service(svc.get("kind", ""), svc.get("config") or {}, storage_class)
     except Exception:
         log.exception("failed to build cloud storage from node service object")
         return None
 
 
-def build_destination(kind: str) -> ProtectionDestination:
+def build_destination(kind: str, storage_class: Optional[str] = None) -> ProtectionDestination:
     """Factory honoring configuration. Arkive Cloud (``cv-cloud``) resolves to the
     storage service object selected on the running node (Amazon S3 / Azure Blob);
-    falls back to env-configured S3, then local FS for the prototype."""
+    falls back to env-configured S3, then local FS for the prototype.
+    ``storage_class`` (from the tenant's plan policy) overrides the cost tier."""
     if kind == "cv-cloud":
-        dest = _cv_cloud_from_service()
+        dest = _cv_cloud_from_service(storage_class)
         if dest is not None:
             return dest
         if settings.aws_access_key_id:
@@ -436,6 +493,7 @@ def build_destination(kind: str) -> ProtectionDestination:
                 endpoint_url=settings.s3_endpoint_url,
                 access_key=settings.aws_access_key_id,
                 secret_key=settings.aws_secret_access_key,
+                storage_class=storage_class or DEFAULT_CLOUD_STORAGE_CLASS,
             )
         return LocalFsDestination()
     if kind == "customer-s3" and settings.aws_access_key_id:

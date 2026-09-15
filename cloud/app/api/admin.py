@@ -9,6 +9,7 @@ an operator read customer plaintext (spec 3.1: no standing plaintext access).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -88,6 +89,67 @@ def update_pricing(body: PricingUpdate, db: Session = Depends(get_db)):
         setattr(p, k, v)
     db.commit()
     return pricing_public(p)
+
+
+# --- Arkive Cloud storage class (cost tier) per plan ------------------------
+
+_STORAGE_CLASS_OPTIONS = [
+    {"value": "GLACIER_IR", "label": "Glacier Instant Retrieval — lowest cost, instant reads (recommended)"},
+    {"value": "ONEZONE_IA", "label": "One Zone-IA — cheapest infrequent-access, single AZ"},
+    {"value": "STANDARD_IA", "label": "Standard-IA — infrequent access, multi-AZ"},
+    {"value": "INTELLIGENT_TIERING", "label": "Intelligent-Tiering — auto-moves between tiers"},
+    {"value": "STANDARD", "label": "Standard — hot tier, highest cost"},
+]
+_STORAGE_PLANS = ["consumer", "family", "business", "enterprise"]
+
+
+@router.get("/cloud-storage-policy")
+def get_cloud_storage_policy(db: Session = Depends(get_db)):
+    """Per-plan Arkive Cloud S3 storage class. Only instant-retrieval classes are
+    offered so recovery stays immediate."""
+    from ..models import SystemSetting
+    from .. import storage
+    row = db.get(SystemSetting, "cloud_storage_class_policy")
+    policy: dict = {}
+    if row and row.value:
+        try:
+            policy = json.loads(row.value)
+        except Exception:  # noqa: BLE001
+            policy = {}
+    return {"plans": _STORAGE_PLANS, "classes": _STORAGE_CLASS_OPTIONS,
+            "default": storage.DEFAULT_CLOUD_STORAGE_CLASS, "policy": policy}
+
+
+class CloudStoragePolicyUpdate(BaseModel):
+    policy: dict
+
+
+@router.put("/cloud-storage-policy")
+def set_cloud_storage_policy(body: CloudStoragePolicyUpdate,
+                             principal: security.Principal = Depends(security.require_platform_admin),
+                             db: Session = Depends(get_db)):
+    from ..models import SystemSetting
+    from .. import storage
+    clean: dict = {}
+    for plan, cls in (body.policy or {}).items():
+        c = str(cls or "").strip()
+        if not c:
+            continue
+        if c not in storage.INSTANT_STORAGE_CLASSES:
+            raise HTTPException(400, f"'{c}' isn't an instant-retrieval class — it would "
+                                     "break immediate recovery. Choose one of: "
+                                     + ", ".join(storage.INSTANT_STORAGE_CLASSES))
+        clean[plan] = c
+    row = db.get(SystemSetting, "cloud_storage_class_policy")
+    val = json.dumps(clean)
+    if row is None:
+        db.add(SystemSetting(key="cloud_storage_class_policy", value=val))
+    else:
+        row.value = val
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.cloud_storage_policy_updated",
+                 category="admin", severity="notice", detail={"policy": clean})
+    return {"ok": True, "policy": clean}
 
 
 # --- Email: configuration, test, and broadcast ------------------------------

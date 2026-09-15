@@ -101,7 +101,7 @@ def _provision_aws(admin: dict, tenant_id: str, progress: Progress) -> dict:
     r_key = iam.create_access_key(UserName=r_user)["AccessKey"]
 
     return {
-        "config": {"bucket": bucket, "region": region, "storage_class": "INTELLIGENT_TIERING"},
+        "config": {"bucket": bucket, "region": region, "storage_class": "GLACIER_IR"},
         "write": {"access_key_id": w_key["AccessKeyId"], "secret_access_key": w_key["SecretAccessKey"]},
         "read": {"access_key_id": r_key["AccessKeyId"], "secret_access_key": r_key["SecretAccessKey"]},
         "summary": f"Provisioned bucket {bucket}, IAM users {w_user} (write) and {r_user} (read).",
