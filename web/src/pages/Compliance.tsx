@@ -193,7 +193,7 @@ export default function Compliance() {
                       </td>
                       <td>
                         {c.state === "exception"
-                          ? <Pill tone="warn" title={c.exception?.reason || undefined}>exception</Pill>
+                          ? <span title={c.exception?.reason || undefined}><Pill tone="warn">exception</Pill></span>
                           : <select className="input sm" value={c.state} onChange={(e) => setState(c, e.target.value)}>
                               {STATES.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
                             </select>}
