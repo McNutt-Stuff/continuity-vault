@@ -313,6 +313,18 @@ function MiniStat({ icon, label, value, tint }: { icon: IconName; label: string;
   );
 }
 
+// Label-above-value stat, matching the Appliance Details header grid.
+function Info({ label, value, mono, title }: { label: string; value: string; mono?: boolean; title?: string }) {
+  return (
+    <div className="stack" style={{ gap: 2, minWidth: 0 }} title={title}>
+      <div className="faint" style={{ fontSize: 11.5 }}>{label}</div>
+      <div className={mono ? "mono" : undefined}
+           style={{ fontWeight: 600, fontSize: mono ? 12 : undefined, overflow: "hidden",
+                    textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{value}</div>
+    </div>
+  );
+}
+
 // ---- Time-series trends -------------------------------------------------- //
 interface TrendPoint { day: string; bytes: number }
 interface TrendEntity {
@@ -2092,11 +2104,11 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
           <div className="insight-card-ic" style={{ background: "#0364B81e", color: "#0364B8", width: 42, height: 42 }}>
             <SourceIcon type="microsoft365" fallback="cloud" size={22} />
           </div>
-          <div style={{ flex: 1 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
             <h3 style={{ margin: 0 }}>Microsoft 365</h3>
-            <div className="faint" style={{ fontSize: 12 }}>
-              Turn Microsoft Entra ID into the source for your Arkive organization users —
-              administrator-governed, no per-employee sign-in.
+            <div className="faint mono" style={{ fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                 title={status?.microsoft_tenant_id || undefined}>
+              {status?.microsoft_tenant_id ? `Tenant ${status.microsoft_tenant_id}` : "Microsoft Entra ID — administrator-governed directory source"}
             </div>
           </div>
           <Pill tone={consent === "granted" ? "ok" : connected ? "warn" : "info"} dot>
@@ -2104,12 +2116,11 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
           </Pill>
         </div>
         {connected && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", gap: 12, marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border-soft)" }}>
-            <MiniStat icon="cloud" label="Microsoft tenant" value={status?.microsoft_tenant_id || "—"} tint="#0364B8" />
-            <MiniStat icon="user" label="Identities discovered" value={String(status?.identities_discovered ?? 0)} tint="#3a6df0" />
-            <MiniStat icon="check" label="Mapped" value={String(status?.identities_mapped ?? 0)} tint="#35d0a5" />
-            <MiniStat icon="link" label="Suggested" value={String(status?.identities_suggested ?? 0)} tint="#f5a623" />
-            <MiniStat icon="shield" label="In scope" value={String(inScope.length)} tint="#c56cf0" />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
+            <Info label="Identities discovered" value={String(status?.identities_discovered ?? 0)} />
+            <Info label="Mapped" value={String(status?.identities_mapped ?? 0)} />
+            <Info label="Suggested" value={String(status?.identities_suggested ?? 0)} />
+            <Info label="In scope" value={String(inScope.length)} />
           </div>
         )}
       </Card>
@@ -2164,14 +2175,18 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
         </Card>
       ) : (
         <>
-        {/* Tabbed navigation — grows as later phases of the integration land. */}
-        <div className="row" style={{ gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-          <button className={`chip ${tab === "overview" ? "active" : ""}`} onClick={() => setTab("overview")}>Overview</button>
-          <button className={`chip ${tab === "identities" ? "active" : ""}`} onClick={() => setTab("identities")}>Identities</button>
-          <button className={`chip ${tab === "protection" ? "active" : ""}`} onClick={() => setTab("protection")}>Protection</button>
-          <button className={`chip ${tab === "compliance" ? "active" : ""}`} onClick={() => setTab("compliance")}>
-            <Icon name="shield" size={12} /> Rules
-          </button>
+        {/* Tabbed navigation — matches the Appliance Details tab style. */}
+        <div className="row" style={{ gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+          {([
+            { key: "overview", label: "Overview", icon: "activity" },
+            { key: "identities", label: "Identities", icon: "user" },
+            { key: "protection", label: "Protection", icon: "shield" },
+            { key: "compliance", label: "Rules", icon: "grid" },
+          ] as const).map((tb) => (
+            <button key={tb.key} className={`btn sm ${tab === tb.key ? "primary" : "ghost"}`} onClick={() => setTab(tb.key)}>
+              <Icon name={tb.icon} size={13} /> {tb.label}
+            </button>
+          ))}
         </div>
 
         {tab === "overview" && (
