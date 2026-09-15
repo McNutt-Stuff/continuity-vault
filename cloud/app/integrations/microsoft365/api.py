@@ -533,6 +533,8 @@ _WORKLOAD_CATALOG = [
      "description": "Each protected user's Outlook/Exchange calendar events"},
     {"id": "contacts", "label": "Exchange Contacts", "scope": "user",
      "description": "Each protected user's Outlook/Exchange contacts"},
+    {"id": "onenote", "label": "OneNote", "scope": "user",
+     "description": "Each protected user's OneNote notebooks"},
 ]
 _VALID_WORKLOADS = {w["id"] for w in _WORKLOAD_CATALOG}
 
@@ -929,7 +931,8 @@ def list_managed_sources(instance_id: str = "",
     _WL_LABEL = {"exchange": "Exchange Online", "onedrive": "OneDrive",
                  "sharepoint": "SharePoint", "teams": "Teams channels",
                  "teams_chat": "Teams chats", "copilot": "Microsoft 365 Copilot",
-                 "calendar": "Exchange Calendar", "contacts": "Exchange Contacts"}
+                 "calendar": "Exchange Calendar", "contacts": "Exchange Contacts",
+                 "onenote": "OneNote"}
     sources = []
     rollup: dict[str, dict] = {}
     for s in rows:

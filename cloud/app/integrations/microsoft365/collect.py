@@ -41,6 +41,8 @@ _WORKLOADS = {
                  "facet": ["organizer", "location"], "search": ["organizer", "location"]},
     "contacts": {"source_type": "contacts", "label": "Exchange Contacts", "scope": "user",
                  "facet": ["company"], "search": ["emails", "company", "jobTitle"]},
+    "onenote": {"source_type": "onenote", "label": "OneNote", "scope": "user",
+                "facet": ["section"], "search": ["section"]},
 }
 _DEFAULT_WORKLOADS = ("exchange", "onedrive")
 _USER_WORKLOADS = frozenset(w for w, v in _WORKLOADS.items() if v["scope"] == "user")
@@ -396,6 +398,10 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
                 state=state, resource=f"users/{key}"))
         elif source.workload == "contacts":  # a user's Exchange contacts
             objs = list(live.stream_contacts(
+                app_token, cursor=cfg.get("cursor"), content_cap=cap,
+                state=state, resource=f"users/{key}"))
+        elif source.workload == "onenote":  # a user's OneNote notebooks
+            objs = list(live.stream_onenote(
                 app_token, cursor=cfg.get("cursor"), content_cap=cap,
                 state=state, resource=f"users/{key}"))
         else:  # teams_chat — a user's 1:1/group chats

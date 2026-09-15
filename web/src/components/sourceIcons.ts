@@ -16,7 +16,7 @@ export const SYNCED_SOURCE_ICONS: ReadonlySet<string> = new Set([
   "instagram", "google_calendar", "google_contacts", "google_photos",
   "evernote", "linkedin", "imessage", "ubiquiti", "aws", "azure", "gcp",
   "salesforce", "crossbeam", "microsoft365", "sharepoint", "teams", "exchange",
-  "copilot",
+  "copilot", "onenote",
   // Device/endpoint platform marks (Devices page).
   "macos", "windows", "ios", "android",
 ]);

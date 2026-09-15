@@ -82,6 +82,9 @@ def _source_meta(source_type: str) -> dict:
     if source_type == "contacts":
         return {"type": "contacts", "displayName": "Exchange Contacts",
                 "icon": "user", "color": "#0f6cbd"}
+    if source_type == "onenote":
+        return {"type": "onenote", "displayName": "OneNote",
+                "icon": "file", "color": "#7719aa"}
     conn = get_connector(source_type)
     if not conn:
         return {"type": source_type, "displayName": source_type,

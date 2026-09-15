@@ -1324,6 +1324,68 @@ def stream_contacts(access_token: str, cursor=None, config: Optional[dict] = Non
     state["cursor"] = {"next": next_url, "has_more": bool(next_url)}
 
 
+_ONENOTE_CHUNK = 150  # OneNote pages per collection cycle (content fetch is heavier)
+
+
+def _onenote_obj(c: "httpx.Client", headers: dict, base: str, resource: str,
+                 pg: dict, cap: int) -> SourceObject:
+    """Normalize one OneNote page (fetching its HTML content) into a SourceObject."""
+    pid = pg.get("id")
+    title = (pg.get("title") or "(untitled note)").strip()
+    html = ""
+    try:
+        cr = c.get(f"{base}/{resource}/onenote/pages/{pid}/content", headers=headers)
+        if cr.status_code < 400:
+            html = cr.text or ""
+    except Exception:  # noqa: BLE001 — a page whose content won't fetch still indexes by title
+        html = ""
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
+    section = (pg.get("parentSection") or {}).get("displayName") or ""
+    raw = html.encode("utf-8", "replace") if html else json.dumps({"title": title}).encode()
+    content, backed = _capped(raw, cap)
+    return SourceObject(
+        object_id=f"onenote:{pid}", doc_type="document", category="document",
+        title=title, content=content, preview=text[:160],
+        meta={"section": section, "content_backed_up": backed},
+        labels=[l for l in ("OneNote", section) if l], size_bytes=len(content) or None,  # type: ignore
+        modified_at=_parse_dt(pg.get("lastModifiedDateTime")))
+
+
+def stream_onenote(access_token: str, cursor=None, config: Optional[dict] = None,
+                   state: Optional[dict] = None, content_cap: int = _DEFAULT_CAP,
+                   resource: str = "") -> Iterable[SourceObject]:
+    """App-only OneNote for one user. ``resource`` is ``"users/<id>"``. Pages
+    ``/users/<id>/onenote/pages`` (bounded ~150/cycle) and fetches each page's HTML
+    content, persisting the ``@odata.nextLink`` in the cursor so the worker loops;
+    ingest content-hash dedup skips unchanged pages. Requires ``Notes.Read.All``."""
+    state = state if state is not None else {}
+    base = "https://graph.microsoft.com/v1.0"
+    start = cursor.get("next") if isinstance(cursor, dict) else None
+    url: Optional[str] = start or f"{base}/{resource}/onenote/pages"
+    params: Optional[dict] = None if start else {
+        "$top": 50, "$orderby": "lastModifiedDateTime desc",
+        "$select": "id,title,links,parentSection,lastModifiedDateTime"}
+    headers = {"Authorization": f"Bearer {access_token}"}
+    emitted = 0
+    next_url: Optional[str] = None
+    with httpx.Client(timeout=120) as c:
+        while url:
+            r = c.get(url, headers=headers, params=params)
+            if r.status_code >= 400:
+                if _is_auth_status(r.status_code) or r.status_code >= 500:
+                    _raise_api("OneNote", r, ctx=f"pages {resource}")
+                return
+            b = r.json()
+            for pg in b.get("value", []):
+                yield _onenote_obj(c, headers, base, resource, pg, content_cap)
+                emitted += 1
+            next_url = b.get("@odata.nextLink")
+            url, params = next_url, None
+            if emitted >= _ONENOTE_CHUNK:
+                break
+    state["cursor"] = {"next": next_url, "has_more": bool(next_url)}
+
+
 GDRIVE_API = "https://www.googleapis.com/drive/v3"
 _GDRIVE_EXPORT = {
     "application/vnd.google-apps.document":
