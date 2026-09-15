@@ -571,16 +571,40 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict,
     if body.m365_external_identities or body.m365_managed_sources:
         try:
             from ..integrations.microsoft365 import models as _m365
+            # A node can discover under a STALE local M365 instance id (e.g. after the
+            # instance was re-created on the CP), orphaning the pushed identities from
+            # the CP's canonical instance so the portal shows "no identities". When a
+            # tenant has exactly ONE M365 instance on the CP, re-parent any pushed row
+            # that references a different id to it (self-heals on the next push).
+            _canon: dict[str, str | None] = {}
+
+            def _reparent(row: dict) -> dict:
+                tid = row.get("tenant_id")
+                iid = row.get("integration_instance_id")
+                if not tid or not iid:
+                    return row
+                if tid not in _canon:
+                    ids = [r[0] for r in db.query(IntegrationInstance.id).filter(
+                        IntegrationInstance.tenant_id == tid,
+                        IntegrationInstance.integration_type == "microsoft365").all()]
+                    _canon[tid] = ids[0] if len(ids) == 1 else None
+                canon = _canon[tid]
+                if canon and iid != canon:
+                    logger.info("m365 push: re-parenting %s from stale instance %s → %s",
+                                row.get("id"), iid, canon)
+                    return {**row, "integration_instance_id": canon}
+                return row
+
             for row in body.m365_external_identities:
                 if not _ok(row):
                     continue
-                _upsert(db, _m365.ExternalIdentity, row)
+                _upsert(db, _m365.ExternalIdentity, _reparent(row))
                 counts["integrations"] += 1
             for row in body.m365_managed_sources:
                 owner = row.get("owner_user_id")
                 if not _ok(row) or (owner and owner not in valid_users):
                     continue
-                _upsert(db, _m365.ManagedSource, row)
+                _upsert(db, _m365.ManagedSource, _reparent(row))
                 counts["integrations"] += 1
         except Exception:  # noqa: BLE001 — package optional; never fail the push
             logger.exception("m365 push ingest failed")
