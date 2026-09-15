@@ -6,6 +6,12 @@ Downloads an SVG logo per source type into ``web/public/source-icons/<type>.svg`
 so the portal can show a real brand mark for each source (Gmail, Dropbox, …)
 with a graceful fallback to the built-in glyphs.
 
+RULE: brand icons are ALWAYS a real, freely-licensed logo fetched here — NEVER a
+hand-authored/approximated SVG. If the exact file title is unknown, search
+commons.wikimedia.org (or the web) for it and add it below. If Commons genuinely
+lacks the mark, alias to a related real logo or leave the glyph fallback; do not
+fabricate one.
+
 HOW TO ADD / RETRIEVE MORE ICONS
 --------------------------------
 1. Add an entry to ``SOURCE_ICONS`` below: the source ``type`` (must match the
@@ -77,9 +83,8 @@ SOURCE_ICONS: dict[str, dict] = {
     "sharepoint": {"file": "Microsoft Office SharePoint (2019–present).svg", "search": "Microsoft SharePoint logo"},
     "teams":      {"file": "Microsoft Office Teams (2018–present).svg", "search": "Microsoft Teams logo"},
     "exchange":   {"file": "Microsoft Exchange (2019-present).svg", "search": "Microsoft Exchange logo"},
-    # NOTE: Microsoft 365 Copilot's mark is a locally-provided asset committed at
-    # web/public/source-icons/copilot.svg — this script intentionally does NOT manage it.
-    # OneNote's mark is likewise a locally-provided asset (web/public/source-icons/onenote.svg).
+    "copilot":    {"file": "Microsoft-copilot-2026-seeklogo.svg", "search": "Microsoft Copilot icon"},
+    "onenote":    {"file": "Microsoft OneNote Icon (2025 - present).svg", "search": "Microsoft OneNote icon"},
     "gcp":        {"file": "Google Cloud icon (2026).svg", "search": "Google Cloud icon 2026"},
     # Device/endpoint platform marks (Devices page). Brand logos from Commons.
     "macos":      {"file": "Apple logo black.svg", "search": "Apple logo black"},

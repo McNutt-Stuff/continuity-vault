@@ -90,6 +90,14 @@ client/server-encrypted; storage holds only ciphertext.
   (SharePoint/Teams with `owner_user_id=None`). Expose `can_switch_scope` and a My/Org toggle; break org views
   down **by member** where it helps (roll owner-less managed vaults up under "Organization (shared)"). Content
   reads for a single user still use `content_vault_ids`.
+- **Brand icons are REAL logos, never hand-drawn.** Every source/connector/integration/storage-provider/device
+  brand mark MUST be a genuine, freely-licensed logo fetched via `scripts/sync_source_icons.py` (Wikimedia
+  Commons): find the exact Commons `File:` title (search the web / `commons.wikimedia.org`), add the type →
+  title (+ a `search` fallback phrase) to `SOURCE_ICONS`, run the script, and register the type in
+  `cloud/app/source_icons.py` + `web/src/components/sourceIcons.ts`. **NEVER author or approximate a logo in
+  SVG by hand** — if Commons genuinely lacks it, obtain the official freely-licensed asset, or alias to a
+  related real mark, or leave the built-in glyph fallback; do not fabricate one. `SourceIcon` already falls
+  back gracefully, so a missing icon is never a crash.
 
 
 ## Deploy loop
