@@ -394,6 +394,97 @@ def cancel_tenant_addon(tid: str, code: str,
     return get_tenant_addons(tid, db)
 
 
+# --- Catalog & price-book (versioned plans) ---------------------------------
+
+@router.get("/catalog")
+def get_catalog(db: Session = Depends(get_db)):
+    """The versioned plan catalog (each plan with its effective + historical versions)."""
+    from .. import catalog
+    return {"plans": catalog.catalog(db)}
+
+
+class PlanBody(BaseModel):
+    code: str
+    family: str | None = None
+    name: str | None = None
+    description: str | None = None
+    status: str | None = None
+    customer_visible: bool | None = None
+
+
+@router.post("/catalog/plans")
+def upsert_plan(body: PlanBody,
+                principal: security.Principal = Depends(security.require_platform_admin),
+                db: Session = Depends(get_db)):
+    """Create or update a plan's metadata (not its prices — those are versioned)."""
+    from ..catalog import service as cat_service
+    from ..catalog.models import Plan
+    cat_service.ensure_seeded(db)
+    code = (body.code or "").strip().lower()
+    if not code:
+        raise HTTPException(400, "an immutable plan code is required")
+    p = db.get(Plan, code)
+    created = p is None
+    if p is None:
+        p = Plan(code=code, family=body.family or code, name=body.name or code.title())
+        db.add(p)
+    for k, v in body.dict(exclude_none=True).items():
+        if k != "code":
+            setattr(p, k, v)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.catalog_plan_upserted",
+                 category="admin", severity="notice", detail={"code": code, "created": created})
+    return cat_service.plan_view(db, p)
+
+
+class PlanVersionBody(BaseModel):
+    currency: str | None = None
+    billing_interval: str | None = None
+    base_price_cents: int | None = None
+    protection_cents_per_tb: int | None = None
+    cloud_cents_per_tb: int | None = None
+    cloud_plus_cents_per_tb: int | None = None
+    per_user_cents: int | None = None
+    per_member_cents: int | None = None
+    included_users: int | None = None
+    included_members: int | None = None
+    included_tb: int | None = None
+    min_tb: int | None = None
+    max_users: int | None = None
+    features: list[str] | None = None
+    entitlements: dict | None = None
+    compatible_addons: list[str] | None = None
+    appliance_tiers: list[dict] | None = None
+    provider_mappings: dict | None = None
+    trial_days: int | None = None
+    notes: str | None = None
+
+
+@router.post("/catalog/plans/{code}/versions")
+def publish_plan_version(code: str, body: PlanVersionBody,
+                         principal: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    """Publish a NEW immutable price version (closes the current one)."""
+    from ..catalog import service as cat_service
+    try:
+        v = cat_service.publish_version(db, code.strip().lower(),
+                                        body.dict(exclude_none=True), actor=principal.user_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    audit.record(db, actor=principal.user_id, action="admin.catalog_version_published",
+                 category="admin", severity="notice",
+                 detail={"plan": code, "version": v.version})
+    from ..catalog.models import Plan
+    return cat_service.plan_view(db, db.get(Plan, code.strip().lower()))
+
+
+@router.get("/catalog/plans/{code}/pricing")
+def get_plan_pricing(code: str, db: Session = Depends(get_db)):
+    """The effective normalized pricing for a plan (catalog or legacy fallback)."""
+    from .. import catalog
+    return catalog.plan_pricing(db, code.strip().lower())
+
+
 # --- Email: configuration, test, and broadcast ------------------------------
 
 def _email_config(db: Session):

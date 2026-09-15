@@ -126,6 +126,23 @@ try:
 except Exception:  # noqa: BLE001 — package optional
     _m365m = None
 
+# Catalog / entitlements are CP-authoritative commercial state; ship them DOWN so a
+# node can derive entitlements + resolve plan pricing locally. Global tables first,
+# tenant-scoped ones AFTER tenants (FK order).
+try:
+    from ..catalog.models import Plan as _CatPlan, PlanVersion as _CatPlanVersion
+    from ..entitlements.models import (AddOn as _AddOn, TenantAddOn as _TenantAddOn,
+                                       EntitlementOverride as _EntOverride)
+    _PULL_ORDER += [
+        ("catalog_plans", _CatPlan),
+        ("catalog_plan_versions", _CatPlanVersion),
+        ("addons", _AddOn),
+        ("tenant_addons", _TenantAddOn),
+        ("entitlement_overrides", _EntOverride),
+    ]
+except Exception:  # noqa: BLE001 — packages optional
+    pass
+
 
 def _now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)

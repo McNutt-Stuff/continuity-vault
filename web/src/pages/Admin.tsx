@@ -159,6 +159,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "integrations", label: "Integrations", icon: "puzzle", group: "Configurations" },
   { key: "service-objects", label: "Service objects", icon: "mail", group: "Configurations" },
   { key: "pricing", label: "Pricing", icon: "database", group: "Configurations" },
+  { key: "catalog", label: "Plan catalog", icon: "grid", group: "Configurations" },
   { key: "addons", label: "Add-ons", icon: "puzzle", group: "Configurations" },
   { key: "website", label: "Website", icon: "grid", group: "Configurations" },
   { key: "nodes", label: "Nodes", icon: "server", group: "Infrastructure" },
@@ -199,6 +200,7 @@ export default function Admin() {
       {s === "service-objects" && <><ServiceObjectsAdmin /><EmailAdmin /></>}
       {s === "fleet" && <Fleet />}
       {s === "pricing" && <Pricing />}
+      {s === "catalog" && <CatalogAdmin />}
       {s === "addons" && <AddonsAdmin />}
       {s === "website" && <WebsiteCMS />}
       {s === "crypto" && <Crypto />}
@@ -6465,6 +6467,118 @@ function ServiceTable({ title, rows, onEdit, onDelete, onTest, testable }: {
 }
 
 interface CloudIndexReplica { status: string; object_count: number; last_replicated_at: string | null; error: string }
+interface PlanVer {
+  id: string; version: number; status: string; currency: string; billing_interval: string;
+  effective_from: string | null; effective_to: string | null;
+  base_price_cents: number; protection_cents_per_tb: number; cloud_cents_per_tb: number;
+  cloud_plus_cents_per_tb: number; per_user_cents: number; per_member_cents: number;
+  included_users: number; included_members: number; included_tb: number; min_tb: number;
+}
+interface CatalogPlan {
+  code: string; family: string; name: string; description: string; status: string;
+  customer_visible: boolean; effective_version: PlanVer | null; versions: PlanVer[];
+}
+
+const DOLLARS = (c: number) => `$${((c || 0) / 100).toFixed(2)}`;
+
+// Plan Catalog & price-book — versioned plans with immutable price history.
+function CatalogAdmin() {
+  const [plans, setPlans] = useState<CatalogPlan[] | null>(null);
+  const [edit, setEdit] = useState<{ code: string; v: PlanVer } | null>(null);
+  const [toast, setToast] = useState("");
+  const flash = (m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); };
+  async function load() { try { const r = await api.get<{ plans: CatalogPlan[] }>("/admin/catalog"); setPlans(r.plans || []); } catch { setPlans([]); } }
+  useEffect(() => { void load(); }, []);
+  function num(v: PlanVer, k: keyof PlanVer): number { return (v[k] as number) || 0; }
+  async function publish() {
+    if (!edit) return;
+    const v = edit.v;
+    const body = {
+      currency: v.currency, billing_interval: v.billing_interval,
+      base_price_cents: v.base_price_cents, protection_cents_per_tb: v.protection_cents_per_tb,
+      cloud_cents_per_tb: v.cloud_cents_per_tb, cloud_plus_cents_per_tb: v.cloud_plus_cents_per_tb,
+      per_user_cents: v.per_user_cents, per_member_cents: v.per_member_cents,
+      included_users: v.included_users, included_members: v.included_members,
+      included_tb: v.included_tb, min_tb: v.min_tb,
+    };
+    try { await api.post(`/admin/catalog/plans/${edit.code}/versions`, body); setEdit(null); await load(); flash("New version published"); }
+    catch (e) { flash((e as { message?: string }).message || "Couldn't publish"); }
+  }
+  const CENT_FIELDS: { k: keyof PlanVer; label: string; money?: boolean }[] = [
+    { k: "base_price_cents", label: "Base / mo", money: true },
+    { k: "protection_cents_per_tb", label: "Protection / TB", money: true },
+    { k: "cloud_cents_per_tb", label: "Cloud / TB", money: true },
+    { k: "cloud_plus_cents_per_tb", label: "Cloud Plus / TB", money: true },
+    { k: "per_user_cents", label: "Per user / mo", money: true },
+    { k: "per_member_cents", label: "Per member / mo", money: true },
+    { k: "included_users", label: "Included users" },
+    { k: "included_members", label: "Included members" },
+    { k: "included_tb", label: "Included TB" },
+    { k: "min_tb", label: "Min TB" },
+  ];
+  if (!plans) return <Card><div className="muted">Loading catalog…</div></Card>;
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 16, alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ margin: "0 0 2px" }}>Plan catalog</h2>
+          <div className="muted" style={{ fontSize: 12.5, maxWidth: 660 }}>Versioned plans with immutable price history — a price change publishes a NEW version so past invoices stay reproducible. All money is minor-units (cents). Seeded from the legacy Pricing config.</div>
+        </div>
+      </div>
+
+      {edit && (
+        <Card style={{ marginBottom: 16 }}>
+          <h3 style={{ marginTop: 0 }}>Publish new version of {edit.code} <span className="faint" style={{ fontSize: 12 }}>(current v{edit.v.version})</span></h3>
+          <div className="grid grid-3" style={{ gap: 10 }}>
+            {CENT_FIELDS.map((f) => (
+              <label key={String(f.k)} className="stack" style={{ gap: 3 }}>
+                <span className="faint" style={{ fontSize: 11.5 }}>{f.label}</span>
+                <input className="input sm" type="number" step={f.money ? "0.01" : "1"}
+                       value={f.money ? (num(edit.v, f.k) / 100).toString() : num(edit.v, f.k).toString()}
+                       onChange={(e) => { const raw = parseFloat(e.target.value || "0"); const val = f.money ? Math.round(raw * 100) : Math.round(raw); setEdit({ ...edit, v: { ...edit.v, [f.k]: val } }); }} />
+              </label>
+            ))}
+          </div>
+          <div className="row" style={{ gap: 8, marginTop: 12 }}>
+            <button className="btn primary sm" onClick={publish}><Icon name="check" size={13} /> Publish version</button>
+            <button className="btn ghost sm" onClick={() => setEdit(null)}>Cancel</button>
+          </div>
+        </Card>
+      )}
+
+      <Card>
+        <table className="table">
+          <thead><tr><th>Plan</th><th>Family</th><th>Ver</th><th>Base</th><th>Protection/TB</th><th>Cloud/TB</th><th>Per user</th><th>Incl. users/mbrs</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {plans.map((p) => {
+              const v = p.effective_version;
+              return (
+                <tr key={p.code}>
+                  <td className="mono" style={{ fontSize: 12 }}>{p.code}</td>
+                  <td className="faint">{p.family}</td>
+                  <td>{v ? `v${v.version}` : "—"}</td>
+                  <td>{v ? DOLLARS(v.base_price_cents) : "—"}</td>
+                  <td>{v ? DOLLARS(v.protection_cents_per_tb) : "—"}</td>
+                  <td>{v ? DOLLARS(v.cloud_cents_per_tb) : "—"}</td>
+                  <td>{v ? DOLLARS(v.per_user_cents) : "—"}</td>
+                  <td className="faint">{v ? `${v.included_users}/${v.included_members}` : "—"}</td>
+                  <td><Pill tone={p.status === "active" ? "ok" : "warn"}>{p.status}</Pill></td>
+                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    {v && <button className="btn ghost sm" onClick={() => setEdit({ code: p.code, v: { ...v } })}>New version</button>}
+                  </td>
+                </tr>
+              );
+            })}
+            {plans.length === 0 && <tr><td colSpan={10} className="muted">No plans in the catalog.</td></tr>}
+          </tbody>
+        </table>
+        <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>Publishing a new version closes the current one (kept as immutable history) and takes effect immediately for new charges.</div>
+      </Card>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+}
+
 interface Addon {
   code: string; name: string; description: string; status: string; version: number;
   pricing_model: string; price_cents: number; currency: string; billing_interval: string;

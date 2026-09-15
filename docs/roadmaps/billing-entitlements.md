@@ -43,9 +43,18 @@ plan names are never hard-coded at call-sites.
    (`GET /admin/tenants/{id}/entitlements`, `POST/DELETE …/override`), customer
    `GET /billing/entitlements`. Seat check wired into org invite, **gated by the new
    `entitlements_enforced` flag (OFF)** so nothing changes for existing customers.
-3. **Versioned catalog + price-book** — `Product`/`Plan`/`PlanVersion`/`Price` (+
-   effective dates, immutable codes, minor-unit money, provider mappings). Migrate
-   `PricingConfig` behind a compatibility adapter (dual-read).
+3. **Versioned catalog + price-book** — **DONE (Phase 2, this change).** `catalog/`
+   package: `Plan` (immutable `code`, family, status) + `PlanVersion` (immutable,
+   effective-dated, **integer minor-unit** prices: base/protection-per-TB/cloud-per-TB/
+   cloud-plus-per-TB/per-user/per-member, included users/members/TB, features,
+   entitlements, compatible add-ons, appliance tiers in cents, provider mappings).
+   Seeded from `PricingConfig` (dual-read); `service.plan_pricing` adapter resolves
+   the effective version and **falls back to the legacy `PricingConfig`** so existing
+   billing is untouched. `publish_version` closes the current version (kept as
+   immutable history) and opens a new one — prior invoices stay reproducible. Admin
+   catalog API (`GET /admin/catalog`, `POST …/plans`, `POST …/plans/{code}/versions`,
+   `GET …/plans/{code}/pricing`) + **Plan Catalog** admin section. Catalog + entitlement/
+   add-on tables replicate CP→node (`_PULL_ORDER`).
 4. **Subscription items** — `Subscription` + `SubscriptionItem` (base/seats/capacity/
    add-ons/appliance/usage), each price-version-referenced; adapter over `BillingProfile`.
 5. **Billing calc service** — deterministic, minor-units, included-vs-billable split,

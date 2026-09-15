@@ -53,3 +53,13 @@ def test_default_addons_reference_valid_entitlements():
         for key in (a.get("entitlements") or {}):
             assert registry.definition(key) is not None, f"{a['code']} grants unknown {key}"
 
+
+def test_catalog_cents_conversion():
+    from cloud.app.catalog.service import _cents
+    assert _cents(6.0) == 600
+    assert _cents(4.995) == 500      # rounds to nearest cent
+    assert _cents(None) == 0
+    assert _cents("bad") == 0
+    assert _cents(0) == 0
+
+
