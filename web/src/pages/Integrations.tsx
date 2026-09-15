@@ -2289,6 +2289,8 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
                         value={profile.backup_interval_minutes ?? -1}
                         onChange={(e) => saveProfile({ backup_interval_minutes: Number(e.target.value) })}>
                   <option value={-1}>Default cadence</option>
+                  <option value={30}>Every 30 minutes</option>
+                  <option value={60}>Hourly</option>
                   <option value={360}>Every 6 hours</option>
                   <option value={720}>Every 12 hours</option>
                   <option value={1440}>Daily</option>

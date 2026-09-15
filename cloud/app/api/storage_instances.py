@@ -291,6 +291,38 @@ def arkive_cloud(principal: security.Principal = Depends(security.get_principal)
         if r.created_at and (last_at is None or r.created_at > last_at):
             last_at = r.created_at
         total_bytes += int(r.total_bytes or 0)
+    # Managed Microsoft 365 collections land in cv-cloud too, but their snapshot
+    # receipts can be absent/lagging on the control plane (federated replication);
+    # surface them from the durable index so managed backups always appear in the
+    # breakdown, branded by workload (Exchange Online / OneDrive / SharePoint /
+    # Teams) rather than merged under the generic connector.
+    from ..models import SearchDocument
+    from sqlalchemy import func
+    _WL_ICON = {"exchange": "exchange", "onedrive": "onedrive", "sharepoint": "sharepoint",
+                "teams": "teams", "teams_chat": "teams"}
+    managed = [c for c in colls.values()
+               if (c.config or {}).get("managed") and (c.config or {}).get("m365_workload")
+               and "cv-cloud" in (c.destinations or ["cv-cloud"])]
+    if managed:
+        mids = [c.id for c in managed]
+        doc_rows = {cid: (int(n or 0), int(b or 0)) for cid, n, b in
+                    db.query(SearchDocument.collection_id, func.count(SearchDocument.id),
+                             func.coalesce(func.sum(SearchDocument.size_bytes), 0))
+                    .filter(SearchDocument.collection_id.in_(mids))
+                    .group_by(SearchDocument.collection_id).all()}
+        for c in managed:
+            icon = _WL_ICON.get((c.config or {}).get("m365_workload"), c.source_type)
+            if c.id in by_coll:
+                by_coll[c.id]["source_type"] = icon  # brand the managed row
+                continue
+            n, b = doc_rows.get(c.id, (0, 0))
+            if n == 0:
+                continue  # nothing protected yet
+            by_coll[c.id] = {
+                "collection_id": c.id, "name": c.name, "source_type": icon,
+                "recovery_points": 1, "objects": n, "bytes": b,
+                "recoverable": 1, "last_at": c.last_backup_run_at}
+            total_bytes += b
     sources = sorted(by_coll.values(), key=lambda s: -s["bytes"])
     for s in sources:
         s["last_at"] = s["last_at"].isoformat() if s["last_at"] else None

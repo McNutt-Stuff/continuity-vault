@@ -66,6 +66,11 @@ def _bucket_for(doc_type: str) -> dict:
 
 
 def _source_meta(source_type: str) -> dict:
+    # Managed Exchange Online reuses the Outlook connector's source_type but is a
+    # distinct product — give it its own identity so it isn't hidden under Outlook.
+    if source_type == "exchange":
+        return {"type": "exchange", "displayName": "Exchange Online",
+                "icon": "mail", "color": "#0f6cbd"}
     conn = get_connector(source_type)
     if not conn:
         return {"type": source_type, "displayName": source_type,
@@ -130,6 +135,16 @@ def overview(scope: str = "me",
     type_counts: dict[str, int] = {}
     for c in collections:
         type_counts[c.source_type] = type_counts.get(c.source_type, 0) + 1
+    # Managed Exchange Online collections carry source_type "outlook"; reclassify
+    # them under a distinct "exchange" so the source mix shows Exchange Online.
+    mex_ids = [c.id for c in collections
+               if (c.config or {}).get("m365_workload") == "exchange" and (c.config or {}).get("managed")]
+    if mex_ids and type_counts.get("outlook"):
+        moved = min(len(mex_ids), type_counts["outlook"])
+        type_counts["outlook"] -= moved
+        if type_counts["outlook"] <= 0:
+            type_counts.pop("outlook", None)
+        type_counts["exchange"] = type_counts.get("exchange", 0) + moved
     if not type_counts:  # nothing mapped yet — seed from linked accounts/agents
         for a in accounts:
             type_counts[a.connector_type] = type_counts.get(a.connector_type, 0) + 1
@@ -161,6 +176,20 @@ def overview(scope: str = "me",
             bucket_counts[bk] = bucket_counts.get(bk, 0) + n
             if st:
                 source_obj_counts[st] = source_obj_counts.get(st, 0) + n
+    # Reclassify managed Exchange Online objects (stored as source_type "outlook")
+    # into their own "exchange" bucket so the overview shows Exchange Online.
+    if mex_ids and vault_ids and source_obj_counts.get("outlook"):
+        mex = int(db.query(func.count()).filter(
+            SearchDocument.tenant_id == tenant.id,
+            SearchDocument.vault_id.in_(vault_ids),
+            SearchDocument.is_current.is_(True),
+            SearchDocument.collection_id.in_(mex_ids)).scalar() or 0)
+        if mex > 0:
+            moved = min(mex, source_obj_counts.get("outlook", 0))
+            source_obj_counts["outlook"] -= moved
+            if source_obj_counts["outlook"] <= 0:
+                source_obj_counts.pop("outlook", None)
+            source_obj_counts["exchange"] = source_obj_counts.get("exchange", 0) + moved
     object_breakdown = [
         {"key": b["key"], "label": b["label"], "icon": b["icon"], "color": b["color"],
          "count": bucket_counts.get(b["key"], 0)}
