@@ -85,6 +85,13 @@ def _source_meta(source_type: str) -> dict:
     if source_type == "onenote":
         return {"type": "onenote", "displayName": "OneNote",
                 "icon": "file", "color": "#7719aa"}
+    # SharePoint and Teams are managed M365 workloads with no standalone connector.
+    if source_type == "sharepoint":
+        return {"type": "sharepoint", "displayName": "SharePoint",
+                "icon": "database", "color": "#038387"}
+    if source_type == "teams":
+        return {"type": "teams", "displayName": "Teams",
+                "icon": "activity", "color": "#5b5fc7"}
     conn = get_connector(source_type)
     if not conn:
         return {"type": source_type, "displayName": source_type,
