@@ -403,7 +403,7 @@ they behave like any other source. You can scope a rule to them two ways:
 - In **Rules**, the scope picker lists them under **Microsoft 365 (managed
   sources)** — pick a specific managed source (e.g. a SharePoint site or a
   member's Exchange) by name.
-- In **Integrations → Microsoft 365**, the **Governance** tab shows every rule
+- In **Integrations → Microsoft 365**, the **Rules** tab shows every rule
   that applies to that organization's managed sources and links straight to
   the rule editor.
 

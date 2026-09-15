@@ -1652,10 +1652,10 @@ function splitLines(v: string): string[] {
   return v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
 }
 
-// Microsoft 365 → Governance tab: the ingest governance RULES that apply to managed
-// sources. Framework COMPLIANCE POSTURE is measured organization-wide under the
-// top-level Compliance feature; Microsoft 365 contributes evidence there via its
-// compliance driver (it is NOT a separate compliance system).
+// Microsoft 365 → Rules tab: the ingest RULES that apply to managed sources.
+// Framework COMPLIANCE POSTURE is measured organization-wide under the top-level
+// Compliance feature; Microsoft 365 contributes evidence there via its compliance
+// driver (rules HELP DRIVE compliance but are not the assessment).
 function M365CompliancePanel({ rules, onManageRules }: {
   rules: M365Compliance | null; onManageRules: () => void;
 }) {
@@ -1682,7 +1682,7 @@ function M365CompliancePanel({ rules, onManageRules }: {
       <Card>
         <div className="spread" style={{ marginBottom: 8 }}>
           <div className="stack" style={{ gap: 2 }}>
-            <h3 style={{ margin: 0 }}><Icon name="shield" size={15} /> Governance rules</h3>
+            <h3 style={{ margin: 0 }}><Icon name="shield" size={15} /> Rules</h3>
             <span className="faint" style={{ fontSize: 12 }}>
               Rules applied to these managed sources on ingest (label, restrict, obfuscate,
               don't-index or discard). Rules help <i>drive</i> compliance (data classification &
@@ -2169,7 +2169,7 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
           <button className={`chip ${tab === "identities" ? "active" : ""}`} onClick={() => setTab("identities")}>Identities</button>
           <button className={`chip ${tab === "protection" ? "active" : ""}`} onClick={() => setTab("protection")}>Protection</button>
           <button className={`chip ${tab === "compliance" ? "active" : ""}`} onClick={() => setTab("compliance")}>
-            <Icon name="shield" size={12} /> Governance
+            <Icon name="shield" size={12} /> Rules
           </button>
         </div>
 
