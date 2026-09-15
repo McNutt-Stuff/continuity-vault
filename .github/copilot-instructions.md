@@ -65,6 +65,15 @@ client/server-encrypted; storage holds only ciphertext.
   connect-dialog copy. Bundle any new server dependency in `cloud/requirements.txt` (installer-managed), never
   a manual `pip install`. A feature without its docs update is incomplete. See
   `.github/instructions/connectors.instructions.md` + `support-docs.instructions.md`.
+- **Compliance is a first-class, capability-driven engine — feed it on EVERY enhancement.** The
+  `cloud/app/compliance/` engine scores tenants against frameworks (NIST CSF/CIS/HIPAA, extensible) from
+  *evidence* Arkive + its integrations provide (`providers.py` / integration `compliance_driver.py`), keeps a
+  posture history + change ledger, and is feature-flagged (`compliance_enabled`, OFF, Business-only). When you
+  add/change a capability, integration or detection, ask "does this evidence a compliance capability?" — if so,
+  extend `registry.CAPABILITIES`/`FRAMEWORKS` and emit it from the right provider. The rules engine is a
+  GOVERNANCE tool that HELPS DRIVE compliance (classification/minimization) — it is NOT the compliance feature;
+  never mislabel it as such. Ingest enforcement stays in `rules_engine`. See
+  `.github/instructions/compliance.instructions.md`.
 - **Cross-member data access is gated + audited — NEVER authorize by tenant alone.** A member sees only their
   OWN vaults; content is not shared across users. An org ADMIN may widen an aggregate/admin view, but any path
   that reads or recovers ANOTHER member's data (org/user-scope search, `retrieve`, recovered content) MUST:

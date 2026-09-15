@@ -364,7 +364,9 @@ immediate backup.
 
 **Rules** add a deeper layer of logic on top of the Data Map. Each rule is
 evaluated **the moment data is ingested** — before it's indexed — and decides how
-that item is handled. This is the foundation of Arkive's compliance controls.
+that item is handled. Rules **help drive compliance** — data classification and
+minimization — and complement the [Compliance engine](/support/compliance), which
+measures your framework posture. Rules are a governance tool, not the assessment.
 
 > Rules are an add‑on capability. If you don't see a **Rules** item in the
 > sidebar, it isn't enabled for your account — contact your administrator.
@@ -401,8 +403,8 @@ they behave like any other source. You can scope a rule to them two ways:
 - In **Rules**, the scope picker lists them under **Microsoft 365 (managed
   sources)** — pick a specific managed source (e.g. a SharePoint site or a
   member's Exchange) by name.
-- In **Integrations → Microsoft 365**, the **Compliance rules** card shows every
-  rule that applies to that organization's managed sources and links straight to
+- In **Integrations → Microsoft 365**, the **Governance** tab shows every rule
+  that applies to that organization's managed sources and links straight to
   the rule editor.
 
 Rules run on the node that collects the managed source, at ingest, exactly as
@@ -421,6 +423,92 @@ rule editor lets you check exactly which rules match a sample item before you
 rely on them. Rule matches are also written to the audit log.
 """,
         help_routes=["/rules"], required_plan="business"),
+
+    _doc(
+        "compliance", "Compliance engine", "Security & Account", _SECURITY, 35, "shield",
+        "Score your organization against NIST CSF, CIS and HIPAA from live evidence Arkive and "
+        "its integrations provide — and track your posture improving over time.",
+        """
+# Compliance engine
+
+The **Compliance** feature measures your organization against recognised security
+frameworks and produces a **live score** from evidence Arkive and your
+integrations already generate — no questionnaires. It is a Business/Enterprise
+capability; if you don't see **Compliance** in the sidebar, an administrator hasn't
+enabled it yet.
+
+> Arkive scores the **data‑protection domains** of each framework — backup,
+> recovery, encryption, access governance, audit and retention. It is not a
+> whole‑framework GRC tool; it proves the controls Arkive can genuinely evidence.
+
+## How it works
+Compliance is **capability‑driven**. Every framework control maps to one or more
+atomic **capabilities** (backup coverage, encryption at rest/in transit,
+immutability, recovery, retention, access control, MFA, audit logging, monitoring,
+legal hold, data classification, data minimization, inventory, incident response).
+**Providers** report a status per capability from live state:
+
+- **Arkive core** — platform‑wide evidence: quantum‑safe encryption at rest, TLS in
+  transit, tamper‑evident sealed snapshots + audit chain, gated & audited
+  cross‑member access, admin passkey (MFA) enrolment, recoverable recovery points,
+  retention schedules, and data classification/minimization from your governance rules.
+- **Integrations** — each integration is a **compliance driver**. Microsoft 365, for
+  example, reports how many managed workloads are protected, how much is captured,
+  and any sources needing re‑consent — folding straight into your score.
+
+The engine rolls capability evidence up into each control's **state** and a
+per‑framework **score**, and stores a **snapshot every assessment** so you can see
+whether you're improving or regressing.
+
+## Frameworks
+Enable the frameworks you're measured against. Today:
+
+- **NIST CSF 2.0** — Identify / Protect / Detect / Respond / Recover / Govern
+  controls for data inventory, classification, at‑rest & in‑transit protection,
+  backups, least‑privilege access, event logging, recovery and retention.
+- **CIS Controls v8** — the Data Protection (3.x), Access Control (6.x), Audit Log
+  Management (8.x) and Data Recovery (11.x) controls.
+- **HIPAA Security Rule** — the backup, disaster recovery, encryption, access
+  control, audit, integrity and retention safeguards for ePHI.
+
+More frameworks (ISO 27001, SOC 2, GDPR, PCI, CMMC…) are on the roadmap; the
+engine is designed so a new framework is a registry entry, not a rebuild.
+
+## Controls, evidence & scoring
+Open a framework to see its **controls**. Each shows:
+
+- a **state** — auto‑assessed (`operating`, `implemented`, `partially implemented`,
+  `planned`, `not assessed`) or set manually;
+- the **evidence** behind it — every provider signal (met / partial / unmet) with a
+  plain‑language summary, so you can see exactly *why* a control scores as it does;
+- **guidance** on what the control expects.
+
+**Scoring:** operating/implemented (and accepted exceptions) count as fully met,
+partially‑implemented as half, everything else as not‑yet‑met; the framework score
+is the mean across its applicable controls.
+
+## Overrides, exceptions & history
+- **Override** any control's state (e.g. mark one *not applicable* or attest it
+  manually). A manual state is preserved — re‑assessment won't overwrite it.
+- **Record an exception** with a reason (and optional expiry) when you're formally
+  accepting a gap. Exceptions are **audited**.
+- Every change is written to a **change ledger** with the detail that drove it, and
+  each assessment takes a **posture snapshot** — the framework view shows your score
+  **trend** and the recent history, so you can prove improvement over time.
+
+## How Arkive produces value here
+Because Arkive already encrypts, backs up, seals, audits and governs your data, the
+hard part — **the evidence** — is a by‑product of using the product. Compliance turns
+that into a defensible, continuously‑updated posture per framework, with a full
+evidence trail and history for auditors — instead of a point‑in‑time spreadsheet.
+
+## Availability
+::: plan business
+The Compliance engine is a Business/Enterprise capability, enabled per organization
+and available to organization administrators.
+:::
+""",
+        help_routes=["/compliance"], required_plan="business"),
 
     # ---------------------------------------------------------------- Storage & recovery
     _doc(
