@@ -6,11 +6,18 @@
 > `web/src/pages/Compliance.tsx`. Extension rules: `.github/instructions/compliance.instructions.md`.
 
 ## Delivered (preview)
-- Capability registry (15 capabilities) + frameworks **NIST CSF 2.0, CIS v8, HIPAA**.
+- Capability registry (19 capabilities — incl. conditional access, DLP, external
+  sharing control, data residency) + frameworks **NIST CSF 2.0, CIS v8, HIPAA**.
 - Evidence providers: **Arkive core** (encryption, immutability, backup coverage,
   recovery, access control, MFA/passkeys, audit logging, monitoring, retention,
   legal hold, classification/minimization from rules, inventory, incident response)
   and the **Microsoft 365 driver** (managed-source coverage/health).
+- **Reusable posture signals** (`compliance.signals` + `register_refresher` +
+  generic `integration_signals` provider): integrations record live posture that the
+  engine surfaces without framework changes. **M365 posture collector**
+  (`microsoft365/posture.py`) evidences MFA registration, conditional access,
+  external sharing and data residency from Graph; DLP is tracked as manual
+  attestation. Missing Graph permissions degrade to an actionable `unknown` signal.
 - Engine: best-status-per-capability → control state + score; manual overrides;
   time-boxed audited exceptions; evidence trail; **posture snapshots** (trend) and a
   **change ledger** (what drove each change).
@@ -23,7 +30,7 @@
 |---|---|
 | More frameworks | ISO 27001, SOC 2, GDPR, PCI DSS, CMMC — registry entries + control→capability maps. |
 | Scheduled auto-evaluation | A worker that re-evaluates + snapshots on a cadence (currently on-demand + on enable), so the trend fills without manual re-assess. |
-| Richer M365 evidence | Map real M365 detections to capabilities: MFA/conditional-access posture, DLP hits, external sharing/exposure, guest access, mailbox audit, retention/hold labels, residency. |
+| Deeper M365 evidence | Beyond the delivered MFA/CA/sharing/residency signals: DLP policy hits (when a Graph surface lands), guest access, mailbox audit, retention/hold labels. |
 | More integration drivers | Ubiquiti (network segmentation/logging), desktop agent (endpoint encryption/backup), appliance (offline/immutable copy) as compliance drivers. |
 | Evidence export | Downloadable auditor report (PDF/CSV) per framework: controls, states, evidence, exceptions, history. |
 | Control → source scoping | Per-control applicability + scoping (e.g. HIPAA only over vaults tagged ePHI). |

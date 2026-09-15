@@ -454,7 +454,15 @@ legal hold, data classification, data minimization, inventory, incident response
   retention schedules, and data classification/minimization from your governance rules.
 - **Integrations** — each integration is a **compliance driver**. Microsoft 365, for
   example, reports how many managed workloads are protected, how much is captured,
-  and any sources needing re‑consent — folding straight into your score.
+  and any sources needing re‑consent — folding straight into your score. It also
+  reports live **security posture** from Microsoft Graph: multi‑factor
+  authentication coverage, conditional‑access policies, external‑sharing settings
+  and data residency. These read‑only checks are best‑effort — if the Microsoft 365
+  app hasn't been granted a permission (for example `Policy.Read.All` for
+  conditional access, `Reports.Read.All` for MFA, `SharePointTenantSettings.Read.All`
+  for external sharing, or `Organization.Read.All` for residency) the related control
+  simply shows as *needs attention* and names the permission to grant, rather than
+  failing. DLP has no automatic check yet, so it's tracked for manual attestation.
 
 The engine rolls capability evidence up into each control's **state** and a
 per‑framework **score**, and stores a **snapshot every assessment** so you can see

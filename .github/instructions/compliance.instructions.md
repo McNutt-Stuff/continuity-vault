@@ -49,6 +49,31 @@ Rules: derive evidence from the tenant's OWN live state (managed sources, detect
 config); NEVER return secrets or payloads in `detail`; one bad provider must not break the
 engine (the engine isolates each). Microsoft 365 is the reference driver.
 
+## Posture SIGNALS — the reusable way integrations contribute live posture
+A provider computes evidence synchronously at evaluation time; that's fine for state Arkive
+already holds. For posture that must be **fetched from the integration** (MFA coverage,
+conditional access, DLP, external sharing, data residency, threat detections…), use the
+**signal** pipeline so it's collected once, cached, and surfaced generically:
+```python
+from ...compliance.providers import register_refresher
+from ...compliance import signals
+def _refresh(db, tenant):                      # registered per integration
+    for inst in <tenant's instances>:
+        # throttle: skip if signals.latest_at(db, tenant.id, "<pkg>") is recent
+        signals.record(db, tenant.id, "<pkg>", "mfa", status="met|partial|unmet|unknown",
+                       summary="…", detail={...})  # never secrets
+register_refresher("<pkg>", _refresh)
+```
+`engine.evaluate` runs `providers.refresh_all` first, then the built-in `integration_signals`
+provider turns every `ComplianceSignal` into `CapabilityEvidence` — no framework code changes.
+Fetches must be **best-effort**: on a missing permission (403), record an `unknown` signal whose
+summary names the scope to grant, so the control stays *assessable* and degrades gracefully.
+Microsoft 365 (`integrations/microsoft365/posture.py`) is the reference collector; its Graph
+posture needs `Reports.Read.All`/`AuditLog.Read.All` (MFA), `Policy.Read.All` (conditional
+access), `SharePointTenantSettings.Read.All` (external sharing), `Organization.Read.All`
+(residency). DLP has no stable app-only Graph surface yet, so it's tracked as `unknown`
+(manual attestation) rather than silently 0.
+
 ## STANDARD — capture compliance on EVERY enhancement
 When you add or change a capability, integration, or detection, ask: **does this produce a
 signal that could evidence a compliance capability?** If yes:
