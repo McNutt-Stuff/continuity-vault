@@ -842,7 +842,9 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         audit.record(db, actor=principal.user_id, action="search.cross_member",
                      tenant_id=tenant.id, category="admin", severity="warning",
                      detail={"scope": _eff_scope, "q": (q or "")[:200],
-                             "reason": (reason or "")[:300]})
+                             "reason": (reason or "")[:300],
+                             "target_user_id": (_eff_scope.split(":", 1)[1]
+                                                if _eff_scope.startswith("user:") else None)})
     # Fast path: for everything except label/attribute filters, faceting and
     # pagination run in the DB against one current row per object (is_current),
     # instead of hauling the whole index into Python. Those two filters need the
