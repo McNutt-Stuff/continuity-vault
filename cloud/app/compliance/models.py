@@ -117,3 +117,26 @@ class ComplianceEvent(Base):
     summary = Column(String, default="")
     detail = Column(JSON, default=dict)
     created_at = Column(DateTime, default=_now, index=True)
+
+
+class ComplianceSignal(Base):
+    """A durable, integration/source-recorded posture SIGNAL that maps to a
+    capability (e.g. Microsoft 365 MFA/conditional-access/DLP/external-sharing/
+    residency). ANY integration or source records signals via ``compliance.signals``;
+    the engine's ``_integration_signals`` provider surfaces them as evidence, so a
+    new integration contributes to compliance without touching the framework math.
+
+    Keyed by (tenant, provider, capability, scope) — one live signal per slot,
+    upserted on each refresh."""
+
+    __tablename__ = "compliance_signals"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    provider = Column(String, default="", index=True)   # microsoft365|ubiquiti|desktop|…
+    capability = Column(String, default="", index=True)  # -> registry.CAPABILITIES key
+    scope = Column(String, default="")                   # optional sub-scope (e.g. a workload/site)
+    status = Column(String, default="unknown")           # met|partial|unmet|not_applicable|unknown
+    summary = Column(String, default="")
+    detail = Column(JSON, default=dict)                  # non-secret signal detail
+    observed_at = Column(DateTime, default=_now, index=True)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)

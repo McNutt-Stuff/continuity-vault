@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from . import registry
 from . import models as m
-from .providers import collect_evidence
+from .providers import collect_evidence, refresh_all
 
 
 def _now() -> datetime:
@@ -129,6 +129,7 @@ def _derive(caps: list[str], by_cap: dict) -> tuple[str, int, list]:
 def evaluate(db: Session, tenant, actor: str = "", only_framework: str = "") -> dict:
     """Re-assess every enabled pack from live evidence; write evidence, events + a
     posture snapshot per framework. Returns a short report."""
+    refresh_all(db, tenant)  # let integrations collect fresh posture signals first
     by_cap = collect_evidence(db, tenant)
     packs = (db.query(m.CompliancePack)
              .filter(m.CompliancePack.tenant_id == tenant.id,

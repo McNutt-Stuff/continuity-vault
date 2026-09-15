@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from ...compliance.providers import CapabilityEvidence, register_provider
+from ...compliance.providers import CapabilityEvidence, register_provider, register_refresher
 from . import models as m
 
 
@@ -69,3 +69,13 @@ def _m365_evidence(db: Session, tenant, scope: dict) -> list[CapabilityEvidence]
 
 
 register_provider("microsoft365", _m365_evidence)
+
+
+def _refresh(db: Session, tenant) -> None:
+    """Collect live M365 Graph posture (MFA/conditional access/DLP/sharing/residency)
+    into compliance signals before evaluation."""
+    from . import posture
+    posture.refresh_for_tenant(db, tenant)
+
+
+register_refresher("microsoft365", _refresh)

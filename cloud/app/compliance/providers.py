@@ -36,11 +36,30 @@ class CapabilityEvidence:
 
 # provider name -> callable(db, tenant, scope) -> list[CapabilityEvidence]
 _PROVIDERS: dict[str, Callable] = {}
+# refresher name -> callable(db, tenant) that COLLECTS posture into ComplianceSignal
+# rows (e.g. an integration fetching MFA/DLP/sharing/residency). Run before evidence
+# collection so the generic signals provider surfaces fresh values.
+_REFRESHERS: dict[str, Callable] = {}
 
 
 def register_provider(name: str, fn: Callable) -> None:
     """Register an evidence provider (idempotent). Integrations call this at import."""
     _PROVIDERS[name] = fn
+
+
+def register_refresher(name: str, fn: Callable) -> None:
+    """Register a posture refresher: collects live signals into ComplianceSignal.
+    Integrations register one to contribute MFA/DLP/sharing/residency/etc."""
+    _REFRESHERS[name] = fn
+
+
+def refresh_all(db: Session, tenant) -> None:
+    """Run every registered refresher (best-effort) so signals are current."""
+    for name, fn in _REFRESHERS.items():
+        try:
+            fn(db, tenant)
+        except Exception:  # noqa: BLE001 — a refresher must never break evaluation
+            logger.exception("compliance refresher %s failed (tenant=%s)", name, getattr(tenant, "id", "?"))
 
 
 def providers() -> dict[str, Callable]:
@@ -172,6 +191,22 @@ def tenant_admin_id(db: Session, tid: str):
 
 
 register_provider("arkive", _arkive_core)
+
+
+def _integration_signals(db: Session, tenant, scope: dict) -> list[CapabilityEvidence]:
+    """Surface every posture signal integrations/sources have recorded (MFA,
+    conditional access, DLP, external sharing, residency, …) as capability evidence.
+    This is how ANY integration contributes without editing framework math."""
+    from . import signals
+    out: list[CapabilityEvidence] = []
+    for s in signals.for_tenant(db, tenant.id):
+        out.append(CapabilityEvidence(capability=s.capability, status=s.status,
+                                      summary=s.summary, provider=s.provider,
+                                      detail=s.detail or {}))
+    return out
+
+
+register_provider("integration_signals", _integration_signals)
 
 
 def collect_evidence(db: Session, tenant, scope: dict | None = None) -> dict[str, list[CapabilityEvidence]]:

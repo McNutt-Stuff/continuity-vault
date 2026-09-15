@@ -121,6 +121,17 @@ def get_paged(token: str, path: str, params: dict | None = None, cap: int = 2000
             url = j.get("@odata.nextLink")
 
 
+def get_one(token: str, path: str, params: dict | None = None) -> dict:
+    """GET a single Graph resource (not a collection). Raises GraphError on non-200."""
+    import httpx
+    url = path if path.startswith("http") else GRAPH_BASE + path
+    with httpx.Client(timeout=60) as c:
+        r = c.get(url, params=params, headers={"Authorization": f"Bearer {token}"})
+        if r.status_code != 200:
+            raise _error(r)
+        return r.json()
+
+
 def list_sites(token: str, cap: int = 500):
     """Organization SharePoint sites the app can see (Sites.Read.All, app-only)."""
     return get_paged(token, "/sites", params={"search": "*", "$top": "100"}, cap=cap)
