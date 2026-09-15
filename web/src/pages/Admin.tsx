@@ -159,6 +159,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: "integrations", label: "Integrations", icon: "puzzle", group: "Configurations" },
   { key: "service-objects", label: "Service objects", icon: "mail", group: "Configurations" },
   { key: "pricing", label: "Pricing", icon: "database", group: "Configurations" },
+  { key: "addons", label: "Add-ons", icon: "puzzle", group: "Configurations" },
   { key: "website", label: "Website", icon: "grid", group: "Configurations" },
   { key: "nodes", label: "Nodes", icon: "server", group: "Infrastructure" },
   { key: "topology", label: "Topology", icon: "grid", group: "Infrastructure" },
@@ -198,6 +199,7 @@ export default function Admin() {
       {s === "service-objects" && <><ServiceObjectsAdmin /><EmailAdmin /></>}
       {s === "fleet" && <Fleet />}
       {s === "pricing" && <Pricing />}
+      {s === "addons" && <AddonsAdmin />}
       {s === "website" && <WebsiteCMS />}
       {s === "crypto" && <Crypto />}
       {s === "audit" && <Audit />}
@@ -6463,6 +6465,108 @@ function ServiceTable({ title, rows, onEdit, onDelete, onTest, testable }: {
 }
 
 interface CloudIndexReplica { status: string; object_count: number; last_replicated_at: string | null; error: string }
+interface Addon {
+  code: string; name: string; description: string; status: string; version: number;
+  pricing_model: string; price_cents: number; currency: string; billing_interval: string;
+  eligible_plans: string[]; entitlements: Record<string, unknown>; feature_flags: string[];
+  meter_key: string; min_qty: number; max_qty: number | null;
+  self_service: boolean; requires_approval: boolean; customer_visible: boolean;
+}
+
+const ADDON_MODELS = ["flat", "per_user", "per_member", "per_tb", "per_cloud_tb", "per_appliance", "metered", "tiered", "included"];
+
+// Add-on Management — the internal catalog/source of truth for optional capabilities.
+function AddonsAdmin() {
+  const [rows, setRows] = useState<Addon[] | null>(null);
+  const [edit, setEdit] = useState<Partial<Addon> | null>(null);
+  const [toast, setToast] = useState("");
+  const flash = (m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); };
+  async function load() { try { const r = await api.get<{ addons: Addon[] }>("/admin/addons?include_retired=true"); setRows(r.addons || []); } catch { setRows([]); } }
+  useEffect(() => { void load(); }, []);
+  async function save() {
+    if (!edit) return;
+    const body: Record<string, unknown> = {
+      code: (edit.code || "").trim().toLowerCase(), name: edit.name, description: edit.description,
+      status: edit.status, pricing_model: edit.pricing_model, price_cents: edit.price_cents,
+      billing_interval: edit.billing_interval, eligible_plans: edit.eligible_plans,
+      entitlements: edit.entitlements, feature_flags: edit.feature_flags,
+      customer_visible: edit.customer_visible, self_service: edit.self_service,
+      min_qty: edit.min_qty,
+    };
+    try { await api.post("/admin/addons", body); setEdit(null); await load(); flash("Add-on saved"); }
+    catch (e) { flash((e as { message?: string }).message || "Couldn't save"); }
+  }
+  if (!rows) return <Card><div className="muted">Loading add-ons…</div></Card>;
+  return (
+    <>
+      <div className="spread" style={{ marginBottom: 16, alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ margin: "0 0 2px" }}>Add-ons</h2>
+          <div className="muted" style={{ fontSize: 12.5, maxWidth: 640 }}>The catalog of purchasable capabilities. Each add-on grants entitlements/feature flags and is priced in minor units (cents). Codes are immutable.</div>
+        </div>
+        <button className="btn primary sm" onClick={() => setEdit({ pricing_model: "flat", billing_interval: "month", status: "active", price_cents: 0, min_qty: 1, customer_visible: true, self_service: true, eligible_plans: [], feature_flags: [], entitlements: {} })}><Icon name="plus" size={13} /> New add-on</button>
+      </div>
+
+      {edit && (
+        <Card style={{ marginBottom: 16 }}>
+          <h3 style={{ marginTop: 0 }}>{edit.code && rows.find((r) => r.code === edit.code) ? `Edit ${edit.code}` : "New add-on"}</h3>
+          <div className="grid grid-2" style={{ gap: 10 }}>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Code (immutable)</span>
+              <input className="input sm" value={edit.code || ""} disabled={!!rows.find((r) => r.code === edit.code)} onChange={(e) => setEdit({ ...edit, code: e.target.value })} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Name</span>
+              <input className="input sm" value={edit.name || ""} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Pricing model</span>
+              <select className="input sm" value={edit.pricing_model} onChange={(e) => setEdit({ ...edit, pricing_model: e.target.value })}>{ADDON_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Unit price (USD)</span>
+              <input className="input sm" type="number" step="0.01" value={((edit.price_cents || 0) / 100).toString()} onChange={(e) => setEdit({ ...edit, price_cents: Math.round(parseFloat(e.target.value || "0") * 100) })} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Billing interval</span>
+              <select className="input sm" value={edit.billing_interval} onChange={(e) => setEdit({ ...edit, billing_interval: e.target.value })}>{["month", "quarter", "year"].map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Status</span>
+              <select className="input sm" value={edit.status} onChange={(e) => setEdit({ ...edit, status: e.target.value })}>{["draft", "active", "grandfathered", "retired"].map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Eligible plans (comma; empty = all)</span>
+              <input className="input sm" value={(edit.eligible_plans || []).join(",")} onChange={(e) => setEdit({ ...edit, eligible_plans: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Feature flags (comma)</span>
+              <input className="input sm" value={(edit.feature_flags || []).join(",")} onChange={(e) => setEdit({ ...edit, feature_flags: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} /></label>
+          </div>
+          <label className="stack" style={{ gap: 3, marginTop: 10 }}><span className="faint" style={{ fontSize: 11.5 }}>Entitlements granted (JSON, per unit)</span>
+            <textarea className="input" rows={2} style={{ fontFamily: "var(--mono, monospace)", fontSize: 12 }} defaultValue={JSON.stringify(edit.entitlements || {})} onBlur={(e) => { try { setEdit({ ...edit, entitlements: JSON.parse(e.target.value || "{}") }); } catch { flash("Invalid entitlements JSON"); } }} /></label>
+          <label className="stack" style={{ gap: 3, marginTop: 8 }}><span className="faint" style={{ fontSize: 11.5 }}>Description</span>
+            <textarea className="input" rows={2} value={edit.description || ""} onChange={(e) => setEdit({ ...edit, description: e.target.value })} /></label>
+          <div className="row" style={{ gap: 14, marginTop: 10 }}>
+            <label className="row" style={{ gap: 6, fontSize: 12.5 }}><input type="checkbox" checked={!!edit.customer_visible} onChange={(e) => setEdit({ ...edit, customer_visible: e.target.checked })} /> Customer-visible</label>
+            <label className="row" style={{ gap: 6, fontSize: 12.5 }}><input type="checkbox" checked={!!edit.self_service} onChange={(e) => setEdit({ ...edit, self_service: e.target.checked })} /> Self-service</label>
+          </div>
+          <div className="row" style={{ gap: 8, marginTop: 12 }}>
+            <button className="btn primary sm" onClick={save}><Icon name="check" size={13} /> Save add-on</button>
+            <button className="btn ghost sm" onClick={() => setEdit(null)}>Cancel</button>
+          </div>
+        </Card>
+      )}
+
+      <Card>
+        <table className="table">
+          <thead><tr><th>Code</th><th>Name</th><th>Model</th><th>Price</th><th>Plans</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {rows.map((a) => (
+              <tr key={a.code}>
+                <td className="mono" style={{ fontSize: 12 }}>{a.code}</td>
+                <td style={{ fontWeight: 600 }}>{a.name}</td>
+                <td className="faint">{a.pricing_model}</td>
+                <td>${(a.price_cents / 100).toFixed(2)}/{a.billing_interval}</td>
+                <td className="faint" style={{ fontSize: 11.5 }}>{(a.eligible_plans || []).join(", ") || "all"}</td>
+                <td><Pill tone={a.status === "active" ? "ok" : a.status === "retired" ? "danger" : "warn"}>{a.status}</Pill></td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}><button className="btn ghost sm" onClick={() => setEdit({ ...a })}>Edit</button></td>
+              </tr>
+            ))}
+            {rows.length === 0 && <tr><td colSpan={7} className="muted">No add-ons yet — create one.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
+    </>
+  );
+}
+
 interface StorageUsage {
   cloud_total: { bytes: number; objects: number; recovery_points: number; tenants: number };
   by_tenant: { tenant_id: string; customer_id?: string; scope?: string; tenant_name: string; plan: string; licensed_bytes: number; bytes: number; objects: number; recovery_points: number; index_replica?: CloudIndexReplica | null }[];

@@ -101,15 +101,37 @@ def derive(db: Session, tenant, user=None) -> dict[str, Entitlement]:
         grants["protected_data_tb"] = max(int(grants.get("protected_data_tb", 0) or 0),
                                           max(1, round(lb / _TB)))
 
+    # Add-ons the tenant has purchased add to the plan grants (quantity entitlements
+    # increment; boolean entitlements enable). Applied BEFORE overrides.
+    try:
+        from . import addons
+        qty_inc, add_bools, _flags = addons.grants_for_tenant(db, tenant.id)
+        for k, inc in qty_inc.items():
+            grants[k] = int(grants.get(k, 0) or 0) + int(inc)
+        for k, on in add_bools.items():
+            if on:
+                grants[k] = True
+    except Exception:  # noqa: BLE001 — add-ons optional; plan grants still apply
+        pass
+
     overrides = _active_overrides(db, tenant.id)
+    tflags = (getattr(tenant, "feature_flags", None) or {})
+    shared = ((getattr(tenant, "tenant_type", "") or "dedicated") == "shared")
     out: dict[str, Entitlement] = {}
     for key, spec in registry.ENTITLEMENTS.items():
         etype = spec["type"]
         source = "plan"
         if etype == "bool" and spec.get("feature"):
-            # Feature-flag-backed rights honor the admin flag (e.g. a legal hold OFF).
-            value: object = features.resolve(user, tenant, spec["feature"])
-            source = "flag"
+            feat = spec["feature"]
+            if (not shared) and tflags.get(feat) is False:
+                # Explicit tenant disable (e.g. legal hold) wins over any grant.
+                value: object = False
+                source = "flag"
+            else:
+                flag_on = features.resolve(user, tenant, feat)
+                grant_on = bool(grants.get(key))
+                value = flag_on or grant_on
+                source = "flag" if flag_on else ("plan" if grant_on else "flag")
         else:
             value = grants.get(key)
         if value is None:

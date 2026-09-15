@@ -242,6 +242,158 @@ def clear_tenant_entitlement_override(tid: str, key: str,
     return {**entitlements.view(db, t, _tenant_owner(db, tid)), "plan": t.plan}
 
 
+# --- Add-on catalog (Add-on Management) + per-tenant assignment --------------
+
+_ADDON_PRICING_MODELS = {"flat", "per_user", "per_member", "per_tb", "per_cloud_tb",
+                         "per_appliance", "metered", "tiered", "included"}
+
+
+@router.get("/addons")
+def list_addons(include_retired: bool = False, db: Session = Depends(get_db)):
+    """The add-on catalog (internal source of truth)."""
+    from ..entitlements import addons
+    return {"addons": [addons.public_view(a) for a in addons.catalog(db, include_retired)]}
+
+
+class AddOnBody(BaseModel):
+    code: str
+    name: str | None = None
+    description: str | None = None
+    status: str | None = None
+    pricing_model: str | None = None
+    price_cents: int | None = None
+    currency: str | None = None
+    billing_interval: str | None = None
+    eligible_plans: list[str] | None = None
+    entitlements: dict | None = None
+    feature_flags: list[str] | None = None
+    meter_key: str | None = None
+    min_qty: int | None = None
+    max_qty: int | None = None
+    self_service: bool | None = None
+    requires_approval: bool | None = None
+    customer_visible: bool | None = None
+    provider_mappings: dict | None = None
+
+
+@router.post("/addons")
+def upsert_addon(body: AddOnBody,
+                 principal: security.Principal = Depends(security.require_platform_admin),
+                 db: Session = Depends(get_db)):
+    """Create or update an add-on (by immutable code). Bumps the version on change."""
+    from ..entitlements.models import AddOn
+    from ..entitlements import addons as _addons, registry as ent_registry
+    code = (body.code or "").strip().lower()
+    if not code:
+        raise HTTPException(400, "an immutable add-on code is required")
+    if body.pricing_model and body.pricing_model not in _ADDON_PRICING_MODELS:
+        raise HTTPException(400, f"invalid pricing_model (one of {sorted(_ADDON_PRICING_MODELS)})")
+    if body.price_cents is not None and body.price_cents < 0:
+        raise HTTPException(400, "price_cents cannot be negative")
+    for k in (body.entitlements or {}):
+        if ent_registry.definition(k) is None:
+            raise HTTPException(400, f"unknown entitlement '{k}'")
+    _addons.ensure_defaults(db)
+    a = db.get(AddOn, code)
+    created = a is None
+    if a is None:
+        a = AddOn(code=code, name=body.name or code)
+        db.add(a)
+    fields = body.dict(exclude_none=True)
+    fields.pop("code", None)
+    for k, v in fields.items():
+        setattr(a, k, v)
+    if not created:
+        a.version = int(a.version or 1) + 1  # price/config change → new version
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.addon_upserted",
+                 category="admin", severity="notice",
+                 detail={"code": code, "created": created, "version": a.version})
+    return _addons.public_view(a)
+
+
+@router.get("/tenants/{tid}/addons")
+def get_tenant_addons(tid: str, db: Session = Depends(get_db)):
+    """A tenant's active add-ons + the add-ons eligible for its plan."""
+    from ..entitlements import addons
+    from ..entitlements.models import AddOn
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    by_code = {a.code: a for a in db.query(AddOn).all()}
+    active = [{"id": ta.id, "code": ta.addon_code,
+               "name": (by_code.get(ta.addon_code).name if by_code.get(ta.addon_code) else ta.addon_code),
+               "quantity": ta.quantity, "price_cents": ta.price_cents_snapshot,
+               "version": ta.addon_version,
+               "since": ta.effective_at.isoformat() if ta.effective_at else None}
+              for ta in addons.active_for_tenant(db, tid)]
+    eligible = [addons.public_view(a) for a in addons.eligible_for_plan(db, t.plan)]
+    return {"plan": t.plan, "active": active, "eligible": eligible}
+
+
+class TenantAddOnBody(BaseModel):
+    code: str
+    quantity: int = 1
+
+
+@router.post("/tenants/{tid}/addons")
+def assign_tenant_addon(tid: str, body: TenantAddOnBody,
+                        principal: security.Principal = Depends(security.require_platform_admin),
+                        db: Session = Depends(get_db)):
+    """Assign (or update the quantity of) an add-on for a tenant. Pins the current
+    price + version for reproducible invoicing."""
+    from ..entitlements.models import AddOn, TenantAddOn
+    from ..entitlements import addons as _addons
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    a = db.get(AddOn, (body.code or "").strip().lower())
+    if a is None or a.status == "retired":
+        raise HTTPException(404, "add-on not found")
+    qty = max(int(a.min_qty or 1), int(body.quantity or 1))
+    if a.max_qty is not None and qty > a.max_qty:
+        raise HTTPException(400, f"maximum quantity is {a.max_qty}")
+    existing = (db.query(TenantAddOn)
+                .filter(TenantAddOn.tenant_id == tid, TenantAddOn.addon_code == a.code,
+                        TenantAddOn.status == "active").first())
+    if existing:
+        existing.quantity = qty
+        existing.price_cents_snapshot = a.price_cents
+        existing.addon_version = a.version
+    else:
+        db.add(TenantAddOn(tenant_id=tid, addon_code=a.code, quantity=qty, status="active",
+                           price_cents_snapshot=a.price_cents, addon_version=a.version,
+                           created_by=principal.user_id))
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="admin.tenant_addon_assigned",
+                 tenant_id=tid, category="admin", severity="notice",
+                 detail={"code": a.code, "quantity": qty})
+    return get_tenant_addons(tid, db)
+
+
+@router.delete("/tenants/{tid}/addons/{code}")
+def cancel_tenant_addon(tid: str, code: str,
+                        principal: security.Principal = Depends(security.require_platform_admin),
+                        db: Session = Depends(get_db)):
+    from ..entitlements.models import TenantAddOn
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    n = 0
+    for ta in (db.query(TenantAddOn)
+               .filter(TenantAddOn.tenant_id == tid,
+                       TenantAddOn.addon_code == code.lower(),
+                       TenantAddOn.status == "active").all()):
+        ta.status = "canceled"
+        ta.ends_at = _now()
+        n += 1
+    db.commit()
+    if n:
+        audit.record(db, actor=principal.user_id, action="admin.tenant_addon_canceled",
+                     tenant_id=tid, category="admin", severity="notice", detail={"code": code})
+    return get_tenant_addons(tid, db)
+
+
 # --- Email: configuration, test, and broadcast ------------------------------
 
 def _email_config(db: Session):

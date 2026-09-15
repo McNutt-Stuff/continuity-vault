@@ -50,8 +50,15 @@ plan names are never hard-coded at call-sites.
    add-ons/appliance/usage), each price-version-referenced; adapter over `BillingProfile`.
 5. **Billing calc service** — deterministic, minor-units, included-vs-billable split,
    preview API; reproducible line items referencing exact price versions.
-6. **Add-on management** — `AddOn`/`AddOnVersion`, eligibility, pricing models
-   (flat/per-user/per-TB/tiered/metered), entitlement + flag mappings.
+6. **Add-on management** — **DONE (Phase 3, this change).** `AddOn` (immutable
+   code, `pricing_model`, minor-unit `price_cents`, `eligible_plans`, `entitlements`
+   map, `feature_flags`, provider mappings) + `TenantAddOn` (per-tenant assignment;
+   pins price + version for reproducible invoicing). Seeded real defaults (M365
+   per-user, Arkive Cloud Plus per-cloud-TB, Compliance flat, extra users/members).
+   `engine.derive` folds active add-on grants into entitlements (quantity increments;
+   booleans enable, respecting a legal-hold disable). Admin **Add-on Management**
+   section (catalog CRUD) + per-tenant assign/cancel API; customer `GET /billing/
+   addons` (eligible + active, priced from the catalog). Integer minor-units money.
 7. **Usage metering** — `UsageMeter`/`UsageRecord` with idempotency keys; protected
    TB / cloud / seats; feeds the calc.
 8. **Admin experience** — Plan Management, Add-on Management, per-org subscription +

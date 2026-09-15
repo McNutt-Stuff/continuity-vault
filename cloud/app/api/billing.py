@@ -455,6 +455,24 @@ def get_entitlements(principal: security.Principal = Depends(security.get_princi
     return {**entitlements.view(db, tenant, user), "plan": tenant.plan}
 
 
+@router.get("/addons")
+def get_addons(principal: security.Principal = Depends(security.get_principal),
+               tenant: Tenant = Depends(security.get_tenant),
+               db: Session = Depends(get_db)):
+    """Add-ons compatible with the tenant's plan (customer-visible only) + the ones
+    currently active. Pricing comes from the catalog — never the frontend."""
+    from ..entitlements import addons
+    from ..entitlements.models import AddOn
+    by_code = {a.code: a for a in db.query(AddOn).all()}
+    active = [{"code": ta.addon_code, "quantity": ta.quantity,
+               "name": (by_code.get(ta.addon_code).name if by_code.get(ta.addon_code) else ta.addon_code),
+               "price_cents": ta.price_cents_snapshot}
+              for ta in addons.active_for_tenant(db, tenant.id)]
+    eligible = [addons.public_view(a) for a in addons.eligible_for_plan(db, tenant.plan)
+                if a.customer_visible]
+    return {"plan": tenant.plan, "active": active, "available": eligible}
+
+
 class PlanUpdate(BaseModel):
     options: list[str] | None = None
     licensed_tb: float | None = None

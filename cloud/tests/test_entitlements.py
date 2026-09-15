@@ -38,3 +38,18 @@ def test_coerce():
     assert _coerce("quantity", "12") == 12
     assert _coerce("capacity", "5.9") == 5      # truncates to int TB
     assert _coerce("quantity", "junk") == 0
+
+
+def test_default_addons_reference_valid_entitlements():
+    from cloud.app.entitlements.addons import _DEFAULT_ADDONS
+    _MODELS = {"flat", "per_user", "per_member", "per_tb", "per_cloud_tb",
+               "per_appliance", "metered", "tiered", "included"}
+    codes = set()
+    for a in _DEFAULT_ADDONS:
+        assert a["code"] not in codes, f"duplicate add-on code {a['code']}"
+        codes.add(a["code"])
+        assert a["pricing_model"] in _MODELS, a["code"]
+        assert int(a["price_cents"]) >= 0
+        for key in (a.get("entitlements") or {}):
+            assert registry.definition(key) is not None, f"{a['code']} grants unknown {key}"
+

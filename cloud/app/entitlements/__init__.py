@@ -7,6 +7,7 @@ from __future__ import annotations
 from . import models  # noqa: F401  register tables for create_all
 from . import registry  # noqa: F401
 from . import engine  # noqa: F401
+from . import addons  # noqa: F401
 
 # Re-export the service API so callers do `from ..entitlements import has_entitlement`.
 from .engine import (  # noqa: E402,F401
