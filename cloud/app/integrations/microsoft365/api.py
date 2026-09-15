@@ -1003,6 +1003,155 @@ def compliance_rules(instance_id: str = "",
     }
 
 
+# --------------------------------------------------------------------------- #
+# Compliance packs (roadmap phase P5) — framework posture + evidence          #
+# --------------------------------------------------------------------------- #
+@router.get("/compliance/packs")
+def compliance_packs(instance_id: str = "",
+                     principal: security.Principal = Depends(require_m365),
+                     db: Session = Depends(get_db)):
+    """Available framework packs with enabled state + live posture summary."""
+    from . import compliance
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    return compliance.available(db, inst)
+
+
+class PackToggle(BaseModel):
+    enabled: bool
+
+
+@router.post("/compliance/packs/{framework}")
+def compliance_set_pack(framework: str, body: PackToggle, instance_id: str = "",
+                        principal: security.Principal = Depends(require_m365),
+                        db: Session = Depends(get_db)):
+    """Enable/disable a framework pack (seeds + auto-assesses controls on enable)."""
+    from . import compliance
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    try:
+        compliance.set_pack(db, inst, framework, body.enabled)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    audit.record(db, actor=principal.user_id, action="m365.compliance.pack",
+                 category="admin", resource=inst.id,
+                 detail={"framework": framework, "enabled": body.enabled})
+    return compliance.available(db, inst)
+
+
+@router.post("/compliance/reassess")
+def compliance_reassess(instance_id: str = "",
+                        principal: security.Principal = Depends(require_m365),
+                        db: Session = Depends(get_db)):
+    """Re-evaluate auto-assessed controls against current platform evidence."""
+    from . import compliance
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    n = compliance.reassess(db, inst)
+    return {"reassessed": n, **compliance.report(db, inst)}
+
+
+@router.get("/compliance/controls")
+def compliance_controls(pack_id: str, instance_id: str = "",
+                        principal: security.Principal = Depends(require_m365),
+                        db: Session = Depends(get_db)):
+    """Controls (with state + exception) for one enabled pack."""
+    from . import compliance
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    return {"controls": compliance.controls_view(db, inst, pack_id)}
+
+
+class ControlUpdate(BaseModel):
+    state: str | None = None
+    owner: str | None = None
+
+
+@router.patch("/compliance/controls/{control_id}")
+def compliance_update_control(control_id: str, body: ControlUpdate, instance_id: str = "",
+                              principal: security.Principal = Depends(require_m365),
+                              db: Session = Depends(get_db)):
+    """Override a control's posture state / owner (marks it a manual assessment)."""
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    c = db.get(m.ComplianceControl, control_id)
+    if c is None or c.tenant_id != inst.tenant_id:
+        raise HTTPException(404, "control not found")
+    if body.state:
+        c.state = body.state
+    if body.owner is not None:
+        c.owner = body.owner
+    meta = dict(c.meta or {})
+    meta["auto"] = False  # a manual assessment is no longer auto-reassessed
+    c.meta = meta
+    from datetime import datetime, timezone
+    c.last_evaluated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="m365.compliance.control",
+                 category="admin", resource=control_id,
+                 detail={"state": c.state, "control": c.control_id})
+    return {"ok": True, "state": c.state, "owner": c.owner}
+
+
+class ExceptionBody(BaseModel):
+    reason: str
+    expires_at: str | None = None
+
+
+@router.post("/compliance/controls/{control_id}/exception")
+def compliance_add_exception(control_id: str, body: ExceptionBody, instance_id: str = "",
+                             principal: security.Principal = Depends(require_m365),
+                             db: Session = Depends(get_db)):
+    """Record a time-boxed exception for a control (sets its state to exception)."""
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    c = db.get(m.ComplianceControl, control_id)
+    if c is None or c.tenant_id != inst.tenant_id:
+        raise HTTPException(404, "control not found")
+    if not (body.reason or "").strip():
+        raise HTTPException(400, "a reason is required")
+    from datetime import datetime, timezone
+    exp = None
+    if body.expires_at:
+        try:
+            exp = datetime.fromisoformat(body.expires_at.replace("Z", "+00:00"))
+            exp = exp.replace(tzinfo=None) if exp.tzinfo else exp
+        except ValueError:
+            raise HTTPException(400, "invalid expires_at")
+    # One exception per control — replace any prior.
+    for e in db.query(m.ComplianceException).filter(
+            m.ComplianceException.control_id == control_id).all():
+        db.delete(e)
+    db.add(m.ComplianceException(tenant_id=inst.tenant_id, control_id=control_id,
+                                 reason=body.reason.strip(),
+                                 approved_by=principal.user_id, expires_at=exp))
+    c.state = "exception"
+    meta = dict(c.meta or {}); meta["auto"] = False; c.meta = meta
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="m365.compliance.exception",
+                 category="admin", severity="warning", resource=control_id,
+                 detail={"control": c.control_id, "reason": body.reason.strip()[:200]})
+    return {"ok": True}
+
+
+@router.get("/compliance/report")
+def compliance_report(instance_id: str = "",
+                      principal: security.Principal = Depends(require_m365),
+                      db: Session = Depends(get_db)):
+    """Overall compliance posture across every enabled framework pack."""
+    from . import compliance
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(409, "connect first")
+    return compliance.report(db, inst)
+
+
 class CollectionToggle(BaseModel):
     enabled: bool
 
