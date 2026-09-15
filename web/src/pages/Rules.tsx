@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { Card, Pill, Loading } from "../components/ui";
 import { Icon } from "../components/Icon";
+import { SourceIcon } from "../components/SourceIcon";
 import { confirmDialog, notify } from "../components/dialog";
 
 type Condition = { field: string; op: string; value?: string };
@@ -26,6 +27,148 @@ const WORKLOAD_LABELS: Record<string, string> = {
   exchange: "Exchange Online", onedrive: "OneDrive", sharepoint: "SharePoint",
   teams: "Teams channels", teams_chat: "Teams chats",
 };
+
+type Coll = { id: string; name: string; source_type: string; managed?: boolean; workload?: string; instance_id?: string };
+
+const SOURCE_TYPE_LABEL: Record<string, string> = {
+  outlook: "Outlook / Exchange", onedrive: "OneDrive", sharepoint: "SharePoint",
+  teams: "Teams", gmail: "Gmail", exchange: "Exchange Online",
+};
+function stLabel(st: string): string {
+  return SOURCE_TYPE_LABEL[st] || st.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+// Icon type for a collection — managed sources brand by workload, others by source_type.
+function collIcon(c: Coll): string {
+  if (c.managed && c.workload) return c.workload === "teams_chat" ? "teams" : c.workload;
+  return c.source_type;
+}
+
+// Rule scope selector: pick "every source", whole source TYPES (broad, future-proof),
+// and/or specific sources via a searchable list — friendly even with many sources.
+function ScopePicker({ collections, collectionIds, sourceTypes, onChange }: {
+  collections: Coll[];
+  collectionIds: string[];
+  sourceTypes: string[];
+  onChange: (field: "collection_ids" | "source_types", value: string[]) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState(false);
+
+  // Distinct source types present, with a friendly label + count.
+  const types = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of collections) m.set(c.source_type, (m.get(c.source_type) || 0) + 1);
+    return [...m.entries()].map(([st, n]) => ({ st, n })).sort((a, b) => b.n - a.n);
+  }, [collections]);
+
+  const byId = useMemo(() => new Map(collections.map((c) => [c.id, c])), [collections]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const list = q
+      ? collections.filter((c) => c.name.toLowerCase().includes(q)
+          || stLabel(c.source_type).toLowerCase().includes(q)
+          || (c.workload && WORKLOAD_LABELS[c.workload]?.toLowerCase().includes(q)))
+      : collections;
+    return [...list].sort((a, b) => a.name.localeCompare(b.name));
+  }, [collections, query]);
+
+  const toggleType = (st: string) =>
+    onChange("source_types", sourceTypes.includes(st)
+      ? sourceTypes.filter((x) => x !== st) : [...sourceTypes, st]);
+  const toggleColl = (id: string) =>
+    onChange("collection_ids", collectionIds.includes(id)
+      ? collectionIds.filter((x) => x !== id) : [...collectionIds, id]);
+
+  const nothing = collectionIds.length === 0 && sourceTypes.length === 0;
+  // Only show the specific list when searching, expanded, or the set is small.
+  const showList = expanded || query.trim().length > 0 || collections.length <= 8;
+
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <span className="faint" style={{ fontSize: 11.5 }}>Applies to</span>
+
+      {/* Summary of the current scope, with removable chips. */}
+      <div className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+        {nothing && <Pill tone="info"><Icon name="check" size={11} /> Every source</Pill>}
+        {sourceTypes.map((st) => (
+          <button key={`t-${st}`} className="chip active" onClick={() => toggleType(st)}
+                  title="Remove — all sources of this type">
+            <SourceIcon type={st} size={12} /> All {stLabel(st)} <Icon name="x" size={10} />
+          </button>
+        ))}
+        {collectionIds.map((id) => {
+          const c = byId.get(id);
+          return (
+            <button key={`c-${id}`} className="chip active" onClick={() => toggleColl(id)} title="Remove">
+              {c ? <SourceIcon type={collIcon(c)} size={12} /> : null} {c ? c.name : id} <Icon name="x" size={10} />
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Quick: whole source types (covers current + future sources of that type). */}
+      {types.length > 0 && (
+        <div className="stack" style={{ gap: 4 }}>
+          <span className="faint" style={{ fontSize: 11 }}>By source type</span>
+          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+            {types.map(({ st, n }) => {
+              const on = sourceTypes.includes(st);
+              return (
+                <button key={st} className={`chip ${on ? "active" : ""}`} onClick={() => toggleType(st)}>
+                  <SourceIcon type={st} size={12} /> {stLabel(st)} <span className="faint">· {n}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Specific sources — searchable list, so many sources stay manageable. */}
+      <div className="stack" style={{ gap: 4 }}>
+        <div className="spread" style={{ alignItems: "center" }}>
+          <span className="faint" style={{ fontSize: 11 }}>Specific sources</span>
+          {collections.length > 8 && !showList && (
+            <button className="btn ghost sm" onClick={() => setExpanded(true)}>Choose sources…</button>
+          )}
+        </div>
+        {showList && (
+          <>
+            <input className="input sm" placeholder={`Search ${collections.length} sources…`}
+                   value={query} onChange={(e) => setQuery(e.target.value)} />
+            {collections.length === 0 ? (
+              <span className="faint" style={{ fontSize: 12 }}>No Data Map sources yet.</span>
+            ) : (
+              <div style={{ maxHeight: 200, overflowY: "auto", border: "1px solid var(--border-soft)",
+                   borderRadius: 8 }}>
+                {filtered.map((c) => {
+                  const on = collectionIds.includes(c.id);
+                  const covered = sourceTypes.includes(c.source_type);
+                  return (
+                    <label key={c.id} className="row" style={{ gap: 8, alignItems: "center", padding: "6px 10px",
+                           borderBottom: "1px solid var(--border-soft)", cursor: covered ? "default" : "pointer",
+                           opacity: covered ? 0.55 : 1 }}
+                           title={covered ? `Already covered by "All ${stLabel(c.source_type)}"` : undefined}>
+                      <input type="checkbox" checked={on || covered} disabled={covered}
+                             onChange={() => toggleColl(c.id)} />
+                      <SourceIcon type={collIcon(c)} size={15} />
+                      <span style={{ fontSize: 12.5, fontWeight: 600, flex: 1 }}>{c.name}</span>
+                      <span className="faint" style={{ fontSize: 11 }}>
+                        {c.managed ? WORKLOAD_LABELS[c.workload || ""] || c.workload : stLabel(c.source_type)}
+                      </span>
+                    </label>
+                  );
+                })}
+                {filtered.length === 0 && (
+                  <div className="faint" style={{ fontSize: 12, padding: "8px 10px" }}>No sources match “{query}”.</div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 const PLAN_RANK: Record<string, number> = { personal: 0, family: 1, business: 2 };
 
@@ -247,38 +390,9 @@ function RuleEditor({ rule, opts, planRank, onChange, onSave, onDelete, saving, 
 
       {/* Scope */}
       <div className="stack" style={{ gap: 6 }}>
-        <span className="faint" style={{ fontSize: 11.5 }}>Applies to (leave empty = every source)</span>
-        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-          {opts.collections.filter((c) => !c.managed).map((c) => {
-            const on = rule.collection_ids.includes(c.id);
-            return (
-              <button key={c.id} className={`chip ${on ? "active" : ""}`}
-                      onClick={() => onChange("collection_ids", on ? rule.collection_ids.filter((x) => x !== c.id) : [...rule.collection_ids, c.id])}>
-                {on && <Icon name="check" size={12} />} {c.name}
-              </button>
-            );
-          })}
-          {opts.collections.length === 0 && <span className="faint" style={{ fontSize: 12 }}>No Data Map sources yet.</span>}
-        </div>
-        {opts.collections.some((c) => c.managed) && (
-          <>
-            <span className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
-              <Icon name="cloud" size={11} /> Microsoft 365 (managed sources)
-            </span>
-            <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-              {opts.collections.filter((c) => c.managed).map((c) => {
-                const on = rule.collection_ids.includes(c.id);
-                return (
-                  <button key={c.id} className={`chip ${on ? "active" : ""}`}
-                          title={`${WORKLOAD_LABELS[c.workload || ""] || c.workload} · ${c.name}`}
-                          onClick={() => onChange("collection_ids", on ? rule.collection_ids.filter((x) => x !== c.id) : [...rule.collection_ids, c.id])}>
-                    {on && <Icon name="check" size={12} />} {c.name}
-                  </button>
-                );
-              })}
-            </div>
-          </>
-        )}
+        <ScopePicker collections={opts.collections} collectionIds={rule.collection_ids}
+                     sourceTypes={rule.source_types}
+                     onChange={(field, value) => onChange(field, value)} />
       </div>
 
       {/* IF */}
