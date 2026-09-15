@@ -1770,9 +1770,9 @@ function M365Overview({ workloadRollup, totalObjects, totalBytes, collectEnabled
              alignItems: "stretch" }}>
           {workloadRollup.map((w) => (
             <div key={w.workload} className="card" style={{ padding: "10px 14px", display: "flex", flexDirection: "column", minHeight: 82 }}>
-              <div className="row" style={{ gap: 6, alignItems: "center" }}>
+              <div className="row" style={{ gap: 6, alignItems: "center", minWidth: 0 }}>
                 <SourceIcon type={workloadIcon(w.workload)} size={18} />
-                <span style={{ fontSize: 12.5, fontWeight: 600 }}>{w.label}</span>
+                <span style={{ fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.label}</span>
               </div>
               <div style={{ fontSize: 22, fontWeight: 700, marginTop: 4 }}>{w.objects.toLocaleString()}</div>
               <div className="faint" style={{ fontSize: 11.5 }}>{bytes(w.bytes)} · {w.active}/{w.sources} active{w.errors ? ` · ${w.errors} need attention` : ""}</div>

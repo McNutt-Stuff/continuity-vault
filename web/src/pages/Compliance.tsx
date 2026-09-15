@@ -139,7 +139,7 @@ export default function Compliance() {
              alignItems: "stretch" }}>
           {frameworks.map((f) => (
             <div key={f.framework} className="card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column",
-                 minHeight: 156, borderColor: f.enabled ? "var(--accent,#4f7cff)" : undefined }}>
+                 minHeight: 176, borderColor: f.enabled ? "var(--accent,#4f7cff)" : undefined }}>
               <div className="spread" style={{ alignItems: "flex-start" }}>
                 <div>
                   <div style={{ fontSize: 14, fontWeight: 700 }}>{f.label}</div>
@@ -148,7 +148,8 @@ export default function Compliance() {
                 <label><input type="checkbox" checked={f.enabled} disabled={busy === f.framework}
                               onChange={(e) => toggle(f.framework, e.target.checked)} /></label>
               </div>
-              <div className="faint" style={{ fontSize: 11.5, marginTop: 6, minHeight: 32 }}>{f.description}</div>
+              <div className="faint" style={{ fontSize: 11.5, marginTop: 6, display: "-webkit-box", WebkitLineClamp: 2,
+                   WebkitBoxOrient: "vertical", overflow: "hidden", minHeight: 30 }}>{f.description}</div>
               {f.enabled && (
                 <div style={{ marginTop: 8 }}>
                   <div className="row" style={{ justifyContent: "space-between", fontSize: 12 }}>
