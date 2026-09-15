@@ -1127,6 +1127,80 @@ def stream_teams(access_token: str, cursor=None, config: Optional[dict] = None,
     state["cursor"] = {"done": emitted < _TEAMS_MSG_CHUNK}
 
 
+_COPILOT_CHUNK = 300  # Copilot interactions per collection cycle (bounded; worker loops)
+
+
+def _copilot_obj(it: dict, cap: int) -> SourceObject:
+    """Normalize one Microsoft 365 Copilot enterprise interaction (a user prompt or
+    an AI response) into a SourceObject."""
+    body = it.get("body") or {}
+    ctype = body.get("contentType") or "text"
+    html_body = body.get("content") or ""
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html_body)).strip()
+    itype = it.get("interactionType") or "interaction"   # userPrompt | aiResponse
+    contexts = it.get("contexts") or []
+    app = (it.get("appClass")
+           or (contexts[0].get("displayName") if contexts else "")
+           or "Copilot")
+    frm = it.get("from") or {}
+    sender = ((frm.get("user") or {}).get("displayName")
+              or (frm.get("application") or {}).get("displayName")
+              or ("Copilot" if itype == "aiResponse" else ""))
+    created = it.get("createdDateTime")
+    session = it.get("sessionId") or ""
+    raw = html_body.encode("utf-8", "replace") if html_body else json.dumps({"text": text}).encode()
+    content, backed = _capped(raw, cap)
+    label = "Prompt" if itype == "userPrompt" else ("Response" if itype == "aiResponse" else itype)
+    title = text[:80] or f"Copilot {label.lower()}"
+    return SourceObject(
+        object_id=f"copilot:{it.get('id')}", doc_type="message", category="message",
+        title=title, content=content,
+        preview=(f"{sender}: " if sender else "") + text[:160],
+        meta={"app": app, "from": sender, "interactionType": itype, "session": session,
+              "created": created, "contentType": ctype, "content_backed_up": backed},
+        labels=[l for l in (app, label) if l], size_bytes=len(content) or None,  # type: ignore
+        modified_at=_parse_dt(created))
+
+
+def stream_copilot(access_token: str, cursor=None, config: Optional[dict] = None,
+                   state: Optional[dict] = None, content_cap: int = _DEFAULT_CAP,
+                   resource: str = "") -> Iterable[SourceObject]:
+    """App-only Microsoft 365 Copilot enterprise interaction history for one user.
+    ``resource`` is ``"users/<id>"``. Pages the beta Graph function
+    ``/copilot/users/<id>/interactionHistory/getAllEnterpriseInteractions`` in
+    bounded chunks (~300/cycle), persisting the ``@odata.nextLink`` in the cursor so
+    the worker loops across cycles; ingest content-hash dedup skips interactions
+    already captured. Requires the ``AiEnterpriseInteraction.Read.All`` application
+    permission (admin-consented)."""
+    state = state if state is not None else {}
+    uid = resource.split("/", 1)[1] if resource.startswith("users/") else resource
+    base = "https://graph.microsoft.com/beta"
+    start = cursor.get("next") if isinstance(cursor, dict) else None
+    url: Optional[str] = start or (
+        f"{base}/copilot/users/{uid}/interactionHistory/getAllEnterpriseInteractions")
+    headers = {"Authorization": f"Bearer {access_token}"}
+    emitted = 0
+    next_url: Optional[str] = None
+    with httpx.Client(timeout=90) as c:
+        while url:
+            r = c.get(url, headers=headers)
+            if r.status_code >= 400:
+                # Soft-fail on a missing/beta endpoint; raise on auth/5xx so the source flags.
+                if _is_auth_status(r.status_code) or r.status_code >= 500:
+                    _raise_api("Copilot", r, ctx=f"interactions user={uid}")
+                return
+            b = r.json()
+            for it in b.get("value", []):
+                yield _copilot_obj(it, content_cap)
+                emitted += 1
+            next_url = b.get("@odata.nextLink")
+            url = next_url
+            if emitted >= _COPILOT_CHUNK:
+                break
+    # Resume from the next page next cycle; has_more keeps the worker looping.
+    state["cursor"] = {"next": next_url, "has_more": bool(next_url)}
+
+
 GDRIVE_API = "https://www.googleapis.com/drive/v3"
 _GDRIVE_EXPORT = {
     "application/vnd.google-apps.document":

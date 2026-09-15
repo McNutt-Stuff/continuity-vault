@@ -71,6 +71,10 @@ def _source_meta(source_type: str) -> dict:
     if source_type == "exchange":
         return {"type": "exchange", "displayName": "Exchange Online",
                 "icon": "mail", "color": "#0f6cbd"}
+    # Microsoft 365 Copilot is a managed workload with no standalone connector.
+    if source_type == "copilot":
+        return {"type": "copilot", "displayName": "Microsoft 365 Copilot",
+                "icon": "activity", "color": "#7f56d9"}
     conn = get_connector(source_type)
     if not conn:
         return {"type": source_type, "displayName": source_type,

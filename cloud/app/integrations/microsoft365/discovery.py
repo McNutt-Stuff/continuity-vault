@@ -36,7 +36,8 @@ def _friendly_graph_error(e: "graph.GraphError") -> str:
                 "→ Microsoft Graph → APPLICATION permissions, add User.Read.All (and Mail.Read, "
                 "Files.Read.All for content backup; Sites.Read.All for SharePoint; "
                 "ChannelMessage.Read.All + Chat.Read.All for Teams — under the ChannelMessage and Chat "
-                "groups), then click 'Grant admin consent'. Note: app-only reading of Teams channel/chat "
+                "groups; AiEnterpriseInteraction.Read.All for Microsoft 365 Copilot), then click "
+                "'Grant admin consent'. Note: app-only reading of Teams channel/chat "
                 "messages is a Microsoft 'protected API' — it also requires completing Microsoft's "
                 "'Request access to protected APIs' process, or Teams stays 403 even after consent. "
                 "Re-run discovery afterwards.")

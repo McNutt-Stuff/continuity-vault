@@ -35,6 +35,8 @@ _WORKLOADS = {
               "facet": ["team", "channel"], "search": ["from", "team", "channel"]},
     "teams_chat": {"source_type": "teams", "label": "Teams chats", "scope": "user",
                    "facet": ["chat"], "search": ["from", "chat"]},
+    "copilot": {"source_type": "copilot", "label": "Microsoft 365 Copilot", "scope": "user",
+                "facet": ["app", "interactionType"], "search": ["app", "from", "interactionType"]},
 }
 _DEFAULT_WORKLOADS = ("exchange", "onedrive")
 _USER_WORKLOADS = frozenset(w for w, v in _WORKLOADS.items() if v["scope"] == "user")
@@ -380,6 +382,10 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
             objs = list(live.stream_teams(
                 app_token, cursor=cfg.get("cursor"), content_cap=cap,
                 state=state, resource=f"teams/{key}"))
+        elif source.workload == "copilot":  # a user's Microsoft 365 Copilot interactions
+            objs = list(live.stream_copilot(
+                app_token, cursor=cfg.get("cursor"), content_cap=cap,
+                state=state, resource=f"users/{key}"))
         else:  # teams_chat — a user's 1:1/group chats
             objs = list(live.stream_teams(
                 app_token, cursor=cfg.get("cursor"), content_cap=cap,

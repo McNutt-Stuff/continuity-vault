@@ -77,6 +77,8 @@ SOURCE_ICONS: dict[str, dict] = {
     "sharepoint": {"file": "Microsoft Office SharePoint (2019–present).svg", "search": "Microsoft SharePoint logo"},
     "teams":      {"file": "Microsoft Office Teams (2018–present).svg", "search": "Microsoft Teams logo"},
     "exchange":   {"file": "Microsoft Exchange (2019-present).svg", "search": "Microsoft Exchange logo"},
+    # NOTE: Microsoft 365 Copilot's mark is a locally-provided asset committed at
+    # web/public/source-icons/copilot.svg — this script intentionally does NOT manage it.
     "gcp":        {"file": "Google Cloud icon (2026).svg", "search": "Google Cloud icon 2026"},
     # Device/endpoint platform marks (Devices page). Brand logos from Commons.
     "macos":      {"file": "Apple logo black.svg", "search": "Apple logo black"},

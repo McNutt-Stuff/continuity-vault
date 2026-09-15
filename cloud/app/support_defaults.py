@@ -1339,6 +1339,8 @@ _SOURCE_PAGES = [
          "**SharePoint** — organization site document libraries (organization-owned source).",
          "**Teams** — channel conversations at the organization level, plus each protected user's "
          "1:1 and group chats.",
+         "**Microsoft 365 Copilot** — each protected user's Copilot interaction history (the prompts "
+         "they sent and the AI responses across Word, Outlook, Teams and the Copilot app).",
          "Each mapped user's data lands in **that user's** Arkive vault; organization data "
          "(SharePoint sites, Teams channels) lands in the **organization** vault."],
         # Good to know.
@@ -1375,6 +1377,8 @@ _SOURCE_PAGES = [
             "- `Group.Read.All` — list the organization's Teams (required to discover channels).\n"
             "- `ChannelMessage.Read.All` — back up Teams channel conversations.\n"
             "- `Chat.Read.All` — back up each protected user's Teams chats.\n"
+            "- `AiEnterpriseInteraction.Read.All` — back up each protected user's Microsoft 365 "
+            "Copilot interaction history (optional; only needed if you protect the Copilot workload).\n"
             "\n"
             "Add each permission under *Add a permission → Microsoft Graph → **Application "
             "permissions*** (`Chat.Read.All` and `ChannelMessage.Read.All` live under the *Chat* and "
@@ -1385,6 +1389,11 @@ _SOURCE_PAGES = [
             "APIs* process. Without it, Teams returns `403 Forbidden — Missing role permissions` even "
             "after consent. SharePoint (`Sites.Read.All`) and Exchange (`Mail.Read`) have no such "
             "requirement.\n"
+            "\n"
+            "> **Microsoft 365 Copilot** capture reads each user's enterprise interaction history via "
+            "Microsoft Graph and needs the `AiEnterpriseInteraction.Read.All` application permission "
+            "(admin-consented). Users must be licensed for Microsoft 365 Copilot for history to exist; "
+            "without the permission the Copilot workload simply stays empty and is flagged.\n"
             "\n"
             "Finally, add the app's **Web** redirect URI (`https://<your-control-plane>/api/"
             "integrations/microsoft365/oauth/redirect`) and a client secret. Consent uses `.default`, "
