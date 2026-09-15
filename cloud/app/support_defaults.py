@@ -478,9 +478,20 @@ Enable the frameworks you're measured against. Today:
   Management (8.x) and Data Recovery (11.x) controls.
 - **HIPAA Security Rule** — the backup, disaster recovery, encryption, access
   control, audit, integrity and retention safeguards for ePHI.
+- **ISO/IEC 27001:2022** — the Annex A controls for information backup and
+  redundancy, cryptography, access control, logging, and retention/classification.
+- **SOC 2 (Trust Services)** — the Security, Availability and Confidentiality
+  criteria for protected data (access, backup & recovery, monitoring, disposal).
+- **GDPR** — the security‑of‑processing (Art. 32), records/inventory (Art. 30),
+  data‑minimization, retention and residency obligations Arkive helps evidence.
 
-More frameworks (ISO 27001, SOC 2, GDPR, PCI, CMMC…) are on the roadmap; the
-engine is designed so a new framework is a registry entry, not a rebuild.
+Every framework has a **dedicated dashboard** (open it from its card): the score
+and its trend over time, all controls with their evidence, the **drivers** behind
+the score, the **open issues**, and the specific **troubling accounts or systems**
+(for example admins without a passkey, or a source that needs re‑consent).
+
+More frameworks (PCI DSS, CMMC…) are on the roadmap; the engine is designed so a
+new framework is a registry entry, not a rebuild.
 
 ## Controls, evidence & scoring
 Open a framework to see its **controls**. Each shows:

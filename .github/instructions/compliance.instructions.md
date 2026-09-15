@@ -49,6 +49,15 @@ Rules: derive evidence from the tenant's OWN live state (managed sources, detect
 config); NEVER return secrets or payloads in `detail`; one bad provider must not break the
 engine (the engine isolates each). Microsoft 365 is the reference driver.
 
+## Drill-in entities — name the troubling accounts/systems
+The per-framework dashboard (`engine.framework_detail` → `GET /compliance/framework/{fw}`)
+surfaces the specific accounts/systems dragging a control down. To feed it, put a
+`entities` list in an evidence row's `detail`:
+`detail={"entities": [{"kind": "account"|"source"|..., "label": "<name/email>",
+"status": "unmet"|"partial", "note": "<why>"}]}` (never secrets). Examples: admins
+without a passkey (`_arkive_core` mfa), sources with `last_error` (monitoring), M365
+sources needing re-consent (`compliance_driver`). The engine dedupes and groups them.
+
 ## Posture SIGNALS — the reusable way integrations contribute live posture
 A provider computes evidence synchronously at evaluation time; that's fine for state Arkive
 already holds. For posture that must be **fetched from the integration** (MFA coverage,
