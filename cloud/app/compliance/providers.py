@@ -118,29 +118,105 @@ def _arkive_core(db: Session, tenant, scope: dict) -> list[CapabilityEvidence]:
         "Snapshots are sealed with a signed manifest; the audit ledger is a tamper-evident hash chain.")
 
     # Access control + MFA (passkeys) — gating is a platform invariant; MFA measured.
-    admins = int(db.query(func.count(User.id))
-                 .filter(User.tenant_id == tid, User.role.in_(("admin", "owner"))).scalar() or 0)
-    admins_pk = 0
+    admin_users = (db.query(User)
+                   .filter(User.tenant_id == tid, User.role.in_(("admin", "owner"))).all())
+    admins = len(admin_users)
+    pk_user_ids: set = set()
     try:
-        admins_pk = int(db.query(func.count(func.distinct(Passkey.user_id)))
-                        .join(User, User.id == Passkey.user_id)
-                        .filter(User.tenant_id == tid,
-                                User.role.in_(("admin", "owner"))).scalar() or 0)
+        for (uid,) in (db.query(func.distinct(Passkey.user_id))
+                       .join(User, User.id == Passkey.user_id)
+                       .filter(User.tenant_id == tid,
+                               User.role.in_(("admin", "owner"))).all()):
+            pk_user_ids.add(uid)
     except Exception:  # noqa: BLE001
-        admins_pk = 0
+        pk_user_ids = set()
+    admins_pk = len(pk_user_ids)
     add("access_control", "met",
         "Cross-member access is gated by flag, dual-controlled and audited; least privilege by vault owner.")
     if admins:
+        # Name the specific admin accounts still missing phishing-resistant MFA so the
+        # framework drill-down can point at exactly who to enrol.
+        no_pk = [{"kind": "account", "label": (u.email or u.display_name or u.id),
+                  "status": "unmet", "note": "No passkey enrolled"}
+                 for u in admin_users if u.id not in pk_user_ids]
         add("mfa", "met" if admins_pk >= admins else ("partial" if admins_pk else "unmet"),
             f"{admins_pk}/{admins} admin(s) enrolled in passkeys (phishing-resistant MFA)",
-            admins=admins, admins_with_passkey=admins_pk)
+            admins=admins, admins_with_passkey=admins_pk, entities=no_pk)
     else:
         add("mfa", "unknown", "No org admins to assess")
 
     # Audit logging + monitoring — always on.
     add("audit_logging", "met", "Tamper-evident audit chain records access + admin actions (Platform Logs).")
-    add("monitoring", "met", "Source failures + anomalies raise notifications and admin alerts.")
-    add("incident_response", "met", "Failures surface as source-problem notifications with tenant attribution.")
+    # Surface sources currently failing so the drill-down names the troubled systems.
+    failing = []
+    try:
+        for a in (db.query(ConnectorAccount)
+                  .filter(ConnectorAccount.tenant_id == tid).all()):
+            err = (getattr(a, "last_error", "") or "").strip()
+            fails = int(getattr(a, "fail_count", 0) or 0)
+            if err or fails:
+                failing.append({"kind": "source",
+                                "label": f"{getattr(a, 'account', '') or a.connector_type} ({a.connector_type})",
+                                "status": "unmet" if fails >= 3 else "partial",
+                                "note": (err[:120] or f"{fails} recent failure(s)")})
+    except Exception:  # noqa: BLE001
+        failing = []
+    add("monitoring", "partial" if failing else "met",
+        (f"{len(failing)} source(s) need attention" if failing
+         else "Source failures + anomalies raise notifications and admin alerts."),
+        failing=len(failing), entities=failing)
+    add("incident_response", "met", "Failures surface as source-problem notifications with tenant attribution.",
+        entities=failing)
+
+    # Resilience — version history, offsite redundancy, air-gapped offline copy (3-2-1).
+    from ..models import ObjectVersion, Appliance
+    versions = 0
+    try:
+        versions = int(db.query(func.count(ObjectVersion.id))
+                       .filter(ObjectVersion.tenant_id == tid).scalar() or 0)
+    except Exception:  # noqa: BLE001
+        versions = 0
+    add("versioning", "met" if objects else "unmet",
+        ("Every object is versioned (content-addressed) for point-in-time restore"
+         + (f" — {versions:,} version(s) tracked" if versions else "")) if objects
+        else "No protected objects yet", versions=versions)
+
+    # An on-prem appliance provides an offline, immutable tier.
+    appliances = 0
+    try:
+        appliances = int(db.query(func.count(Appliance.id))
+                         .filter(Appliance.tenant_id == tid).scalar() or 0)
+    except Exception:  # noqa: BLE001
+        appliances = 0
+
+    # Offsite / redundant copies — distinct storage destinations across collections
+    # (cv-cloud, customer S3/BYOS, appliance). Two+ independent locations = offsite.
+    dests: set = set()
+    try:
+        for c in db.query(Collection).filter(Collection.tenant_id == tid).all():
+            for d in (c.destinations or []):
+                dests.add(str(d))
+    except Exception:  # noqa: BLE001
+        pass
+    if appliances:
+        dests.add("appliance")
+    if not dests and objects:
+        dests.add("cv-cloud")  # default managed destination
+    n_dest = len(dests)
+    add("offsite_copy", "met" if n_dest >= 2 else ("partial" if n_dest == 1 else "unmet"),
+        (f"Protected data is copied to {n_dest} independent destination(s): {', '.join(sorted(dests))}"
+         if n_dest else "No storage destinations configured"),
+        destinations=sorted(dests))
+
+    # Air-gapped/offline copy — an on-prem appliance. A bonus control:
+    # not_applicable (doesn't penalize) when no appliance is deployed.
+    if appliances:
+        add("air_gapped_copy", "met",
+            f"{appliances} on-prem appliance(s) provide an offline, immutable copy.",
+            appliances=appliances)
+    else:
+        add("air_gapped_copy", "not_applicable",
+            "No on-prem appliance deployed (add one for an air-gapped offline copy).")
 
     # Retention + legal hold — legal hold via purge flag; retention if any schedule set.
     schedules = 0

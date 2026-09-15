@@ -252,6 +252,97 @@ def report(db: Session, tenant) -> dict:
     }
 
 
+_OPEN_STATES = {"planned", "partially_implemented", "failed", "not_assessed"}
+
+
+def framework_detail(db: Session, tenant, framework: str) -> dict:
+    """Everything the dedicated framework dashboard needs: header + score, the
+    adherence trend, controls, the drivers (providers/capabilities behind the
+    score), open issues, and the specific troubling accounts/systems flagged by
+    evidence. One call powers the whole drill-in page."""
+    spec = registry.framework(framework)
+    if spec is None:
+        return {}
+    pack = (db.query(m.CompliancePack)
+            .filter(m.CompliancePack.tenant_id == tenant.id,
+                    m.CompliancePack.framework == framework).first())
+    enabled = bool(pack and pack.enabled)
+    controls = controls_view(db, tenant, framework) if enabled else []
+
+    # Latest snapshot + full trend for the adherence-over-time chart.
+    snaps = (db.query(m.ComplianceSnapshot)
+             .filter(m.ComplianceSnapshot.tenant_id == tenant.id,
+                     m.ComplianceSnapshot.framework == framework)
+             .order_by(m.ComplianceSnapshot.taken_at.asc()).all())
+    trend = [{"score": s.score, "met": s.controls_met, "total": s.controls_total,
+              "at": s.taken_at.isoformat()} for s in snaps]
+    cur = snaps[-1] if snaps else None
+    prev = snaps[-2] if len(snaps) > 1 else None
+
+    # Evidence rows (with detail) for this framework's controls → drivers + entities.
+    ctrl_by_id = {c["id"]: c for c in controls}
+    ev_rows = []
+    if ctrl_by_id:
+        ev_rows = (db.query(m.ComplianceEvidence)
+                   .filter(m.ComplianceEvidence.tenant_id == tenant.id,
+                           m.ComplianceEvidence.control_id.in_(list(ctrl_by_id.keys()))).all())
+    # Drivers = each provider's contribution (how many signals, and their health).
+    drivers: dict[str, dict] = {}
+    for e in ev_rows:
+        d = drivers.setdefault(e.provider or "arkive",
+                               {"provider": e.provider or "arkive", "met": 0, "partial": 0,
+                                "unmet": 0, "unknown": 0, "signals": 0, "capabilities": set()})
+        d["signals"] += 1
+        d["capabilities"].add(e.capability)
+        if e.status in d:
+            d[e.status] += 1
+    drivers_out = [{**{k: v for k, v in d.items() if k != "capabilities"},
+                    "capabilities": sorted(d["capabilities"])}
+                   for d in drivers.values()]
+    drivers_out.sort(key=lambda x: (-x["signals"], x["provider"]))
+
+    # Open issues = controls not fully met, with the failing evidence reasons.
+    open_issues = []
+    for c in controls:
+        if c["state"] in _OPEN_STATES:
+            reasons = [f"{ev['capability']}: {ev['summary']}" for ev in c["evidence"]
+                       if ev["status"] in ("unmet", "partial", "unknown")]
+            open_issues.append({"control_id": c["control_id"], "title": c["title"],
+                                "family": c["family"], "state": c["state"],
+                                "capabilities": c["capabilities"], "reasons": reasons})
+
+    # Troubling accounts/systems — entities providers flagged in evidence detail.
+    entities = []
+    seen = set()
+    for e in ev_rows:
+        for ent in ((e.detail or {}).get("entities") or []):
+            label = ent.get("label") or ""
+            key = (ent.get("kind", ""), label, e.capability)
+            if not label or key in seen:
+                continue
+            seen.add(key)
+            ctrl = ctrl_by_id.get(e.control_id, {})
+            entities.append({"kind": ent.get("kind", "item"), "label": label,
+                             "status": ent.get("status", "unmet"), "note": ent.get("note", ""),
+                             "capability": e.capability, "provider": e.provider or "arkive",
+                             "control_id": ctrl.get("control_id", "")})
+    entities.sort(key=lambda x: (x["kind"], x["label"]))
+
+    events = history(db, tenant, framework, limit=60)["events"]
+    return {
+        "framework": framework, "label": spec["label"], "version": spec["version"],
+        "authority": spec.get("authority"), "url": spec.get("url"),
+        "description": spec.get("description"), "enabled": enabled,
+        "score": cur.score if cur else None,
+        "met": cur.controls_met if cur else None,
+        "total": cur.controls_total if cur else (len(spec["controls"]) if not enabled else 0),
+        "delta": (cur.score - prev.score) if (cur and prev) else 0,
+        "last_assessed_at": cur.taken_at.isoformat() if cur else None,
+        "trend": trend, "controls": controls, "drivers": drivers_out,
+        "open_issues": open_issues, "entities": entities, "events": events,
+    }
+
+
 def history(db: Session, tenant, framework: str = "", limit: int = 60) -> dict:
     sq = db.query(m.ComplianceSnapshot).filter(m.ComplianceSnapshot.tenant_id == tenant.id)
     if framework:

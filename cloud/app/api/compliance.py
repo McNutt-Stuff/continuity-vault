@@ -104,6 +104,17 @@ def controls(framework: str,
     return {"controls": engine.controls_view(db, _tenant(db, principal), framework)}
 
 
+@router.get("/framework/{framework}")
+def framework_detail(framework: str,
+                     principal: security.Principal = Depends(require_compliance),
+                     db: Session = Depends(get_db)):
+    """The dedicated framework dashboard bundle: score + trend, controls, drivers,
+    open issues and the specific troubling accounts/systems."""
+    if registry.framework(framework) is None:
+        raise HTTPException(404, "unknown framework")
+    return engine.framework_detail(db, _tenant(db, principal), framework)
+
+
 @router.get("/history")
 def history(framework: str = "",
             principal: security.Principal = Depends(require_compliance),

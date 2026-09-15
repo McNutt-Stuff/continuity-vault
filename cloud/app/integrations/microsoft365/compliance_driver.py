@@ -36,13 +36,18 @@ def _m365_evidence(db: Session, tenant, scope: dict) -> list[CapabilityEvidence]
     inst_ids = {i.id for i in instances}
     active = 0
     needs_attention = 0
+    trouble: list[dict] = []
     for inst in instances:
         active += db.query(m.ManagedSource).filter(
             m.ManagedSource.integration_instance_id == inst.id,
             m.ManagedSource.state.notin_(("paused_by_admin", "decommissioned", "planned"))).count()
-        needs_attention += db.query(m.ManagedSource).filter(
-            m.ManagedSource.integration_instance_id == inst.id,
-            m.ManagedSource.state.in_(("permission_required", "credential_error"))).count()
+        for s in db.query(m.ManagedSource).filter(
+                m.ManagedSource.integration_instance_id == inst.id,
+                m.ManagedSource.state.in_(("permission_required", "credential_error"))).all():
+            needs_attention += 1
+            trouble.append({"kind": "source", "label": s.name or s.source_key,
+                            "status": "unmet",
+                            "note": f"{s.workload} — {s.state.replace('_', ' ')}"})
 
     # Managed-collection object footprint (the durable protected count).
     mc = [c for c in db.query(Collection).filter(Collection.tenant_id == tenant.id).all()
@@ -56,13 +61,13 @@ def _m365_evidence(db: Session, tenant, scope: dict) -> list[CapabilityEvidence]
         "met" if (active and needs_attention == 0) else ("partial" if active else "unmet"),
         f"Microsoft 365: {active} managed source(s) protected, {objects:,} object(s)"
         + (f"; {needs_attention} need attention" if needs_attention else ""),
-        active=active, objects=objects, needs_attention=needs_attention)
+        active=active, objects=objects, needs_attention=needs_attention, entities=trouble)
     add("inventory", "met" if active else "unmet",
         f"Microsoft 365 discovered + protecting {active} source(s)", active=active)
     if needs_attention:
         add("access_control", "partial",
             f"{needs_attention} Microsoft 365 source(s) need re-consent/permissions",
-            needs_attention=needs_attention)
+            needs_attention=needs_attention, entities=trouble)
     add("audit_logging", "met",
         "Microsoft 365 collection + admin actions are recorded in the audit ledger.")
     return ev
