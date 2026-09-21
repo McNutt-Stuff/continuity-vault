@@ -1991,6 +1991,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
         </Card>
       )}
 
+      {tab === "subscription" && !isShared && <BillingEnginePanel id={id} />}
       {tab === "subscription" && !isShared && <TenantSubscriptionBreakdown id={id} />}
 
       {tab === "features" && !isShared && <AccountFeatures tenantId={id} />}
@@ -6653,6 +6654,101 @@ function TenantSubscriptionBreakdown({ id }: { id: string }) {
           {sub.synced_at && <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>Last synced {timeAgo(sub.synced_at)}</div>}
         </>
       )}
+    </Card>
+  );
+}
+
+// Billing engine — legacy vs new-calc source, migration (dry-run/apply/rollback),
+// grandfather price lock, and migration history (Phase 12).
+function BillingEnginePanel({ id }: { id: string }) {
+  const [mig, setMig] = useState<{ preview: any; history: any[] } | null>(null);
+  const [src, setSrc] = useState<{ effective: string; override: string | null; platform_default: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState("");
+  const flash = (m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); };
+  async function load() {
+    try { setMig(await api.get<any>(`/admin/tenants/${id}/migration`)); } catch { setMig(null); }
+    try { setSrc(await api.get<any>(`/admin/tenants/${id}/billing-source`)); } catch { setSrc(null); }
+  }
+  useEffect(() => { void load(); }, [id]);
+  async function migrate(mode: "calc" | "grandfather") {
+    const p = mig?.preview;
+    const msg = mode === "grandfather"
+      ? `Cut over to the new billing engine but PIN the current price (${DOLLARS(p?.legacy_cents || 0)}/mo) — the charge won't change.`
+      : `Cut over to the new billing engine and charge the calc total (${DOLLARS(p?.calc_cents || 0)}/mo)${p && !p.match ? ` — that's ${DOLLARS(Math.abs(p.delta_cents))}/mo ${p.delta_cents > 0 ? "more" : "less"} than today` : ""}.`;
+    if (!await confirmDialog({ title: "Migrate billing?", message: msg, confirmLabel: "Migrate" })) return;
+    setBusy(true);
+    try { await api.post(`/admin/tenants/${id}/migration/apply`, { mode }); flash("Migrated"); await load(); }
+    catch (e) { flash((e as { message?: string }).message || "Migration failed"); }
+    finally { setBusy(false); }
+  }
+  async function rollback() {
+    if (!await confirmDialog({ title: "Roll back migration?", message: "Restore the previous billing source and charged amount.", tone: "danger", confirmLabel: "Roll back" })) return;
+    setBusy(true);
+    try { await api.post(`/admin/tenants/${id}/migration/rollback`, {}); flash("Rolled back"); await load(); }
+    catch (e) { flash((e as { message?: string }).message || "Rollback failed"); }
+    finally { setBusy(false); }
+  }
+  async function setSource(source: "legacy" | "calc" | "inherit") {
+    setBusy(true);
+    try { await api.put(`/admin/tenants/${id}/billing-source`, { source }); flash("Source updated"); await load(); }
+    catch (e) { flash((e as { message?: string }).message || "Failed"); }
+    finally { setBusy(false); }
+  }
+  const p = mig?.preview;
+  const applied = (mig?.history || []).some((h) => h.status === "applied");
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div className="spread" style={{ marginBottom: 8 }}>
+        <div>
+          <h3 style={{ margin: 0 }}>Billing engine</h3>
+          <div className="faint" style={{ fontSize: 12 }}>Migrate this tenant from the legacy price breakdown to the new deterministic calc (bills one monthly total). Reversible.</div>
+        </div>
+        {src && <Pill tone={src.effective === "calc" ? "ok" : "info"}>{src.effective === "calc" ? "New engine (calc)" : "Legacy"}{src.override ? " · override" : ""}</Pill>}
+      </div>
+      {p && (
+        <>
+          <div className="grid grid-4" style={{ gap: 12, marginBottom: 12 }}>
+            <Mini label="Charges today (legacy)" value={`${DOLLARS(p.legacy_cents)}/mo`} />
+            <Mini label="New calc total" value={`${DOLLARS(p.calc_cents)}/mo`} />
+            <Mini label="Delta" value={`${p.delta_cents > 0 ? "+" : ""}${DOLLARS(p.delta_cents)}/mo`} />
+            <Mini label="Parity" value={p.match ? "Matches ✓" : "Differs"} />
+          </div>
+          {p.price_lock_cents != null && (
+            <div style={{ marginBottom: 10 }}><Pill tone="warn">Grandfathered — price pinned at {DOLLARS(p.price_lock_cents)}/mo</Pill></div>
+          )}
+          <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>{p.note}</div>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <button className="btn primary sm" disabled={busy} onClick={() => migrate("calc")}><Icon name="check" size={13} /> Migrate → new billing</button>
+            <button className="btn sm" disabled={busy} onClick={() => migrate("grandfather")}>Grandfather (keep price)</button>
+            {applied && <button className="btn danger sm" disabled={busy} onClick={rollback}>Roll back</button>}
+            <span style={{ flex: 1 }} />
+            <span className="faint" style={{ fontSize: 11.5, alignSelf: "center" }}>Source:</span>
+            <select className="input sm" style={{ width: 120 }} value={src?.override || "inherit"} disabled={busy} onChange={(e) => setSource(e.target.value as any)}>
+              <option value="inherit">Inherit ({src?.platform_default || "legacy"})</option>
+              <option value="legacy">Legacy</option>
+              <option value="calc">New (calc)</option>
+            </select>
+          </div>
+        </>
+      )}
+      {(mig?.history || []).length > 0 && (
+        <table className="table" style={{ marginTop: 14 }}>
+          <thead><tr><th>When</th><th>Mode</th><th>Status</th><th>Was</th><th>Now</th></tr></thead>
+          <tbody>
+            {mig!.history.map((h) => (
+              <tr key={h.id}>
+                <td className="faint" style={{ fontSize: 12 }}>{h.created_at ? timeAgo(h.created_at) : "—"}</td>
+                <td>{h.mode}</td>
+                <td><Pill tone={h.status === "applied" ? "ok" : "warn"}>{h.status}</Pill></td>
+                <td className="faint">{DOLLARS(h.prev_amount_cents)}</td>
+                <td>{DOLLARS(h.new_amount_cents)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </Card>
   );
 }

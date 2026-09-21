@@ -848,6 +848,7 @@ function BillingSettings() {
   const [methods, setMethods] = useState<PaymentMethodView[]>([]);
   const [addrs, setAddrs] = useState<Address[]>([]);
   const [sub, setSub] = useState<SubscriptionResp | null>(null);
+  const [subItems, setSubItems] = useState<{ subscription: any; items: any[] } | null>(null);
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -866,6 +867,8 @@ function BillingSettings() {
       api.get<SubscriptionResp>("/billing/subscription").catch(() => null),
     ]);
     setCfg(c); setMethods(m.payment_methods); setAddrs(a.addresses); setSub(s);
+    api.get<{ subscription: any; items: any[] }>("/billing/subscription-items")
+      .then(setSubItems).catch(() => setSubItems(null));
   }
   useEffect(() => { void load(); }, []);
 
@@ -974,6 +977,37 @@ function BillingSettings() {
               </div>
             </div>
             {sub.profile && <Pill tone={sub.profile.active ? "ok" : "warn"}>{sub.profile.active ? "Active" : "Inactive"}</Pill>}
+          </div>
+        );
+      })()}
+
+      {subItems?.subscription && (subItems.items || []).length > 0 && (() => {
+        const recurring = subItems.items.filter((i: any) => i.kind !== "one_time");
+        const oneTime = subItems.items.filter((i: any) => i.kind === "one_time");
+        const cents = (c: number) => fmtCents(c || 0, subItems.subscription.currency || "USD");
+        return (
+          <div style={{ background: "var(--inset)", borderRadius: 10, padding: 14, marginBottom: 6 }}>
+            <div className="spread" style={{ marginBottom: 8 }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Your subscription, itemized</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>each line priced by us</div>
+            </div>
+            <div className="stack" style={{ gap: 6 }}>
+              {recurring.map((i: any) => (
+                <div key={i.key} className="spread" style={{ fontSize: 12.5, alignItems: "baseline" }}>
+                  <span>{i.label}{i.licensed_qty > 0 && <span className="faint" style={{ fontSize: 11 }}>{" "}· {i.included_qty > 0 ? `${i.included_qty} incl, ` : ""}{i.quantity} billable</span>}</span>
+                  <span style={{ fontWeight: 600 }}>{cents(i.amount_cents)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="spread" style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border-soft)" }}>
+              <span style={{ fontWeight: 700 }}>Monthly total</span>
+              <span style={{ fontWeight: 800 }}>{cents(subItems.subscription.recurring_cents)}</span>
+            </div>
+            {oneTime.length > 0 && oneTime.map((i: any) => (
+              <div key={i.key} className="spread faint" style={{ fontSize: 12, marginTop: 4 }}>
+                <span>{i.label} (one-time)</span><span style={{ fontWeight: 600 }}>{cents(i.amount_cents)}</span>
+              </div>
+            ))}
           </div>
         );
       })()}
