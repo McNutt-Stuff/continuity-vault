@@ -31,7 +31,7 @@ def _require_enabled(db: Session, principal, tenant: Tenant) -> None:
     too — personal/shared accounts can only be enabled per user (tenant flags
     aren't exposed for shared tenants)."""
     user = db.get(User, principal.user_id) if principal else None
-    if not features.resolve(user, tenant, "rules_enabled"):
+    if not features.resolve(user, tenant, "rules_enabled", db):
         raise HTTPException(404, "not found")  # hide the feature entirely when off
 
 

@@ -557,7 +557,7 @@ def me(principal: security.Principal = Depends(security.get_principal),
         "email_verified": user.email_verified,
         "passkey_verified": principal.passkey_verified,
         "needs_setup": user.setup_completed_at is None,
-        "features": _features.effective(user, tenant),
+        "features": _features.effective(user, tenant, db),
         "recovery_key": (_recovery_key.status(db, user, tenant) if tenant else None),
         "passkeys": [{"id": p.id, "label": p.label, "transport": p.transport}
                      for p in user.passkeys],

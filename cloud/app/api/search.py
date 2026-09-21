@@ -251,7 +251,7 @@ def _guard_cross_member_recovery(db, principal, tenant, receipt, *, object_id,
     from .. import features
     user = db.get(User, principal.user_id)
     if not (_is_org_admin(principal, tenant)
-            and features.resolve(user, tenant, "admin_cross_member_access")):
+            and features.resolve(user, tenant, "admin_cross_member_access", db)):
         raise HTTPException(403, "Cross-member recovery is restricted — you can only "
                                  "recover your own data.")
     target = db.get(User, owner)
@@ -836,7 +836,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     if _eff_scope not in ("", "me"):
         from .. import features
         _user = db.get(User, principal.user_id)
-        if not features.resolve(_user, tenant, "admin_cross_member_access"):
+        if not features.resolve(_user, tenant, "admin_cross_member_access", db):
             raise HTTPException(403, "Cross-member search is disabled for your "
                                      "organization (privacy/legal hold).")
         audit.record(db, actor=principal.user_id, action="search.cross_member",

@@ -557,7 +557,7 @@ def generate_all() -> int:
         for u in users:
             try:
                 tenant = tenants.get(u.tenant_id)
-                if not features.resolve(u, tenant, "insights_enabled"):
+                if not features.resolve(u, tenant, "insights_enabled", db):
                     continue
                 # In federation the assigned node owns its tenants' index and
                 # computes their insights (then pushes them up); the control

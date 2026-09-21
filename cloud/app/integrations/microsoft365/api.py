@@ -57,7 +57,7 @@ def require_m365(principal: security.Principal = Depends(security.require_org_ad
     plan = (tenant.plan if tenant else "") or ""
     if plan.lower() not in _PLANS:
         raise HTTPException(403, "Microsoft 365 requires the Business or Enterprise plan")
-    if not features.resolve(user, tenant, "m365_managed_integration"):
+    if not features.resolve(user, tenant, "m365_managed_integration", db):
         raise HTTPException(403, "Microsoft 365 isn't enabled for your organization yet")
     return principal
 
@@ -984,7 +984,7 @@ def compliance_rules(instance_id: str = "",
         raise HTTPException(409, "connect first")
     user = db.get(User, principal.user_id)
     tenant = db.get(Tenant, principal.tenant_id)
-    if not features.resolve(user, tenant, "rules_enabled"):
+    if not features.resolve(user, tenant, "rules_enabled", db):
         return {"enabled": False, "managed_collections": [], "rules": []}
     # Managed collections for this instance (Collection.config.m365_instance_id).
     colls = [c for c in db.query(Collection).filter(Collection.tenant_id == tenant.id).all()

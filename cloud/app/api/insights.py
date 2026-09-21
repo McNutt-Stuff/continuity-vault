@@ -21,7 +21,7 @@ router = APIRouter(prefix="/insights", tags=["insights"])
 def _enabled(db: Session, principal: security.Principal) -> bool:
     user = db.get(User, principal.user_id)
     tenant = db.get(Tenant, principal.tenant_id)
-    return features.resolve(user, tenant, "insights_enabled")
+    return features.resolve(user, tenant, "insights_enabled", db)
 
 
 def _view(row: UserInsights) -> dict:

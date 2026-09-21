@@ -539,7 +539,7 @@ def _load_rules_for(db: Session, collection: Collection, vault: Vault):
     tenant = db.get(Tenant, collection.tenant_id)
     plan = (tenant.plan if tenant else "personal") or "personal"
     owner = db.get(User, vault.owner_user_id) if getattr(vault, "owner_user_id", None) else None
-    if not features.resolve(owner, tenant, "rules_enabled"):
+    if not features.resolve(owner, tenant, "rules_enabled", db):
         return [], plan
     rules = (db.query(Rule)
              .filter(Rule.tenant_id == collection.tenant_id, Rule.enabled.is_(True))

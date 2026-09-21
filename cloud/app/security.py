@@ -229,7 +229,7 @@ def require_feature(flag: str):
         from . import features
         from .models import User
         user = db.get(User, principal.user_id)
-        if not features.resolve(user, tenant, flag):
+        if not features.resolve(user, tenant, flag, db):
             raise HTTPException(status.HTTP_403_FORBIDDEN, f"the '{flag}' feature is disabled")
         return principal
     return _dep

@@ -115,23 +115,15 @@ def derive(db: Session, tenant, user=None) -> dict[str, Entitlement]:
         pass
 
     overrides = _active_overrides(db, tenant.id)
-    tflags = (getattr(tenant, "feature_flags", None) or {})
-    shared = ((getattr(tenant, "tenant_type", "") or "dedicated") == "shared")
     out: dict[str, Entitlement] = {}
     for key, spec in registry.ENTITLEMENTS.items():
         etype = spec["type"]
         source = "plan"
         if etype == "bool" and spec.get("feature"):
-            feat = spec["feature"]
-            if (not shared) and tflags.get(feat) is False:
-                # Explicit tenant disable (e.g. legal hold) wins over any grant.
-                value: object = False
-                source = "flag"
-            else:
-                flag_on = features.resolve(user, tenant, feat)
-                grant_on = bool(grants.get(key))
-                value = flag_on or grant_on
-                source = "flag" if flag_on else ("plan" if grant_on else "flag")
+            # The flag resolver is now the single source of truth for a flag-backed
+            # capability: it layers plan/add-on grant under per-user/tenant overrides
+            # (and legal-hold disable). No inverted "flag OR grant" here.
+            value: object = features.resolve(user, tenant, spec["feature"], db=db)
         else:
             value = grants.get(key)
         if value is None:

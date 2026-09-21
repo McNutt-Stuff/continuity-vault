@@ -235,7 +235,7 @@ def _arkive_core(db: Session, tenant, scope: dict) -> list[CapabilityEvidence]:
     # Data classification / minimization — driven by the governance rules engine.
     from .. import features
     from ..models import Rule
-    rules_on = features.resolve(db.get(User, tenant_admin_id(db, tid)), tenant, "rules_enabled") if tid else False
+    rules_on = features.resolve(db.get(User, tenant_admin_id(db, tid)), tenant, "rules_enabled", db) if tid else False
     label_rules = restrict_rules = 0
     if rules_on:
         try:

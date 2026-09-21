@@ -74,19 +74,87 @@ def _shared(tenant) -> bool:
     return ((tenant.tenant_type if tenant else "dedicated") or "dedicated") == "shared"
 
 
-def resolve(user, tenant, name: str) -> bool:
+# Reverse map (built lazily): a feature-flag key -> the entitlement key that gates
+# it, so the plan/add-on that grants the entitlement is what turns the flag on.
+_FLAG_ENTITLEMENT: dict[str, str] | None = None
+
+
+def _flag_entitlement_map() -> dict[str, str]:
+    global _FLAG_ENTITLEMENT
+    if _FLAG_ENTITLEMENT is None:
+        try:
+            from .entitlements import registry as ent_registry
+            _FLAG_ENTITLEMENT = {spec["feature"]: key
+                                 for key, spec in ent_registry.ENTITLEMENTS.items()
+                                 if spec.get("feature")}
+        except Exception:  # noqa: BLE001 — entitlements optional
+            _FLAG_ENTITLEMENT = {}
+    return _FLAG_ENTITLEMENT
+
+
+def _plan_addon_grant(tenant, name: str, db=None):
+    """Whether the tenant's PLAN / ADD-ONS grant this flag — the primary control.
+
+    Returns True/False when the plan (or an add-on) decides the flag, or ``None``
+    when the flag isn't entitlement-controlled (caller falls back to the global
+    default). A known plan that lists the gating entitlement is authoritative; an
+    add-on can only turn a flag ON (never off)."""
+    ent_key = _flag_entitlement_map().get(name)
+    granted: bool | None = None
+    if ent_key is not None and tenant is not None:
+        try:
+            from .entitlements import registry as ent_registry
+            plan_grants = ent_registry.plan_grants((getattr(tenant, "plan", "") or "").lower())
+            if ent_key in plan_grants:                 # known plan decides explicitly
+                granted = bool(plan_grants[ent_key])
+        except Exception:  # noqa: BLE001
+            pass
+    # Add-ons can ENABLE a flag (via their entitlements map or a direct feature_flags
+    # entry). Needs a db session; when absent, only the plan layer applies.
+    if db is not None and tenant is not None:
+        try:
+            from .entitlements import addons
+            _qty, bools, flags = addons.grants_for_tenant(db, tenant.id)
+            if name in (flags or []):
+                granted = True
+            if ent_key is not None and bools.get(ent_key):
+                granted = True
+        except Exception:  # noqa: BLE001
+            pass
+    return granted
+
+
+def resolve(user, tenant, name: str, db=None) -> bool:
+    """Effective value of a feature flag. Precedence (highest first):
+
+      1. tenant hard-disable (legal hold) — authoritative for org tenants,
+      2. explicit per-user override,
+      3. explicit per-tenant allow (org tenants),
+      4. PLAN / ENTITLEMENT / ADD-ON grant — the primary control of what's enabled,
+      5. the global default (for flags not tied to any entitlement).
+
+    Pass ``db`` so add-on grants are consulted; without it only the plan layer +
+    overrides + default apply."""
     default = FLAGS.get(name, False)
     uf = (user.feature_flags or {}) if user else {}
     tf = (tenant.feature_flags or {}) if tenant else {}
-    # Tenant-level disable is authoritative (legal hold) for org tenants.
-    if not _shared(tenant) and tf.get(name) is False:
+    shared = _shared(tenant)
+    # 1. Tenant-level disable is authoritative (legal hold) for org tenants.
+    if not shared and tf.get(name) is False:
         return False
+    # 2. Explicit per-user override.
     if name in uf:
         return bool(uf[name])
-    if not _shared(tenant) and name in tf:
+    # 3. Explicit per-tenant allow (org tenants).
+    if not shared and name in tf:
         return bool(tf[name])
+    # 4. Plan / entitlement / add-on grant — the primary driver.
+    granted = _plan_addon_grant(tenant, name, db)
+    if granted is not None:
+        return granted
+    # 5. Global default.
     return bool(default)
 
 
-def effective(user, tenant) -> dict:
-    return {name: resolve(user, tenant, name) for name in FLAGS}
+def effective(user, tenant, db=None) -> dict:
+    return {name: resolve(user, tenant, name, db) for name in FLAGS}

@@ -30,7 +30,7 @@ def require_compliance(principal: security.Principal = Depends(security.require_
     plan = (tenant.plan if tenant else "") or ""
     if plan.lower() not in _PLANS:
         raise HTTPException(403, "Compliance requires the Business or Enterprise plan")
-    if not features.resolve(user, tenant, "compliance_enabled"):
+    if not features.resolve(user, tenant, "compliance_enabled", db):
         raise HTTPException(403, "The Compliance engine isn't enabled for your organization")
     return principal
 
