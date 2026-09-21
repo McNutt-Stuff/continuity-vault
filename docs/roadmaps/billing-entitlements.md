@@ -104,10 +104,23 @@ plan names are never hard-coded at call-sites.
    and **Save previews before confirm** via `POST /billing/estimate/preview`
    (new recurring total + delta) — prices come from the server, never the UI.
    *(Signup-flow parity is a follow-up.)*
-10. **Org/user enforcement** — turn on seat limits per cohort; M365 auto-discovery →
-    review/mapping, never auto-billable seats.
-11. **Payment-provider enhancements** — multi-item subscriptions, proration, metered
-    usage report; **idempotent, signature-verified webhooks** + reconciliation job.
+10. **Org/user enforcement** — **DONE (this change).** Seat enforcement is wired on
+    EVERY seat-creating path (org invite, admin add-user) via `require_seat` (402 over
+    the licensed seats), gated by the now tenant-scoped `entitlements_enforced` flag —
+    so the cohort rollout is simply flipping that flag per tenant on the Account
+    Features tab. M365 auto-create respects the seat limit when enforcement is on:
+    identities over the allowance are HELD as `new_user_candidate` for admin review/
+    mapping and never silently provisioned into a billable member (discovery/binding
+    was already non-billable).
+11. **Payment-provider enhancements** — **DONE (this change; simplified — bill the
+    single monthly total, no processor line items).** `billing_source` cutover
+    (global + per-tenant) makes `billing_calc.recurring_cents` the charged amount;
+    `refresh_active_amounts` keeps each active profile current before the sweep.
+    **Signature-verified + idempotent Stripe webhooks** (`POST /billing/webhooks/
+    stripe`, HMAC verify + `ProcessedWebhook` ledger) confirm charge outcomes;
+    `reconcile_charges` (querying the PaymentIntent) is the safety net for missed
+    deliveries. *(Multi-item subscriptions/proration intentionally skipped — one
+    total is billed monthly.)*
 12. **Legacy compatibility & migration** — grandfather existing subscriptions; dry-run
     "Upgrade Legacy Customer" with outbox/compensating actions.
 13. **Federated entitlement sync** — signed entitlement snapshot pushed to nodes
