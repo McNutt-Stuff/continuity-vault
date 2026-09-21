@@ -137,13 +137,30 @@ def _record_sync_error(db: Session, account: Optional[ConnectorAccount],
     msg = _normalize_sync_error(exc)
     needs_auth = _is_auth_error(exc)
     # A 401 can mean the access token was invalidated (re-consent, clock skew,
-    # a fresh grant on another node) while the refresh token still works — try a
-    # refresh before demanding a full re-authorization.
+    # a fresh grant on another node) or simply EXPIRED mid-crawl on a long run,
+    # while the refresh token still works — try a refresh before demanding a full
+    # re-authorization.
+    recovered = False
     if needs_auth and _try_refresh_token(db, account):
         needs_auth = False
+        recovered = True
+    account.fail_count = int(account.fail_count or 0) + 1
+    # A transient auth failure we immediately healed with a token refresh (the
+    # classic case: the Gmail access token expired part-way through a big backfill)
+    # must NOT nag the user — the next run recovers with the fresh token. Stay quiet
+    # unless it KEEPS happening, which points at a real problem worth surfacing.
+    if recovered and int(account.fail_count or 0) <= 3:
+        account.last_error = None
+        account.last_error_at = None
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+        logger.info("sync auth hiccup healed by token refresh: source=%s account=%s (%s)",
+                    collection.source_type, account.account_label, msg)
+        return
     account.last_error = msg
     account.last_error_at = datetime.now(timezone.utc)
-    account.fail_count = int(account.fail_count or 0) + 1
     if needs_auth:
         account.auth_status = "needs-reauth"
     try:
