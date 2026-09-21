@@ -129,15 +129,32 @@ def catalog(db: Session, include_retired: bool = False) -> list[AddOn]:
     return q.order_by(AddOn.name.asc()).all()
 
 
+def plan_compatible_addons(db: Session, plan: str) -> set[str] | None:
+    """The add-on codes a plan restricts itself to (its catalog version's
+    ``compatible_addons``), or ``None`` when the plan places no restriction (an empty
+    list = all add-ons allowed)."""
+    try:
+        from ..catalog import effective_version
+        v = effective_version(db, (plan or "").lower())
+        codes = (v.compatible_addons or []) if v is not None else []
+        return {str(c).lower() for c in codes} if codes else None
+    except Exception:  # noqa: BLE001 — catalog optional
+        return None
+
+
 def eligible_for_plan(db: Session, plan: str) -> list[AddOn]:
     plan = (plan or "").lower()
+    compat = plan_compatible_addons(db, plan)   # None = no restriction
     out = []
     for a in catalog(db):
         if a.status not in ("active", "grandfathered"):
             continue
         elig = a.eligible_plans or []
-        if not elig or plan in [str(p).lower() for p in elig]:
-            out.append(a)
+        if elig and plan not in [str(p).lower() for p in elig]:
+            continue
+        if compat is not None and a.code not in compat:
+            continue  # the plan restricts to a specific add-on set
+        out.append(a)
     return out
 
 

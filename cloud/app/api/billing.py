@@ -552,6 +552,10 @@ def add_customer_addon(body: AddOnSelect,
     elig = a.eligible_plans or []
     if elig and (tenant.plan or "").lower() not in [str(p).lower() for p in elig]:
         raise HTTPException(400, "this add-on isn't available on your plan")
+    from ..entitlements import addons as _addons
+    compat = _addons.plan_compatible_addons(db, tenant.plan)
+    if compat is not None and a.code not in compat:
+        raise HTTPException(400, "this add-on isn't compatible with your plan")
     qty = max(int(a.min_qty or 1), int(body.quantity or 1))
     if a.max_qty is not None and qty > a.max_qty:
         raise HTTPException(400, f"maximum quantity is {a.max_qty}")
