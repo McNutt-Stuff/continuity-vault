@@ -294,6 +294,32 @@ def _likely_reauth(msg: str) -> bool:
                                 "invalid_grant", "reauth", "expired token", "token expired"))
 
 
+def _sees_org_shared(db, user: User) -> bool:
+    """Whether this user should receive ORGANIZATION-shared (owner-less) source,
+    integration and storage problems. On a personal/shared tenant the single user
+    owns everything, so they see it all; on an organization/business tenant only the
+    owner + admins do — never regular members (they'd otherwise be spammed with org
+    integration/source errors that aren't theirs to fix)."""
+    t = db.get(Tenant, user.tenant_id)
+    if t is None or (t.tenant_type or "shared") == "shared":
+        return True
+    return (user.role or "").lower() in ("owner", "security-admin", "admin")
+
+
+def _effective_source_type(c) -> str:
+    """A collection's DISPLAY source type. Managed Microsoft 365 Exchange reuses the
+    Outlook connector's source_type ("outlook"); surface it under its own "exchange"
+    identity (Exchange Online) — matching the dashboard — so managed Exchange is
+    never shown or counted as a personal Outlook.com account."""
+    if c is None:
+        return "source"
+    cfg = c.config or {}
+    if (c.source_type == "outlook" and cfg.get("managed")
+            and cfg.get("m365_workload") == "exchange"):
+        return "exchange"
+    return c.source_type or "source"
+
+
 def _source_issues(db, user: User) -> list[dict]:
     """Connector and integration issues requiring user attention.
 
@@ -325,6 +351,7 @@ def _source_issues(db, user: User) -> list[dict]:
     # Managed Microsoft 365 sources have no ConnectorAccount, but a source stuck in
     # a permission/credential state is a real problem the owner should see — surface
     # it alongside standard connector issues so managed sources alert the same way.
+    sees_org = _sees_org_shared(db, user)
     try:
         from .integrations.microsoft365 import models as _m365m
         for s in (db.query(_m365m.ManagedSource)
@@ -333,6 +360,8 @@ def _source_issues(db, user: User) -> list[dict]:
                               ("permission_required", "credential_error"))).all()):
             if s.owner_user_id and s.owner_user_id != user.id:
                 continue  # a user only sees their own managed sources
+            if s.owner_user_id is None and not sees_org:
+                continue  # organization-shared managed source → owner/admins only
             last = (s.config or {}).get("last_result") or {}
             out.append({"id": s.id, "kind": "connector",
                         "name": s.name,
@@ -351,8 +380,9 @@ def _source_issues(db, user: User) -> list[dict]:
     iq = (db.query(IntegrationInstance)
           .filter(IntegrationInstance.tenant_id == user.tenant_id,
                   IntegrationInstance.enabled.is_(True),
-                  or_(IntegrationInstance.owner_user_id == user.id,
-                      IntegrationInstance.owner_user_id.is_(None))).all())
+                  (or_(IntegrationInstance.owner_user_id == user.id,
+                       IntegrationInstance.owner_user_id.is_(None))
+                   if sees_org else IntegrationInstance.owner_user_id == user.id)).all())
     for inst in iq:
         prov = inst.provision_state or "idle"
         errored = bool(inst.status == "error" or inst.last_error or prov == "error")
@@ -380,12 +410,15 @@ def _source_issues(db, user: User) -> list[dict]:
         # collects zero devices — the controller/site/credentials broke silently
         # (a live network always has clients). last_success stays fresh so the
         # stale check above can't catch it. Guard on an established integration so
-        # a fresh setup mid-first-poll doesn't false-alarm.
+        # a fresh setup mid-first-poll doesn't false-alarm. Only applies to
+        # device/controller integrations that actually report a `clients` count —
+        # Microsoft 365 reports identities and collects content on a SEPARATE
+        # schedule, so it must never trip this "no devices" alarm.
         stats = inst.last_stats or {}
         established = bool(inst.created_at and (now - inst.created_at).total_seconds() > 6 * 3600)
         empty = bool(prov in ("idle", "done") and inst.enabled and established
                      and inst.last_run_at is not None and not errored
-                     and int(stats.get("clients", 0) or 0) == 0)
+                     and "clients" in stats and int(stats.get("clients", 0) or 0) == 0)
         if not errored and not stale and not setup_stuck and not empty:
             continue
         if errored:
@@ -473,11 +506,13 @@ def _storage_issues(db, user: User) -> list[dict]:
     stalled during provisioning — anything the customer must fix to keep backups
     flowing to that destination."""
     out: list[dict] = []
+    sees_org = _sees_org_shared(db, user)
     q = (db.query(CustomerStorage)
          .filter(CustomerStorage.tenant_id == user.tenant_id,
                  CustomerStorage.enabled.is_(True),
-                 or_(CustomerStorage.owner_user_id == user.id,
-                     CustomerStorage.owner_user_id.is_(None)),
+                 (or_(CustomerStorage.owner_user_id == user.id,
+                      CustomerStorage.owner_user_id.is_(None))
+                  if sees_org else CustomerStorage.owner_user_id == user.id),
                  or_(CustomerStorage.status.in_(("degraded", "error")),
                      CustomerStorage.provision_state == "error",
                      CustomerStorage.last_test_ok.is_(False))))
@@ -520,7 +555,7 @@ def build_daily_summary(db, user: User, *, force: bool = False) -> dict | None:
     for r in receipts:
         total_bytes += int(r.total_bytes or 0)
         c = colls.get(r.collection_id)
-        st = (c.source_type if c else "source")
+        st = _effective_source_type(c)
         by_source[st] = by_source.get(st, 0) + int(r.total_bytes or 0)
         label, ic = _dest_label(r.destination)
         by_dest[label] = by_dest.get(label, 0) + int(r.total_bytes or 0)
@@ -622,7 +657,7 @@ def build_weekly_org(db, tenant: Tenant) -> dict | None:
         if owner:
             by_user[owner] = by_user.get(owner, 0) + int(r.total_bytes or 0)
         c = colls.get(r.collection_id)
-        st = c.source_type if c else "source"
+        st = _effective_source_type(c)
         by_source[st] = by_source.get(st, 0) + int(r.total_bytes or 0)
         label, ic = _dest_label(r.destination)
         by_dest[label] = by_dest.get(label, 0) + int(r.total_bytes or 0)
@@ -785,6 +820,13 @@ def build_plan_change(db, user: User, change: dict) -> dict:
 
 
 def _source_name(source_type: str) -> str:
+    # Managed Microsoft 365 workloads have no standalone connector — name them the
+    # same as the portal (dashboard._source_meta) so email + UI always match.
+    _managed = {"exchange": "Exchange Online", "copilot": "Microsoft 365 Copilot",
+                "sharepoint": "SharePoint", "teams": "Teams", "onenote": "OneNote",
+                "calendar": "Exchange Calendar", "contacts": "Exchange Contacts"}
+    if source_type in _managed:
+        return _managed[source_type]
     try:
         from .connectors import get_connector
         c = get_connector(source_type)
