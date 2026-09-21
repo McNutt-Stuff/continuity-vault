@@ -15,8 +15,11 @@ without a live gateway — swap in the real secret and the same call goes live.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -379,4 +382,52 @@ def charge_once(service: dict | None, *, customer: str, token: str, amount_cents
     # Test / unconfigured: succeed deterministically.
     return {"charge_id": f"test_ch_{int(datetime.now(timezone.utc).timestamp())}",
             "status": "succeeded", "error": ""}
+
+
+def verify_stripe_webhook(secret: str, payload: bytes, sig_header: str,
+                          tolerance: int = 300) -> bool:
+    """Verify a Stripe webhook signature (HMAC-SHA256 over ``t.payload`` with the
+    endpoint signing secret). Constant-time compare + a timestamp tolerance so a
+    replayed/forged event is rejected. No live secret configured → cannot verify."""
+    if not secret or not sig_header or not payload:
+        return False
+    parts = dict(p.split("=", 1) for p in sig_header.split(",") if "=" in p)
+    t, v1 = parts.get("t"), parts.get("v1")
+    if not t or not v1:
+        return False
+    try:
+        if tolerance and abs(time.time() - int(t)) > tolerance:
+            return False
+    except ValueError:
+        return False
+    signed = f"{t}.".encode() + payload
+    expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, v1)
+
+
+def get_payment_status(service: dict | None, charge_id: str) -> str:
+    """Current processor status for a PaymentIntent/charge id — used by the
+    reconciliation sweep to resolve a charge whose webhook was missed. Returns
+    ``succeeded`` | ``failed`` | ``pending`` | ``unknown``."""
+    kind = (service or {}).get("kind", "")
+    cfg = (service or {}).get("config", {}) or {}
+    if kind != "payment-stripe" or not cfg.get("secret_key") or not charge_id.startswith("pi_"):
+        return "unknown"
+    try:
+        with httpx.Client(timeout=20) as client:
+            r = client.get(f"https://api.stripe.com/v1/payment_intents/{charge_id}",
+                           auth=(cfg["secret_key"], ""))
+        if r.status_code >= 400:
+            return "unknown"
+        st = (r.json() or {}).get("status", "")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stripe get_payment_status failed: %s", exc)
+        return "unknown"
+    if st == "succeeded":
+        return "succeeded"
+    if st in ("canceled", "requires_payment_method"):
+        return "failed"
+    if st in ("processing", "requires_action", "requires_confirmation", "requires_capture"):
+        return "pending"
+    return "unknown"
 

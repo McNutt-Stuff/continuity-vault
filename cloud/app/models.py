@@ -1444,6 +1444,17 @@ class BillingCharge(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class ProcessedWebhook(Base):
+    """A payment-processor webhook event we've already handled — the idempotency
+    ledger so a redelivered event (Stripe retries) is never processed twice."""
+
+    __tablename__ = "processed_webhooks"
+    event_id = Column(String, primary_key=True)            # processor's event id (evt_…)
+    processor = Column(String, default="stripe")
+    event_type = Column(String, default="")
+    received_at = Column(DateTime, default=_now)
+
+
 class QueueItem(Base):
     """Durable registry of a protection activity that must be delivered to a
     destination which may be temporarily unreachable — an offline appliance, or

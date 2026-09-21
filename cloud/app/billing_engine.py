@@ -150,6 +150,30 @@ def refresh_active_amounts(db: Session) -> int:
     return changed
 
 
+def reconcile_charges(db: Session, older_than_minutes: int = 60) -> int:
+    """Resolve charges stuck in 'pending' (a missed/late webhook) by asking the
+    processor for the PaymentIntent status. The safety net behind the webhook."""
+    from . import payments, services
+    cutoff = _now() - timedelta(minutes=older_than_minutes)
+    n = 0
+    for ch in (db.query(BillingCharge)
+               .filter(BillingCharge.status == "pending",
+                       BillingCharge.created_at < cutoff).all()):
+        if not (ch.processor_charge_id or "").startswith("pi_"):
+            continue
+        svc = services.tenant_payment_service(db, ch.tenant_id)
+        st = payments.get_payment_status(svc, ch.processor_charge_id)
+        if st in ("succeeded", "failed"):
+            ch.status = st
+            prof = db.get(BillingProfile, ch.profile_id)
+            if prof is not None:
+                prof.last_status = st
+            n += 1
+    if n:
+        db.commit()
+    return n
+
+
 def run_due_charges(db: Session, now: datetime | None = None) -> int:
     """Charge every active profile whose next_charge_at has arrived, then advance
     it to the next anniversary. Failures mark past_due and retry the next day."""

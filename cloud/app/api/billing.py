@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -853,6 +853,63 @@ def _ensure_billing_profile(db: Session, tenant: Tenant, user: User,
     db.commit()
     db.refresh(prof)
     return prof
+
+
+def _apply_stripe_event(db: Session, event: dict) -> None:
+    """Update the matching BillingCharge/profile from a verified Stripe event."""
+    etype = event.get("type", "")
+    obj = (event.get("data", {}) or {}).get("object", {}) or {}
+    pi = obj.get("id", "") if obj.get("object") == "payment_intent" else obj.get("payment_intent", "")
+    if not pi:
+        return
+    charge = (db.query(BillingCharge)
+              .filter(BillingCharge.processor_charge_id == pi)
+              .order_by(BillingCharge.created_at.desc()).first())
+    if charge is None:
+        return
+    if etype in ("payment_intent.succeeded", "charge.succeeded", "invoice.payment_succeeded"):
+        charge.status, charge.error = "succeeded", ""
+    elif etype in ("payment_intent.payment_failed", "charge.failed", "invoice.payment_failed"):
+        charge.status = "failed"
+        charge.error = (((obj.get("last_payment_error") or {}).get("message")) or "payment failed")[:200]
+    else:
+        return
+    prof = db.get(BillingProfile, charge.profile_id)
+    if prof is not None:
+        prof.last_status = charge.status
+
+
+@router.post("/webhooks/stripe")
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    """Stripe webhook receiver — UNAUTHENTICATED but SIGNATURE-VERIFIED (HMAC over
+    the raw body with the endpoint signing secret) and IDEMPOTENT (each event id is
+    handled once). Confirms charge outcomes asynchronously; the reconcile sweep is
+    the safety net for missed deliveries."""
+    from .. import payments, services
+    from ..models import ProcessedWebhook
+    import json
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    svc = services.self_payment_service() or {}
+    secret = (svc.get("config") or {}).get("webhook_secret", "")
+    if not payments.verify_stripe_webhook(secret, payload, sig):
+        raise HTTPException(400, "invalid signature")
+    try:
+        event = json.loads(payload or b"{}")
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "invalid payload")
+    eid = event.get("id", "")
+    if not eid:
+        raise HTTPException(400, "missing event id")
+    if db.get(ProcessedWebhook, eid) is not None:
+        return {"ok": True, "duplicate": True}   # idempotent — already handled
+    db.add(ProcessedWebhook(event_id=eid, processor="stripe", event_type=event.get("type", "")))
+    try:
+        _apply_stripe_event(db, event)
+    except Exception:  # noqa: BLE001
+        logger.exception("stripe webhook apply failed for %s", eid)
+    db.commit()
+    return {"ok": True}
 
 
 def _profile_view(db: Session, prof: BillingProfile) -> dict:
