@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { Card, Pill, bytes, groupScope } from "../components/ui";
@@ -98,11 +98,14 @@ export default function Onboarding() {
   }, []);
 
   // Server-authoritative itemized bill (includes active add-ons) — recomputed for the
-  // pending licensed amount so the summary always matches what we'll charge.
+  // pending licensed amount. A request token guards against a stale slower response
+  // overwriting a newer one (the summary must always match the latest state).
+  const billReq = useRef(0);
   async function recomputeBill(tb: number) {
+    const token = ++billReq.current;
     try {
       const r = await api.post<{ proposed: Estimate }>("/billing/estimate/preview", { licensed_tb: tb });
-      setBill(r.proposed);
+      if (token === billReq.current) setBill(r.proposed);
     } catch { /* ignore */ }
   }
   async function reloadAddons() {
@@ -191,6 +194,9 @@ export default function Onboarding() {
         : delta > 0 ? `That's ${dollars(delta)}/mo more than today.`
           : `That's ${dollars(-delta)}/mo less than today.`;
       const oneTime = prev.one_time_cents ? ` A one-time charge of ${dollars(prev.one_time_cents)} applies.` : "";
+      // Keep the on-screen summary in lockstep with the confirmed figure.
+      billReq.current++;
+      setBill(prev.proposed);
       const ok = await confirmDialog({
         title: "Confirm your plan", confirmLabel: "Confirm & save",
         message: `Your new recurring charge will be ${prev.proposed.recurring_display}/mo. ${deltaLine}${oneTime}`,
@@ -216,6 +222,9 @@ export default function Onboarding() {
   const overLicensed = usedTb > licensedTb;
   const activeAddonCodes = new Set((addons?.active || []).map((a) => a.code));
   const optionalAddons = (addons?.available || []).filter((a) => a.code !== "arkive_cloud");
+  // Value/return is measured against the ACTUAL server bill (all lines incl. add-ons).
+  const billMonthly = (bill?.recurring_cents || 0) / 100;
+  const billRatio = billMonthly > 0 ? (costs.dataValue / (billMonthly * 12)) : null;
 
   return (
     <>
@@ -255,7 +264,7 @@ export default function Onboarding() {
       <div className="grid" style={{ gridTemplateColumns: "1fr 340px", gap: 16, alignItems: "start" }}>
         {/* -------- Left: choices -------- */}
         <div className="stack" style={{ gap: 16 }}>
-          <Card>
+          <Card style={{ order: 2 }}>
             <div className="spread" style={{ marginBottom: 4 }}>
               <h3 style={{ margin: 0 }}>Storage protection</h3>
               <span className="faint" style={{ fontSize: 12 }}>Choose one or more</span>
@@ -323,8 +332,8 @@ export default function Onboarding() {
             </div>
           </Card>
 
-          {/* Protection level slider */}
-          <Card>
+          {/* Protection level slider — shown first (flex order) */}
+          <Card style={{ order: 1 }}>
             <div className="spread" style={{ marginBottom: 4 }}>
               <h3 style={{ margin: 0 }}>Protection level</h3>
               <span className="faint" style={{ fontSize: 12 }}>{money2(rate)} / TB · month</span>
@@ -358,7 +367,7 @@ export default function Onboarding() {
           </Card>
 
           {optionalAddons.length > 0 && (
-            <Card>
+            <Card style={{ order: 3 }}>
               <div className="spread" style={{ marginBottom: 4 }}>
                 <h3 style={{ margin: 0 }}>Add-ons</h3>
                 <span className="faint" style={{ fontSize: 12 }}>Optional capabilities</span>
@@ -456,14 +465,14 @@ export default function Onboarding() {
               ))}
               {plan.value_breakdown.length === 0 && <div className="faint" style={{ fontSize: 12 }}>Protect data to see its value.</div>}
             </div>
-            {costs.ratio != null && costs.ratio > 0 && (
+            {billRatio != null && billRatio > 0 && (
               <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
                 <div className="row" style={{ gap: 8, alignItems: "center" }}>
                   <div className="result-icon" style={{ width: 32, height: 32, background: "var(--inset)", color: "#35d0a5" }}>
                     <Icon name="check" size={16} />
                   </div>
                   <div style={{ fontSize: 12.5 }}>
-                    Every <b>{money2(costs.annual / 12)}</b>/mo protects about <b style={{ color: "#35d0a5" }}>{money(costs.dataValue)}</b> — a <b>{costs.ratio.toLocaleString(undefined, { maximumFractionDigits: 0 })}×</b> return.
+                    Every <b>{money2(billMonthly)}</b>/mo protects about <b style={{ color: "#35d0a5" }}>{money(costs.dataValue)}</b> — a <b>{billRatio.toLocaleString(undefined, { maximumFractionDigits: 0 })}×</b> return.
                   </div>
                 </div>
               </div>

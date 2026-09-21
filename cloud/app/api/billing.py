@@ -377,6 +377,26 @@ def _apply_cloud_unsubscribe(target, prev: set[str], new: set[str]) -> None:
         target.cloud_delete_at = None
 
 
+def _sync_cloud_addon(db: Session, tenant: Tenant, enabled: bool, actor: str | None) -> None:
+    """Keep the ``arkive_cloud`` consumption add-on in sync with the cv-cloud storage
+    tier, so enabling Arkive Cloud bills its per-TB consumption through the calc."""
+    from ..entitlements.models import AddOn, TenantAddOn
+    a = db.get(AddOn, "arkive_cloud")
+    if a is None:
+        return
+    existing = (db.query(TenantAddOn)
+                .filter(TenantAddOn.tenant_id == tenant.id,
+                        TenantAddOn.addon_code == "arkive_cloud",
+                        TenantAddOn.status == "active").first())
+    if enabled and existing is None:
+        db.add(TenantAddOn(tenant_id=tenant.id, addon_code="arkive_cloud", quantity=1,
+                           status="active", price_cents_snapshot=a.price_cents,
+                           addon_version=a.version, created_by=actor))
+    elif not enabled and existing is not None:
+        existing.status = "canceled"
+        existing.ends_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def cloud_stored_summary(db: Session, tenant: Tenant, vault_ids) -> tuple[int, int]:
     """(object_count, bytes) currently stored in Arkive Cloud for the given vaults."""
     from ..models import SearchDocument, SnapshotReceipt
@@ -661,6 +681,7 @@ def update_plan(body: PlanUpdate,
             new = {o for o in body.options if o in valid}
             user.protection_options = list(new)
             _apply_cloud_unsubscribe(user, prev, new)
+            _sync_cloud_addon(db, tenant, "cv-cloud" in new, principal.user_id)
             for o in sorted(new - prev):
                 summary.append(f"Enabled {_OPTION_LABELS.get(o, o)}")
             for o in sorted(prev - new):
@@ -683,6 +704,7 @@ def update_plan(body: PlanUpdate,
         new = {o for o in body.options if o in valid}
         tenant.protection_options = list(new)
         _apply_cloud_unsubscribe(tenant, prev, new)
+        _sync_cloud_addon(db, tenant, "cv-cloud" in new, principal.user_id)
         for o in sorted(new - prev):
             summary.append(f"Enabled {_OPTION_LABELS.get(o, o)}")
         for o in sorted(prev - new):
