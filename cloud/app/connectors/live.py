@@ -1152,6 +1152,11 @@ def _copilot_obj(it: dict, cap: int) -> SourceObject:
     content, backed = _capped(raw, cap)
     label = "Prompt" if itype == "userPrompt" else ("Response" if itype == "aiResponse" else itype)
     title = text[:80] or f"Copilot {label.lower()}"
+    # Copilot interactions are IMMUTABLE historical records — a prompt/response never
+    # changes. Key the content hash on the interaction identity (not the rendered
+    # HTML, which Graph can return slightly differently each fetch) so re-collection
+    # always de-dupes instead of creating a new version every cycle.
+    stable = f"copilot:{it.get('id')}|{created or ''}"
     return SourceObject(
         object_id=f"copilot:{it.get('id')}", doc_type="message", category="message",
         title=title, content=content,
@@ -1159,6 +1164,7 @@ def _copilot_obj(it: dict, cap: int) -> SourceObject:
         meta={"app": app, "from": sender, "interactionType": itype, "session": session,
               "created": created, "contentType": ctype, "content_backed_up": backed},
         labels=[l for l in (app, label) if l], size_bytes=len(content) or None,  # type: ignore
+        content_hash=hashlib.sha256(stable.encode("utf-8", "replace")).hexdigest(),
         modified_at=_parse_dt(created))
 
 
