@@ -98,13 +98,18 @@ export default function Onboarding() {
   }, []);
 
   // Server-authoritative itemized bill (includes active add-ons) — recomputed for the
-  // pending licensed amount. A request token guards against a stale slower response
-  // overwriting a newer one (the summary must always match the latest state).
+  // pending licensed amount + the pending Arkive Cloud selection (the cv-cloud tier
+  // maps to the arkive_cloud consumption add-on, which is only persisted on Save, so
+  // it's injected here as an override to preview live). A request token guards against
+  // a stale slower response overwriting a newer one.
   const billReq = useRef(0);
+  function previewBody(tb: number) {
+    return { licensed_tb: tb, addons: [{ code: "arkive_cloud", quantity: options.has("cv-cloud") ? 1 : 0 }] };
+  }
   async function recomputeBill(tb: number) {
     const token = ++billReq.current;
     try {
-      const r = await api.post<{ proposed: Estimate }>("/billing/estimate/preview", { licensed_tb: tb });
+      const r = await api.post<{ proposed: Estimate }>("/billing/estimate/preview", previewBody(tb));
       if (token === billReq.current) setBill(r.proposed);
     } catch { /* ignore */ }
   }
@@ -120,7 +125,7 @@ export default function Onboarding() {
       await recomputeBill(licensedTb);
     } catch { /* best-effort; the bill reflects reality on next load */ }
   }
-  useEffect(() => { if (plan) void recomputeBill(licensedTb); }, [licensedTb, plan]);
+  useEffect(() => { if (plan) void recomputeBill(licensedTb); }, [licensedTb, plan, options]);
 
   // Arriving from "Order a new appliance": enable the appliance destination and
   // pre-add one unit (incremental order) so the user just picks capacity + Save.
@@ -187,7 +192,7 @@ export default function Onboarding() {
     // and the delta before committing (prices come from the server, never the UI).
     try {
       const prev = await api.post<{ proposed: Estimate; delta_cents: number; one_time_cents: number }>(
-        "/billing/estimate/preview", { licensed_tb: licensedTb });
+        "/billing/estimate/preview", previewBody(licensedTb));
       const dollars = (c: number) => "$" + ((c || 0) / 100).toFixed(2);
       const delta = prev.delta_cents || 0;
       const deltaLine = delta === 0 ? "No change to your recurring charge."
