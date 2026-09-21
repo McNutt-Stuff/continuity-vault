@@ -6753,12 +6753,6 @@ function CatalogAdmin() {
   function setSeats(n: number) { setV(isFamily ? { included_members: n, included_users: 0 } : { included_users: n, included_members: 0 }); }
   function setPerSeat(c: number) { setV(isFamily ? { per_member_cents: c, per_user_cents: 0 } : { per_user_cents: c, per_member_cents: 0 }); }
 
-  const MONEY_FIELDS: { k: keyof PlanVer; label: string }[] = [
-    { k: "base_price_cents", label: "Base / mo" },
-    { k: "protection_cents_per_tb", label: "Protection / TB · mo" },
-    { k: "cloud_cents_per_tb", label: "Arkive Cloud / TB · mo" },
-    { k: "cloud_plus_cents_per_tb", label: "Cloud Plus / TB · mo" },
-  ];
   if (!plans) return <Card><div className="muted">Loading catalog…</div></Card>;
   return (
     <>
@@ -6791,24 +6785,24 @@ function CatalogAdmin() {
           <label className="stack" style={{ gap: 3, marginTop: 8 }}><span className="faint" style={{ fontSize: 11.5 }}>Description</span>
             <textarea className="input" rows={2} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label>
 
-          <div className="faint" style={{ fontSize: 11.5, margin: "14px 0 6px", fontWeight: 600 }}>Pricing &amp; included allowance</div>
+          <div className="faint" style={{ fontSize: 11.5, margin: "14px 0 6px", fontWeight: 600 }}>Base plan</div>
           <div className="grid grid-3" style={{ gap: 10 }}>
-            {MONEY_FIELDS.map((f) => (
-              <label key={String(f.k)} className="stack" style={{ gap: 3 }}>
-                <span className="faint" style={{ fontSize: 11.5 }}>{f.label}</span>
-                <input className="input sm" type="number" step="0.01" value={(num(form.v, f.k) / 100).toString()}
-                       onChange={(e) => setV({ [f.k]: Math.round(parseFloat(e.target.value || "0") * 100) } as Partial<PlanVer>)} />
-              </label>
-            ))}
-            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>{isFamily ? "Included members" : "Included seats"}</span>
-              <input className="input sm" type="number" value={seats.toString()} onChange={(e) => setSeats(Math.round(parseFloat(e.target.value || "0")))} /></label>
-            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Per extra {isFamily ? "member" : "seat"} / mo</span>
-              <input className="input sm" type="number" step="0.01" value={(perSeat / 100).toString()} onChange={(e) => setPerSeat(Math.round(parseFloat(e.target.value || "0") * 100))} /></label>
-            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Included TB</span>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Base price / {form.v.billing_interval === "year" ? "yr" : "mo"}</span>
+              <input className="input sm" type="number" step="0.01" value={(num(form.v, "base_price_cents") / 100).toString()} onChange={(e) => setV({ base_price_cents: Math.round(parseFloat(e.target.value || "0") * 100) })} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Included protection (TB)</span>
               <input className="input sm" type="number" value={num(form.v, "included_tb").toString()} onChange={(e) => setV({ included_tb: Math.round(parseFloat(e.target.value || "0")) })} /></label>
-            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Min TB</span>
-              <input className="input sm" type="number" value={num(form.v, "min_tb").toString()} onChange={(e) => setV({ min_tb: Math.round(parseFloat(e.target.value || "0")) })} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Included {isFamily ? "members" : "seats"} ({isFamily ? "members" : "users"})</span>
+              <input className="input sm" type="number" value={seats.toString()} onChange={(e) => setSeats(Math.round(parseFloat(e.target.value || "0")))} /></label>
           </div>
+
+          <div className="faint" style={{ fontSize: 11.5, margin: "14px 0 6px", fontWeight: 600 }}>Usage costs (over the included allowance)</div>
+          <div className="grid grid-3" style={{ gap: 10 }}>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Additional protection / TB · {form.v.billing_interval === "year" ? "yr" : "mo"}</span>
+              <input className="input sm" type="number" step="0.01" value={(num(form.v, "protection_cents_per_tb") / 100).toString()} onChange={(e) => setV({ protection_cents_per_tb: Math.round(parseFloat(e.target.value || "0") * 100) })} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Additional {isFamily ? "member" : "user"} / {form.v.billing_interval === "year" ? "yr" : "mo"}</span>
+              <input className="input sm" type="number" step="0.01" value={(perSeat / 100).toString()} onChange={(e) => setPerSeat(Math.round(parseFloat(e.target.value || "0") * 100))} /></label>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>Arkive Cloud &amp; Arkive Cloud Plus aren't priced on the plan — they're consumption-based add-ons (billed per stored TB). Manage them under Add-ons.</div>
 
           <div className="faint" style={{ fontSize: 11.5, margin: "14px 0 6px", fontWeight: 600 }}>What's included</div>
           <div className="grid grid-2" style={{ gap: 12 }}>
@@ -6829,7 +6823,7 @@ function CatalogAdmin() {
 
       <Card>
         <table className="table">
-          <thead><tr><th>Plan</th><th>Family</th><th>Ver</th><th>Base</th><th>Protection/TB</th><th>Cloud/TB</th><th>Per seat</th><th>Incl. seats</th><th>Incl. TB</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Plan</th><th>Family</th><th>Ver</th><th>Base</th><th>Add'l protection/TB</th><th>Add'l user</th><th>Incl. seats</th><th>Incl. TB</th><th>Status</th><th></th></tr></thead>
           <tbody>
             {plans.map((p) => {
               const v = p.effective_version;
@@ -6843,7 +6837,6 @@ function CatalogAdmin() {
                   <td>{v ? `v${v.version}` : "—"}</td>
                   <td>{v ? DOLLARS(v.base_price_cents) : "—"}</td>
                   <td>{v ? DOLLARS(v.protection_cents_per_tb) : "—"}</td>
-                  <td>{v ? DOLLARS(v.cloud_cents_per_tb) : "—"}</td>
                   <td>{v ? DOLLARS(seatRate) : "—"}</td>
                   <td className="faint">{v ? seatIncl : "—"}</td>
                   <td className="faint">{v ? v.included_tb : "—"}</td>
@@ -6854,7 +6847,7 @@ function CatalogAdmin() {
                 </tr>
               );
             })}
-            {plans.length === 0 && <tr><td colSpan={11} className="muted">No plans in the catalog.</td></tr>}
+            {plans.length === 0 && <tr><td colSpan={10} className="muted">No plans in the catalog.</td></tr>}
           </tbody>
         </table>
         <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>Publishing a new version closes the current one (kept as immutable history) and takes effect immediately for new charges.</div>

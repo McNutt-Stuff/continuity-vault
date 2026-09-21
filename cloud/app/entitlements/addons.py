@@ -35,6 +35,11 @@ _DEFAULT_ADDONS: list[dict] = [
      "eligible_plans": ["business", "enterprise"],
      "entitlements": {"m365_managed_integration": True},
      "feature_flags": ["m365_managed_integration"]},
+    {"code": "arkive_cloud", "name": "Arkive Cloud",
+     "description": "Managed cloud storage for your protected data, billed per consumed TB.",
+     "pricing_model": "per_cloud_tb", "price_cents": 1000, "billing_interval": "month",
+     "eligible_plans": [],  # available on every plan
+     "entitlements": {"arkive_cloud_access": True}, "meter_key": "cloud_stored_tb"},
     {"code": "arkive_cloud_plus", "name": "Arkive Cloud Plus",
      "description": "Higher-tier managed cloud storage, billed per consumed TB.",
      "pricing_model": "per_cloud_tb", "price_cents": 1500, "billing_interval": "month",
