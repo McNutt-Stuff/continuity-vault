@@ -394,13 +394,13 @@ def billing_debug(tenant: str = "", limit: int = 100, db: Session = Depends(get_
 
     def _legacy_cents(t: "Tenant"):
         """Legacy authoritative recurring cents (what actually bills today), or None."""
-        from .billing import _plan_amount_cents
+        from .billing import _legacy_amount_cents
         owner = (db.query(User).filter(User.tenant_id == t.id)
                  .order_by(User.created_at.asc()).first())
         if owner is None:
             return None
         try:
-            cents, _cur, _pid, _name = _plan_amount_cents(db, owner, t)
+            cents, _cur, _pid, _name = _legacy_amount_cents(db, owner, t)
             return int(cents)
         except Exception as exc:  # noqa: BLE001
             logger.warning("debug/billing legacy calc failed for %s: %s", t.id, exc)

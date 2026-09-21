@@ -810,21 +810,52 @@ def _billing_source(db: Session, tenant: Tenant | None) -> str:
     return val if val in ("calc", "legacy") else "legacy"
 
 
-def _plan_amount_cents(db: Session, user: User, tenant: Tenant) -> tuple[int, str, str, str]:
-    """(amount_cents, currency, plan_id, plan_name) — the tenant's monthly charge.
-    Uses the deterministic billing_calc total when the tenant is on ``billing_source
-    = calc`` (we bill the single recurring total, not line items); otherwise the
-    legacy PricingConfig monthly total."""
-    if _billing_source(db, tenant) == "calc":
-        from .. import billing_calc
-        calc = billing_calc.calculate(db, tenant)
-        plan = (tenant.plan or "")
-        return int(calc.recurring_cents), (calc.currency or "USD"), plan, plan.title() or "Arkive"
+def _set_billing_source(db: Session, tenant_id: str, value: str | None) -> None:
+    """Set (or clear, when ``value`` is None) a tenant's per-tenant billing_source
+    override. Caller commits."""
+    from ..models import SystemSetting
+    key = f"billing_source:{tenant_id}"
+    row = db.get(SystemSetting, key)
+    if value is None:
+        if row is not None:
+            db.delete(row)
+    elif row is None:
+        db.add(SystemSetting(key=key, value=value))
+    else:
+        row.value = value
+
+
+def _legacy_amount_cents(db: Session, user: User, tenant: Tenant) -> tuple[int, str, str, str]:
+    """The legacy PricingConfig monthly total (always — regardless of billing_source)."""
     view = plan_view(db, user, tenant)
     total = float((view.get("costs") or {}).get("total_monthly") or 0.0)
     plan = view.get("license_plan") or {}
     cur = (view.get("currency") or "USD")
     return int(round(total * 100)), cur, plan.get("id", tenant.plan or ""), plan.get("name", "")
+
+
+def _calc_amount_cents(db: Session, tenant: Tenant) -> tuple[int, str, str, str]:
+    """The deterministic billing_calc recurring monthly total (always)."""
+    from .. import billing_calc
+    calc = billing_calc.calculate(db, tenant)
+    plan = (tenant.plan or "")
+    return int(calc.recurring_cents), (calc.currency or "USD"), plan, plan.title() or "Arkive"
+
+
+def _plan_amount_cents(db: Session, user: User, tenant: Tenant) -> tuple[int, str, str, str]:
+    """(amount_cents, currency, plan_id, plan_name) — the tenant's monthly charge.
+    A grandfather price lock wins; otherwise the deterministic billing_calc total
+    when the tenant is on ``billing_source = calc`` (we bill the single recurring
+    total, not line items), else the legacy PricingConfig monthly total."""
+    from .. import billing_migration
+    lock = billing_migration.price_lock(db, tenant.id)
+    if lock is not None:
+        plan = (tenant.plan or "")
+        cur = _calc_amount_cents(db, tenant)[1]
+        return int(lock), cur, plan, plan.title() or "Arkive"
+    if _billing_source(db, tenant) == "calc":
+        return _calc_amount_cents(db, tenant)
+    return _legacy_amount_cents(db, user, tenant)
 
 
 def _ensure_billing_profile(db: Session, tenant: Tenant, user: User,

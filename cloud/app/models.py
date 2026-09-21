@@ -1455,6 +1455,27 @@ class ProcessedWebhook(Base):
     received_at = Column(DateTime, default=_now)
 
 
+class BillingMigration(Base):
+    """A legacy→new-engine billing cutover for one tenant, with the compensating
+    snapshot needed to roll it back. The audit trail for Phase 12 migrations."""
+
+    __tablename__ = "billing_migrations"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), index=True)
+    mode = Column(String, default="calc")                  # calc | grandfather
+    status = Column(String, default="applied", index=True)  # applied | rolled_back
+    prev_source = Column(String, default="")               # billing_source before (legacy|calc|"")
+    new_source = Column(String, default="")
+    legacy_cents = Column(Integer, default=0)              # legacy amount at migration time
+    calc_cents = Column(Integer, default=0)                # calc amount at migration time
+    prev_amount_cents = Column(Integer, default=0)         # BillingProfile.amount_cents before
+    new_amount_cents = Column(Integer, default=0)
+    actor = Column(String, nullable=True)
+    note = Column(Text, default="")
+    created_at = Column(DateTime, default=_now)
+    rolled_back_at = Column(DateTime, nullable=True)
+
+
 class QueueItem(Base):
     """Durable registry of a protection activity that must be delivered to a
     destination which may be temporarily unreachable — an offline appliance, or

@@ -611,6 +611,75 @@ def set_tenant_billing_source(tid: str, body: BillingSourceBody,
     return get_tenant_billing_source(tid, db)
 
 
+# --- Legacy → new-engine billing migration (Phase 12) -----------------------
+
+@router.get("/tenants/{tid}/migration")
+def get_tenant_migration(tid: str, db: Session = Depends(get_db)):
+    """Dry-run plan (legacy vs calc, delta, recommendation) + migration history."""
+    from .. import billing_migration
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    return {"preview": billing_migration.preview(db, t),
+            "history": billing_migration.history(db, tid)}
+
+
+class MigrationApplyBody(BaseModel):
+    mode: str = "calc"   # calc (re-price to the calc total) | grandfather (price-neutral)
+    note: str | None = None
+
+
+@router.post("/tenants/{tid}/migration/apply")
+def apply_tenant_migration(tid: str, body: MigrationApplyBody,
+                           principal: security.Principal = Depends(security.require_platform_admin),
+                           db: Session = Depends(get_db)):
+    """Cut a tenant over to the new billing engine (calc). 'grandfather' pins the
+    current price so the cutover is price-neutral; 'calc' re-prices to the calc total.
+    Records a compensating snapshot for rollback."""
+    from .. import billing_migration
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    mode = (body.mode or "calc").lower()
+    if mode not in ("calc", "grandfather"):
+        raise HTTPException(400, "mode must be 'calc' or 'grandfather'")
+    res = billing_migration.apply(db, t, mode=mode, actor=principal.user_id, note=body.note or "")
+    audit.record(db, actor=principal.user_id, action="admin.billing_migration_applied",
+                 tenant_id=tid, category="admin", severity="warning",
+                 detail={"mode": mode, "new_amount_cents": res.get("new_amount_cents")})
+    return res
+
+
+@router.post("/tenants/{tid}/migration/rollback")
+def rollback_tenant_migration(tid: str,
+                              principal: security.Principal = Depends(security.require_platform_admin),
+                              db: Session = Depends(get_db)):
+    """Revert the tenant's most recent applied migration (restore source + amount)."""
+    from .. import billing_migration
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    res = billing_migration.rollback(db, t, actor=principal.user_id)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error", "rollback failed"))
+    audit.record(db, actor=principal.user_id, action="admin.billing_migration_rolled_back",
+                 tenant_id=tid, category="admin", severity="warning", detail=res)
+    return res
+
+
+@router.post("/billing/backfill-subscriptions")
+def backfill_subscriptions(limit: int = 0,
+                           principal: security.Principal = Depends(security.require_platform_admin),
+                           db: Session = Depends(get_db)):
+    """Materialize the persisted subscription for every tenant (idempotent; does not
+    change billing_source or charge anything). Run before a broad cutover."""
+    from .. import billing_migration
+    res = billing_migration.backfill_all(db, limit=(limit or None))
+    audit.record(db, actor=principal.user_id, action="admin.billing_backfill",
+                 category="admin", severity="notice", detail=res)
+    return res
+
+
 @router.get("/tenants/{tid}/usage")
 def get_tenant_usage(tid: str, db: Session = Depends(get_db)):
     """Current-period metered usage for a tenant (admin view)."""
