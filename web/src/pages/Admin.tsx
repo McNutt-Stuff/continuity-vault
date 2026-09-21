@@ -81,6 +81,17 @@ function extractFlags(r: Record<string, string>, cat: FlagDef[]): Record<string,
   return out;
 }
 
+// ---- Entitlement registry (typed) — powers the entitlement pickers -----------
+interface EntDef { key: string; title: string; type: string; unit: string; scope: string; feature: string; description: string }
+let _entRegistry: EntDef[] | null = null;
+async function entRegistry(): Promise<EntDef[]> {
+  if (!_entRegistry) {
+    try { const r = await api.get<{ entitlements: EntDef[] }>("/admin/entitlements/registry"); _entRegistry = r.entitlements || []; }
+    catch { _entRegistry = []; }
+  }
+  return _entRegistry;
+}
+
 // Shared user-edit dialog (used from a tenant's Users list AND the global Users tab).
 // Returns true when a change was saved.
 async function editUserDialog(u: any, isShared: boolean): Promise<boolean> {
@@ -6475,6 +6486,8 @@ interface PlanVer {
   base_price_cents: number; protection_cents_per_tb: number; cloud_cents_per_tb: number;
   cloud_plus_cents_per_tb: number; per_user_cents: number; per_member_cents: number;
   included_users: number; included_members: number; included_tb: number; min_tb: number;
+  max_users?: number | null; features?: string[]; entitlements?: Record<string, unknown>;
+  compatible_addons?: string[];
 }
 interface CatalogPlan {
   code: string; family: string; name: string; description: string; status: string;
@@ -6482,6 +6495,83 @@ interface CatalogPlan {
 }
 
 const DOLLARS = (c: number) => `$${((c || 0) / 100).toFixed(2)}`;
+
+// Reusable chip/checkbox multi-select — pick from a known catalog instead of
+// hand-typing comma-separated keys (plans, feature flags, add-on codes).
+function MultiSelect({ label, options, value, onChange, placeholder }: {
+  label?: string; options: { value: string; label: string }[];
+  value: string[]; onChange: (v: string[]) => void; placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const sel = new Set(value || []);
+  const labelFor = (v: string) => options.find((o) => o.value === v)?.label || v;
+  function toggle(v: string) { const n = new Set(sel); if (n.has(v)) n.delete(v); else n.add(v); onChange([...n]); }
+  return (
+    <div className="stack" style={{ gap: 3, position: "relative" }}>
+      {label && <span className="faint" style={{ fontSize: 11.5 }}>{label}</span>}
+      <div className="input sm" style={{ display: "flex", flexWrap: "wrap", gap: 4, minHeight: 30, cursor: "pointer", alignItems: "center" }} onClick={() => setOpen((o) => !o)}>
+        {(value || []).length === 0 && <span className="faint" style={{ fontSize: 12 }}>{placeholder || "None — click to choose"}</span>}
+        {(value || []).map((v) => (
+          <span key={v} onClick={(e) => { e.stopPropagation(); toggle(v); }}
+                style={{ fontSize: 11.5, background: "var(--inset)", border: "1px solid var(--border-soft)", borderRadius: 6, padding: "1px 6px" }}>
+            {labelFor(v)} <span className="faint">×</span>
+          </span>
+        ))}
+      </div>
+      {open && (
+        <div className="card" style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 30, marginTop: 4, maxHeight: 240, overflow: "auto", padding: 6 }}>
+          {options.map((o) => (
+            <label key={o.value} className="row" style={{ gap: 8, padding: "4px 6px", cursor: "pointer", fontSize: 12.5 }}>
+              <input type="checkbox" checked={sel.has(o.value)} onChange={() => toggle(o.value)} /> {o.label}
+              <span className="faint mono" style={{ fontSize: 10.5, marginLeft: "auto" }}>{o.value}</span>
+            </label>
+          ))}
+          {options.length === 0 && <div className="muted" style={{ fontSize: 12, padding: 6 }}>No options.</div>}
+          <div className="row" style={{ justifyContent: "flex-end", marginTop: 4 }}>
+            <button className="btn ghost sm" onClick={() => setOpen(false)}>Done</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Typed entitlement picker — add grants from the registry (bool = toggle,
+// quantity/capacity = number) instead of editing raw JSON.
+function EntitlementPicker({ registry, value, onChange }: {
+  registry: EntDef[]; value: Record<string, unknown>; onChange: (v: Record<string, unknown>) => void;
+}) {
+  const set = value || {};
+  const keys = Object.keys(set);
+  const remaining = registry.filter((d) => !(d.key in set));
+  const setVal = (k: string, v: unknown) => onChange({ ...set, [k]: v });
+  function remove(k: string) { const n = { ...set }; delete n[k]; onChange(n); }
+  function add(k: string) { const d = registry.find((x) => x.key === k); if (d) setVal(k, d.type === "bool" ? true : 1); }
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      {keys.length === 0 && <span className="faint" style={{ fontSize: 12 }}>No entitlements granted.</span>}
+      {keys.map((k) => {
+        const d = registry.find((x) => x.key === k);
+        const isBool = !d || d.type === "bool";
+        return (
+          <div key={k} className="row" style={{ gap: 8, alignItems: "center" }}>
+            <span style={{ flex: 1, fontSize: 12.5 }}>{d?.title || k}{d?.unit ? <span className="faint"> ({d.unit})</span> : null}</span>
+            {isBool
+              ? <label className="row" style={{ gap: 6, fontSize: 12 }}><input type="checkbox" checked={!!set[k]} onChange={(e) => setVal(k, e.target.checked)} /> granted</label>
+              : <input className="input sm" type="number" style={{ width: 90 }} value={String((set[k] as number) ?? 0)} onChange={(e) => setVal(k, Math.round(parseFloat(e.target.value || "0")))} />}
+            <button className="btn ghost sm" onClick={() => remove(k)}><Icon name="x" size={12} /></button>
+          </div>
+        );
+      })}
+      {remaining.length > 0 && (
+        <select className="input sm" value="" onChange={(e) => { if (e.target.value) add(e.target.value); }}>
+          <option value="">+ Add entitlement…</option>
+          {remaining.map((d) => <option key={d.key} value={d.key}>{d.title}</option>)}
+        </select>
+      )}
+    </div>
+  );
+}
 
 // Per-tenant persisted subscription + its priced line items (Phase 4/8). Reads the
 // materialized record; "Re-sync" recomputes it from the deterministic billing calc.
@@ -6573,15 +6663,29 @@ function TenantSubscriptionBreakdown({ id }: { id: string }) {
   );
 }
 
+const PLAN_FAMILIES = ["personal", "consumer", "family", "business", "enterprise"];
+const PLAN_STATUSES = ["draft", "active", "grandfathered", "retired"];
+
 // Plan Catalog & price-book — versioned plans with immutable price history.
 function CatalogAdmin() {
   const [plans, setPlans] = useState<CatalogPlan[] | null>(null);
-  const [edit, setEdit] = useState<{ code: string; v: PlanVer } | null>(null);
+  const [edit, setEdit] = useState<{ code: string; family: string; v: PlanVer } | null>(null);
+  const [planEdit, setPlanEdit] = useState<Partial<CatalogPlan> | null>(null);
+  const [flagOpts, setFlagOpts] = useState<{ value: string; label: string }[]>([]);
+  const [ents, setEnts] = useState<EntDef[]>([]);
+  const [addonOpts, setAddonOpts] = useState<{ value: string; label: string }[]>([]);
   const [toast, setToast] = useState("");
   const flash = (m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); };
-  async function load() { try { const r = await api.get<{ plans: CatalogPlan[] }>("/admin/catalog"); setPlans(r.plans || []); } catch { setPlans([]); } }
+  async function load() {
+    try { const r = await api.get<{ plans: CatalogPlan[] }>("/admin/catalog"); setPlans(r.plans || []); } catch { setPlans([]); }
+    try { const c = await flagCatalog(); setFlagOpts(c.map((f) => ({ value: f.name, label: f.label }))); } catch { /* ignore */ }
+    try { setEnts(await entRegistry()); } catch { /* ignore */ }
+    try { const a = await api.get<{ addons: Addon[] }>("/admin/addons"); setAddonOpts((a.addons || []).map((x) => ({ value: x.code, label: x.name || x.code }))); } catch { /* ignore */ }
+  }
   useEffect(() => { void load(); }, []);
+  const planOpts = (plans || []).map((p) => ({ value: p.code, label: p.name || p.code }));
   function num(v: PlanVer, k: keyof PlanVer): number { return (v[k] as number) || 0; }
+
   async function publish() {
     if (!edit) return;
     const v = edit.v;
@@ -6592,21 +6696,42 @@ function CatalogAdmin() {
       per_user_cents: v.per_user_cents, per_member_cents: v.per_member_cents,
       included_users: v.included_users, included_members: v.included_members,
       included_tb: v.included_tb, min_tb: v.min_tb,
+      features: v.features || [], entitlements: v.entitlements || {},
+      compatible_addons: v.compatible_addons || [],
     };
     try { await api.post(`/admin/catalog/plans/${edit.code}/versions`, body); setEdit(null); await load(); flash("New version published"); }
     catch (e) { flash((e as { message?: string }).message || "Couldn't publish"); }
   }
-  const CENT_FIELDS: { k: keyof PlanVer; label: string; money?: boolean }[] = [
-    { k: "base_price_cents", label: "Base / mo", money: true },
-    { k: "protection_cents_per_tb", label: "Protection / TB", money: true },
-    { k: "cloud_cents_per_tb", label: "Cloud / TB", money: true },
-    { k: "cloud_plus_cents_per_tb", label: "Cloud Plus / TB", money: true },
-    { k: "per_user_cents", label: "Per user / mo", money: true },
-    { k: "per_member_cents", label: "Per member / mo", money: true },
-    { k: "included_users", label: "Included users" },
-    { k: "included_members", label: "Included members" },
-    { k: "included_tb", label: "Included TB" },
-    { k: "min_tb", label: "Min TB" },
+  async function savePlan() {
+    if (!planEdit) return;
+    const code = (planEdit.code || "").trim().toLowerCase();
+    if (!code) { flash("A plan code is required"); return; }
+    const body = { code, name: planEdit.name, family: planEdit.family, description: planEdit.description,
+                   status: planEdit.status, customer_visible: planEdit.customer_visible };
+    try { await api.post("/admin/catalog/plans", body); setPlanEdit(null); await load(); flash("Plan saved"); }
+    catch (e) { flash((e as { message?: string }).message || "Couldn't save plan"); }
+  }
+
+  // Seats and members are the SAME concept — a plan is seat-based (business) OR
+  // member-based (family), never both. Show one "Included seats"/"Per extra seat"
+  // pair and map it to the right column by the plan family.
+  const isFamily = edit?.family === "family";
+  const seats = edit ? (isFamily ? num(edit.v, "included_members") : num(edit.v, "included_users")) : 0;
+  const perSeat = edit ? (isFamily ? num(edit.v, "per_member_cents") : num(edit.v, "per_user_cents")) : 0;
+  function setSeats(n: number) {
+    if (!edit) return;
+    setEdit({ ...edit, v: { ...edit.v, included_members: isFamily ? n : 0, included_users: isFamily ? 0 : n } });
+  }
+  function setPerSeat(c: number) {
+    if (!edit) return;
+    setEdit({ ...edit, v: { ...edit.v, per_member_cents: isFamily ? c : 0, per_user_cents: isFamily ? 0 : c } });
+  }
+
+  const MONEY_FIELDS: { k: keyof PlanVer; label: string }[] = [
+    { k: "base_price_cents", label: "Base / mo" },
+    { k: "protection_cents_per_tb", label: "Protection / TB · mo" },
+    { k: "cloud_cents_per_tb", label: "Arkive Cloud / TB · mo" },
+    { k: "cloud_plus_cents_per_tb", label: "Cloud Plus / TB · mo" },
   ];
   if (!plans) return <Card><div className="muted">Loading catalog…</div></Card>;
   return (
@@ -6614,24 +6739,64 @@ function CatalogAdmin() {
       <div className="spread" style={{ marginBottom: 16, alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
         <div>
           <h2 style={{ margin: "0 0 2px" }}>Plan catalog</h2>
-          <div className="muted" style={{ fontSize: 12.5, maxWidth: 660 }}>Versioned plans with immutable price history — a price change publishes a NEW version so past invoices stay reproducible. All money is minor-units (cents). Seeded from the legacy Pricing config.</div>
+          <div className="muted" style={{ fontSize: 12.5, maxWidth: 680 }}>Versioned plans with immutable price history — a price change publishes a NEW version so past invoices stay reproducible. A plan <b>includes</b> entitlements + feature flags and defines <b>overage rates</b> over the included allowance; buying beyond that is priced by the plan, not a duplicate add-on. All money is minor-units (cents).</div>
         </div>
+        <button className="btn primary sm" onClick={() => setPlanEdit({ family: "business", status: "active", customer_visible: true })}><Icon name="plus" size={13} /> New plan</button>
       </div>
+
+      {planEdit && (
+        <Card style={{ marginBottom: 16 }}>
+          <h3 style={{ marginTop: 0 }}>{planEdit.code && plans.find((p) => p.code === planEdit.code) ? `Edit plan ${planEdit.code}` : "New plan"}</h3>
+          <div className="grid grid-3" style={{ gap: 10 }}>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Code (immutable)</span>
+              <input className="input sm" value={planEdit.code || ""} disabled={!!plans.find((p) => p.code === planEdit.code)} onChange={(e) => setPlanEdit({ ...planEdit, code: e.target.value })} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Name</span>
+              <input className="input sm" value={planEdit.name || ""} onChange={(e) => setPlanEdit({ ...planEdit, name: e.target.value })} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Family</span>
+              <select className="input sm" value={planEdit.family || "business"} onChange={(e) => setPlanEdit({ ...planEdit, family: e.target.value })}>{PLAN_FAMILIES.map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Status</span>
+              <select className="input sm" value={planEdit.status || "active"} onChange={(e) => setPlanEdit({ ...planEdit, status: e.target.value })}>{PLAN_STATUSES.map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
+            <label className="row" style={{ gap: 6, fontSize: 12.5, alignSelf: "end" }}><input type="checkbox" checked={!!planEdit.customer_visible} onChange={(e) => setPlanEdit({ ...planEdit, customer_visible: e.target.checked })} /> Customer-visible</label>
+          </div>
+          <label className="stack" style={{ gap: 3, marginTop: 8 }}><span className="faint" style={{ fontSize: 11.5 }}>Description</span>
+            <textarea className="input" rows={2} value={planEdit.description || ""} onChange={(e) => setPlanEdit({ ...planEdit, description: e.target.value })} /></label>
+          <div className="row" style={{ gap: 8, marginTop: 12 }}>
+            <button className="btn primary sm" onClick={savePlan}><Icon name="check" size={13} /> Save plan</button>
+            <button className="btn ghost sm" onClick={() => setPlanEdit(null)}>Cancel</button>
+          </div>
+        </Card>
+      )}
 
       {edit && (
         <Card style={{ marginBottom: 16 }}>
           <h3 style={{ marginTop: 0 }}>Publish new version of {edit.code} <span className="faint" style={{ fontSize: 12 }}>(current v{edit.v.version})</span></h3>
+          <div className="faint" style={{ fontSize: 11.5, marginBottom: 10 }}>Prices are per the interval; seats/members are one concept for this {edit.family || "plan"} plan.</div>
           <div className="grid grid-3" style={{ gap: 10 }}>
-            {CENT_FIELDS.map((f) => (
+            {MONEY_FIELDS.map((f) => (
               <label key={String(f.k)} className="stack" style={{ gap: 3 }}>
                 <span className="faint" style={{ fontSize: 11.5 }}>{f.label}</span>
-                <input className="input sm" type="number" step={f.money ? "0.01" : "1"}
-                       value={f.money ? (num(edit.v, f.k) / 100).toString() : num(edit.v, f.k).toString()}
-                       onChange={(e) => { const raw = parseFloat(e.target.value || "0"); const val = f.money ? Math.round(raw * 100) : Math.round(raw); setEdit({ ...edit, v: { ...edit.v, [f.k]: val } }); }} />
+                <input className="input sm" type="number" step="0.01" value={(num(edit.v, f.k) / 100).toString()}
+                       onChange={(e) => setEdit({ ...edit, v: { ...edit.v, [f.k]: Math.round(parseFloat(e.target.value || "0") * 100) } })} />
               </label>
             ))}
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>{isFamily ? "Included members" : "Included seats"}</span>
+              <input className="input sm" type="number" value={seats.toString()} onChange={(e) => setSeats(Math.round(parseFloat(e.target.value || "0")))} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Per extra {isFamily ? "member" : "seat"} / mo</span>
+              <input className="input sm" type="number" step="0.01" value={(perSeat / 100).toString()} onChange={(e) => setPerSeat(Math.round(parseFloat(e.target.value || "0") * 100))} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Included TB</span>
+              <input className="input sm" type="number" value={num(edit.v, "included_tb").toString()} onChange={(e) => setEdit({ ...edit, v: { ...edit.v, included_tb: Math.round(parseFloat(e.target.value || "0")) } })} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Min TB</span>
+              <input className="input sm" type="number" value={num(edit.v, "min_tb").toString()} onChange={(e) => setEdit({ ...edit, v: { ...edit.v, min_tb: Math.round(parseFloat(e.target.value || "0")) } })} /></label>
           </div>
-          <div className="row" style={{ gap: 8, marginTop: 12 }}>
+          <div className="grid grid-3" style={{ gap: 12, marginTop: 12 }}>
+            <MultiSelect label="Feature flags enabled" options={flagOpts} value={edit.v.features || []} onChange={(features) => setEdit({ ...edit, v: { ...edit.v, features } })} placeholder="No flags included" />
+            <MultiSelect label="Compatible add-ons" options={addonOpts} value={edit.v.compatible_addons || []} onChange={(compatible_addons) => setEdit({ ...edit, v: { ...edit.v, compatible_addons } })} placeholder="All add-ons" />
+            <div className="stack" style={{ gap: 3 }}>
+              <span className="faint" style={{ fontSize: 11.5 }}>Entitlements granted</span>
+              <EntitlementPicker registry={ents} value={edit.v.entitlements || {}} onChange={(entitlements) => setEdit({ ...edit, v: { ...edit.v, entitlements } })} />
+            </div>
+          </div>
+          <div className="row" style={{ gap: 8, marginTop: 14 }}>
             <button className="btn primary sm" onClick={publish}><Icon name="check" size={13} /> Publish version</button>
             <button className="btn ghost sm" onClick={() => setEdit(null)}>Cancel</button>
           </div>
@@ -6640,28 +6805,33 @@ function CatalogAdmin() {
 
       <Card>
         <table className="table">
-          <thead><tr><th>Plan</th><th>Family</th><th>Ver</th><th>Base</th><th>Protection/TB</th><th>Cloud/TB</th><th>Per user</th><th>Incl. users/mbrs</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Plan</th><th>Family</th><th>Ver</th><th>Base</th><th>Protection/TB</th><th>Cloud/TB</th><th>Per seat</th><th>Incl. seats</th><th>Incl. TB</th><th>Status</th><th></th></tr></thead>
           <tbody>
             {plans.map((p) => {
               const v = p.effective_version;
+              const isFam = p.family === "family";
+              const seatIncl = v ? (isFam ? v.included_members : v.included_users) : 0;
+              const seatRate = v ? (isFam ? v.per_member_cents : v.per_user_cents) : 0;
               return (
                 <tr key={p.code}>
-                  <td className="mono" style={{ fontSize: 12 }}>{p.code}</td>
+                  <td><div style={{ fontWeight: 600 }}>{p.name || p.code}</div><div className="faint mono" style={{ fontSize: 11 }}>{p.code}</div></td>
                   <td className="faint">{p.family}</td>
                   <td>{v ? `v${v.version}` : "—"}</td>
                   <td>{v ? DOLLARS(v.base_price_cents) : "—"}</td>
                   <td>{v ? DOLLARS(v.protection_cents_per_tb) : "—"}</td>
                   <td>{v ? DOLLARS(v.cloud_cents_per_tb) : "—"}</td>
-                  <td>{v ? DOLLARS(v.per_user_cents) : "—"}</td>
-                  <td className="faint">{v ? `${v.included_users}/${v.included_members}` : "—"}</td>
+                  <td>{v ? DOLLARS(seatRate) : "—"}</td>
+                  <td className="faint">{v ? seatIncl : "—"}</td>
+                  <td className="faint">{v ? v.included_tb : "—"}</td>
                   <td><Pill tone={p.status === "active" ? "ok" : "warn"}>{p.status}</Pill></td>
                   <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                    {v && <button className="btn ghost sm" onClick={() => setEdit({ code: p.code, v: { ...v } })}>New version</button>}
+                    <button className="btn ghost sm" onClick={() => setPlanEdit({ ...p })}>Edit</button>{" "}
+                    {v && <button className="btn ghost sm" onClick={() => setEdit({ code: p.code, family: p.family, v: { ...v } })}>New version</button>}
                   </td>
                 </tr>
               );
             })}
-            {plans.length === 0 && <tr><td colSpan={10} className="muted">No plans in the catalog.</td></tr>}
+            {plans.length === 0 && <tr><td colSpan={11} className="muted">No plans in the catalog.</td></tr>}
           </tbody>
         </table>
         <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>Publishing a new version closes the current one (kept as immutable history) and takes effect immediately for new charges.</div>
@@ -6685,9 +6855,17 @@ const ADDON_MODELS = ["flat", "per_user", "per_member", "per_tb", "per_cloud_tb"
 function AddonsAdmin() {
   const [rows, setRows] = useState<Addon[] | null>(null);
   const [edit, setEdit] = useState<Partial<Addon> | null>(null);
+  const [flagOpts, setFlagOpts] = useState<{ value: string; label: string }[]>([]);
+  const [ents, setEnts] = useState<EntDef[]>([]);
+  const [planOpts, setPlanOpts] = useState<{ value: string; label: string }[]>([]);
   const [toast, setToast] = useState("");
   const flash = (m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); };
-  async function load() { try { const r = await api.get<{ addons: Addon[] }>("/admin/addons?include_retired=true"); setRows(r.addons || []); } catch { setRows([]); } }
+  async function load() {
+    try { const r = await api.get<{ addons: Addon[] }>("/admin/addons?include_retired=true"); setRows(r.addons || []); } catch { setRows([]); }
+    try { const c = await flagCatalog(); setFlagOpts(c.map((f) => ({ value: f.name, label: f.label }))); } catch { /* ignore */ }
+    try { setEnts(await entRegistry()); } catch { /* ignore */ }
+    try { const p = await api.get<{ plans: CatalogPlan[] }>("/admin/catalog"); setPlanOpts((p.plans || []).map((x) => ({ value: x.code, label: x.name || x.code }))); } catch { /* ignore */ }
+  }
   useEffect(() => { void load(); }, []);
   async function save() {
     if (!edit) return;
@@ -6729,13 +6907,11 @@ function AddonsAdmin() {
               <select className="input sm" value={edit.billing_interval} onChange={(e) => setEdit({ ...edit, billing_interval: e.target.value })}>{["month", "quarter", "year"].map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Status</span>
               <select className="input sm" value={edit.status} onChange={(e) => setEdit({ ...edit, status: e.target.value })}>{["draft", "active", "grandfathered", "retired"].map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
-            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Eligible plans (comma; empty = all)</span>
-              <input className="input sm" value={(edit.eligible_plans || []).join(",")} onChange={(e) => setEdit({ ...edit, eligible_plans: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} /></label>
-            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Feature flags (comma)</span>
-              <input className="input sm" value={(edit.feature_flags || []).join(",")} onChange={(e) => setEdit({ ...edit, feature_flags: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} /></label>
+            <MultiSelect label="Eligible plans (empty = all)" options={planOpts} value={edit.eligible_plans || []} onChange={(eligible_plans) => setEdit({ ...edit, eligible_plans })} placeholder="All plans" />
+            <MultiSelect label="Feature flags enabled" options={flagOpts} value={edit.feature_flags || []} onChange={(feature_flags) => setEdit({ ...edit, feature_flags })} placeholder="No flags" />
           </div>
-          <label className="stack" style={{ gap: 3, marginTop: 10 }}><span className="faint" style={{ fontSize: 11.5 }}>Entitlements granted (JSON, per unit)</span>
-            <textarea className="input" rows={2} style={{ fontFamily: "var(--mono, monospace)", fontSize: 12 }} defaultValue={JSON.stringify(edit.entitlements || {})} onBlur={(e) => { try { setEdit({ ...edit, entitlements: JSON.parse(e.target.value || "{}") }); } catch { flash("Invalid entitlements JSON"); } }} /></label>
+          <label className="stack" style={{ gap: 3, marginTop: 10 }}><span className="faint" style={{ fontSize: 11.5 }}>Entitlements granted (per unit of quantity)</span>
+            <EntitlementPicker registry={ents} value={edit.entitlements || {}} onChange={(entitlements) => setEdit({ ...edit, entitlements })} /></label>
           <label className="stack" style={{ gap: 3, marginTop: 8 }}><span className="faint" style={{ fontSize: 11.5 }}>Description</span>
             <textarea className="input" rows={2} value={edit.description || ""} onChange={(e) => setEdit({ ...edit, description: e.target.value })} /></label>
           <div className="row" style={{ gap: 14, marginTop: 10 }}>
