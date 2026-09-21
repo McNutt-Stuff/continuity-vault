@@ -290,7 +290,7 @@ export default function Onboarding() {
       <div className="grid" style={{ gridTemplateColumns: "1fr 340px", gap: 16, alignItems: "start" }}>
         {/* -------- Left: choices -------- */}
         <div className="stack" style={{ gap: 16 }}>
-          <Card style={{ order: 3 }}>
+          <Card style={{ order: 3, marginTop: 0 }}>
             <div className="spread" style={{ marginBottom: 4 }}>
               <h3 style={{ margin: 0 }}>Storage protection</h3>
               <span className="faint" style={{ fontSize: 12 }}>Choose one or more</span>
@@ -359,7 +359,7 @@ export default function Onboarding() {
           </Card>
 
           {/* Protection level slider — shown first (flex order) */}
-          <Card style={{ order: 1 }}>
+          <Card style={{ order: 1, marginTop: 0 }}>
             <div className="spread" style={{ marginBottom: 4 }}>
               <h3 style={{ margin: 0 }}>Protection level</h3>
               <span className="faint" style={{ fontSize: 12 }}>{money2(rate)} / TB · month</span>
@@ -393,7 +393,7 @@ export default function Onboarding() {
           </Card>
 
           {plan.seats?.sellable && (
-            <Card style={{ order: 2 }}>
+            <Card style={{ order: 2, marginTop: 0 }}>
               <div className="spread" style={{ marginBottom: 4 }}>
                 <h3 style={{ margin: 0 }}>Protected {plan.seats.unit}s</h3>
                 <span className="faint" style={{ fontSize: 12 }}>{money2(plan.seats.per_seat_cents / 100)} / {plan.seats.unit} · mo</span>
@@ -418,7 +418,7 @@ export default function Onboarding() {
           )}
 
           {optionalAddons.length > 0 && (
-            <Card style={{ order: 4 }}>
+            <Card style={{ order: 4, marginTop: 0 }}>
               <div className="spread" style={{ marginBottom: 4 }}>
                 <h3 style={{ margin: 0 }}>Add-ons</h3>
                 <span className="faint" style={{ fontSize: 12 }}>Optional capabilities</span>
@@ -498,7 +498,7 @@ export default function Onboarding() {
             {options.size === 0 && <div className="faint" style={{ fontSize: 11.5, marginTop: 6, textAlign: "center" }}>Select at least one storage option</div>}
           </Card>
 
-          <Card>
+          <Card style={{ marginTop: 0 }}>
             <div className="spread" style={{ marginBottom: 10 }}>
               <h3 style={{ margin: 0 }}>Your data's value</h3>
               <Icon name="shield" size={16} />
