@@ -3,14 +3,25 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { Icon, IconName } from "../components/Icon";
 
-interface Plan { id: string; name: string; price_per_tb_month: number; min_tb: number; }
+interface Plan {
+  id: string; name: string; price_per_tb_month: number; min_tb: number;
+  family?: string; description?: string; base_price_month?: number;
+  per_user_month?: number; per_member_month?: number;
+  included_tb?: number; included_users?: number; included_members?: number;
+  compatible_addons?: string[];
+}
+interface AddOn {
+  code: string; name: string; description?: string; pricing_model: string;
+  price_cents: number; setup_cents?: number; billing_interval?: string;
+  eligible_plans?: string[]; min_qty?: number; max_qty?: number | null;
+}
 interface ApplianceTier { capacity_tb: number; monthly: number; setup: number; model: string; }
 interface StorageTier { id: string; title: string; tagline: string; icon: string; color: string; benefits: string[]; }
 interface Pricing {
   currency: string; protection_price_per_tb_month: number; cloud_price_per_tb_month: number;
   appliance_tiers: ApplianceTier[]; tiers: StorageTier[];
 }
-interface Config { enabled: boolean; trial_days: number; appliance_nonreturn_fee?: number; accepted_countries: string[]; plans: Plan[]; pricing: Pricing; }
+interface Config { enabled: boolean; trial_days: number; appliance_nonreturn_fee?: number; accepted_countries: string[]; plans: Plan[]; addons?: AddOn[]; pricing: Pricing; }
 interface PayConfig { configured: boolean; processor?: string | null; publishable_key?: string; currency?: string; }
 
 let _stripeScript: Promise<void> | null = null;
@@ -62,6 +73,8 @@ export default function Signup() {
   });
   const [options, setOptions] = useState<Set<string>>(new Set(["cv-cloud"]));
   const [licensedTb, setLicensedTb] = useState(1);
+  const [seats, setSeats] = useState(0);
+  const [addonSel, setAddonSel] = useState<Record<string, number>>({});
   const [qty, setQty] = useState<Record<number, number>>({});
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -104,6 +117,16 @@ export default function Signup() {
 
   const stripeMode = pay?.processor === "stripe" && !!pay.publishable_key;
   const selectedPlan = useMemo(() => cfg?.plans.find((p) => p.id === plan), [cfg, plan]);
+  // Add-ons the chosen plan can buy at signup (Compliance, Microsoft 365, …).
+  const eligibleAddons = useMemo(() => {
+    const compat = selectedPlan?.compatible_addons || [];
+    return (cfg?.addons || []).filter((a) => {
+      const elig = (a.eligible_plans || []).map((x) => x.toLowerCase());
+      if (elig.length && !elig.includes(plan.toLowerCase())) return false;
+      if (compat.length && !compat.includes(a.code)) return false;
+      return true;
+    });
+  }, [cfg, selectedPlan, plan]);
   const isDedicated = DEDICATED.has(plan);
   const subs = form.country === "CA" ? CA_PROVINCES : US_STATES;
   const pricing = cfg?.pricing;
@@ -122,8 +145,26 @@ export default function Signup() {
     const tiers = pricing?.appliance_tiers || [];
     const applianceMonthly = tiers.reduce((s, t) => s + (qty[t.capacity_tb] || 0) * t.monthly, 0);
     const applianceSetup = tiers.reduce((s, t) => s + (qty[t.capacity_tb] || 0) * t.setup, 0);
-    return { monthly: cloud + applianceMonthly, setup: applianceSetup, cloud, applianceMonthly, storageTb, rate, usesCloud };
-  }, [pricing, selectedPlan, licensedTb, qty, options]);
+    // Base plan + billable seats over the plan's included allowance.
+    const base = selectedPlan?.base_price_month || 0;
+    const perSeat = selectedPlan?.per_user_month || 0;
+    const inclUsers = selectedPlan?.included_users || 0;
+    const billableSeats = Math.max(0, seats - inclUsers);
+    const seatMonthly = perSeat * billableSeats;
+    // Self-service add-ons chosen at signup (per_user scales with seats).
+    const addonLines = eligibleAddons
+      .filter((a) => (addonSel[a.code] || 0) > 0)
+      .map((a) => {
+        const units = a.pricing_model === "per_user" ? Math.max(1, seats || 1) : (addonSel[a.code] || 1);
+        return { code: a.code, name: a.name, monthly: (a.price_cents / 100) * units,
+                 setup: (a.setup_cents || 0) / 100, units, per_user: a.pricing_model === "per_user" };
+      });
+    const addonMonthly = addonLines.reduce((s, l) => s + l.monthly, 0);
+    const addonSetup = addonLines.reduce((s, l) => s + l.setup, 0);
+    return { monthly: base + cloud + applianceMonthly + seatMonthly + addonMonthly,
+             setup: applianceSetup + addonSetup, cloud, applianceMonthly, storageTb, rate, usesCloud,
+             base, seatMonthly, billableSeats, perSeat, addonLines };
+  }, [pricing, selectedPlan, licensedTb, qty, options, seats, addonSel, eligibleAddons]);
 
   // Keep the storage amount at or above the selected plan's minimum.
   useEffect(() => { const m = selectedPlan?.min_tb || 0; if (m) setLicensedTb((v) => Math.max(v, m)); }, [selectedPlan?.min_tb]);
@@ -171,16 +212,34 @@ export default function Signup() {
     return (
       <div className="card" style={{ background: "var(--inset)", marginTop: 16 }}>
         <div className="stack" style={{ gap: 7 }}>
+          {est.base > 0 && (
+            <div className="spread" style={{ fontSize: 13 }}>
+              <span>{selectedPlan?.name || "Plan"} base</span>
+              <span>{money(est.base)}/mo</span>
+            </div>
+          )}
           {est.usesCloud && (
             <div className="spread" style={{ fontSize: 13 }}>
               <span>Arkive Cloud · {est.storageTb} TB <span className="faint">(billed on usage)</span></span>
               <span>{money(est.cloud)}/mo</span>
             </div>
           )}
+          {est.seatMonthly > 0 && (
+            <div className="spread" style={{ fontSize: 13 }}>
+              <span>{est.billableSeats}× additional seat</span>
+              <span>{money(est.seatMonthly)}/mo</span>
+            </div>
+          )}
           {applianceLines.map((x) => (
             <div key={x.capacity_tb} className="spread" style={{ fontSize: 13 }}>
               <span>{x.n}× {x.model} appliance</span>
               <span>{money(x.n * x.monthly)}/mo</span>
+            </div>
+          ))}
+          {est.addonLines.map((l) => (
+            <div key={l.code} className="spread" style={{ fontSize: 13 }}>
+              <span>{l.name}{l.per_user ? ` · ${l.units} user${l.units === 1 ? "" : "s"}` : ""}</span>
+              <span>{money(l.monthly)}/mo</span>
             </div>
           ))}
           <div className="spread" style={{ borderTop: "1px solid var(--border-soft)", paddingTop: 8, marginTop: 1, fontWeight: 700 }}>
@@ -234,14 +293,15 @@ export default function Signup() {
         token = paymentMethod.id;
       }
       const applianceArr = Object.entries(qty).filter(([, q]) => q > 0).map(([cap, q]) => ({ capacity_tb: Number(cap), qty: q }));
+      const addonArr = Object.entries(addonSel).filter(([, q]) => q > 0).map(([code, q]) => ({ code, quantity: q }));
       const res = await api.post<{ ok: boolean; dev_code?: string; trial?: boolean }>("/signup", {
         email: form.email.trim().toLowerCase(),
         first_name: form.first_name.trim(), last_name: form.last_name.trim(),
         phone: form.phone.trim(), org_name: form.org_name.trim(), plan,
         address: { line1: form.line1.trim(), line2: form.line2.trim(), city: form.city.trim(),
           subdivision: form.subdivision, postal_code: form.postal_code.trim(), country: form.country },
-        options: [...options], licensed_tb: licensedTb, appliance_plan: applianceArr,
-        payment_method_token: token, trial: true,
+        options: [...options], licensed_tb: licensedTb, seats, appliance_plan: applianceArr,
+        addons: addonArr, payment_method_token: token, trial: true,
       });
       setDone({ dev_code: res.dev_code, trial: res.trial });
       setStep(5);
@@ -483,6 +543,55 @@ export default function Signup() {
               {!options.has("cv-cloud") && (
                 <div className="row" style={{ gap: 8, marginTop: 10, color: "var(--warn)", fontSize: 12, alignItems: "flex-start" }}>
                   <Icon name="alert" size={13} /> <span>We recommend keeping <b>Arkive Cloud</b> on as your always-available primary copy. You can add others alongside it.</span>
+                </div>
+              )}
+
+              {(selectedPlan?.per_user_month || 0) > 0 && (
+                <div className="card" style={{ marginTop: 14 }}>
+                  <div className="spread" style={{ alignItems: "center" }}>
+                    <div>
+                      <div style={{ fontWeight: 700 }}>Protected users (seats)</div>
+                      <div className="faint" style={{ fontSize: 12 }}>
+                        {(selectedPlan?.included_users || 0) > 0
+                          ? `${selectedPlan?.included_users} included · ${money(selectedPlan?.per_user_month || 0)}/user · month after`
+                          : `${money(selectedPlan?.per_user_month || 0)}/user · month`}
+                      </div>
+                    </div>
+                    <span className="row" style={{ gap: 8, alignItems: "center" }}>
+                      <button className="btn ghost sm" onClick={() => setSeats((s) => Math.max(0, s - 1))}>−</button>
+                      <span style={{ minWidth: 20, textAlign: "center", fontWeight: 700 }}>{Math.max(seats, selectedPlan?.included_users || 0)}</span>
+                      <button className="btn ghost sm" onClick={() => setSeats((s) => Math.max(selectedPlan?.included_users || 0, s) + 1)}>+</button>
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {eligibleAddons.length > 0 && (
+                <div style={{ marginTop: 14 }}>
+                  <div className="faint" style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>Add-ons</div>
+                  <div className="stack" style={{ gap: 8 }}>
+                    {eligibleAddons.map((a) => {
+                      const on = (addonSel[a.code] || 0) > 0;
+                      const perUser = a.pricing_model === "per_user";
+                      return (
+                        <div key={a.code} className="card" style={{ borderColor: on ? "var(--accent, #4f7cff)" : undefined, borderWidth: on ? 2 : 1, cursor: "pointer" }}
+                             onClick={() => setAddonSel((s) => ({ ...s, [a.code]: on ? 0 : (a.min_qty || 1) }))}>
+                          <div className="spread" style={{ alignItems: "flex-start" }}>
+                            <div className="flex1">
+                              <div className="spread">
+                                <span style={{ fontWeight: 700 }}>{a.name}</span>
+                                {on && <Icon name="check" size={15} />}
+                              </div>
+                              <div className="faint" style={{ fontSize: 12 }}>{a.description}</div>
+                            </div>
+                            <span style={{ fontWeight: 700, fontSize: 13, whiteSpace: "nowrap", marginLeft: 10 }}>
+                              {money(a.price_cents / 100)}{perUser ? "/user" : ""}/mo
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 

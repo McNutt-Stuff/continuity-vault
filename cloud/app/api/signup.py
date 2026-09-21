@@ -44,12 +44,48 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _plans(db: Session) -> list[dict]:
-    from .billing import get_pricing
-    p = get_pricing(db)
-    return [{"id": pl.get("id"), "name": pl.get("name"),
-             "price_per_tb_month": pl.get("price_per_tb_month"),
-             "min_tb": pl.get("min_tb", 0)}
-            for pl in (p.license_plans or []) if pl.get("id") not in _HIDDEN_PLANS]
+    """Customer-visible plans straight from the plan catalog — the single pricing
+    authority (``catalog.plan_pricing``). The catalog is seeded from (and dual-reads)
+    the legacy PricingConfig, so this stays correct while old pricing is deprecated."""
+    from ..catalog import catalog as _catalog
+    out: list[dict] = []
+    for pv in _catalog(db):
+        code = pv.get("code") or ""
+        if code in _HIDDEN_PLANS or not pv.get("customer_visible") or pv.get("status") != "active":
+            continue
+        ev = pv.get("effective_version") or {}
+        out.append({
+            "id": code,
+            "name": pv.get("name") or code.title(),
+            "family": pv.get("family") or code,
+            "description": pv.get("description") or "",
+            # Kept as dollars for the existing signup contract; catalog stores cents.
+            "price_per_tb_month": round((ev.get("protection_cents_per_tb") or 0) / 100, 2),
+            "base_price_month": round((ev.get("base_price_cents") or 0) / 100, 2),
+            "per_user_month": round((ev.get("per_user_cents") or 0) / 100, 2),
+            "per_member_month": round((ev.get("per_member_cents") or 0) / 100, 2),
+            "min_tb": ev.get("min_tb") or 0,
+            "included_tb": ev.get("included_tb") or 0,
+            "included_users": ev.get("included_users") or 0,
+            "included_members": ev.get("included_members") or 0,
+            "compatible_addons": ev.get("compatible_addons") or [],
+        })
+    return out
+
+
+def _signup_addons(db: Session) -> list[dict]:
+    """Self-service, customer-visible add-ons the signup wizard can offer (e.g.
+    Compliance, Microsoft 365). Arkive Cloud + appliance add-ons are excluded — those
+    are driven by the protection-setup step, not offered as standalone checkboxes."""
+    from ..entitlements import addons as _addons
+    out: list[dict] = []
+    for a in _addons.catalog(db):
+        if not (a.customer_visible and a.self_service):
+            continue
+        if a.code.startswith("appliance_") or a.code in ("arkive_cloud", "arkive_cloud_plus"):
+            continue
+        out.append(_addons.public_view(a))
+    return out
 
 
 @router.get("/config")
@@ -67,6 +103,7 @@ def signup_config(db: Session = Depends(get_db)):
         "appliance_nonreturn_fee": APPLIANCE_NONRETURN_FEE,
         "accepted_countries": sorted(geo.ACCEPTED_COUNTRIES),
         "plans": _plans(db),
+        "addons": _signup_addons(db),
         "pricing": pricing_public(get_pricing(db)),
         "regions": [{"code": r.code, "name": r.name} for r in regions],
     }
@@ -200,7 +237,10 @@ class SignupBody(BaseModel):
     # Protection setup (mirrors the in-app onboarding).
     options: list[str] = ["cv-cloud"]
     licensed_tb: float = 1
+    seats: int = 0
     appliance_plan: list[dict] = []
+    # Self-service add-ons chosen at signup (e.g. Compliance) — [{code, quantity}].
+    addons: list[dict] = []
     # Billing / trial.
     payment_method_token: str | None = None
     trial: bool = True
@@ -261,6 +301,7 @@ def signup(body: SignupBody, db: Session = Depends(get_db)):
     org = body.org_name.strip() or (f"{first}'s Organization" if dedicated else f"{first}'s Account")
     options = [o for o in (body.options or []) if o in _VALID_OPTIONS] or ["cv-cloud"]
     licensed_bytes = int(max(0.0, body.licensed_tb) * (1000 ** 4))
+    seats = max(0, int(body.seats or 0)) if dedicated else 0
     appliance_plan = [{"capacity_tb": s.get("capacity_tb"), "qty": int(s.get("qty") or 0)}
                       for s in (body.appliance_plan or []) if int(s.get("qty") or 0) > 0]
 
@@ -270,6 +311,7 @@ def signup(body: SignupBody, db: Session = Depends(get_db)):
         storage_prefix=f"t-{_secrets.token_hex(4)}",
         protection_options=options,
         licensed_bytes=licensed_bytes if dedicated else 0,
+        licensed_seats=seats,
         appliance_plan=appliance_plan,
     )
     db.add(tenant)
@@ -291,7 +333,19 @@ def signup(body: SignupBody, db: Session = Depends(get_db)):
     vault = provision_vault(db, tenant=tenant, owner_user_id=user.id, name="Primary Vault",
                             key_ownership_model="customer-managed")
     _save_billing_address(db, tenant, user, body)
+    # Wire the new subscription/entitlement model: new tenants bill on the
+    # deterministic calc, Arkive Cloud + appliances flow through add-ons, and any
+    # self-service add-ons the customer picked at signup are assigned.
+    _provision_entitlements(db, tenant, user, body, options, appliance_plan)
     db.commit()
+
+    # Materialize the subscription + priced items from the calc (best-effort — a
+    # billing hiccup must never fail the signup; the sweep re-syncs later).
+    try:
+        from .. import subscriptions
+        subscriptions.sync_from_calc(db, tenant)
+    except Exception:  # noqa: BLE001
+        logger.exception("signup subscription sync failed for %s", email)
 
     audit.record(db, actor=email, action="auth.signup", tenant_id=tenant.id,
                  detail={"plan": plan, "region": region_code, "country": country,
@@ -402,6 +456,48 @@ def _save_billing_address(db: Session, tenant: Tenant, user: User, body: SignupB
         line1=a.line1.strip(), line2=a.line2.strip(), city=a.city.strip(),
         region=geo.normalize_subdivision(a.subdivision), postal_code=a.postal_code.strip(),
         country=geo.normalize_country(a.country), phone=body.phone.strip(), is_default=True))
+
+
+def _provision_entitlements(db: Session, tenant: Tenant, user: User, body: SignupBody,
+                            options: list[str], appliance_plan: list[dict]) -> None:
+    """Put the new tenant on the deterministic billing calc and wire its selected
+    capabilities through the add-on / entitlement model: Arkive Cloud (from the
+    cv-cloud protection option), leased appliances (from the appliance plan), and any
+    self-service add-ons chosen at signup — each validated against the plan."""
+    from ..entitlements import addons as _addons
+    from ..entitlements.models import AddOn, TenantAddOn
+    from .billing import _set_billing_source, _sync_appliance_addons, _sync_cloud_addon
+
+    _set_billing_source(db, tenant.id, "calc")
+    _sync_cloud_addon(db, tenant, "cv-cloud" in options, actor=user.id)
+    _sync_appliance_addons(db, tenant, appliance_plan, actor=user.id)
+
+    _addons.ensure_defaults(db)
+    compat = _addons.plan_compatible_addons(db, tenant.plan)
+    plan = (tenant.plan or "").lower()
+    seen: set[str] = set()
+    for sel in (body.addons or []):
+        code = str((sel or {}).get("code") or "").strip().lower()
+        if not code or code in seen or code.startswith("appliance_") \
+                or code in ("arkive_cloud", "arkive_cloud_plus"):
+            continue
+        a = db.get(AddOn, code)
+        if a is None or a.status not in ("active", "grandfathered"):
+            continue
+        if not (a.self_service and a.customer_visible):
+            continue
+        elig = [str(p).lower() for p in (a.eligible_plans or [])]
+        if elig and plan not in elig:
+            continue
+        if compat is not None and a.code not in compat:
+            continue
+        qty = max(int(a.min_qty or 1), int((sel or {}).get("quantity") or 1))
+        if a.max_qty is not None:
+            qty = min(qty, int(a.max_qty))
+        db.add(TenantAddOn(tenant_id=tenant.id, addon_code=a.code, quantity=qty, status="active",
+                           price_cents_snapshot=a.price_cents, addon_version=a.version,
+                           created_by=user.id))
+        seen.add(code)
 
 
 def _attach_card_and_trial(db: Session, tenant: Tenant, user: User, body: SignupBody) -> bool:
