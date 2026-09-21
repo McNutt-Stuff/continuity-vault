@@ -16,6 +16,10 @@ Typical slow-DB triage:
 
 Ad-hoc read-only SQL:
     python3 scripts/arkive_debug.py query "SELECT relname, n_dead_tup FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 10"
+
+Billing migration parity (legacy charge vs new billing_calc):
+    python3 scripts/arkive_debug.py billing                 # parity overview across tenants
+    python3 scripts/arkive_debug.py billing <tenant_id>     # full per-tenant billing dump
 """
 
 from __future__ import annotations
@@ -62,6 +66,10 @@ def main() -> int:
     q = sub.add_parser("query"); q.add_argument("sql"); q.add_argument("--limit", type=int, default=200)
     v = sub.add_parser("vacuum"); v.add_argument("table", nargs="?", default=None)
     a = sub.add_parser("analyze"); a.add_argument("table", nargs="?", default=None)
+    bl = sub.add_parser("billing"); bl.add_argument("tenant", nargs="?", default="")
+    bl.add_argument("--limit", type=int, default=100)
+    co = sub.add_parser("costs"); co.add_argument("--provider", default="")
+    ig = sub.add_parser("integrations"); ig.add_argument("--tenant", default=""); ig.add_argument("--itype", default="")
     args = p.parse_args()
 
     if not args.base or not args.key:
@@ -86,6 +94,13 @@ def main() -> int:
         method, path, body = "POST", "/db/maintenance", {"action": "vacuum", "table": args.table}
     elif args.cmd == "analyze":
         method, path, body = "POST", "/db/maintenance", {"action": "analyze", "table": args.table}
+    elif args.cmd == "billing":
+        qs = f"?tenant={args.tenant}&limit={args.limit}" if args.tenant else f"?limit={args.limit}"
+        method, path, body = "GET", "/billing" + qs, None
+    elif args.cmd == "costs":
+        method, path, body = "GET", "/costs" + (f"?provider={args.provider}" if args.provider else ""), None
+    elif args.cmd == "integrations":
+        method, path, body = "GET", f"/integrations?tenant={args.tenant}&itype={args.itype}", None
     else:  # pragma: no cover
         print(f"unknown command {args.cmd}", file=sys.stderr)
         return 2

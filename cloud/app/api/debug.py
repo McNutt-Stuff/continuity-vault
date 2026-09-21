@@ -125,6 +125,11 @@ _MANIFEST = {
         {"method": "GET", "path": "/api/debug/integrations",
          "desc": "Integration collection diagnostics: run history, last success, DPI note, day-coverage "
                  "gaps, client/app counts, unmapped apps, stale devices. Optional ?tenant=&itype=ubiquiti."},
+        {"method": "GET", "path": "/api/debug/billing",
+         "desc": "Billing/entitlement diagnostics. No ?tenant → PARITY overview (legacy charge vs new "
+                 "billing_calc recurring total per tenant, with a match flag) — the cutover gate. "
+                 "?tenant=<id> → full dump: plan + pricing source, legacy vs calc, itemized lines, "
+                 "persisted subscription + items, add-ons, overrides, entitlements vs usage, metered usage."},
     ],
     "notes": [
         "All responses are JSON. Query/maintenance are read-only or explicitly guarded — safe on production.",
@@ -358,6 +363,124 @@ def prune_db(db: Session = Depends(get_db)):
     counts = prune_all(db)
     return {"ok": True, "pruned": counts,
             "note": "run VACUUM (ANALYZE) to reclaim the freed space on disk"}
+
+
+@router.get("/billing", dependencies=[Depends(require_debug_key)])
+def billing_debug(tenant: str = "", limit: int = 100, db: Session = Depends(get_db)):
+    """Billing / entitlement diagnostics — the migration + go-live troubleshooting
+    surface. Without ?tenant it returns a PARITY overview across tenants: the legacy
+    charge (``_price_breakdown`` → BillingProfile.amount_cents) vs the new
+    deterministic ``billing_calc`` recurring total, with a mismatch flag — so you can
+    prove the new engine reproduces today's prices before cutover. With ?tenant=<id>
+    it dumps everything for one tenant: plan + pricing source (catalog version or
+    legacy fallback), legacy vs calc, the itemized calc lines, the persisted
+    subscription + items, active add-ons, entitlement overrides, derived entitlements
+    vs usage, and current-period metered usage."""
+    from ..models import Tenant, User, BillingProfile
+    from .. import billing_calc, subscriptions, metering, catalog, entitlements
+    from ..entitlements.models import TenantAddOn, EntitlementOverride
+
+    def _legacy_cents(t: "Tenant"):
+        """Legacy authoritative recurring cents (what actually bills today), or None."""
+        from .billing import _plan_amount_cents
+        owner = (db.query(User).filter(User.tenant_id == t.id)
+                 .order_by(User.created_at.asc()).first())
+        if owner is None:
+            return None
+        try:
+            cents, _cur, _pid, _name = _plan_amount_cents(db, owner, t)
+            return int(cents)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("debug/billing legacy calc failed for %s: %s", t.id, exc)
+            return None
+
+    def _calc(t: "Tenant"):
+        try:
+            return billing_calc.calculate(db, t)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("debug/billing calc failed for %s: %s", t.id, exc)
+            return None
+
+    # ---- Overview: parity sweep across tenants (the cutover gate) --------------
+    if not tenant:
+        rows = []
+        n_match = n_mismatch = n_unknown = 0
+        for t in db.query(Tenant).order_by(Tenant.created_at.asc()).limit(max(1, min(1000, limit))).all():
+            legacy = _legacy_cents(t)
+            c = _calc(t)
+            calc_cents = c.recurring_cents if c else None
+            prof = db.query(BillingProfile).filter(BillingProfile.tenant_id == t.id).first()
+            if legacy is None or calc_cents is None:
+                match = None
+                n_unknown += 1
+            else:
+                match = (legacy == calc_cents)
+                n_match += int(match)
+                n_mismatch += int(not match)
+            rows.append({
+                "tenant_id": t.id, "name": t.name, "plan": t.plan,
+                "tenant_type": getattr(t, "tenant_type", ""),
+                "legacy_cents": legacy, "calc_cents": calc_cents,
+                "delta_cents": (None if (legacy is None or calc_cents is None) else calc_cents - legacy),
+                "match": match,
+                "profile_amount_cents": (int(prof.amount_cents or 0) if prof else None),
+                "profile_status": (prof.status if prof else None),
+                "profile_active": (bool(prof.active) if prof else None),
+            })
+        # Worst mismatches first so the parity gaps are obvious.
+        rows.sort(key=lambda r: (r["match"] is not False, -abs(r["delta_cents"] or 0)))
+        return {"mode": "parity_overview",
+                "counts": {"match": n_match, "mismatch": n_mismatch,
+                           "unknown": n_unknown, "total": len(rows)},
+                "note": "match=true means the new billing_calc reproduces today's legacy charge to the "
+                        "cent. Resolve all mismatches before flipping billing_source=calc.",
+                "tenants": rows}
+
+    # ---- Detail: one tenant, full picture -------------------------------------
+    t = db.get(Tenant, tenant)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    owner = (db.query(User).filter(User.tenant_id == t.id)
+             .order_by(User.created_at.asc()).first())
+    c = _calc(t)
+    legacy = _legacy_cents(t)
+    pricing = catalog.plan_pricing(db, str(t.plan or "").lower())
+    prof = db.query(BillingProfile).filter(BillingProfile.tenant_id == t.id).first()
+    try:
+        ents = {k: {"value": e.value, "type": e.type, "source": e.source}
+                for k, e in entitlements.derive(db, t, owner).items()}
+    except Exception as exc:  # noqa: BLE001
+        ents = {"_error": str(exc)[:200]}
+    usage = {k: entitlements.get_usage(db, t, k) for k in ("protected_users", "protected_data_tb")}
+    active_addons = [{"code": ta.addon_code, "quantity": ta.quantity, "status": ta.status,
+                      "price_cents_snapshot": ta.price_cents_snapshot, "version": ta.addon_version}
+                     for ta in db.query(TenantAddOn).filter(TenantAddOn.tenant_id == t.id).all()]
+    overrides = [{"key": o.key, "value": o.value, "active": bool(o.active),
+                  "reason": o.reason, "expires_at": _jsonable(o.expires_at)}
+                 for o in db.query(EntitlementOverride).filter(EntitlementOverride.tenant_id == t.id).all()]
+    return {
+        "mode": "tenant_detail",
+        "tenant": {"id": t.id, "name": t.name, "plan": t.plan,
+                   "tenant_type": getattr(t, "tenant_type", ""),
+                   "licensed_bytes": int(getattr(t, "licensed_bytes", 0) or 0),
+                   "appliance_plan": getattr(t, "appliance_plan", None) or []},
+        "pricing_source": {"source": pricing.get("source"), "version": pricing.get("version"),
+                           "currency": pricing.get("currency")},
+        "parity": {"legacy_cents": legacy,
+                   "calc_recurring_cents": (c.recurring_cents if c else None),
+                   "delta_cents": (None if (legacy is None or not c) else c.recurring_cents - legacy),
+                   "match": (None if (legacy is None or not c) else legacy == c.recurring_cents)},
+        "calc": (c.as_dict() if c else None),
+        "billing_profile": ({"amount_cents": int(prof.amount_cents or 0), "currency": prof.currency,
+                             "status": prof.status, "active": bool(prof.active),
+                             "plan_id": prof.plan_id, "plan_name": prof.plan_name,
+                             "next_charge_at": _jsonable(prof.next_charge_at),
+                             "dunning_attempts": prof.dunning_attempts or 0} if prof else None),
+        "subscription": subscriptions.view(db, t),
+        "entitlements": ents, "usage": usage,
+        "active_addons": active_addons, "overrides": overrides,
+        "metered_usage": metering.tenant_view(db, t),
+    }
 
 
 @router.get("/integrations", dependencies=[Depends(require_debug_key)])
