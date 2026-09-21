@@ -27,6 +27,7 @@ interface Plan {
   objects_total: number; value_breakdown: ValueRow[]; data_value_total: number;
   appliance_plan: { capacity_tb: number; qty: number }[];
   license_plan?: LicensePlan; min_tb?: number;
+  seats?: { unit: string; per_seat_cents: number; included: number; licensed: number; used: number; sellable: boolean };
 }
 interface EstimateLine {
   key: string; label: string; quantity: number; unit_price_cents: number; amount_cents: number;
@@ -75,6 +76,7 @@ export default function Onboarding() {
   const [org, setOrg] = useState<{ name?: string; plan?: string; can_admin?: boolean } | null>(null);
   const [options, setOptions] = useState<Set<string>>(new Set());
   const [licensedTb, setLicensedTb] = useState(1);
+  const [licensedSeats, setLicensedSeats] = useState(0);
   const [qty, setQty] = useState<Record<number, number>>({});
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -90,6 +92,7 @@ export default function Onboarding() {
       setOptions(new Set(p.options));
       const min = p.license_plan?.min_tb || 0;
       setLicensedTb(Math.max(p.licensed_tb || 0, Math.ceil((p.used_tb || 0) * 10) / 10, min, 1));
+      setLicensedSeats(p.seats?.licensed || 0);
       const q: Record<number, number> = {};
       for (const a of p.appliance_plan || []) q[a.capacity_tb] = a.qty;
       setQty(q);
@@ -110,7 +113,7 @@ export default function Onboarding() {
       code: `appliance_${t.capacity_tb}tb`, quantity: qty[t.capacity_tb] || 0,
     }));
     return {
-      licensed_tb: tb,
+      licensed_tb: tb, seats: licensedSeats,
       addons: [{ code: "arkive_cloud", quantity: options.has("cv-cloud") ? 1 : 0 }, ...applianceAddons],
     };
   }
@@ -141,7 +144,7 @@ export default function Onboarding() {
     if (billTimer.current) clearTimeout(billTimer.current);
     billTimer.current = setTimeout(() => { void recomputeBill(licensedTb); }, 350);
     return () => { if (billTimer.current) clearTimeout(billTimer.current); };
-  }, [licensedTb, plan, options, qty]);
+  }, [licensedTb, licensedSeats, plan, options, qty]);
 
   // Arriving from "Order a new appliance": enable the appliance destination and
   // pre-add one unit (incremental order) so the user just picks capacity + Save.
@@ -229,7 +232,7 @@ export default function Onboarding() {
       const appliance_plan = Object.entries(qty).filter(([, q]) => q > 0)
         .map(([cap, q]) => ({ capacity_tb: Number(cap), qty: q }));
       const updated = await api.put<Plan>("/billing/plan", {
-        options: [...options], licensed_tb: licensedTb, appliance_plan,
+        options: [...options], licensed_tb: licensedTb, licensed_seats: licensedSeats, appliance_plan,
       });
       setPlan(updated); setSaved(true);
       void reloadAddons();
@@ -246,6 +249,8 @@ export default function Onboarding() {
   // Value/return is measured against the ACTUAL server bill (all lines incl. add-ons).
   const billMonthly = (bill?.recurring_cents || 0) / 100;
   const billRatio = billMonthly > 0 ? (costs.dataValue / (billMonthly * 12)) : null;
+  const minSeats = plan.seats ? Math.max(plan.seats.included, plan.seats.used) : 0;
+  const billableSeats = plan.seats ? Math.max(0, licensedSeats - plan.seats.included) : 0;
 
   return (
     <>
@@ -285,7 +290,7 @@ export default function Onboarding() {
       <div className="grid" style={{ gridTemplateColumns: "1fr 340px", gap: 16, alignItems: "start" }}>
         {/* -------- Left: choices -------- */}
         <div className="stack" style={{ gap: 16 }}>
-          <Card style={{ order: 2 }}>
+          <Card style={{ order: 3 }}>
             <div className="spread" style={{ marginBottom: 4 }}>
               <h3 style={{ margin: 0 }}>Storage protection</h3>
               <span className="faint" style={{ fontSize: 12 }}>Choose one or more</span>
@@ -387,8 +392,33 @@ export default function Onboarding() {
             )}
           </Card>
 
+          {plan.seats?.sellable && (
+            <Card style={{ order: 2 }}>
+              <div className="spread" style={{ marginBottom: 4 }}>
+                <h3 style={{ margin: 0 }}>Protected {plan.seats.unit}s</h3>
+                <span className="faint" style={{ fontSize: 12 }}>{money2(plan.seats.per_seat_cents / 100)} / {plan.seats.unit} · mo</span>
+              </div>
+              <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
+                License the {plan.seats.unit}s whose data Arkive protects. <b>{plan.seats.included}</b> included with your plan{plan.seats.used > 0 ? `, ${plan.seats.used} in use` : ""}.
+              </div>
+              <div className="row" style={{ gap: 12, alignItems: "center" }}>
+                <button className="btn ghost sm" disabled={licensedSeats <= minSeats} onClick={() => { setSaved(false); setLicensedSeats((s) => Math.max(minSeats, s - 1)); }}>−</button>
+                <div style={{ textAlign: "center", minWidth: 70 }}>
+                  <div style={{ fontSize: 26, fontWeight: 700, lineHeight: 1 }}>{licensedSeats}</div>
+                  <div className="faint" style={{ fontSize: 11 }}>licensed</div>
+                </div>
+                <button className="btn ghost sm" onClick={() => { setSaved(false); setLicensedSeats((s) => s + 1); }}>+</button>
+                <div className="flex1" style={{ textAlign: "right", fontSize: 12.5 }}>
+                  {billableSeats > 0
+                    ? <><b>{billableSeats}</b> extra × {money2(plan.seats.per_seat_cents / 100)} = <b>{money2(billableSeats * plan.seats.per_seat_cents / 100)}</b>/mo</>
+                    : <span className="faint">within your included allowance</span>}
+                </div>
+              </div>
+            </Card>
+          )}
+
           {optionalAddons.length > 0 && (
-            <Card style={{ order: 3 }}>
+            <Card style={{ order: 4 }}>
               <div className="spread" style={{ marginBottom: 4 }}>
                 <h3 style={{ margin: 0 }}>Add-ons</h3>
                 <span className="faint" style={{ fontSize: 12 }}>Optional capabilities</span>

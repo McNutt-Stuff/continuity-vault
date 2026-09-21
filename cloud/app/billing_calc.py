@@ -149,9 +149,15 @@ def calculate(db: Session, tenant, *, overrides: dict | None = None) -> Calc:
         if "family_members" in ents:
             mem_add += int(ents["family_members"]) * max(1, int(ta.quantity or 1))
 
+    # Seats/members: licensed = at least the plan's included, at least what the tenant
+    # licensed (or a preview override), and never below the members actually in use.
+    used_seats = entitlements.get_usage(db, tenant, "protected_users")
+    seats_ov = ov.get("seats")
+    base_seats = int(seats_ov) if seats_ov is not None else int(getattr(tenant, "licensed_seats", 0) or 0)
+
     # 3) Protected users (Business/Enterprise) — billable = licensed − included.
     incl_users = int(pricing.get("included_users", 0) or 0)
-    licensed_users = incl_users + seat_add
+    licensed_users = max(incl_users, base_seats, used_seats) + seat_add
     bill_users = max(0, licensed_users - incl_users)
     rate_user = int(pricing.get("per_user_cents", 0) or 0)
     if rate_user and licensed_users:
@@ -161,7 +167,7 @@ def calculate(db: Session, tenant, *, overrides: dict | None = None) -> Calc:
 
     # 4) Family members — billable over the included allowance.
     incl_mem = int(pricing.get("included_members", 0) or 0)
-    licensed_mem = incl_mem + mem_add
+    licensed_mem = max(incl_mem, base_seats, used_seats) + mem_add
     bill_mem = max(0, licensed_mem - incl_mem)
     rate_mem = int(pricing.get("per_member_cents", 0) or 0)
     if rate_mem and licensed_mem:
@@ -170,7 +176,7 @@ def calculate(db: Session, tenant, *, overrides: dict | None = None) -> Calc:
             included_qty=incl_mem, licensed_qty=licensed_mem, source=src)
 
     # 5) Non-seat add-ons — priced from the catalog (per unit / per user / per TB / metered).
-    protected_users_used = entitlements.get_usage(db, tenant, "protected_users")
+    protected_users_used = used_seats
     # Arkive Cloud consumption is billed on the ACTUAL data stored in Arkive Cloud
     # (fractional TB) — a 1 GB tenant must bill ~1 cent, not round to 0.
     cloud_tb = _cloud_stored_tb(db, tenant)

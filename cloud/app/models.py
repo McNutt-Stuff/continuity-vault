@@ -45,6 +45,7 @@ class Tenant(Base):
     key_ownership_model = Column(String, default="customer-managed")  # spec 10.x
     storage_prefix = Column(String, nullable=False)  # tenant isolation in S3
     licensed_bytes = Column(BigInteger, default=0)  # data allowance they pay for (0 = unlimited)
+    licensed_seats = Column(Integer, default=0)  # licensed protected users/members (0 = plan default)
     protection_options = Column(JSON, default=list)  # enabled storage tiers (feature gating)
     appliance_plan = Column(JSON, default=list)  # desired appliances [{capacity_tb, qty}]
     # Tenant model determines UX + isolation posture:

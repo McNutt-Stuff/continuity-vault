@@ -498,7 +498,22 @@ def user_plan(db: Session, user, tenant: Tenant) -> dict:
 def get_plan(principal: security.Principal = Depends(security.get_principal),
              tenant: Tenant = Depends(security.get_tenant),
              db: Session = Depends(get_db)):
-    return plan_view(db, db.get(User, principal.user_id), tenant)
+    view = plan_view(db, db.get(User, principal.user_id), tenant)
+    # Seat licensing for the Protection Setup "Protected users" control (org tenants).
+    if (tenant.tenant_type or "dedicated") != "shared":
+        from .. import catalog, entitlements
+        is_family = (tenant.plan or "").lower() == "family"
+        pricing = catalog.plan_pricing(db, (tenant.plan or "").lower())
+        rate = int(pricing.get("per_member_cents" if is_family else "per_user_cents", 0) or 0)
+        incl = int(pricing.get("included_members" if is_family else "included_users", 0) or 0)
+        used = entitlements.get_usage(db, tenant, "protected_users")
+        view["seats"] = {
+            "unit": "member" if is_family else "user",
+            "per_seat_cents": rate, "included": incl,
+            "licensed": max(int(tenant.licensed_seats or 0), incl, used),
+            "used": used, "sellable": rate > 0,
+        }
+    return view
 
 
 @router.get("/entitlements")
@@ -614,6 +629,7 @@ def billing_estimate(principal: security.Principal = Depends(security.get_princi
 class EstimatePreview(BaseModel):
     plan: str | None = None
     licensed_tb: float | None = None
+    seats: int | None = None
     addons: list[dict] | None = None
 
 
@@ -650,6 +666,7 @@ def get_usage_meters(principal: security.Principal = Depends(security.get_princi
 class PlanUpdate(BaseModel):
     options: list[str] | None = None
     licensed_tb: float | None = None
+    licensed_seats: int | None = None
     appliance_plan: list[dict] | None = None
 
 
@@ -772,6 +789,11 @@ def update_plan(body: PlanUpdate,
         # Mirror the appliance selection into per-tier appliance add-ons so it flows
         # through entitlements + the calc (recurring lease + one-time setup).
         _sync_appliance_addons(db, tenant, tenant.appliance_plan, principal.user_id)
+    if body.licensed_seats is not None:
+        prev_seats = int(tenant.licensed_seats or 0)
+        tenant.licensed_seats = max(0, int(body.licensed_seats))
+        if tenant.licensed_seats != prev_seats:
+            summary.append(f"Licensed {tenant.licensed_seats} user{'s' if tenant.licensed_seats != 1 else ''}")
     db.commit()
     audit.record(db, actor=principal.user_id, action="billing.plan_updated",
                  tenant_id=tenant.id, resource=tenant.id,
