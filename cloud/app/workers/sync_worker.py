@@ -556,6 +556,18 @@ def _load_rules_for(db: Session, collection: Collection, vault: Vault):
     return scoped, plan
 
 
+def _strip_nul(v):
+    """Remove NUL (0x00) bytes that Postgres text/JSON columns reject. Some source
+    content (e.g. malformed email headers) contains them, which fails the insert."""
+    if isinstance(v, str):
+        return v.replace("\x00", "") if "\x00" in v else v
+    if isinstance(v, list):
+        return [_strip_nul(x) for x in v]
+    if isinstance(v, dict):
+        return {(_strip_nul(k) if isinstance(k, str) else k): _strip_nul(x) for k, x in v.items()}
+    return v
+
+
 def ingest_objects(db: Session, collection: Collection, source_objects,
                    destinations: Optional[List[str]] = None,
                    searchable_fields: Optional[List[str]] = None,
@@ -741,11 +753,11 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                 source_type=collection.source_type,
                 doc_type=src.doc_type,
                 category=src.category,
-                title=str(src.title) if src.title is not None else "",
-                preview=preview,
-                meta=discrete_meta,
-                labels=row_labels,
-                search_blob=search_blob,
+                title=_strip_nul(str(src.title) if src.title is not None else ""),
+                preview=_strip_nul(preview),
+                meta=_strip_nul(discrete_meta),
+                labels=_strip_nul(row_labels),
+                search_blob=_strip_nul(search_blob),
                 size_bytes=src.size_bytes,
                 modified_at=src.modified_at,
                 content_hash=content_hash,
