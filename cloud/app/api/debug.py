@@ -130,6 +130,10 @@ _MANIFEST = {
                  "billing_calc recurring total per tenant, with a match flag) — the cutover gate. "
                  "?tenant=<id> → full dump: plan + pricing source, legacy vs calc, itemized lines, "
                  "persisted subscription + items, add-ons, overrides, entitlements vs usage, metered usage."},
+        {"method": "GET", "path": "/api/debug/features",
+         "desc": "Feature-flag resolution (the SAME authority used for authorization) with the raw layer "
+                 "breakdown per flag (manual override / plan / add-on / default). Org tenants are "
+                 "tenant-scoped (members inherit); shared pools are account-scoped. ?tenant=<id> [&user=<id>]."},
     ],
     "notes": [
         "All responses are JSON. Query/maintenance are read-only or explicitly guarded — safe on production.",
@@ -480,6 +484,56 @@ def billing_debug(tenant: str = "", limit: int = 100, db: Session = Depends(get_
         "entitlements": ents, "usage": usage,
         "active_addons": active_addons, "overrides": overrides,
         "metered_usage": metering.tenant_view(db, t),
+    }
+
+
+@router.get("/features", dependencies=[Depends(require_debug_key)])
+def features_debug(tenant: str = "", user: str = "", db: Session = Depends(get_db)):
+    """Feature-flag resolution — the SAME authority used for authorization — with the
+    raw layer breakdown. Org tenants are tenant-scoped (members inherit the tenant's
+    flags); shared/personal pools are account-scoped. Query: ?tenant=<id> [&user=<id>];
+    with only ?user, its tenant is used."""
+    from .. import features
+    from ..models import Tenant, User
+    t = db.get(Tenant, tenant) if tenant else None
+    if tenant and t is None:
+        raise HTTPException(404, "tenant not found")
+    u = db.get(User, user) if user else None
+    if user and u is None:
+        raise HTTPException(404, "user not found")
+    if u is not None and t is None:
+        t = db.get(Tenant, u.tenant_id)
+    if t is None:
+        raise HTTPException(400, "provide ?tenant=<id> or ?user=<id>")
+    shared = (t.tenant_type or "dedicated") == "shared"
+    ent_map = features._flag_entitlement_map()
+    tf = t.feature_flags or {}
+    uf = (u.feature_flags or {}) if u else {}
+    gov = uf if shared else tf          # governing manual-override layer
+    rows = []
+    for name in features.FLAGS:
+        # Org tenants ignore the per-user layer — resolve with user=None so the
+        # output matches exactly what authorization sees for any member.
+        val, src = features.resolve_with_source(u if shared else None, t, name, db)
+        granted, origin = features._plan_addon_grant_src(t, name, db)
+        rows.append({
+            "name": name, "label": features.LABELS.get(name, name),
+            "enabled": bool(val), "source": src,
+            "entitlement": ent_map.get(name),
+            "layers": {
+                "manual_override": (gov.get(name) if name in gov else None),
+                "plan_or_addon": granted, "grant_origin": origin,
+                "default": bool(features.FLAGS.get(name, False)),
+            },
+        })
+    return {
+        "scope": "account" if shared else "tenant",
+        "tenant_id": t.id, "tenant_type": t.tenant_type, "plan": t.plan,
+        "user_id": (u.id if (u and shared) else None),
+        "note": ("Shared/personal pool: account-scoped (plan + add-on + per-user override)."
+                 if shared else
+                 "Org tenant: tenant-scoped — every member inherits these (plan + add-on + tenant override)."),
+        "flags": rows,
     }
 
 

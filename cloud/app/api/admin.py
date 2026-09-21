@@ -1297,12 +1297,13 @@ def tenant_feature_sources(tid: str, user_id: str = "", db: Session = Depends(ge
     user = db.get(User, user_id) if user_id else None
     if user_id and (user is None or user.tenant_id != tid):
         raise HTTPException(404, "user not found")
-    tf = t.feature_flags or {}
-    uf = (user.feature_flags or {}) if user else {}
+    # Org tenants are tenant-scoped (members inherit); shared pools are account-scoped.
+    shared = (t.tenant_type or "dedicated") == "shared"
+    gov = ((user.feature_flags or {}) if (shared and user) else (t.feature_flags or {}))
     flags = []
     for name in features.FLAGS:
-        val, src = features.resolve_with_source(user, t, name, db)
-        override = uf.get(name) if (user and name in uf) else (tf.get(name) if name in tf else None)
+        val, src = features.resolve_with_source(user if shared else None, t, name, db)
+        override = gov.get(name) if name in gov else None
         flags.append({
             "name": name, "label": features.LABELS.get(name, name),
             "enabled": bool(val), "source": src,

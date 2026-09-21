@@ -68,6 +68,7 @@ def main() -> int:
     a = sub.add_parser("analyze"); a.add_argument("table", nargs="?", default=None)
     bl = sub.add_parser("billing"); bl.add_argument("tenant", nargs="?", default="")
     bl.add_argument("--limit", type=int, default=100)
+    fe = sub.add_parser("features"); fe.add_argument("tenant", nargs="?", default=""); fe.add_argument("--user", default="")
     co = sub.add_parser("costs"); co.add_argument("--provider", default="")
     ig = sub.add_parser("integrations"); ig.add_argument("--tenant", default=""); ig.add_argument("--itype", default="")
     args = p.parse_args()
@@ -97,6 +98,9 @@ def main() -> int:
     elif args.cmd == "billing":
         qs = f"?tenant={args.tenant}&limit={args.limit}" if args.tenant else f"?limit={args.limit}"
         method, path, body = "GET", "/billing" + qs, None
+    elif args.cmd == "features":
+        qs = f"?tenant={args.tenant}&user={args.user}"
+        method, path, body = "GET", "/features" + qs, None
     elif args.cmd == "costs":
         method, path, body = "GET", "/costs" + (f"?provider={args.provider}" if args.provider else ""), None
     elif args.cmd == "integrations":

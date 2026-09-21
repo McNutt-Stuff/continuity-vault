@@ -138,18 +138,25 @@ def _plan_addon_grant_src(tenant, name: str, db=None):
 
 
 def resolve_with_source(user, tenant, name: str, db=None) -> tuple[bool, str]:
-    """Like ``resolve`` but also reports WHY: ``"manual"`` (explicit user/tenant
-    override — set by an Arkive admin), ``"plan"``, ``"addon"``, or ``"default"``."""
+    """The single authority for a feature flag's effective value + WHY.
+
+    The tenant TYPE decides the scope:
+      - org / dedicated tenant → TENANT-scoped: every member INHERITS the tenant's
+        flags (plan feature → add-on feature → manual tenant override). Per-user
+        flags do not apply to org members.
+      - shared / personal pool → ACCOUNT-scoped: the account's own resolution
+        (plan feature → add-on feature → manual per-user override).
+
+    Source: ``"manual"`` (an explicit Arkive-admin override on the governing
+    tenant/account), ``"plan"``, ``"addon"``, or ``"default"``."""
     default = FLAGS.get(name, False)
-    uf = (user.feature_flags or {}) if user else {}
-    tf = (tenant.feature_flags or {}) if tenant else {}
     shared = _shared(tenant)
-    if not shared and tf.get(name) is False:
-        return False, "manual"                     # tenant legal-hold disable
-    if name in uf:
-        return bool(uf[name]), "manual"            # explicit per-user override
-    if not shared and name in tf:
-        return bool(tf[name]), "manual"            # explicit per-tenant allow
+    # The governing manual-override layer: the account for a shared/personal pool,
+    # the tenant for an org — so org members inherit their tenant.
+    overrides = (((user.feature_flags or {}) if user else {}) if shared
+                 else ((tenant.feature_flags or {}) if tenant else {}))
+    if name in overrides:
+        return bool(overrides[name]), "manual"
     granted, origin = _plan_addon_grant_src(tenant, name, db)
     if granted is not None:
         return granted, (origin or "plan")
@@ -157,16 +164,9 @@ def resolve_with_source(user, tenant, name: str, db=None) -> tuple[bool, str]:
 
 
 def resolve(user, tenant, name: str, db=None) -> bool:
-    """Effective value of a feature flag. Precedence (highest first):
-
-      1. tenant hard-disable (legal hold) — authoritative for org tenants,
-      2. explicit per-user override,
-      3. explicit per-tenant allow (org tenants),
-      4. PLAN / ENTITLEMENT / ADD-ON grant — the primary control of what's enabled,
-      5. the global default (for flags not tied to any entitlement).
-
-    Pass ``db`` so add-on grants are consulted; without it only the plan layer +
-    overrides + default apply."""
+    """Effective value of a feature flag — THE way an account's/tenant's features are
+    determined (org members inherit the tenant; shared accounts resolve per-account).
+    Every authorization check flows through here. Pass ``db`` so add-on grants count."""
     return resolve_with_source(user, tenant, name, db)[0]
 
 
