@@ -6666,13 +6666,33 @@ function TenantSubscriptionBreakdown({ id }: { id: string }) {
 const PLAN_FAMILIES = ["personal", "consumer", "family", "business", "enterprise"];
 const PLAN_STATUSES = ["draft", "active", "grandfathered", "retired"];
 
+// Blank price version for a brand-new plan (all zeros; first Save publishes v1).
+const BLANK_VER: PlanVer = {
+  id: "", version: 0, status: "draft", currency: "USD", billing_interval: "month",
+  effective_from: null, effective_to: null,
+  base_price_cents: 0, protection_cents_per_tb: 0, cloud_cents_per_tb: 0,
+  cloud_plus_cents_per_tb: 0, per_user_cents: 0, per_member_cents: 0,
+  included_users: 0, included_members: 0, included_tb: 0, min_tb: 0,
+  features: [], entitlements: {}, compatible_addons: [],
+};
+const VERSION_KEYS: (keyof PlanVer)[] = [
+  "base_price_cents", "protection_cents_per_tb", "cloud_cents_per_tb", "cloud_plus_cents_per_tb",
+  "per_user_cents", "per_member_cents", "included_users", "included_members", "included_tb",
+  "min_tb", "entitlements", "compatible_addons",
+];
+interface PlanForm {
+  code: string; name: string; family: string; status: string;
+  customer_visible: boolean; description: string;
+  v: PlanVer; orig: PlanVer | null; isNew: boolean;
+}
+
 // Plan Catalog & price-book — versioned plans with immutable price history.
 function CatalogAdmin() {
   const [plans, setPlans] = useState<CatalogPlan[] | null>(null);
-  const [edit, setEdit] = useState<{ code: string; family: string; v: PlanVer } | null>(null);
-  const [planEdit, setPlanEdit] = useState<Partial<CatalogPlan> | null>(null);
+  const [form, setForm] = useState<PlanForm | null>(null);
   const [ents, setEnts] = useState<EntDef[]>([]);
   const [addonOpts, setAddonOpts] = useState<{ value: string; label: string }[]>([]);
+  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState("");
   const flash = (m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); };
   async function load() {
@@ -6681,49 +6701,57 @@ function CatalogAdmin() {
     try { const a = await api.get<{ addons: Addon[] }>("/admin/addons"); setAddonOpts((a.addons || []).map((x) => ({ value: x.code, label: x.name || x.code }))); } catch { /* ignore */ }
   }
   useEffect(() => { void load(); }, []);
-  const planOpts = (plans || []).map((p) => ({ value: p.code, label: p.name || p.code }));
   function num(v: PlanVer, k: keyof PlanVer): number { return (v[k] as number) || 0; }
 
-  async function publish() {
-    if (!edit) return;
-    const v = edit.v;
-    const body = {
-      currency: v.currency, billing_interval: v.billing_interval,
-      base_price_cents: v.base_price_cents, protection_cents_per_tb: v.protection_cents_per_tb,
-      cloud_cents_per_tb: v.cloud_cents_per_tb, cloud_plus_cents_per_tb: v.cloud_plus_cents_per_tb,
-      per_user_cents: v.per_user_cents, per_member_cents: v.per_member_cents,
-      included_users: v.included_users, included_members: v.included_members,
-      included_tb: v.included_tb, min_tb: v.min_tb,
-      features: v.features || [], entitlements: v.entitlements || {},
-      compatible_addons: v.compatible_addons || [],
-    };
-    try { await api.post(`/admin/catalog/plans/${edit.code}/versions`, body); setEdit(null); await load(); flash("New version published"); }
-    catch (e) { flash((e as { message?: string }).message || "Couldn't publish"); }
+  function newPlan() {
+    setForm({ code: "", name: "", family: "business", status: "active", customer_visible: true,
+              description: "", v: { ...BLANK_VER }, orig: null, isNew: true });
   }
-  async function savePlan() {
-    if (!planEdit) return;
-    const code = (planEdit.code || "").trim().toLowerCase();
+  function editPlan(p: CatalogPlan) {
+    setForm({ code: p.code, name: p.name || "", family: p.family || "business", status: p.status || "active",
+              customer_visible: !!p.customer_visible, description: p.description || "",
+              v: p.effective_version ? { ...p.effective_version } : { ...BLANK_VER },
+              orig: p.effective_version, isNew: false });
+  }
+  async function saveForm() {
+    if (!form) return;
+    const code = form.code.trim().toLowerCase();
     if (!code) { flash("A plan code is required"); return; }
-    const body = { code, name: planEdit.name, family: planEdit.family, description: planEdit.description,
-                   status: planEdit.status, customer_visible: planEdit.customer_visible };
-    try { await api.post("/admin/catalog/plans", body); setPlanEdit(null); await load(); flash("Plan saved"); }
-    catch (e) { flash((e as { message?: string }).message || "Couldn't save plan"); }
+    setSaving(true);
+    try {
+      // 1) Plan metadata.
+      await api.post("/admin/catalog/plans", {
+        code, name: form.name, family: form.family, description: form.description,
+        status: form.status, customer_visible: form.customer_visible });
+      // 2) Publish a price version when it's a new plan or any priced field changed
+      // (a pure metadata edit doesn't churn the version history).
+      const v = form.v;
+      const changed = !form.orig || VERSION_KEYS.some((k) => JSON.stringify(v[k] ?? null) !== JSON.stringify((form.orig as PlanVer)[k] ?? null));
+      if (changed) {
+        await api.post(`/admin/catalog/plans/${code}/versions`, {
+          currency: v.currency, billing_interval: v.billing_interval,
+          base_price_cents: v.base_price_cents, protection_cents_per_tb: v.protection_cents_per_tb,
+          cloud_cents_per_tb: v.cloud_cents_per_tb, cloud_plus_cents_per_tb: v.cloud_plus_cents_per_tb,
+          per_user_cents: v.per_user_cents, per_member_cents: v.per_member_cents,
+          included_users: v.included_users, included_members: v.included_members,
+          included_tb: v.included_tb, min_tb: v.min_tb,
+          features: v.features || [], entitlements: v.entitlements || {},
+          compatible_addons: v.compatible_addons || [] });
+      }
+      setForm(null); await load(); flash("Plan saved");
+    } catch (e) { flash((e as { message?: string }).message || "Couldn't save plan"); }
+    finally { setSaving(false); }
   }
 
   // Seats and members are the SAME concept — a plan is seat-based (business) OR
   // member-based (family), never both. Show one "Included seats"/"Per extra seat"
   // pair and map it to the right column by the plan family.
-  const isFamily = edit?.family === "family";
-  const seats = edit ? (isFamily ? num(edit.v, "included_members") : num(edit.v, "included_users")) : 0;
-  const perSeat = edit ? (isFamily ? num(edit.v, "per_member_cents") : num(edit.v, "per_user_cents")) : 0;
-  function setSeats(n: number) {
-    if (!edit) return;
-    setEdit({ ...edit, v: { ...edit.v, included_members: isFamily ? n : 0, included_users: isFamily ? 0 : n } });
-  }
-  function setPerSeat(c: number) {
-    if (!edit) return;
-    setEdit({ ...edit, v: { ...edit.v, per_member_cents: isFamily ? c : 0, per_user_cents: isFamily ? 0 : c } });
-  }
+  const isFamily = form?.family === "family";
+  const seats = form ? (isFamily ? num(form.v, "included_members") : num(form.v, "included_users")) : 0;
+  const perSeat = form ? (isFamily ? num(form.v, "per_member_cents") : num(form.v, "per_user_cents")) : 0;
+  const setV = (patch: Partial<PlanVer>) => { if (form) setForm({ ...form, v: { ...form.v, ...patch } }); };
+  function setSeats(n: number) { setV(isFamily ? { included_members: n, included_users: 0 } : { included_users: n, included_members: 0 }); }
+  function setPerSeat(c: number) { setV(isFamily ? { per_member_cents: c, per_user_cents: 0 } : { per_user_cents: c, per_member_cents: 0 }); }
 
   const MONEY_FIELDS: { k: keyof PlanVer; label: string }[] = [
     { k: "base_price_cents", label: "Base / mo" },
@@ -6739,42 +6767,37 @@ function CatalogAdmin() {
           <h2 style={{ margin: "0 0 2px" }}>Plan catalog</h2>
           <div className="muted" style={{ fontSize: 12.5, maxWidth: 680 }}>Versioned plans with immutable price history — a price change publishes a NEW version so past invoices stay reproducible. A plan <b>includes</b> entitlements + feature flags and defines <b>overage rates</b> over the included allowance; buying beyond that is priced by the plan, not a duplicate add-on. All money is minor-units (cents).</div>
         </div>
-        <button className="btn primary sm" onClick={() => setPlanEdit({ family: "business", status: "active", customer_visible: true })}><Icon name="plus" size={13} /> New plan</button>
+        <button className="btn primary sm" onClick={newPlan}><Icon name="plus" size={13} /> New plan</button>
       </div>
 
-      {planEdit && (
+      {form && (
         <Card style={{ marginBottom: 16 }}>
-          <h3 style={{ marginTop: 0 }}>{planEdit.code && plans.find((p) => p.code === planEdit.code) ? `Edit plan ${planEdit.code}` : "New plan"}</h3>
+          <h3 style={{ marginTop: 0 }}>{form.isNew ? "New plan" : `Edit plan ${form.code}`}{!form.isNew && form.v.version ? <span className="faint" style={{ fontSize: 12 }}> (current v{form.v.version})</span> : null}</h3>
+          <div className="faint" style={{ fontSize: 11.5, marginBottom: 10 }}>Basics, pricing and what's included — one editor. Changing any price/allowance/entitlement publishes a new immutable version; a name-only change doesn't.</div>
+
           <div className="grid grid-3" style={{ gap: 10 }}>
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Code (immutable)</span>
-              <input className="input sm" value={planEdit.code || ""} disabled={!!plans.find((p) => p.code === planEdit.code)} onChange={(e) => setPlanEdit({ ...planEdit, code: e.target.value })} /></label>
+              <input className="input sm" value={form.code} disabled={!form.isNew} onChange={(e) => setForm({ ...form, code: e.target.value })} /></label>
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Name</span>
-              <input className="input sm" value={planEdit.name || ""} onChange={(e) => setPlanEdit({ ...planEdit, name: e.target.value })} /></label>
+              <input className="input sm" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Family</span>
-              <select className="input sm" value={planEdit.family || "business"} onChange={(e) => setPlanEdit({ ...planEdit, family: e.target.value })}>{PLAN_FAMILIES.map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
+              <select className="input sm" value={form.family} onChange={(e) => setForm({ ...form, family: e.target.value })}>{PLAN_FAMILIES.map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Status</span>
-              <select className="input sm" value={planEdit.status || "active"} onChange={(e) => setPlanEdit({ ...planEdit, status: e.target.value })}>{PLAN_STATUSES.map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
-            <label className="row" style={{ gap: 6, fontSize: 12.5, alignSelf: "end" }}><input type="checkbox" checked={!!planEdit.customer_visible} onChange={(e) => setPlanEdit({ ...planEdit, customer_visible: e.target.checked })} /> Customer-visible</label>
+              <select className="input sm" value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>{PLAN_STATUSES.map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Billing interval</span>
+              <select className="input sm" value={form.v.billing_interval} onChange={(e) => setV({ billing_interval: e.target.value })}>{["month", "quarter", "year"].map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
+            <label className="row" style={{ gap: 6, fontSize: 12.5, alignSelf: "end" }}><input type="checkbox" checked={form.customer_visible} onChange={(e) => setForm({ ...form, customer_visible: e.target.checked })} /> Customer-visible</label>
           </div>
           <label className="stack" style={{ gap: 3, marginTop: 8 }}><span className="faint" style={{ fontSize: 11.5 }}>Description</span>
-            <textarea className="input" rows={2} value={planEdit.description || ""} onChange={(e) => setPlanEdit({ ...planEdit, description: e.target.value })} /></label>
-          <div className="row" style={{ gap: 8, marginTop: 12 }}>
-            <button className="btn primary sm" onClick={savePlan}><Icon name="check" size={13} /> Save plan</button>
-            <button className="btn ghost sm" onClick={() => setPlanEdit(null)}>Cancel</button>
-          </div>
-        </Card>
-      )}
+            <textarea className="input" rows={2} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label>
 
-      {edit && (
-        <Card style={{ marginBottom: 16 }}>
-          <h3 style={{ marginTop: 0 }}>Publish new version of {edit.code} <span className="faint" style={{ fontSize: 12 }}>(current v{edit.v.version})</span></h3>
-          <div className="faint" style={{ fontSize: 11.5, marginBottom: 10 }}>Prices are per the interval; seats/members are one concept for this {edit.family || "plan"} plan.</div>
+          <div className="faint" style={{ fontSize: 11.5, margin: "14px 0 6px", fontWeight: 600 }}>Pricing &amp; included allowance</div>
           <div className="grid grid-3" style={{ gap: 10 }}>
             {MONEY_FIELDS.map((f) => (
               <label key={String(f.k)} className="stack" style={{ gap: 3 }}>
                 <span className="faint" style={{ fontSize: 11.5 }}>{f.label}</span>
-                <input className="input sm" type="number" step="0.01" value={(num(edit.v, f.k) / 100).toString()}
-                       onChange={(e) => setEdit({ ...edit, v: { ...edit.v, [f.k]: Math.round(parseFloat(e.target.value || "0") * 100) } })} />
+                <input className="input sm" type="number" step="0.01" value={(num(form.v, f.k) / 100).toString()}
+                       onChange={(e) => setV({ [f.k]: Math.round(parseFloat(e.target.value || "0") * 100) } as Partial<PlanVer>)} />
               </label>
             ))}
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>{isFamily ? "Included members" : "Included seats"}</span>
@@ -6782,21 +6805,24 @@ function CatalogAdmin() {
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Per extra {isFamily ? "member" : "seat"} / mo</span>
               <input className="input sm" type="number" step="0.01" value={(perSeat / 100).toString()} onChange={(e) => setPerSeat(Math.round(parseFloat(e.target.value || "0") * 100))} /></label>
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Included TB</span>
-              <input className="input sm" type="number" value={num(edit.v, "included_tb").toString()} onChange={(e) => setEdit({ ...edit, v: { ...edit.v, included_tb: Math.round(parseFloat(e.target.value || "0")) } })} /></label>
+              <input className="input sm" type="number" value={num(form.v, "included_tb").toString()} onChange={(e) => setV({ included_tb: Math.round(parseFloat(e.target.value || "0")) })} /></label>
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Min TB</span>
-              <input className="input sm" type="number" value={num(edit.v, "min_tb").toString()} onChange={(e) => setEdit({ ...edit, v: { ...edit.v, min_tb: Math.round(parseFloat(e.target.value || "0")) } })} /></label>
+              <input className="input sm" type="number" value={num(form.v, "min_tb").toString()} onChange={(e) => setV({ min_tb: Math.round(parseFloat(e.target.value || "0")) })} /></label>
           </div>
-          <div className="grid grid-2" style={{ gap: 12, marginTop: 12 }}>
+
+          <div className="faint" style={{ fontSize: 11.5, margin: "14px 0 6px", fontWeight: 600 }}>What's included</div>
+          <div className="grid grid-2" style={{ gap: 12 }}>
             <div className="stack" style={{ gap: 3 }}>
               <span className="faint" style={{ fontSize: 11.5 }}>Entitlements granted</span>
-              <EntitlementPicker registry={ents} value={edit.v.entitlements || {}} onChange={(entitlements) => setEdit({ ...edit, v: { ...edit.v, entitlements } })} />
+              <EntitlementPicker registry={ents} value={form.v.entitlements || {}} onChange={(entitlements) => setV({ entitlements })} />
               <span className="faint" style={{ fontSize: 11 }}>Flag-backed entitlements (Compliance, Microsoft 365, Rules, Insights, …) enable their feature flag automatically — there's no separate "feature flags" list on a plan.</span>
             </div>
-            <MultiSelect label="Compatible add-ons" options={addonOpts} value={edit.v.compatible_addons || []} onChange={(compatible_addons) => setEdit({ ...edit, v: { ...edit.v, compatible_addons } })} placeholder="All add-ons" />
+            <MultiSelect label="Compatible add-ons" options={addonOpts} value={form.v.compatible_addons || []} onChange={(compatible_addons) => setV({ compatible_addons })} placeholder="All add-ons" />
           </div>
+
           <div className="row" style={{ gap: 8, marginTop: 14 }}>
-            <button className="btn primary sm" onClick={publish}><Icon name="check" size={13} /> Publish version</button>
-            <button className="btn ghost sm" onClick={() => setEdit(null)}>Cancel</button>
+            <button className="btn primary sm" onClick={saveForm} disabled={saving}><Icon name="check" size={13} /> {saving ? "Saving…" : form.isNew ? "Create plan" : "Save plan"}</button>
+            <button className="btn ghost sm" onClick={() => setForm(null)}>Cancel</button>
           </div>
         </Card>
       )}
@@ -6823,8 +6849,7 @@ function CatalogAdmin() {
                   <td className="faint">{v ? v.included_tb : "—"}</td>
                   <td><Pill tone={p.status === "active" ? "ok" : "warn"}>{p.status}</Pill></td>
                   <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                    <button className="btn ghost sm" onClick={() => setPlanEdit({ ...p })}>Edit</button>{" "}
-                    {v && <button className="btn ghost sm" onClick={() => setEdit({ code: p.code, family: p.family, v: { ...v } })}>New version</button>}
+                    <button className="btn ghost sm" onClick={() => editPlan(p)}>Edit</button>
                   </td>
                 </tr>
               );
