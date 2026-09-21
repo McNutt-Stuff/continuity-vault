@@ -85,12 +85,18 @@ def reconcile_bindings(db: Session, inst, *, can_provision: bool) -> dict:
     if tenant is None:
         return {"suggested": 0, "mapped": 0, "created": 0}
 
+    # Seat governance: when enforcement is on, auto-create NEVER exceeds the licensed
+    # seats — extras are held as candidates for admin review (never auto-billed).
+    from ... import entitlements
+    _enforce = entitlements.enforcement_on(db, tenant)
+    _seat_key = "family_members" if (tenant.plan or "").lower() == "family" else "protected_users"
+
     identities = (db.query(m.ExternalIdentity)
                   .filter(m.ExternalIdentity.integration_instance_id == inst.id,
                           m.ExternalIdentity.in_scope.is_(True)).all())
     bindings = {b.external_identity_id: b for b in db.query(m.ExternalIdentityBinding)
                 .filter(m.ExternalIdentityBinding.integration_instance_id == inst.id).all()}
-    suggested = mapped = created = 0
+    suggested = mapped = created = held = 0
 
     for e in identities:
         binding = bindings.get(e.id)
@@ -99,6 +105,12 @@ def reconcile_bindings(db: Session, inst, *, can_provision: bool) -> dict:
         member = find_member(db, tenant.id, e)
         created_now = False
         if member is None and auto_create:
+            if _enforce and not entitlements.can_consume(db, tenant, _seat_key, 1):
+                # Over the licensed seats — hold for admin review, never auto-bill.
+                if e.state in ("discovered", "suggested_match"):
+                    e.state = "new_user_candidate"
+                held += 1
+                continue
             member = provision_member(db, tenant, e.email or e.upn, e.display_name)
             created_now = member is not None
             if created_now:
@@ -128,7 +140,7 @@ def reconcile_bindings(db: Session, inst, *, can_provision: bool) -> dict:
             suggested += 1
 
     db.commit()
-    if suggested or mapped or created:
-        logger.info("m365 reconcile bindings (instance=%s): suggested=%d mapped=%d created=%d",
-                    inst.id, suggested, mapped, created)
-    return {"suggested": suggested, "mapped": mapped, "created": created}
+    if suggested or mapped or created or held:
+        logger.info("m365 reconcile bindings (instance=%s): suggested=%d mapped=%d created=%d held=%d",
+                    inst.id, suggested, mapped, created, held)
+    return {"suggested": suggested, "mapped": mapped, "created": created, "held": held}

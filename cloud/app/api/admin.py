@@ -1504,6 +1504,9 @@ def create_user(tid: str, body: UserCreate,
     shared = (t.tenant_type or "dedicated") == "shared"
     # Shared tenants hold isolated 1:1 personal accounts — no roles.
     role = "member" if shared else (body.role or "member")
+    if not shared:
+        from .. import entitlements
+        entitlements.require_seat(db, t, None)   # 402 if over licensed seats (enforcement on)
     u = User(tenant_id=tid, email=email, display_name=display,
              first_name=first, last_name=last, phone=(body.phone or "").strip(),
              role=role, status="active")
