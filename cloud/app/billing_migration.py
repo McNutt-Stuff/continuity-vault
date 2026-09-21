@@ -169,15 +169,18 @@ def rollback(db: Session, tenant: Tenant, *, actor: str | None = None) -> dict:
 
 
 def backfill_all(db: Session, *, limit: int | None = None) -> dict:
-    """Materialize the persisted subscription for every tenant (idempotent). Safe to
-    run repeatedly; does NOT change billing_source or charge anything."""
+    """Materialize the persisted subscription for every tenant (idempotent). Also
+    mirrors each tenant's appliance selection into appliance add-ons so appliances
+    bill through the add-on model. Does NOT change billing_source or charge anything."""
     from . import subscriptions
+    from .api.billing import _sync_appliance_addons
     q = db.query(Tenant).order_by(Tenant.created_at.asc())
     if limit:
         q = q.limit(limit)
     ok = failed = 0
     for t in q.all():
         try:
+            _sync_appliance_addons(db, t, getattr(t, "appliance_plan", None) or [], None)
             subscriptions.sync_from_calc(db, t)
             ok += 1
         except Exception:  # noqa: BLE001 — one tenant must not stop the backfill

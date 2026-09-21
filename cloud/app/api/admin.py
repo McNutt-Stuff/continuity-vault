@@ -274,6 +274,7 @@ class AddOnBody(BaseModel):
     status: str | None = None
     pricing_model: str | None = None
     price_cents: int | None = None
+    setup_cents: int | None = None
     currency: str | None = None
     billing_interval: str | None = None
     eligible_plans: list[str] | None = None

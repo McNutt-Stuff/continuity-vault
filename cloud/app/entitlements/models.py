@@ -64,6 +64,7 @@ class AddOn(Base):
     # flat | per_user | per_member | per_tb | per_cloud_tb | per_appliance | metered | tiered | included
     pricing_model = Column(String, default="flat")
     price_cents = Column(Integer, default=0)             # unit price (minor units)
+    setup_cents = Column(Integer, default=0)             # one-time setup/activation fee (per unit)
     currency = Column(String, default="USD")
     billing_interval = Column(String, default="month")   # month | quarter | year
     eligible_plans = Column(JSON, default=list)          # ["business","enterprise"] (empty = all)

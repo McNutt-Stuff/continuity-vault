@@ -356,6 +356,8 @@ def _apply_additive_migrations() -> None:
         # a multi-GB table would stall startup and fail the deploy health check. It
         # runs in the BACKGROUND shortly after boot instead (workers/pruning.prune_all
         # + the concurrent index in workers/scheduler._ensure_perf_indexes).
+        # Add-ons: one-time setup fee (appliance activation etc.).
+        "ALTER TABLE addons ADD COLUMN setup_cents INTEGER DEFAULT 0",
     ]
     for statement in statements:
         try:

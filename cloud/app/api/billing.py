@@ -397,6 +397,43 @@ def _sync_cloud_addon(db: Session, tenant: Tenant, enabled: bool, actor: str | N
         existing.ends_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _sync_appliance_addons(db: Session, tenant: Tenant, appliance_plan, actor: str | None) -> None:
+    """Mirror the tenant's per-tier appliance selection into ``appliance_<cap>tb``
+    add-ons, so appliances flow through the entitlement model + the calc (recurring
+    lease + one-time setup) instead of a separate billing path."""
+    from ..entitlements.models import AddOn, TenantAddOn
+    from ..entitlements import addons as _addons
+    _addons.ensure_defaults(db)   # make sure the appliance add-ons exist
+    want: dict[str, int] = {}
+    for sel in (appliance_plan or []):
+        cap = int(sel.get("capacity_tb") or 0)
+        qty = int(sel.get("qty") or 0)
+        if cap > 0 and qty > 0:
+            want[f"appliance_{cap}tb"] = qty
+    existing = {ta.addon_code: ta for ta in
+                db.query(TenantAddOn)
+                .filter(TenantAddOn.tenant_id == tenant.id, TenantAddOn.status == "active").all()
+                if ta.addon_code.startswith("appliance_")}
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    for code, qty in want.items():
+        a = db.get(AddOn, code)
+        if a is None:
+            continue
+        ta = existing.get(code)
+        if ta is None:
+            db.add(TenantAddOn(tenant_id=tenant.id, addon_code=code, quantity=qty, status="active",
+                               price_cents_snapshot=a.price_cents, addon_version=a.version,
+                               created_by=actor))
+        else:
+            ta.quantity = qty
+            ta.price_cents_snapshot = a.price_cents
+            ta.addon_version = a.version
+    for code, ta in existing.items():
+        if code not in want:
+            ta.status = "canceled"
+            ta.ends_at = now
+
+
 def cloud_stored_summary(db: Session, tenant: Tenant, vault_ids) -> tuple[int, int]:
     """(object_count, bytes) currently stored in Arkive Cloud for the given vaults."""
     from ..models import SearchDocument, SnapshotReceipt
@@ -728,6 +765,9 @@ def update_plan(body: PlanUpdate,
             summary.append("Removed all secure appliances")
         elif new_qty != prev_qty:
             summary.append(f"Updated appliance plan to {new_qty} unit{'s' if new_qty != 1 else ''}")
+        # Mirror the appliance selection into per-tier appliance add-ons so it flows
+        # through entitlements + the calc (recurring lease + one-time setup).
+        _sync_appliance_addons(db, tenant, tenant.appliance_plan, principal.user_id)
     db.commit()
     audit.record(db, actor=principal.user_id, action="billing.plan_updated",
                  tenant_id=tenant.id, resource=tenant.id,

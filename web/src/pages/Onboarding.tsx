@@ -104,7 +104,15 @@ export default function Onboarding() {
   // a stale slower response overwriting a newer one.
   const billReq = useRef(0);
   function previewBody(tb: number) {
-    return { licensed_tb: tb, addons: [{ code: "arkive_cloud", quantity: options.has("cv-cloud") ? 1 : 0 }] };
+    // The cv-cloud tier and each selected appliance map to add-ons that only persist
+    // on Save — inject them here so the live bill reflects the pending selection.
+    const applianceAddons = (pricing?.appliance_tiers || []).map((t) => ({
+      code: `appliance_${t.capacity_tb}tb`, quantity: qty[t.capacity_tb] || 0,
+    }));
+    return {
+      licensed_tb: tb,
+      addons: [{ code: "arkive_cloud", quantity: options.has("cv-cloud") ? 1 : 0 }, ...applianceAddons],
+    };
   }
   async function recomputeBill(tb: number) {
     const token = ++billReq.current;
@@ -125,7 +133,7 @@ export default function Onboarding() {
       await recomputeBill(licensedTb);
     } catch { /* best-effort; the bill reflects reality on next load */ }
   }
-  useEffect(() => { if (plan) void recomputeBill(licensedTb); }, [licensedTb, plan, options]);
+  useEffect(() => { if (plan) void recomputeBill(licensedTb); }, [licensedTb, plan, options, qty]);
 
   // Arriving from "Order a new appliance": enable the appliance destination and
   // pre-add one unit (incremental order) so the user just picks capacity + Save.
@@ -226,7 +234,7 @@ export default function Onboarding() {
 
   const overLicensed = usedTb > licensedTb;
   const activeAddonCodes = new Set((addons?.active || []).map((a) => a.code));
-  const optionalAddons = (addons?.available || []).filter((a) => a.code !== "arkive_cloud");
+  const optionalAddons = (addons?.available || []).filter((a) => a.code !== "arkive_cloud" && !a.code.startsWith("appliance_"));
   // Value/return is measured against the ACTUAL server bill (all lines incl. add-ons).
   const billMonthly = (bill?.recurring_cents || 0) / 100;
   const billRatio = billMonthly > 0 ? (costs.dataValue / (billMonthly * 12)) : null;

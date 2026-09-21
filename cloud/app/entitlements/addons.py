@@ -80,6 +80,45 @@ def ensure_defaults(db: Session) -> None:
             changed = True
     if changed:
         db.commit()
+    _ensure_appliance_addons(db)
+
+
+def _ensure_appliance_addons(db: Session) -> None:
+    """Seed a per-tier Arkive Secure Appliance add-on from the pricing config, so an
+    appliance flows through the add-on/entitlement model with a recurring lease
+    (``price_cents``) + a one-time setup fee (``setup_cents``). Kept in sync with the
+    pricing config (appliances are configured there, not on the add-on)."""
+    try:
+        from ..api.billing import get_pricing
+        tiers = (get_pricing(db).appliance_tiers or [])
+    except Exception:  # noqa: BLE001 — pricing optional
+        return
+    changed = False
+    for t in tiers:
+        cap = int(t.get("capacity_tb") or 0)
+        if cap <= 0:
+            continue
+        code = f"appliance_{cap}tb"
+        model = t.get("model") or f"{cap} TB"
+        monthly = int(round(float(t.get("monthly") or 0) * 100))
+        setup = int(round(float(t.get("setup") or 0) * 100))
+        a = db.get(AddOn, code)
+        if a is None:
+            db.add(AddOn(code=code, name=f"Arkive Secure Appliance — {model}",
+                         description=f"Leased on-prem Arkive appliance ({cap} TB) — monthly lease + one-time setup.",
+                         status="active", version=1, currency="USD", pricing_model="per_appliance",
+                         price_cents=monthly, setup_cents=setup, billing_interval="month",
+                         eligible_plans=[], entitlements={"appliance_management": True},
+                         feature_flags=[], self_service=True, customer_visible=True, min_qty=1,
+                         meta={"capacity_tb": cap, "model": model, "auto": True}))
+            changed = True
+        elif a.price_cents != monthly or (a.setup_cents or 0) != setup:
+            a.price_cents = monthly
+            a.setup_cents = setup
+            a.meta = {**(a.meta or {}), "capacity_tb": cap, "model": model, "auto": True}
+            changed = True
+    if changed:
+        db.commit()
 
 
 def catalog(db: Session, include_retired: bool = False) -> list[AddOn]:
@@ -138,6 +177,7 @@ def public_view(a: AddOn) -> dict:
     return {
         "code": a.code, "name": a.name, "description": a.description, "status": a.status,
         "version": a.version, "pricing_model": a.pricing_model, "price_cents": a.price_cents,
+        "setup_cents": a.setup_cents or 0,
         "currency": a.currency, "billing_interval": a.billing_interval,
         "eligible_plans": a.eligible_plans or [], "entitlements": a.entitlements or {},
         "feature_flags": a.feature_flags or [], "meter_key": a.meter_key,

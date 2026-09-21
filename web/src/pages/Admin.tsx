@@ -7040,7 +7040,7 @@ function CatalogAdmin() {
 
 interface Addon {
   code: string; name: string; description: string; status: string; version: number;
-  pricing_model: string; price_cents: number; currency: string; billing_interval: string;
+  pricing_model: string; price_cents: number; setup_cents?: number; currency: string; billing_interval: string;
   eligible_plans: string[]; entitlements: Record<string, unknown>; feature_flags: string[];
   meter_key: string; min_qty: number; max_qty: number | null;
   self_service: boolean; requires_approval: boolean; customer_visible: boolean;
@@ -7069,6 +7069,7 @@ function AddonsAdmin() {
     const body: Record<string, unknown> = {
       code: (edit.code || "").trim().toLowerCase(), name: edit.name, description: edit.description,
       status: edit.status, pricing_model: edit.pricing_model, price_cents: edit.price_cents,
+      setup_cents: edit.setup_cents,
       billing_interval: edit.billing_interval, eligible_plans: edit.eligible_plans,
       entitlements: edit.entitlements, feature_flags: edit.feature_flags,
       customer_visible: edit.customer_visible, self_service: edit.self_service,
@@ -7100,6 +7101,8 @@ function AddonsAdmin() {
               <select className="input sm" value={edit.pricing_model} onChange={(e) => setEdit({ ...edit, pricing_model: e.target.value })}>{ADDON_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Unit price (USD)</span>
               <input className="input sm" type="number" step="0.01" value={((edit.price_cents || 0) / 100).toString()} onChange={(e) => setEdit({ ...edit, price_cents: Math.round(parseFloat(e.target.value || "0") * 100) })} /></label>
+            <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>One-time setup (USD)</span>
+              <input className="input sm" type="number" step="0.01" value={((edit.setup_cents || 0) / 100).toString()} onChange={(e) => setEdit({ ...edit, setup_cents: Math.round(parseFloat(e.target.value || "0") * 100) })} /></label>
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Billing interval</span>
               <select className="input sm" value={edit.billing_interval} onChange={(e) => setEdit({ ...edit, billing_interval: e.target.value })}>{["month", "quarter", "year"].map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Status</span>

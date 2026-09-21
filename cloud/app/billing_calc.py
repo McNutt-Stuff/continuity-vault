@@ -149,6 +149,7 @@ def calculate(db: Session, tenant, *, overrides: dict | None = None) -> Calc:
     cloud_tb_used = metering.current_or_live(
         db, tenant.id, "cloud_stored_tb",
         lambda: entitlements.get_usage(db, tenant, "protected_data_tb"))
+    covered_appliance_caps: set[int] = set()   # tiers billed via an appliance add-on
     for ta in active:
         a = by_code.get(ta.addon_code)
         if not a:
@@ -166,12 +167,26 @@ def calculate(db: Session, tenant, *, overrides: dict | None = None) -> Calc:
         add(key=f"addon:{a.code}", label=a.name or a.code, quantity=qty,
             unit_price_cents=unit, amount_cents=unit * qty,
             source=f"addon:{a.code} v{ta.addon_version}", detail={"pricing_model": model})
+        # One-time setup fee (per unit) — e.g. an appliance's activation charge.
+        setup = int(getattr(a, "setup_cents", 0) or 0)
+        if setup:
+            add(key=f"addon_setup:{a.code}", label=f"{a.name or a.code} — setup",
+                quantity=qty, unit_price_cents=setup, amount_cents=setup * qty,
+                kind="one_time", source=f"addon:{a.code}", detail={"pricing_model": model})
+        if model == "per_appliance":
+            cap = int((a.meta or {}).get("capacity_tb") or 0)
+            if cap:
+                covered_appliance_caps.add(cap)
 
-    # 6) Appliances (lease + one-time setup) from the plan version's tiers.
+    # 6) Appliances still selected via appliance_plan but NOT yet migrated to an
+    # appliance add-on (transitional) — priced from the plan version's tiers so no
+    # existing appliance customer loses billing before the add-on sync runs.
     tiers = {int(t.get("capacity_tb", 0)): t for t in (pricing_appliance(db, plan))}
     for sel in (getattr(tenant, "appliance_plan", None) or []):
         cap = int(sel.get("capacity_tb", 0) or 0)
         qty = int(sel.get("qty", 1) or 1)
+        if cap in covered_appliance_caps:
+            continue  # billed via its appliance add-on
         t = tiers.get(cap)
         if not t or qty <= 0:
             continue
