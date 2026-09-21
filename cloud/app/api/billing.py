@@ -499,6 +499,18 @@ def billing_estimate_preview(body: EstimatePreview,
     return billing_calc.preview(db, tenant, body.dict(exclude_none=True))
 
 
+@router.get("/subscription")
+def get_subscription(principal: security.Principal = Depends(security.get_principal),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    """The tenant's persisted subscription + its priced items (materialized on first
+    read), so the customer has a durable line-item record, not just a live estimate."""
+    from .. import subscriptions
+    if subscriptions.get_subscription(db, tenant.id) is None:
+        subscriptions.sync_from_calc(db, tenant)
+    return subscriptions.view(db, tenant)
+
+
 class PlanUpdate(BaseModel):
     options: list[str] | None = None
     licensed_tb: float | None = None

@@ -143,6 +143,17 @@ try:
 except Exception:  # noqa: BLE001 — packages optional
     pass
 
+# Subscriptions are CP-authoritative commercial state; ship them DOWN so a node can
+# read a tenant's subscription + items offline. After tenants (FK order).
+try:
+    from ..subscriptions import Subscription as _Sub, SubscriptionItem as _SubItem
+    _PULL_ORDER += [
+        ("subscriptions", _Sub),
+        ("subscription_items", _SubItem),
+    ]
+except Exception:  # noqa: BLE001 — module optional
+    pass
+
 
 def _now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)

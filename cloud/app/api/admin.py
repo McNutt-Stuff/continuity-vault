@@ -495,6 +495,31 @@ def tenant_billing_estimate(tid: str, db: Session = Depends(get_db)):
     return billing_calc.calculate(db, t).as_dict()
 
 
+@router.get("/tenants/{tid}/subscription")
+def get_tenant_subscription(tid: str, db: Session = Depends(get_db)):
+    """The tenant's persisted subscription + priced items (materialized on first read)."""
+    from .. import subscriptions
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    if subscriptions.get_subscription(db, t.id) is None:
+        subscriptions.sync_from_calc(db, t)
+    return subscriptions.view(db, t)
+
+
+@router.post("/tenants/{tid}/subscription/sync")
+def sync_tenant_subscription(tid: str,
+                             principal: security.Principal = Depends(security.require_platform_admin),
+                             db: Session = Depends(get_db)):
+    """Re-materialize the tenant's subscription + items from the current billing calc."""
+    from .. import subscriptions
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    subscriptions.sync_from_calc(db, t)
+    return subscriptions.view(db, t)
+
+
 # --- Email: configuration, test, and broadcast ------------------------------
 
 def _email_config(db: Session):
