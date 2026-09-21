@@ -1767,7 +1767,7 @@ function M365Overview({ workloadRollup, totalObjects, totalBytes, collectEnabled
         </div>
       ) : (
         <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
-             alignItems: "stretch" }}>
+             gridAutoRows: "1fr", alignItems: "stretch" }}>
           {workloadRollup.map((w) => (
             <div key={w.workload} className="card" style={{ padding: "10px 14px", display: "flex", flexDirection: "column", minHeight: 82 }}>
               <div className="row" style={{ gap: 6, alignItems: "center", minWidth: 0 }}>
