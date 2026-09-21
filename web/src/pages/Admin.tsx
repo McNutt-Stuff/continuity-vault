@@ -1988,6 +1988,8 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
         </Card>
       )}
 
+      {tab === "subscription" && !isShared && <TenantSubscriptionBreakdown id={id} />}
+
       {tab === "billing" && <BillingInfoPanel billing={billing} />}
 
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
@@ -6480,6 +6482,96 @@ interface CatalogPlan {
 }
 
 const DOLLARS = (c: number) => `$${((c || 0) / 100).toFixed(2)}`;
+
+// Per-tenant persisted subscription + its priced line items (Phase 4/8). Reads the
+// materialized record; "Re-sync" recomputes it from the deterministic billing calc.
+function TenantSubscriptionBreakdown({ id }: { id: string }) {
+  const [data, setData] = useState<{ subscription: any; items: any[] } | null>(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function load() {
+    try { setErr(""); setData(await api.get<any>(`/admin/tenants/${id}/subscription`)); }
+    catch (e) { setErr((e as { message?: string }).message || "Failed to load subscription"); }
+  }
+  useEffect(() => { void load(); }, [id]);
+  async function resync() {
+    setBusy(true);
+    try { setData(await api.post<any>(`/admin/tenants/${id}/subscription/sync`, {})); }
+    catch (e) { setErr((e as { message?: string }).message || "Sync failed"); }
+    finally { setBusy(false); }
+  }
+  const sub = data?.subscription;
+  const items: any[] = data?.items || [];
+  const recurring = items.filter((i) => i.kind !== "one_time");
+  const oneTime = items.filter((i) => i.kind === "one_time");
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div className="spread" style={{ marginBottom: 6 }}>
+        <div>
+          <h3 style={{ margin: 0 }}>Subscription line items</h3>
+          <div className="faint" style={{ fontSize: 12 }}>
+            The persisted subscription record — each component priced from the plan version it was billed at.
+          </div>
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          {sub && <Pill tone={sub.status === "active" || sub.status === "trialing" ? "ok" : "warn"}>{sub.status}</Pill>}
+          <button className="btn sm" onClick={resync} disabled={busy}>
+            <Icon name="repeat" size={13} /> {busy ? "Syncing…" : "Re-sync"}
+          </button>
+        </div>
+      </div>
+      {err && <div className="muted" style={{ color: "var(--danger)", fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
+      {!data && !err && <div className="muted" style={{ fontSize: 12.5 }}>Loading…</div>}
+      {sub && (
+        <>
+          <div className="grid grid-4" style={{ gap: 12, marginBottom: 14 }}>
+            <Mini label="Plan" value={`${sub.plan_code} · v${sub.plan_version}`} />
+            <Mini label="Interval" value={sub.billing_interval} />
+            <Mini label="Recurring" value={`${DOLLARS(sub.recurring_cents)}/${sub.billing_interval === "year" ? "yr" : "mo"}`} />
+            <Mini label="One-time" value={DOLLARS(sub.one_time_cents)} />
+          </div>
+          <table className="table">
+            <thead><tr><th>Component</th><th>Included</th><th>Licensed</th><th>Billable</th><th style={{ textAlign: "right" }}>Unit</th><th style={{ textAlign: "right" }}>Amount</th></tr></thead>
+            <tbody>
+              {recurring.map((i) => (
+                <tr key={i.key}>
+                  <td><div style={{ fontWeight: 600 }}>{i.label}</div><div className="faint" style={{ fontSize: 11 }}>{i.key}{i.price_version ? ` · v${i.price_version}` : ""}</div></td>
+                  <td className="faint">{i.included_qty || "—"}</td>
+                  <td className="faint">{i.licensed_qty || "—"}</td>
+                  <td>{i.quantity || "—"}</td>
+                  <td style={{ textAlign: "right" }}>{i.unit_price_cents ? DOLLARS(i.unit_price_cents) : "—"}</td>
+                  <td style={{ textAlign: "right", fontWeight: 600 }}>{DOLLARS(i.amount_cents)}</td>
+                </tr>
+              ))}
+              {recurring.length === 0 && <tr><td colSpan={6} className="muted">No recurring components.</td></tr>}
+            </tbody>
+            <tfoot>
+              <tr><td colSpan={5} style={{ textAlign: "right", fontWeight: 600 }}>Recurring total</td>
+                <td style={{ textAlign: "right", fontWeight: 700 }}>{DOLLARS(sub.recurring_cents)}/{sub.billing_interval === "year" ? "yr" : "mo"}</td></tr>
+            </tfoot>
+          </table>
+          {oneTime.length > 0 && (
+            <>
+              <div className="faint" style={{ fontSize: 11.5, margin: "12px 0 6px" }}>One-time charges</div>
+              <table className="table">
+                <tbody>
+                  {oneTime.map((i) => (
+                    <tr key={i.key}>
+                      <td><div style={{ fontWeight: 600 }}>{i.label}</div><div className="faint" style={{ fontSize: 11 }}>{i.key}</div></td>
+                      <td>{i.quantity || 1}×</td>
+                      <td style={{ textAlign: "right", fontWeight: 600 }}>{DOLLARS(i.amount_cents)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+          {sub.synced_at && <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>Last synced {timeAgo(sub.synced_at)}</div>}
+        </>
+      )}
+    </Card>
+  );
+}
 
 // Plan Catalog & price-book — versioned plans with immutable price history.
 function CatalogAdmin() {
