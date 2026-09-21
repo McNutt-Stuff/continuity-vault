@@ -500,6 +500,70 @@ def _appliance_issues(db, user: User) -> list[dict]:
     return out
 
 
+def appliance_problem_list(db, appliance) -> tuple[list[str], str]:
+    """Health problems for ONE appliance as (messages, severity) — used by the
+    scheduler's appliance-health sweep (audit + admin alert). Returns ([], "") when
+    the unit is healthy or not yet in service; severity is "critical" or "warning"."""
+    from .models import ApplianceStorage
+    state = (appliance.state or "").upper()
+    if state in ("PROVISIONING", "DECOMMISSIONED", "RETIRED"):
+        return [], ""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    problems: list[str] = []
+    critical = False
+
+    if (appliance.tamper_state or "normal") != "normal":
+        problems.append(f"Tamper alert ({appliance.tamper_state})")
+        critical = True
+    if state in ("ERROR", "FAULT"):
+        problems.append(f"Appliance state: {state.title()}")
+        critical = True
+    if appliance.last_attestation_at is not None and not appliance.attestation_ok:
+        problems.append("Attestation failed")
+        critical = True
+
+    hb = appliance.last_heartbeat_at
+    offline_secs = (now - hb).total_seconds() if hb else None
+    if hb is None or state == "OFFLINE" or (offline_secs is not None and offline_secs > 20 * 60):
+        if offline_secs is not None and offline_secs > 2 * 3600:
+            problems.append("Offline — no check-in for over 2 hours")
+            critical = True
+        else:
+            problems.append("Offline — no recent check-in")
+
+    # Storage volumes: drive / SMART / RAID health, capacity and device presence.
+    for s in (db.query(ApplianceStorage)
+              .filter(ApplianceStorage.appliance_id == appliance.id).all()):
+        vol = s.name or "Storage"
+        if (s.state or "") == "error":
+            problems.append(f"{vol}: storage error")
+            critical = True
+        elif (s.state or "") == "disconnected":
+            problems.append(f"{vol}: device disconnected")
+        h = s.health or {}
+        drive = str(h.get("drive_health") or h.get("smart") or "").lower()
+        raid = str(h.get("raid") or "").lower()
+        if drive in ("failed", "failing", "bad", "error"):
+            problems.append(f"{vol}: drive health {drive}")
+            critical = True
+        if raid in ("degraded", "failed", "rebuilding"):
+            problems.append(f"{vol}: RAID {raid}")
+            critical = critical or raid == "failed"
+        cap, used = int(s.capacity_bytes or 0), int(s.used_bytes or 0)
+        if cap > 0 and used / cap >= 0.95:
+            problems.append(f"{vol}: {used / cap * 100:.0f}% full")
+        try:
+            temp = h.get("temperature_c")
+            if temp is not None and float(temp) >= 60:
+                problems.append(f"{vol}: high temperature ({int(float(temp))}°C)")
+        except (TypeError, ValueError):
+            pass
+
+    if not problems:
+        return [], ""
+    return problems, ("critical" if critical else "warning")
+
+
 def _storage_issues(db, user: User) -> list[dict]:
     """Customer-owned storage destinations (bring-your-own-storage) for this
     user's tenant that failed their last health test, are degraded/errored, or
