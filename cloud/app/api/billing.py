@@ -590,11 +590,10 @@ def billing_estimate_preview(body: EstimatePreview,
 def get_subscription_items(principal: security.Principal = Depends(security.get_principal),
                            tenant: Tenant = Depends(security.get_tenant),
                            db: Session = Depends(get_db)):
-    """The tenant's persisted subscription + its priced items (materialized on first
-    read), so the customer has a durable line-item record, not just a live estimate."""
+    """The tenant's persisted subscription + its priced items, re-materialized from
+    the current calc on read so it never shows a stale snapshot."""
     from .. import subscriptions
-    if subscriptions.get_subscription(db, tenant.id) is None:
-        subscriptions.sync_from_calc(db, tenant)
+    subscriptions.sync_from_calc(db, tenant)
     return subscriptions.view(db, tenant)
 
 

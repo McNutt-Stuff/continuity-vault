@@ -509,13 +509,14 @@ def tenant_billing_estimate(tid: str, db: Session = Depends(get_db)):
 
 @router.get("/tenants/{tid}/subscription")
 def get_tenant_subscription(tid: str, db: Session = Depends(get_db)):
-    """The tenant's persisted subscription + priced items (materialized on first read)."""
+    """The tenant's persisted subscription + priced items, re-materialized from the
+    current calc on read so it never shows a stale snapshot (e.g. a missing base line
+    after the plan's base price changed)."""
     from .. import subscriptions
     t = db.get(Tenant, tid)
     if not t:
         raise HTTPException(404, "tenant not found")
-    if subscriptions.get_subscription(db, t.id) is None:
-        subscriptions.sync_from_calc(db, t)
+    subscriptions.sync_from_calc(db, t)
     return subscriptions.view(db, t)
 
 
