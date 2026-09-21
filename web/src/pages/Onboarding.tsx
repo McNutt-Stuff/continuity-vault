@@ -37,6 +37,15 @@ interface Estimate {
   recurring_cents: number; one_time_cents: number; recurring_display: string;
   lines: EstimateLine[];
 }
+interface AddOnView {
+  code: string; name: string; description: string; price_cents: number;
+  pricing_model: string; billing_interval: string;
+}
+interface AddonsResp {
+  plan: string;
+  active: { code: string; quantity: number; name: string; price_cents: number }[];
+  available: AddOnView[];
+}
 
 const iconName = (n: string) => (["cloud", "server", "key", "shield", "check", "database", "file"].includes(n) ? n : "database") as never;
 function money(n: number): string {
@@ -45,11 +54,24 @@ function money(n: number): string {
 function money2(n: number): string {
   return "$" + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+function addonPrice(a: AddOnView): string {
+  const p = money2((a.price_cents || 0) / 100);
+  switch (a.pricing_model) {
+    case "per_user": return `${p} / user · mo`;
+    case "per_member": return `${p} / member · mo`;
+    case "per_cloud_tb":
+    case "per_tb": return `${p} / TB · mo`;
+    case "per_appliance": return `${p} / appliance · mo`;
+    case "metered": return `${p} / unit`;
+    default: return `${p} / mo`;
+  }
+}
 
 export default function Onboarding() {
   const [pricing, setPricing] = useState<Pricing | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
-  const [estimate, setEstimate] = useState<Estimate | null>(null);
+  const [bill, setBill] = useState<Estimate | null>(null);
+  const [addons, setAddons] = useState<AddonsResp | null>(null);
   const [org, setOrg] = useState<{ name?: string; plan?: string; can_admin?: boolean } | null>(null);
   const [options, setOptions] = useState<Set<string>>(new Set());
   const [licensedTb, setLicensedTb] = useState(1);
@@ -72,8 +94,30 @@ export default function Onboarding() {
       for (const a of p.appliance_plan || []) q[a.capacity_tb] = a.qty;
       setQty(q);
     }).catch(() => {});
-    api.get<Estimate>("/billing/estimate").then(setEstimate).catch(() => {});
+    api.get<AddonsResp>("/billing/addons").then(setAddons).catch(() => {});
   }, []);
+
+  // Server-authoritative itemized bill (includes active add-ons) — recomputed for the
+  // pending licensed amount so the summary always matches what we'll charge.
+  async function recomputeBill(tb: number) {
+    try {
+      const r = await api.post<{ proposed: Estimate }>("/billing/estimate/preview", { licensed_tb: tb });
+      setBill(r.proposed);
+    } catch { /* ignore */ }
+  }
+  async function reloadAddons() {
+    try { setAddons(await api.get<AddonsResp>("/billing/addons")); } catch { /* ignore */ }
+  }
+  async function toggleAddon(code: string, on: boolean) {
+    setSaved(false);
+    try {
+      if (on) await api.post("/billing/addons", { code });
+      else await api.del(`/billing/addons/${code}`);
+      await reloadAddons();
+      await recomputeBill(licensedTb);
+    } catch { /* best-effort; the bill reflects reality on next load */ }
+  }
+  useEffect(() => { if (plan) void recomputeBill(licensedTb); }, [licensedTb, plan]);
 
   // Arriving from "Order a new appliance": enable the appliance destination and
   // pre-add one unit (incremental order) so the user just picks capacity + Save.
@@ -161,7 +205,8 @@ export default function Onboarding() {
         options: [...options], licensed_tb: licensedTb, appliance_plan,
       });
       setPlan(updated); setSaved(true);
-      api.get<Estimate>("/billing/estimate").then(setEstimate).catch(() => {});
+      void reloadAddons();
+      void recomputeBill(licensedTb);
     } catch { /* surfaced via disabled state */ }
     setSaving(false);
   }
@@ -169,6 +214,8 @@ export default function Onboarding() {
   if (!pricing || !plan || !costs) return <Card><div className="muted">Loading plan…</div></Card>;
 
   const overLicensed = usedTb > licensedTb;
+  const activeAddonCodes = new Set((addons?.active || []).map((a) => a.code));
+  const optionalAddons = (addons?.available || []).filter((a) => a.code !== "arkive_cloud");
 
   return (
     <>
@@ -309,72 +356,87 @@ export default function Onboarding() {
               </div>
             )}
           </Card>
+
+          {optionalAddons.length > 0 && (
+            <Card>
+              <div className="spread" style={{ marginBottom: 4 }}>
+                <h3 style={{ margin: 0 }}>Add-ons</h3>
+                <span className="faint" style={{ fontSize: 12 }}>Optional capabilities</span>
+              </div>
+              <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
+                Enhance your protection — each is billed on top of your plan and shows in your bill on the right.
+              </div>
+              <div className="stack" style={{ gap: 10 }}>
+                {optionalAddons.map((a) => {
+                  const on = activeAddonCodes.has(a.code);
+                  return (
+                    <div key={a.code} onClick={() => void toggleAddon(a.code, !on)}
+                         style={{ cursor: "pointer", border: `1.5px solid ${on ? "#4f7cff" : "var(--border-soft)"}`,
+                                  borderRadius: 12, padding: 14, background: on ? "#4f7cff12" : "transparent", transition: "all .12s" }}>
+                      <div className="spread" style={{ alignItems: "flex-start" }}>
+                        <div style={{ fontWeight: 700, fontSize: 14 }}>{a.name}</div>
+                        <div style={{ width: 20, height: 20, borderRadius: 6, border: `1.5px solid ${on ? "#4f7cff" : "var(--border-soft)"}`,
+                                      background: on ? "#4f7cff" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          {on && <Icon name="check" size={13} />}
+                        </div>
+                      </div>
+                      {a.description && <div className="faint" style={{ fontSize: 12.5, marginTop: 2 }}>{a.description}</div>}
+                      <div style={{ marginTop: 8, fontSize: 12.5, fontWeight: 600, color: "#4f7cff" }}>{addonPrice(a)}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          )}
         </div>
 
         {/* -------- Right: cost + value summary -------- */}
         <div className="stack" style={{ gap: 16, position: "sticky", top: 16 }}>
           <Card>
-            <h3 style={{ margin: "0 0 12px" }}>Your monthly cost</h3>
-            <CostRow label="Data protection" detail={`${costs.billableTb.toFixed(costs.billableTb < 10 ? 1 : 0)} TB × ${money2(rate)}${plan.license_plan ? ` · ${plan.license_plan.name}` : ""}`} value={money2(costs.protection)} />
-            {options.has("cv-cloud") && (
-              <CostRow label="Arkive Cloud storage" detail={`${usedTb.toFixed(2)} TB × ${money2(pricing.cloud_price_per_tb_month)}`} value={money2(costs.cloud)} />
-            )}
-            {options.has("customer-cloud") && (
-              <CostRow label="Your cloud (est.)" detail="billed by your provider" value={money2(costs.thirdParty)} muted />
-            )}
-            {costs.applianceMonthly > 0 && (
-              <CostRow label="Appliance lease" detail="leased hardware" value={money2(costs.applianceMonthly)} />
-            )}
-            <div className="spread" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
-              <div style={{ fontWeight: 700 }}>Total</div>
-              <div style={{ fontSize: 24, fontWeight: 800 }}>{money2(costs.totalMonthly)}<span className="faint" style={{ fontSize: 13, fontWeight: 500 }}> /mo</span></div>
+            <div className="spread" style={{ marginBottom: 4 }}>
+              <h3 style={{ margin: 0 }}>Your monthly cost</h3>
+              {bill && <span className="faint" style={{ fontSize: 11 }}>plan v{bill.price_version}</span>}
             </div>
-            {costs.applianceSetup > 0 && (
-              <div className="spread faint" style={{ fontSize: 12, marginTop: 6 }}>
-                <span>+ Setup (one-time)</span><span style={{ fontWeight: 600 }}>{money(costs.applianceSetup)}</span>
-              </div>
+            <div className="muted" style={{ fontSize: 11.5, marginBottom: 12 }}>
+              Itemized and priced by us — the source of truth for your invoice. Includes your plan, usage and add-ons.
+            </div>
+            {!bill && <div className="muted" style={{ fontSize: 12.5 }}>Calculating…</div>}
+            {bill && (
+              <>
+                <div className="stack" style={{ gap: 8 }}>
+                  {bill.lines.filter((l) => l.kind !== "one_time").map((l) => (
+                    <div key={l.key} className="spread" style={{ fontSize: 12.5, alignItems: "baseline" }}>
+                      <span>
+                        {l.label}
+                        {l.licensed_qty > 0 && (
+                          <span className="faint" style={{ fontSize: 11 }}>
+                            {" "}· {l.included_qty > 0 ? `${l.included_qty} incl, ` : ""}{l.quantity} billable
+                          </span>
+                        )}
+                      </span>
+                      <span style={{ fontWeight: 600 }}>{money2(l.amount_cents / 100)}</span>
+                    </div>
+                  ))}
+                  {bill.lines.filter((l) => l.kind !== "one_time").length === 0 && (
+                    <div className="faint" style={{ fontSize: 12 }}>No recurring charges yet.</div>
+                  )}
+                </div>
+                <div className="spread" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
+                  <div style={{ fontWeight: 700 }}>Total</div>
+                  <div style={{ fontSize: 24, fontWeight: 800 }}>{bill.recurring_display}<span className="faint" style={{ fontSize: 13, fontWeight: 500 }}> /mo</span></div>
+                </div>
+                {bill.one_time_cents > 0 && (
+                  <div className="spread faint" style={{ fontSize: 12, marginTop: 6 }}>
+                    <span>+ Setup (one-time)</span><span style={{ fontWeight: 600 }}>{money2(bill.one_time_cents / 100)}</span>
+                  </div>
+                )}
+              </>
             )}
             <button className="btn primary" style={{ width: "100%", marginTop: 14 }} onClick={save} disabled={saving || options.size === 0}>
               {saving ? "Saving…" : saved ? "Saved ✓" : "Save protection plan"}
             </button>
             {options.size === 0 && <div className="faint" style={{ fontSize: 11.5, marginTop: 6, textAlign: "center" }}>Select at least one storage option</div>}
           </Card>
-
-          {estimate && estimate.lines.length > 0 && (
-            <Card>
-              <div className="spread" style={{ marginBottom: 4 }}>
-                <h3 style={{ margin: 0 }}>Your bill, itemized</h3>
-                <span className="faint" style={{ fontSize: 11 }}>plan v{estimate.price_version}</span>
-              </div>
-              <div className="muted" style={{ fontSize: 11.5, marginBottom: 12 }}>
-                What you're billed today, priced by us — the source of truth for your invoice.
-              </div>
-              <div className="stack" style={{ gap: 8 }}>
-                {estimate.lines.filter((l) => l.kind !== "one_time").map((l) => (
-                  <div key={l.key} className="spread" style={{ fontSize: 12.5, alignItems: "baseline" }}>
-                    <span>
-                      {l.label}
-                      {l.licensed_qty > 0 && (
-                        <span className="faint" style={{ fontSize: 11 }}>
-                          {" "}· {l.included_qty > 0 ? `${l.included_qty} incl, ` : ""}{l.quantity} billable
-                        </span>
-                      )}
-                    </span>
-                    <span style={{ fontWeight: 600 }}>{money2(l.amount_cents / 100)}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="spread" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
-                <div style={{ fontWeight: 700 }}>Recurring total</div>
-                <div style={{ fontSize: 18, fontWeight: 800 }}>{estimate.recurring_display}<span className="faint" style={{ fontSize: 12, fontWeight: 500 }}> /mo</span></div>
-              </div>
-              {estimate.one_time_cents > 0 && (
-                <div className="spread faint" style={{ fontSize: 12, marginTop: 6 }}>
-                  <span>One-time charges</span><span style={{ fontWeight: 600 }}>{money2(estimate.one_time_cents / 100)}</span>
-                </div>
-              )}
-            </Card>
-          )}
 
           <Card>
             <div className="spread" style={{ marginBottom: 10 }}>

@@ -473,6 +473,73 @@ def get_addons(principal: security.Principal = Depends(security.get_principal),
     return {"plan": tenant.plan, "active": active, "available": eligible}
 
 
+class AddOnSelect(BaseModel):
+    code: str
+    quantity: int = 1
+
+
+@router.post("/addons")
+def add_customer_addon(body: AddOnSelect,
+                       principal: security.Principal = Depends(security.get_principal),
+                       tenant: Tenant = Depends(security.get_tenant),
+                       db: Session = Depends(get_db)):
+    """Self-service: add (or set the quantity of) a customer-visible, self-service
+    add-on for the caller's tenant. Pins the current price + version. Flows straight
+    into entitlements + the billing calc."""
+    from ..entitlements.models import AddOn, TenantAddOn
+    a = db.get(AddOn, (body.code or "").strip().lower())
+    if a is None or a.status not in ("active", "grandfathered") or not a.customer_visible:
+        raise HTTPException(404, "add-on not found")
+    if not a.self_service:
+        raise HTTPException(403, "this add-on is enabled by an administrator")
+    elig = a.eligible_plans or []
+    if elig and (tenant.plan or "").lower() not in [str(p).lower() for p in elig]:
+        raise HTTPException(400, "this add-on isn't available on your plan")
+    qty = max(int(a.min_qty or 1), int(body.quantity or 1))
+    if a.max_qty is not None and qty > a.max_qty:
+        raise HTTPException(400, f"maximum quantity is {a.max_qty}")
+    existing = (db.query(TenantAddOn)
+                .filter(TenantAddOn.tenant_id == tenant.id, TenantAddOn.addon_code == a.code,
+                        TenantAddOn.status == "active").first())
+    if existing:
+        existing.quantity = qty
+        existing.price_cents_snapshot = a.price_cents
+        existing.addon_version = a.version
+    else:
+        db.add(TenantAddOn(tenant_id=tenant.id, addon_code=a.code, quantity=qty, status="active",
+                           price_cents_snapshot=a.price_cents, addon_version=a.version,
+                           created_by=principal.user_id))
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="billing.addon_added",
+                 tenant_id=tenant.id, category="billing", severity="notice",
+                 detail={"code": a.code, "quantity": qty})
+    return get_addons(principal, tenant, db)
+
+
+@router.delete("/addons/{code}")
+def remove_customer_addon(code: str,
+                          principal: security.Principal = Depends(security.get_principal),
+                          tenant: Tenant = Depends(security.get_tenant),
+                          db: Session = Depends(get_db)):
+    """Self-service: cancel an add-on for the caller's tenant."""
+    from ..entitlements.models import TenantAddOn
+    from datetime import datetime, timezone
+    n = 0
+    for ta in (db.query(TenantAddOn)
+               .filter(TenantAddOn.tenant_id == tenant.id,
+                       TenantAddOn.addon_code == code.strip().lower(),
+                       TenantAddOn.status == "active").all()):
+        ta.status = "canceled"
+        ta.ends_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        n += 1
+    db.commit()
+    if n:
+        audit.record(db, actor=principal.user_id, action="billing.addon_removed",
+                     tenant_id=tenant.id, category="billing", severity="notice",
+                     detail={"code": code})
+    return get_addons(principal, tenant, db)
+
+
 @router.get("/estimate")
 def billing_estimate(principal: security.Principal = Depends(security.get_principal),
                      tenant: Tenant = Depends(security.get_tenant),
