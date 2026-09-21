@@ -109,6 +109,15 @@ def _plan_addon_grant(tenant, name: str, db=None):
                 granted = bool(plan_grants[ent_key])
         except Exception:  # noqa: BLE001
             pass
+        # The catalog plan version (admin-edited) overrides the code-registry default.
+        if db is not None:
+            try:
+                from . import catalog
+                v = catalog.effective_version(db, (getattr(tenant, "plan", "") or "").lower())
+                if v is not None and v.entitlements and ent_key in v.entitlements:
+                    granted = bool(v.entitlements[ent_key])
+            except Exception:  # noqa: BLE001
+                pass
     # Add-ons can ENABLE a flag (via their entitlements map or a direct feature_flags
     # entry). Needs a db session; when absent, only the plan layer applies.
     if db is not None and tenant is not None:

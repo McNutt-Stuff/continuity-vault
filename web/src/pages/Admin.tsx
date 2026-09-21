@@ -6671,14 +6671,12 @@ function CatalogAdmin() {
   const [plans, setPlans] = useState<CatalogPlan[] | null>(null);
   const [edit, setEdit] = useState<{ code: string; family: string; v: PlanVer } | null>(null);
   const [planEdit, setPlanEdit] = useState<Partial<CatalogPlan> | null>(null);
-  const [flagOpts, setFlagOpts] = useState<{ value: string; label: string }[]>([]);
   const [ents, setEnts] = useState<EntDef[]>([]);
   const [addonOpts, setAddonOpts] = useState<{ value: string; label: string }[]>([]);
   const [toast, setToast] = useState("");
   const flash = (m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); };
   async function load() {
     try { const r = await api.get<{ plans: CatalogPlan[] }>("/admin/catalog"); setPlans(r.plans || []); } catch { setPlans([]); }
-    try { const c = await flagCatalog(); setFlagOpts(c.map((f) => ({ value: f.name, label: f.label }))); } catch { /* ignore */ }
     try { setEnts(await entRegistry()); } catch { /* ignore */ }
     try { const a = await api.get<{ addons: Addon[] }>("/admin/addons"); setAddonOpts((a.addons || []).map((x) => ({ value: x.code, label: x.name || x.code }))); } catch { /* ignore */ }
   }
@@ -6788,13 +6786,13 @@ function CatalogAdmin() {
             <label className="stack" style={{ gap: 3 }}><span className="faint" style={{ fontSize: 11.5 }}>Min TB</span>
               <input className="input sm" type="number" value={num(edit.v, "min_tb").toString()} onChange={(e) => setEdit({ ...edit, v: { ...edit.v, min_tb: Math.round(parseFloat(e.target.value || "0")) } })} /></label>
           </div>
-          <div className="grid grid-3" style={{ gap: 12, marginTop: 12 }}>
-            <MultiSelect label="Feature flags enabled" options={flagOpts} value={edit.v.features || []} onChange={(features) => setEdit({ ...edit, v: { ...edit.v, features } })} placeholder="No flags included" />
-            <MultiSelect label="Compatible add-ons" options={addonOpts} value={edit.v.compatible_addons || []} onChange={(compatible_addons) => setEdit({ ...edit, v: { ...edit.v, compatible_addons } })} placeholder="All add-ons" />
+          <div className="grid grid-2" style={{ gap: 12, marginTop: 12 }}>
             <div className="stack" style={{ gap: 3 }}>
               <span className="faint" style={{ fontSize: 11.5 }}>Entitlements granted</span>
               <EntitlementPicker registry={ents} value={edit.v.entitlements || {}} onChange={(entitlements) => setEdit({ ...edit, v: { ...edit.v, entitlements } })} />
+              <span className="faint" style={{ fontSize: 11 }}>Flag-backed entitlements (Compliance, Microsoft 365, Rules, Insights, …) enable their feature flag automatically — there's no separate "feature flags" list on a plan.</span>
             </div>
+            <MultiSelect label="Compatible add-ons" options={addonOpts} value={edit.v.compatible_addons || []} onChange={(compatible_addons) => setEdit({ ...edit, v: { ...edit.v, compatible_addons } })} placeholder="All add-ons" />
           </div>
           <div className="row" style={{ gap: 8, marginTop: 14 }}>
             <button className="btn primary sm" onClick={publish}><Icon name="check" size={13} /> Publish version</button>

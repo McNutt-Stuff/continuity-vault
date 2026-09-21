@@ -101,6 +101,17 @@ def derive(db: Session, tenant, user=None) -> dict[str, Entitlement]:
         grants["protected_data_tb"] = max(int(grants.get("protected_data_tb", 0) or 0),
                                           max(1, round(lb / _TB)))
 
+    # The catalog plan version (admin-edited via the plan editor) is authoritative
+    # over the code-registry defaults for the entitlements it specifies.
+    try:
+        from .. import catalog
+        v = catalog.effective_version(db, plan)
+        if v is not None and v.entitlements:
+            for k, val in v.entitlements.items():
+                grants[k] = val
+    except Exception:  # noqa: BLE001 — catalog optional; registry defaults apply
+        pass
+
     # Add-ons the tenant has purchased add to the plan grants (quantity entitlements
     # increment; boolean entitlements enable). Applied BEFORE overrides.
     try:
