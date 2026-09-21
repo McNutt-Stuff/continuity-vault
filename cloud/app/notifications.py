@@ -52,6 +52,9 @@ NOTIFICATION_TYPES = [
     {"key": "weekly_org", "label": "Weekly organization summary", "icon": "activity",
      "default": True, "scope": "org",
      "desc": "A weekly roll-up of your organization's protection, by member and source."},
+    {"key": "recovery_key_missing", "label": "Recovery key reminders", "icon": "key",
+     "default": True, "scope": "user",
+     "desc": "A reminder to create your Vault Recovery Key — your last-resort access if you ever lose all your passkeys."},
 ]
 _TYPE_DEFAULT = {t["key"]: t["default"] for t in NOTIFICATION_TYPES}
 _TYPE_KEYS = {t["key"] for t in NOTIFICATION_TYPES}
@@ -883,6 +886,36 @@ def build_plan_change(db, user: User, change: dict) -> dict:
     }
 
 
+def build_recovery_key_missing(db, user: User) -> dict | None:
+    """Nudge a user who has recoverable (non-zero-knowledge) vaults but hasn't yet
+    created a Vault Recovery Key — their last-resort access if all their passkeys are
+    lost. Returns None once they've created one (or have no eligible vault)."""
+    from . import recovery_key as _rk
+    tenant = db.get(Tenant, user.tenant_id)
+    if tenant is None or _rk.get_record(db, user.id) is not None:
+        return None
+    if not _rk.eligible_vaults(db, user, tenant):
+        return None  # nothing a recovery key would cover
+    parts = [
+        '<p style="margin:0 0 12px;">Your vault is unlocked by your <b>passkeys</b>. If you '
+        'ever lose them all, a <b>Vault Recovery Key</b> is your last-resort way back in — '
+        'without it, data in a customer-managed vault can\'t be recovered.</p>',
+        '<p style="margin:0 0 12px;">You haven\'t created one yet. It only takes a minute: '
+        'Arkive generates a one-time key, you store it somewhere safe, and it can restore your '
+        'vault access if your passkeys are gone.</p>',
+    ]
+    return {
+        "subject": "Set up your Vault Recovery Key",
+        "title": "Protect your access — create a Vault Recovery Key",
+        "body_html": "".join(parts),
+        "text": ("You haven't created a Vault Recovery Key yet — it's your last-resort access if "
+                 "you lose all your passkeys. Set it up in Settings → Security: "
+                 f"{_portal_url()}/settings"),
+        "cta": {"label": "Create your recovery key", "url": f"{_portal_url()}/settings"},
+        "preheader": "Your last-resort access if you lose your passkeys",
+    }
+
+
 def _source_name(source_type: str) -> str:
     # Managed Microsoft 365 workloads have no standalone connector — name them the
     # same as the portal (dashboard._source_meta) so email + UI always match.
@@ -982,6 +1015,8 @@ def _build(db, user: User, key: str, ctx: dict) -> dict | None:
     if key == "weekly_org":
         tenant = db.get(Tenant, user.tenant_id)
         return build_weekly_org(db, tenant) if tenant else None
+    if key == "recovery_key_missing":
+        return build_recovery_key_missing(db, user)
     return None
 
 
