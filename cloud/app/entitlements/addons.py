@@ -21,6 +21,13 @@ def _now() -> datetime:
 
 
 # Seeded on first read (like PricingConfig). Real, wired defaults — not demo data.
+#
+# Add-ons are ONLY for capabilities a plan does NOT already include (e.g. a lower
+# plan buying M365 / Cloud Plus / Compliance that the Business plan includes), or a
+# genuine metered extra. Buying MORE seats / members / TB is plan OVERAGE, priced by
+# the plan version's per_user/per_member/per_tb rate over the included allowance —
+# never a duplicate "extra seats" add-on. (The legacy extra_users / extra_members
+# add-ons were exactly that duplication and are retired below.)
 _DEFAULT_ADDONS: list[dict] = [
     {"code": "m365_managed_integration", "name": "Microsoft 365 Managed Integration",
      "description": "Admin-governed Microsoft 365 discovery + collection, billed per protected user.",
@@ -38,20 +45,16 @@ _DEFAULT_ADDONS: list[dict] = [
      "pricing_model": "flat", "price_cents": 9900, "billing_interval": "month",
      "eligible_plans": ["business", "enterprise"],
      "entitlements": {"compliance": True}, "feature_flags": ["compliance_enabled"]},
-    {"code": "extra_users", "name": "Additional protected users",
-     "description": "Add licensed protected users beyond the plan's included allowance.",
-     "pricing_model": "per_user", "price_cents": 2500, "billing_interval": "month",
-     "eligible_plans": ["business", "enterprise"],
-     "entitlements": {"protected_users": 1}, "min_qty": 1},
-    {"code": "extra_members", "name": "Additional family members",
-     "description": "Add family members beyond the included five.",
-     "pricing_model": "per_member", "price_cents": 300, "billing_interval": "month",
-     "eligible_plans": ["family"], "entitlements": {"family_members": 1}, "min_qty": 1},
 ]
+
+# Legacy seeded add-ons that duplicated plan overage — retired (not deleted, so any
+# historical assignment stays reproducible) when no tenant is actively using them.
+_RETIRED_DEFAULTS = ["extra_users", "extra_members"]
 
 
 def ensure_defaults(db: Session) -> None:
-    """Seed the default add-on catalog once (idempotent)."""
+    """Seed the default add-on catalog once (idempotent) and retire the deprecated
+    overage-duplicating defaults when they're unused."""
     have = {c for (c,) in db.query(AddOn.code).all()}
     changed = False
     for spec in _DEFAULT_ADDONS:
@@ -60,6 +63,16 @@ def ensure_defaults(db: Session) -> None:
         db.add(AddOn(status="active", version=1, currency="USD",
                      self_service=True, customer_visible=True, **spec))
         changed = True
+    # Retire the deprecated duplicates if present and not actively assigned.
+    for code in _RETIRED_DEFAULTS:
+        a = db.get(AddOn, code)
+        if a is None or a.status == "retired":
+            continue
+        in_use = (db.query(TenantAddOn)
+                  .filter(TenantAddOn.addon_code == code, TenantAddOn.status == "active").first())
+        if in_use is None:
+            a.status = "retired"
+            changed = True
     if changed:
         db.commit()
 

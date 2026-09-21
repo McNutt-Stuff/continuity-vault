@@ -255,6 +255,18 @@ def list_addons(include_retired: bool = False, db: Session = Depends(get_db)):
     return {"addons": [addons.public_view(a) for a in addons.catalog(db, include_retired)]}
 
 
+@router.get("/entitlements/registry")
+def entitlement_registry():
+    """The entitlement definitions (typed) — powers the admin entitlement picker so
+    plan/add-on grants are chosen from the registry, never hand-typed."""
+    from ..entitlements import registry as ent_registry
+    return {"entitlements": [
+        {"key": k, "title": d.get("title", k), "type": d.get("type", "bool"),
+         "unit": d.get("unit", ""), "scope": d.get("scope", "org"),
+         "feature": d.get("feature", ""), "description": d.get("description", "")}
+        for k, d in ent_registry.ENTITLEMENTS.items()]}
+
+
 class AddOnBody(BaseModel):
     code: str
     name: str | None = None
