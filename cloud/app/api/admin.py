@@ -532,6 +532,85 @@ def sync_tenant_subscription(tid: str,
     return subscriptions.view(db, t)
 
 
+# --- Billing source (legacy _price_breakdown vs new billing_calc) — cohort cutover -
+
+def _sysset(db: Session, key: str) -> str:
+    from ..models import SystemSetting
+    row = db.get(SystemSetting, key)
+    return (row.value or "") if row else ""
+
+
+def _set_sysset(db: Session, key: str, value: str | None) -> None:
+    from ..models import SystemSetting
+    row = db.get(SystemSetting, key)
+    if value is None:
+        if row is not None:
+            db.delete(row)
+    elif row is None:
+        db.add(SystemSetting(key=key, value=value))
+    else:
+        row.value = value
+    db.commit()
+
+
+@router.get("/billing/source")
+def get_billing_source(db: Session = Depends(get_db)):
+    """The platform-default billing source ('legacy' | 'calc')."""
+    val = (_sysset(db, "billing_source") or "legacy").lower()
+    return {"source": val if val in ("calc", "legacy") else "legacy"}
+
+
+class BillingSourceBody(BaseModel):
+    source: str  # 'legacy' | 'calc' | 'inherit' (per-tenant only)
+
+
+@router.put("/billing/source")
+def set_billing_source(body: BillingSourceBody,
+                       principal: security.Principal = Depends(security.require_platform_admin),
+                       db: Session = Depends(get_db)):
+    """Set the platform-default billing source. 'calc' bills the deterministic
+    billing_calc total; 'legacy' keeps the PricingConfig monthly total."""
+    src = (body.source or "").lower()
+    if src not in ("calc", "legacy"):
+        raise HTTPException(400, "source must be 'calc' or 'legacy'")
+    _set_sysset(db, "billing_source", src)
+    audit.record(db, actor=principal.user_id, action="admin.billing_source_set",
+                 category="admin", severity="warning", detail={"scope": "global", "source": src})
+    return {"source": src}
+
+
+@router.get("/tenants/{tid}/billing-source")
+def get_tenant_billing_source(tid: str, db: Session = Depends(get_db)):
+    """A tenant's effective billing source + whether it's an explicit override."""
+    from ..api.billing import _billing_source
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    override = (_sysset(db, f"billing_source:{tid}") or "").lower()
+    return {"tenant_id": tid, "effective": _billing_source(db, t),
+            "override": override if override in ("calc", "legacy") else None,
+            "platform_default": (_sysset(db, "billing_source") or "legacy").lower()}
+
+
+@router.put("/tenants/{tid}/billing-source")
+def set_tenant_billing_source(tid: str, body: BillingSourceBody,
+                              principal: security.Principal = Depends(security.require_platform_admin),
+                              db: Session = Depends(get_db)):
+    """Override the billing source for one tenant (cohort rollout). 'inherit' clears
+    the override so the tenant follows the platform default."""
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    src = (body.source or "").lower()
+    if src not in ("calc", "legacy", "inherit"):
+        raise HTTPException(400, "source must be 'calc', 'legacy' or 'inherit'")
+    _set_sysset(db, f"billing_source:{tid}", None if src == "inherit" else src)
+    audit.record(db, actor=principal.user_id, action="admin.billing_source_set",
+                 tenant_id=tid, category="admin", severity="warning",
+                 detail={"scope": "tenant", "source": src})
+    return get_tenant_billing_source(tid, db)
+
+
 @router.get("/tenants/{tid}/usage")
 def get_tenant_usage(tid: str, db: Session = Depends(get_db)):
     """Current-period metered usage for a tenant (admin view)."""

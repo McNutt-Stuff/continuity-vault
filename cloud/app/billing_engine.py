@@ -117,6 +117,39 @@ def charge_profile(db: Session, prof: BillingProfile, *, kind: str = "recurring"
     return charge
 
 
+def refresh_active_amounts(db: Session) -> int:
+    """Re-sync each active profile's charged amount to the CURRENT computed monthly
+    total (a plan/usage/add-on change, or a billing_source cutover). Logs the drift.
+    Returns how many profiles changed. Run before the charge sweep so a due charge
+    always uses the up-to-date amount."""
+    from .api.billing import _plan_amount_cents
+    from .models import Tenant, User
+    changed = 0
+    for prof in db.query(BillingProfile).filter(BillingProfile.active.is_(True)).all():
+        t = db.get(Tenant, prof.tenant_id)
+        if t is None:
+            continue
+        owner = (db.query(User).filter(User.tenant_id == t.id)
+                 .order_by(User.created_at.asc()).first())
+        try:
+            amount, cur, plan_id, plan_name = _plan_amount_cents(db, owner, t)
+        except Exception:  # noqa: BLE001
+            logger.exception("billing amount refresh failed for tenant %s", t.id)
+            continue
+        if int(amount) != int(prof.amount_cents or 0):
+            logger.info("billing amount drift tenant=%s %s->%s", t.id, prof.amount_cents, amount)
+            prof.amount_cents = int(amount)
+            prof.currency = cur or prof.currency
+            if plan_id:
+                prof.plan_id = plan_id
+            if plan_name:
+                prof.plan_name = plan_name
+            changed += 1
+    if changed:
+        db.commit()
+    return changed
+
+
 def run_due_charges(db: Session, now: datetime | None = None) -> int:
     """Charge every active profile whose next_charge_at has arrived, then advance
     it to the next anniversary. Failures mark past_due and retry the next day."""

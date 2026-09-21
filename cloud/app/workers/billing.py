@@ -25,11 +25,12 @@ def start_billing_worker() -> None:
 
     def loop() -> None:
         time.sleep(45)  # let startup + migrations settle
-        from ..billing_engine import run_due_charges
+        from ..billing_engine import run_due_charges, refresh_active_amounts
         from ..db import WorkerSessionLocal as SessionLocal
         while True:
             try:
                 with SessionLocal() as db:
+                    refresh_active_amounts(db)   # keep the charged amount current
                     run_due_charges(db)
             except Exception:  # noqa: BLE001 — never let the worker die
                 logger.exception("billing sweep failed")

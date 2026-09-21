@@ -369,6 +369,14 @@ def prune_db(db: Session = Depends(get_db)):
             "note": "run VACUUM (ANALYZE) to reclaim the freed space on disk"}
 
 
+def _tenant_billing_source(db, t) -> str:
+    from ..api.billing import _billing_source
+    try:
+        return _billing_source(db, t)
+    except Exception:  # noqa: BLE001
+        return "legacy"
+
+
 @router.get("/billing", dependencies=[Depends(require_debug_key)])
 def billing_debug(tenant: str = "", limit: int = 100, db: Session = Depends(get_db)):
     """Billing / entitlement diagnostics — the migration + go-live troubleshooting
@@ -468,6 +476,7 @@ def billing_debug(tenant: str = "", limit: int = 100, db: Session = Depends(get_
                    "tenant_type": getattr(t, "tenant_type", ""),
                    "licensed_bytes": int(getattr(t, "licensed_bytes", 0) or 0),
                    "appliance_plan": getattr(t, "appliance_plan", None) or []},
+        "billing_source": _tenant_billing_source(db, t),
         "pricing_source": {"source": pricing.get("source"), "version": pricing.get("version"),
                            "currency": pricing.get("currency")},
         "parity": {"legacy_cents": legacy,

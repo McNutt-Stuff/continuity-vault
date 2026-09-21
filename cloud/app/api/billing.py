@@ -795,9 +795,31 @@ def delete_payment_method(pid: str,
 # on/off. The amount is the plan's computed monthly total.                      #
 # --------------------------------------------------------------------------- #
 
+def _billing_source(db: Session, tenant: Tenant | None) -> str:
+    """Which engine sets a tenant's charged amount: ``"calc"`` (new deterministic
+    billing_calc total) or ``"legacy"`` (the PricingConfig ``_price_breakdown``).
+    Default ``legacy``; a global ``billing_source`` SystemSetting is the platform
+    default and a per-tenant ``billing_source:<id>`` key overrides it (cohort rollout)."""
+    from ..models import SystemSetting
+    if tenant is not None:
+        row = db.get(SystemSetting, f"billing_source:{tenant.id}")
+        if row and (row.value or "").lower() in ("calc", "legacy"):
+            return row.value.lower()
+    row = db.get(SystemSetting, "billing_source")
+    val = (row.value or "").lower() if row else ""
+    return val if val in ("calc", "legacy") else "legacy"
+
+
 def _plan_amount_cents(db: Session, user: User, tenant: Tenant) -> tuple[int, str, str, str]:
-    """(amount_cents, currency, plan_id, plan_name) from the tenant's computed
-    monthly plan cost."""
+    """(amount_cents, currency, plan_id, plan_name) — the tenant's monthly charge.
+    Uses the deterministic billing_calc total when the tenant is on ``billing_source
+    = calc`` (we bill the single recurring total, not line items); otherwise the
+    legacy PricingConfig monthly total."""
+    if _billing_source(db, tenant) == "calc":
+        from .. import billing_calc
+        calc = billing_calc.calculate(db, tenant)
+        plan = (tenant.plan or "")
+        return int(calc.recurring_cents), (calc.currency or "USD"), plan, plan.title() or "Arkive"
     view = plan_view(db, user, tenant)
     total = float((view.get("costs") or {}).get("total_monthly") or 0.0)
     plan = view.get("license_plan") or {}
