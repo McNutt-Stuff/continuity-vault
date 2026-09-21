@@ -62,6 +62,19 @@ def _tb(bytes_: int) -> int:
     return max(0, round((bytes_ or 0) / _TB))
 
 
+def _cloud_stored_tb(db: Session, tenant) -> float:
+    """Fractional TB of data actually stored in Arkive Cloud (cv-cloud) — the
+    consumption basis for the Arkive Cloud line, so sub-TB usage still bills."""
+    from .models import Vault
+    from .api.billing import cloud_stored_summary
+    try:
+        vids = [vid for (vid,) in db.query(Vault.id).filter(Vault.tenant_id == tenant.id).all()]
+        _objs, cloud_bytes = cloud_stored_summary(db, tenant, vids)
+        return float(cloud_bytes or 0) / _TB
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 def calculate(db: Session, tenant, *, overrides: dict | None = None) -> Calc:
     """Compute the recurring + one-time charges for a tenant's current commercial
     state. ``overrides`` (plan / licensed_tb / addons[{code,quantity}]) lets a
@@ -144,28 +157,47 @@ def calculate(db: Session, tenant, *, overrides: dict | None = None) -> Calc:
             included_qty=incl_mem, licensed_qty=licensed_mem, source=src)
 
     # 5) Non-seat add-ons — priced from the catalog (per unit / per user / per TB / metered).
-    from . import metering
     protected_users_used = entitlements.get_usage(db, tenant, "protected_users")
-    cloud_tb_used = metering.current_or_live(
-        db, tenant.id, "cloud_stored_tb",
-        lambda: entitlements.get_usage(db, tenant, "protected_data_tb"))
+    # Arkive Cloud consumption is billed on the ACTUAL data stored in Arkive Cloud
+    # (fractional TB) — a 1 GB tenant must bill ~1 cent, not round to 0.
+    cloud_tb = _cloud_stored_tb(db, tenant)
+
+    # Arkive Cloud line — tied to the cv-cloud selection (or an active arkive_cloud
+    # add-on), priced at the arkive_cloud rate × fractional stored TB.
+    opts = set(getattr(tenant, "protection_options", None) or [])
+    cloud_addon = by_code.get("arkive_cloud")
+    cloud_active = ("cv-cloud" in opts) or any(ta.addon_code == "arkive_cloud" for ta in active)
+    if cloud_active:
+        rate = int((cloud_addon.price_cents if cloud_addon else 0)
+                   or int(pricing.get("cloud_cents_per_tb", 0) or 0))
+        if rate:
+            add(key="arkive_cloud", label="Arkive Cloud", quantity=max(0, round(cloud_tb)),
+                unit_price_cents=rate, amount_cents=int(round(rate * cloud_tb)), source="usage",
+                detail={"pricing_model": "per_cloud_tb", "tb": round(cloud_tb, 4)})
+
     covered_appliance_caps: set[int] = set()   # tiers billed via an appliance add-on
     for ta in active:
         a = by_code.get(ta.addon_code)
         if not a:
             continue
+        if a.code == "arkive_cloud":
+            continue  # Arkive Cloud is billed above (tied to the cv-cloud selection)
         ents = a.entitlements or {}
         if "protected_users" in ents or "family_members" in ents:
             continue  # seat grant — already priced by the plan
         unit = int(ta.price_cents_snapshot or a.price_cents or 0)
         qty = max(1, int(ta.quantity or 1))
         model = a.pricing_model
+        amount = unit * qty
         if model == "per_user":
             qty = protected_users_used or 1
+            amount = unit * qty
         elif model in ("per_cloud_tb", "per_tb", "metered"):
-            qty = cloud_tb_used  # usage-based (Phase 7 refines with real meters)
+            # Usage-based → fractional TB (e.g. Cloud Plus), so sub-TB still bills.
+            qty = max(0, round(cloud_tb))
+            amount = int(round(unit * cloud_tb))
         add(key=f"addon:{a.code}", label=a.name or a.code, quantity=qty,
-            unit_price_cents=unit, amount_cents=unit * qty,
+            unit_price_cents=unit, amount_cents=amount,
             source=f"addon:{a.code} v{ta.addon_version}", detail={"pricing_model": model})
         # One-time setup fee (per unit) — e.g. an appliance's activation charge.
         setup = int(getattr(a, "setup_cents", 0) or 0)
