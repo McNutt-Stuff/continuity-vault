@@ -460,17 +460,21 @@ def _ensure_perf_indexes() -> None:
 
 
 def _backfill_search_current() -> None:
-    """One-time: clear is_current on superseded search_documents rows so exactly one
-    current row remains per (tenant, source_type, object_id). New writes maintain the
-    flag going forward; this repairs legacy rows. Runs in the background (never at
-    startup) and only once, guarded by a persisted flag."""
+    """Clear is_current on superseded search_documents rows so exactly one current row
+    remains per (tenant, source_type, object_id). New writes maintain the flag going
+    forward; this repairs legacy/duplicated rows. Runs in the background (never at
+    startup), guarded by a persisted version flag so it re-runs once after a fix that
+    could have left duplicates (e.g. the Copilot re-versioning bug, which replicated
+    many is_current rows to the CP whose supersede flips never propagated)."""
     from ..db import worker_engine
     from ..models import SystemSetting
     if worker_engine.dialect.name != "postgresql":
         return
+    # Bump this when a fix leaves stale is_current rows that need one more collapse.
+    _BACKFILL_VERSION = "2"
     with SessionLocal() as db:
         flag = db.get(SystemSetting, "search_is_current_backfilled")
-        if flag and flag.value == "1":
+        if flag and flag.value == _BACKFILL_VERSION:
             return
         db.execute(text(
             "UPDATE search_documents s SET is_current = FALSE "
@@ -478,9 +482,9 @@ def _backfill_search_current() -> None:
             "WHERE n.tenant_id = s.tenant_id AND n.source_type = s.source_type "
             "AND n.object_id = s.object_id AND (n.created_at > s.created_at "
             "OR (n.created_at = s.created_at AND n.id > s.id)))"))
-        db.merge(SystemSetting(key="search_is_current_backfilled", value="1"))
+        db.merge(SystemSetting(key="search_is_current_backfilled", value=_BACKFILL_VERSION))
         db.commit()
-        logger.info("search is_current backfill complete")
+        logger.info("search is_current backfill complete (v%s)", _BACKFILL_VERSION)
 
 
 def _prune_db() -> None:
