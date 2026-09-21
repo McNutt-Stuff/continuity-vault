@@ -469,26 +469,67 @@ per‑framework **score**, and stores a **snapshot every assessment** so you can
 whether you're improving or regressing.
 
 ## Frameworks
-Enable the frameworks you're measured against. Today:
+Enable the frameworks you're measured against. Each has a **dedicated dashboard**
+(open it from its card): the score and its trend over time, all controls with their
+evidence, the **drivers** behind the score, the **open issues**, and the specific
+**troubling accounts or systems** (for example admins without a passkey, or a source
+that needs re‑consent). Every framework below maps its controls onto the same shared
+capabilities, so a single improvement (say, enrolling MFA or tightening retention)
+lifts your score across all of them at once.
 
-- **NIST CSF 2.0** — Identify / Protect / Detect / Respond / Recover / Govern
-  controls for data inventory, classification, at‑rest & in‑transit protection,
-  backups, least‑privilege access, event logging, recovery and retention.
-- **CIS Controls v8** — the Data Protection (3.x), Access Control (6.x), Audit Log
-  Management (8.x) and Data Recovery (11.x) controls.
-- **HIPAA Security Rule** — the backup, disaster recovery, encryption, access
-  control, audit, integrity and retention safeguards for ePHI.
-- **ISO/IEC 27001:2022** — the Annex A controls for information backup and
-  redundancy, cryptography, access control, logging, and retention/classification.
-- **SOC 2 (Trust Services)** — the Security, Availability and Confidentiality
-  criteria for protected data (access, backup & recovery, monitoring, disposal).
-- **GDPR** — the security‑of‑processing (Art. 32), records/inventory (Art. 30),
-  data‑minimization, retention and residency obligations Arkive helps evidence.
+### NIST CSF 2.0
+The NIST Cybersecurity Framework 2.0 organises outcomes into six functions —
+**Govern, Identify, Protect, Detect, Respond, Recover**. Arkive evidences the
+data‑centric outcomes: asset/data **inventory** and **classification** (Identify);
+**encryption** at rest & in transit, **least‑privilege** and gated cross‑member
+**access control**, and **data minimization** (Protect); tamper‑evident **audit
+logging** and monitoring (Detect); incident context from the audit chain (Respond);
+and **backups, recoverable recovery points and retention** (Recover). Govern is
+evidenced through your governance rules, retention schedules and audited overrides.
 
-Every framework has a **dedicated dashboard** (open it from its card): the score
-and its trend over time, all controls with their evidence, the **drivers** behind
-the score, the **open issues**, and the specific **troubling accounts or systems**
-(for example admins without a passkey, or a source that needs re‑consent).
+### CIS Controls v8
+The Center for Internet Security Critical Security Controls, v8. Arkive maps to the
+safeguards it can genuinely prove: **Control 3 – Data Protection** (encryption at
+rest/in transit, classification, retention and secure disposal), **Control 6 –
+Access Control Management** (least privilege, MFA/passkeys, access approvals),
+**Control 8 – Audit Log Management** (a tamper‑evident, retained audit trail) and
+**Control 11 – Data Recovery** (automated backups, tested recovery, offsite/immutable
+copies). Implementation‑Group progress is visible as your capabilities improve.
+
+### HIPAA Security Rule
+The administrative, physical and technical safeguards for **electronic protected
+health information (ePHI)**. Arkive evidences the Security Rule's data safeguards:
+the **Data Backup Plan** and **Disaster Recovery Plan** (§164.308(a)(7)),
+**encryption & decryption** and transmission security (§164.312(a)(2)(iv) / (e)),
+**access control** and unique user identification (§164.312(a)), **audit controls**
+(§164.312(b)) and **integrity** of ePHI (§164.312(c)). Record retention is tracked
+against §164.316(b)(2). Physical and workforce safeguards Arkive can't observe are
+flagged for **manual attestation** rather than scored.
+
+### ISO/IEC 27001:2022
+The Annex A controls Arkive can evidence from its own operation: **A.8.13
+Information backup** and redundancy of information‑processing facilities, **A.8.24
+Use of cryptography**, **A.5.15–A.5.18 access control** and privileged access,
+**A.8.15 Logging** and **A.8.16 Monitoring**, and **information classification and
+retention** (A.5.12, A.5.10). Together they give your Statement of Applicability a
+continuously‑updated technical evidence base instead of a point‑in‑time review.
+
+### SOC 2 (Trust Services Criteria)
+The AICPA Trust Services Criteria most relevant to protected data — **Security
+(Common Criteria)**, **Availability** and **Confidentiality**. Arkive evidences
+logical **access controls** (CC6), **change / audit logging and monitoring** (CC7),
+backup and **availability & recovery** (A1), and **confidentiality** through
+encryption and controlled **disposal** (C1). The evidence trail and posture history
+are exactly what a SOC 2 examination expects to see maintained across the period.
+
+### GDPR
+The EU General Data Protection Regulation's technical obligations Arkive helps meet:
+**security of processing** (Art. 32 — encryption, resilience, restore‑ability and
+regular testing), **records of processing / inventory** (Art. 30), **data
+minimization** (Art. 5(1)(c), via governance rules), **storage limitation /
+retention** (Art. 5(1)(e)) and **data residency** (region‑pinned storage). It
+evidences your security‑and‑accountability posture — it is not a substitute for your
+broader lawful‑basis and data‑subject‑rights programme.
 
 More frameworks (PCI DSS, CMMC…) are on the roadmap; the engine is designed so a
 new framework is a registry entry, not a rebuild.
@@ -1347,6 +1388,8 @@ _SOURCE_PAGES = [
          "(SharePoint sites, Teams channels) lands in the **organization** vault."],
         # Good to know.
         ["Business / Enterprise plans only — enforced server-side.",
+         "Billed as an add-on, **per protected user** — you pay only for the mapped identities you "
+         "actively protect, and protected users draw from your licensed seats.",
          "Uses Microsoft admin-consent OAuth (**app-only**) — no per-employee sign-in and no stored "
          "password.",
          "Read-only — Arkive never sends, deletes or changes Microsoft data.",
@@ -1403,6 +1446,19 @@ _SOURCE_PAGES = [
             "Finally, add the app's **Web** redirect URI (`https://<your-control-plane>/api/"
             "integrations/microsoft365/oauth/redirect`) and a client secret. Consent uses `.default`, "
             "so it grants exactly the Application permissions configured on the app.\n"
+            "\n## Billing & seats\n"
+            "The Microsoft 365 Managed Integration is an **add-on**, billed **per protected user** "
+            "per month — you're charged for the mapped identities you actually turn protection on for, "
+            "not your whole directory. Discovering or mapping a user is free; a user only counts once "
+            "**Protect mapped users** covers them. Add or remove the add-on any time from "
+            "**Settings → Billing** (or at signup on a Business plan); the change flows straight into "
+            "your subscription and next invoice through the entitlement model.\n"
+            "\n"
+            "Protected Microsoft 365 users draw from your organization's **licensed seats**. If "
+            "enabling protection would take you past your seat count, the extra identities are held "
+            "**pending** (discovered and mapped, but not yet collecting) and Arkive tells you how many "
+            "seats to add — raise your seat count in **Settings → Billing** and they start protecting "
+            "automatically. Nothing is silently dropped.\n"
             "\n## Compliance\n"
             "Under **Integrations → Microsoft 365 → Compliance**, enable a framework pack (NIST CSF, "
             "CIS, ISO 27001, SOC 2, HIPAA, GDPR, PCI, CMMC or BMS). Arkive seeds the pack's controls "
