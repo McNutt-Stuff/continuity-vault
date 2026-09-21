@@ -55,8 +55,15 @@ plan names are never hard-coded at call-sites.
    catalog API (`GET /admin/catalog`, `POST …/plans`, `POST …/plans/{code}/versions`,
    `GET …/plans/{code}/pricing`) + **Plan Catalog** admin section. Catalog + entitlement/
    add-on tables replicate CP→node (`_PULL_ORDER`).
-4. **Subscription items** — `Subscription` + `SubscriptionItem` (base/seats/capacity/
-   add-ons/appliance/usage), each price-version-referenced; adapter over `BillingProfile`.
+4. **Subscription items** — **DONE (Phase 4, this change).** `subscriptions.py`:
+   `Subscription` (one active row/tenant: plan+version+status+recurring/one-time
+   totals) + `SubscriptionItem` (one priced component per calc `Line`, pinning
+   unit price + `price_version`). `sync_from_calc` materializes/refreshes the
+   record from the Phase 5 calc (idempotent); `view`/`cancel`. APIs: customer
+   `GET /billing/subscription`; admin `GET /admin/tenants/{id}/subscription` +
+   `POST …/subscription/sync`. CP-authoritative → replicates CP→node
+   (`_PULL_ORDER`). Adapter over `BillingProfile` (reserved `provider_*` cols);
+   doesn't move money.
 5. **Billing calc service** — **DONE (Phase 5, this change).** `billing_calc.py`:
    deterministic, minor-unit `calculate(db, tenant, overrides=)` → itemized `Line`s
    (base, protected data, protected users, family members, non-seat add-ons,
@@ -78,10 +85,17 @@ plan names are never hard-coded at call-sites.
    addons` (eligible + active, priced from the catalog). Integer minor-units money.
 7. **Usage metering** — `UsageMeter`/`UsageRecord` with idempotency keys; protected
    TB / cloud / seats; feeds the calc.
-8. **Admin experience** — Plan Management, Add-on Management, per-org subscription +
-   entitlement management (extend `Admin.tsx`).
-9. **Customer signup + Protection Setup** — seat/capacity/cloud/appliance/add-on
-   pricing from server calc; preview before confirm. No prices in the frontend.
+8. **Admin experience** — Plan Management + Add-on Management **DONE** (Phases 2/3);
+   **per-tenant subscription line-item panel DONE (Phase 8, this change)** —
+   `TenantSubscriptionBreakdown` on the tenant Subscription tab (included/licensed/
+   billable columns, recurring + one-time totals, per-line price version, "Re-sync"
+   from the calc). *(Full subscription-item editor is a follow-up.)*
+9. **Customer signup + Protection Setup** — **DONE (Phase 9, this change) for the
+   in-app Protection Setup.** Server-authoritative "Your bill, itemized" card reads
+   `GET /billing/estimate` (included-vs-billable line items, recurring + one-time),
+   and **Save previews before confirm** via `POST /billing/estimate/preview`
+   (new recurring total + delta) — prices come from the server, never the UI.
+   *(Signup-flow parity is a follow-up.)*
 10. **Org/user enforcement** — turn on seat limits per cohort; M365 auto-discovery →
     review/mapping, never auto-billable seats.
 11. **Payment-provider enhancements** — multi-item subscriptions, proration, metered

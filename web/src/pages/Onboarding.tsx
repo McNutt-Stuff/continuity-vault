@@ -28,6 +28,15 @@ interface Plan {
   appliance_plan: { capacity_tb: number; qty: number }[];
   license_plan?: LicensePlan; min_tb?: number;
 }
+interface EstimateLine {
+  key: string; label: string; quantity: number; unit_price_cents: number; amount_cents: number;
+  included_qty: number; licensed_qty: number; kind: string; source: string;
+}
+interface Estimate {
+  plan: string; currency: string; price_version: number;
+  recurring_cents: number; one_time_cents: number; recurring_display: string;
+  lines: EstimateLine[];
+}
 
 const iconName = (n: string) => (["cloud", "server", "key", "shield", "check", "database", "file"].includes(n) ? n : "database") as never;
 function money(n: number): string {
@@ -40,6 +49,7 @@ function money2(n: number): string {
 export default function Onboarding() {
   const [pricing, setPricing] = useState<Pricing | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
+  const [estimate, setEstimate] = useState<Estimate | null>(null);
   const [org, setOrg] = useState<{ name?: string; plan?: string; can_admin?: boolean } | null>(null);
   const [options, setOptions] = useState<Set<string>>(new Set());
   const [licensedTb, setLicensedTb] = useState(1);
@@ -62,6 +72,7 @@ export default function Onboarding() {
       for (const a of p.appliance_plan || []) q[a.capacity_tb] = a.qty;
       setQty(q);
     }).catch(() => {});
+    api.get<Estimate>("/billing/estimate").then(setEstimate).catch(() => {});
   }, []);
 
   // Arriving from "Order a new appliance": enable the appliance destination and
@@ -125,6 +136,23 @@ export default function Onboarding() {
       });
       if (!ok2) { setOptions((cur) => new Set([...cur, "cv-cloud"])); return; }
     }
+    // Server-authoritative preview of the change — confirm the new recurring total
+    // and the delta before committing (prices come from the server, never the UI).
+    try {
+      const prev = await api.post<{ proposed: Estimate; delta_cents: number; one_time_cents: number }>(
+        "/billing/estimate/preview", { licensed_tb: licensedTb });
+      const dollars = (c: number) => "$" + ((c || 0) / 100).toFixed(2);
+      const delta = prev.delta_cents || 0;
+      const deltaLine = delta === 0 ? "No change to your recurring charge."
+        : delta > 0 ? `That's ${dollars(delta)}/mo more than today.`
+          : `That's ${dollars(-delta)}/mo less than today.`;
+      const oneTime = prev.one_time_cents ? ` A one-time charge of ${dollars(prev.one_time_cents)} applies.` : "";
+      const ok = await confirmDialog({
+        title: "Confirm your plan", confirmLabel: "Confirm & save",
+        message: `Your new recurring charge will be ${prev.proposed.recurring_display}/mo. ${deltaLine}${oneTime}`,
+      });
+      if (!ok) return;
+    } catch { /* preview is best-effort — don't block saving if it fails */ }
     setSaving(true); setSaved(false);
     try {
       const appliance_plan = Object.entries(qty).filter(([, q]) => q > 0)
@@ -133,6 +161,7 @@ export default function Onboarding() {
         options: [...options], licensed_tb: licensedTb, appliance_plan,
       });
       setPlan(updated); setSaved(true);
+      api.get<Estimate>("/billing/estimate").then(setEstimate).catch(() => {});
     } catch { /* surfaced via disabled state */ }
     setSaving(false);
   }
@@ -310,6 +339,42 @@ export default function Onboarding() {
             </button>
             {options.size === 0 && <div className="faint" style={{ fontSize: 11.5, marginTop: 6, textAlign: "center" }}>Select at least one storage option</div>}
           </Card>
+
+          {estimate && estimate.lines.length > 0 && (
+            <Card>
+              <div className="spread" style={{ marginBottom: 4 }}>
+                <h3 style={{ margin: 0 }}>Your bill, itemized</h3>
+                <span className="faint" style={{ fontSize: 11 }}>plan v{estimate.price_version}</span>
+              </div>
+              <div className="muted" style={{ fontSize: 11.5, marginBottom: 12 }}>
+                What you're billed today, priced by us — the source of truth for your invoice.
+              </div>
+              <div className="stack" style={{ gap: 8 }}>
+                {estimate.lines.filter((l) => l.kind !== "one_time").map((l) => (
+                  <div key={l.key} className="spread" style={{ fontSize: 12.5, alignItems: "baseline" }}>
+                    <span>
+                      {l.label}
+                      {l.licensed_qty > 0 && (
+                        <span className="faint" style={{ fontSize: 11 }}>
+                          {" "}· {l.included_qty > 0 ? `${l.included_qty} incl, ` : ""}{l.quantity} billable
+                        </span>
+                      )}
+                    </span>
+                    <span style={{ fontWeight: 600 }}>{money2(l.amount_cents / 100)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="spread" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
+                <div style={{ fontWeight: 700 }}>Recurring total</div>
+                <div style={{ fontSize: 18, fontWeight: 800 }}>{estimate.recurring_display}<span className="faint" style={{ fontSize: 12, fontWeight: 500 }}> /mo</span></div>
+              </div>
+              {estimate.one_time_cents > 0 && (
+                <div className="spread faint" style={{ fontSize: 12, marginTop: 6 }}>
+                  <span>One-time charges</span><span style={{ fontWeight: 600 }}>{money2(estimate.one_time_cents / 100)}</span>
+                </div>
+              )}
+            </Card>
+          )}
 
           <Card>
             <div className="spread" style={{ marginBottom: 10 }}>
