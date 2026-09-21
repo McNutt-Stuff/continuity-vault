@@ -42,9 +42,10 @@ DEFAULT_SITE = {
                           "Priority recovery", "Legacy & recovery planning"]},
             {"name": "Business", "price": "Custom", "per": "",
              "blurb": "For teams and regulated organizations.", "cta": "Talk to sales",
-             "features": ["Unlimited data & retention", "Customer-managed keys",
-                          "Approvals, quorum & policy", "Offline appliance option",
-                          "Compliance & audit support"]},
+             "features": ["Microsoft 365 managed backup (per user)",
+                          "Compliance engine — NIST, CIS, HIPAA & more",
+                          "Data governance rules engine", "Customer-managed keys",
+                          "Approvals, quorum & policy", "Offline appliance option"]},
         ],
     },
     "about": {

@@ -134,8 +134,8 @@ export const useCases = {
   whoLead: "From families to regulated enterprises, Arkive protects the people and organizations who can't afford to lose what matters.",
   cases: [
     { ico: "👨‍👩‍👧", h: "Families & individuals", p: "Protect a lifetime of email, photos, documents and accounts. Plan for the unexpected with recovery your loved ones can rely on.", points: ["Everything in one secure place", "Simple, guided protection setup", "Legacy & recovery planning"] },
-    { ico: "🏢", h: "Small & mid-size business", p: "Keep the business running through ransomware, departures, and outages with verifiable, policy-driven recovery.", points: ["Per-source retention & routing", "Role-based access & approvals", "Compliance-ready audit trail"] },
-    { ico: "⚖️", h: "Regulated & high-trust", p: "Meet strict data-handling requirements with private-by-design encryption, immutability and provable integrity.", points: ["Customer-managed keys", "Immutable, tamper-evident storage", "Offline air-gapped option"] },
+    { ico: "🏢", h: "Small & mid-size business", p: "Keep the business running through ransomware, departures and outages — and protect Microsoft 365 with an admin-governed, per-user managed integration that needs no per-employee setup.", points: ["Microsoft 365 managed backup — Exchange, OneDrive, SharePoint & Teams", "Per-source retention, routing & role-based access", "Governance rules — classify, restrict & minimize at ingest", "Compliance-ready, tamper-evident audit trail"] },
+    { ico: "⚖️", h: "Regulated & high-trust", p: "Meet strict data-handling requirements with private-by-design encryption, immutability and provable integrity — and prove it with a live compliance posture scored from your own evidence.", points: ["Compliance engine: NIST CSF, CIS, HIPAA, ISO 27001, SOC 2 & GDPR", "Customer-managed keys & immutable, tamper-evident storage", "Offline, air-gapped appliance option", "Continuous evidence trail & posture history for auditors"] },
     { ico: "🧑‍💻", h: "Prosumers & creators", p: "Never lose your work or your accounts. Archive social, media and cloud drives with full version history.", points: ["Big-history photo & media capture", "Cross-account unified search", "You own the keys"] },
   ],
 };
@@ -181,7 +181,7 @@ export const pricing = {
       price: "Custom", per: "",
       blurb: "For teams and regulated organizations.",
       cta: "Talk to sales",
-      features: ["Customer-managed keys", "Approvals, quorum & policy", "Compliance & audit support", "Volume discounts", "Offline appliance supported"],
+      features: ["Microsoft 365 managed backup (per user)", "Compliance engine — NIST, CIS, HIPAA & more", "Data governance rules engine", "Customer-managed keys", "Approvals, quorum & policy", "Offline appliance supported"],
     },
   ],
 };
