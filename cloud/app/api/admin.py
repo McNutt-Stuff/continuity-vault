@@ -680,6 +680,29 @@ def backfill_subscriptions(limit: int = 0,
     return res
 
 
+@router.get("/tenants/{tid}/entitlement-snapshot")
+def get_entitlement_snapshot(tid: str, db: Session = Depends(get_db)):
+    """The tenant's signed entitlement snapshot status (Phase 13 federation)."""
+    from .. import entitlement_snapshot
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    return entitlement_snapshot.status(db, tid)
+
+
+@router.post("/tenants/{tid}/entitlement-snapshot/refresh")
+def refresh_entitlement_snapshot(tid: str,
+                                 principal: security.Principal = Depends(security.require_platform_admin),
+                                 db: Session = Depends(get_db)):
+    """Mint a fresh signed entitlement snapshot for the tenant now (control plane)."""
+    from .. import entitlement_snapshot
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    entitlement_snapshot.build_and_sign(db, t)
+    return entitlement_snapshot.status(db, tid)
+
+
 @router.get("/tenants/{tid}/usage")
 def get_tenant_usage(tid: str, db: Session = Depends(get_db)):
     """Current-period metered usage for a tenant (admin view)."""

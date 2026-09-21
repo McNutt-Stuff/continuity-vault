@@ -121,11 +121,22 @@ plan names are never hard-coded at call-sites.
     `reconcile_charges` (querying the PaymentIntent) is the safety net for missed
     deliveries. *(Multi-item subscriptions/proration intentionally skipped — one
     total is billed monthly.)*
-12. **Legacy compatibility & migration** — grandfather existing subscriptions; dry-run
-    "Upgrade Legacy Customer" with outbox/compensating actions.
-13. **Federated entitlement sync** — signed entitlement snapshot pushed to nodes
-    (org/tenant/values/version/issued/expires), validated before enforcement, safe
-    cached behavior offline.
+12. **Legacy compatibility & migration** — **DONE (this change).** `billing_migration.py`:
+    `preview` (dry-run legacy-vs-calc parity + recommendation, no writes), `apply`
+    (mode `calc`=re-price / `grandfather`=price-neutral lock via a `billing_price_lock`
+    SystemSetting that `_plan_amount_cents` honors first), `rollback` (restore source +
+    amount from the compensating `BillingMigration` snapshot), `backfill_all`
+    (materialize every tenant's subscription; idempotent, no charge). Admin API +
+    a **Billing engine** panel on the tenant Subscription tab (migrate/grandfather/
+    rollback + source toggle + history). The go-live cutover is now safe + reversible.
+13. **Federated entitlement sync** — **DONE (this change).** `entitlement_snapshot.py`:
+    the CP mints a **signed** (hybrid classical+PQ fleet signer), effective-dated
+    snapshot per tenant `{plan, entitlements, flags, version, issued/expires}` →
+    `EntitlementSnapshot` table replicated CP→node. `verify` (CP public bundle) +
+    `get_valid` (signature + expiry, **offline-safe**: a cached non-expired snapshot
+    is trusted even if the CP is unreachable; None → fall back to local derive). The
+    CP billing worker refreshes them (role-guarded); admin refresh + `/debug/features`
+    `signed_snapshot` status.
 14. **Testing, docs, rollout** — add a pytest harness (currently NONE), unit/integration/
     e2e per the spec; cohort rollout flags.
 

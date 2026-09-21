@@ -47,6 +47,15 @@ def start_billing_worker() -> None:
                     metering.snapshot_all(db)
             except Exception:  # noqa: BLE001
                 logger.exception("usage metering snapshot failed")
+            try:
+                # Mint signed entitlement snapshots for nodes (control plane only).
+                from ..config import get_settings
+                if (get_settings().node_role or "control-plane") == "control-plane":
+                    from .. import entitlement_snapshot
+                    with SessionLocal() as db:
+                        entitlement_snapshot.refresh_all(db)
+            except Exception:  # noqa: BLE001
+                logger.exception("entitlement snapshot refresh failed")
             time.sleep(_TICK_SECONDS)
 
     _thread = threading.Thread(target=loop, name="cv-billing", daemon=True)

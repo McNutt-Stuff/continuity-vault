@@ -1476,6 +1476,23 @@ class BillingMigration(Base):
     rolled_back_at = Column(DateTime, nullable=True)
 
 
+class EntitlementSnapshot(Base):
+    """A signed, effective-dated snapshot of a tenant's entitlements + feature flags,
+    minted on the control plane and replicated to nodes. A node validates the
+    signature (control-plane fleet signer) + expiry before trusting it for
+    enforcement, and may keep using a non-expired cached copy while offline."""
+
+    __tablename__ = "entitlement_snapshots"
+    tenant_id = Column(String, ForeignKey("tenants.id"), primary_key=True)
+    version = Column(Integer, default=1)
+    payload = Column(JSON, default=dict)                   # signed body {tenant_id, plan, entitlements, flags, version, issued_at, expires_at}
+    signature = Column(JSON, default=dict)                 # HybridSigner signature
+    signer_fingerprint = Column(String, default="")        # CP signer key fingerprint
+    issued_at = Column(DateTime, default=_now)
+    expires_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
 class QueueItem(Base):
     """Durable registry of a protection activity that must be delivered to a
     destination which may be temporarily unreachable — an offline appliance, or

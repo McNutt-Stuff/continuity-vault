@@ -377,6 +377,14 @@ def _tenant_billing_source(db, t) -> str:
         return "legacy"
 
 
+def _snapshot_status(db, tenant_id: str) -> dict:
+    from .. import entitlement_snapshot
+    try:
+        return entitlement_snapshot.status(db, tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        return {"present": False, "error": str(exc)[:200]}
+
+
 @router.get("/billing", dependencies=[Depends(require_debug_key)])
 def billing_debug(tenant: str = "", limit: int = 100, db: Session = Depends(get_db)):
     """Billing / entitlement diagnostics — the migration + go-live troubleshooting
@@ -542,6 +550,7 @@ def features_debug(tenant: str = "", user: str = "", db: Session = Depends(get_d
         "note": ("Shared/personal pool: account-scoped (plan + add-on + per-user override)."
                  if shared else
                  "Org tenant: tenant-scoped — every member inherits these (plan + add-on + tenant override)."),
+        "signed_snapshot": _snapshot_status(db, t.id),
         "flags": rows,
     }
 

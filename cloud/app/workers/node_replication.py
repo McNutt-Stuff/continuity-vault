@@ -154,6 +154,14 @@ try:
 except Exception:  # noqa: BLE001 — module optional
     pass
 
+# Signed entitlement snapshots are minted on the CP and validated on the node
+# before enforcement; ship them DOWN. After tenants (FK order).
+try:
+    from ..models import EntitlementSnapshot as _EntSnap
+    _PULL_ORDER += [("entitlement_snapshots", _EntSnap)]
+except Exception:  # noqa: BLE001 — optional
+    pass
+
 
 def _now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
