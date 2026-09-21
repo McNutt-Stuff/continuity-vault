@@ -59,6 +59,7 @@ def init_db() -> None:
     from . import entitlements  # noqa: F401  register entitlement tables
     from . import catalog  # noqa: F401  register catalog/price-book tables
     from . import subscriptions  # noqa: F401  register subscription/item tables
+    from . import metering  # noqa: F401  register usage meter/record tables
 
     Base.metadata.create_all(bind=engine)
     _apply_additive_migrations()

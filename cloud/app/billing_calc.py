@@ -144,8 +144,11 @@ def calculate(db: Session, tenant, *, overrides: dict | None = None) -> Calc:
             included_qty=incl_mem, licensed_qty=licensed_mem, source=src)
 
     # 5) Non-seat add-ons — priced from the catalog (per unit / per user / per TB / metered).
+    from . import metering
     protected_users_used = entitlements.get_usage(db, tenant, "protected_users")
-    cloud_tb_used = entitlements.get_usage(db, tenant, "protected_data_tb")
+    cloud_tb_used = metering.current_or_live(
+        db, tenant.id, "cloud_stored_tb",
+        lambda: entitlements.get_usage(db, tenant, "protected_data_tb"))
     for ta in active:
         a = by_code.get(ta.addon_code)
         if not a:

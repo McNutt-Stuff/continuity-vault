@@ -520,6 +520,29 @@ def sync_tenant_subscription(tid: str,
     return subscriptions.view(db, t)
 
 
+@router.get("/tenants/{tid}/usage")
+def get_tenant_usage(tid: str, db: Session = Depends(get_db)):
+    """Current-period metered usage for a tenant (admin view)."""
+    from .. import metering
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    return metering.tenant_view(db, t)
+
+
+@router.post("/tenants/{tid}/usage/snapshot")
+def snapshot_tenant_usage(tid: str,
+                          principal: security.Principal = Depends(security.require_platform_admin),
+                          db: Session = Depends(get_db)):
+    """Force a usage snapshot for a tenant (idempotent per period)."""
+    from .. import metering
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    metering.snapshot_tenant(db, t)
+    return metering.tenant_view(db, t)
+
+
 # --- Email: configuration, test, and broadcast ------------------------------
 
 def _email_config(db: Session):

@@ -39,6 +39,12 @@ def start_billing_worker() -> None:
                     cloud_costs.sample_all(db)
             except Exception:  # noqa: BLE001
                 logger.exception("cloud cost sample failed")
+            try:
+                from .. import metering
+                with SessionLocal() as db:
+                    metering.snapshot_all(db)
+            except Exception:  # noqa: BLE001
+                logger.exception("usage metering snapshot failed")
             time.sleep(_TICK_SECONDS)
 
     _thread = threading.Thread(target=loop, name="cv-billing", daemon=True)

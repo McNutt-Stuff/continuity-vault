@@ -511,6 +511,15 @@ def get_subscription_items(principal: security.Principal = Depends(security.get_
     return subscriptions.view(db, tenant)
 
 
+@router.get("/usage")
+def get_usage_meters(principal: security.Principal = Depends(security.get_principal),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    """Current-period metered usage (peak protected data / users / cloud stored)."""
+    from .. import metering
+    return metering.tenant_view(db, tenant)
+
+
 class PlanUpdate(BaseModel):
     options: list[str] | None = None
     licensed_tb: float | None = None

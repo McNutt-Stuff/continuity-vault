@@ -83,8 +83,16 @@ plan names are never hard-coded at call-sites.
    booleans enable, respecting a legal-hold disable). Admin **Add-on Management**
    section (catalog CRUD) + per-tenant assign/cancel API; customer `GET /billing/
    addons` (eligible + active, priced from the catalog). Integer minor-units money.
-7. **Usage metering** — `UsageMeter`/`UsageRecord` with idempotency keys; protected
-   TB / cloud / seats; feeds the calc.
+7. **Usage metering** — **DONE (Phase 7, this change).** `metering.py`:
+   `UsageMeter` (definition: unit + aggregation max/sum/last + entitlement) +
+   `UsageRecord` (period-bucketed, **globally-unique `idempotency_key`** so a
+   retried event / repeated snapshot never double-counts). `record` (idempotent
+   event), `observe` (monotonic peak snapshot, idempotent per meter/period/source),
+   `current` (period aggregate) + `current_or_live` (metered value else live count
+   → identical to before while empty). Hourly billing worker calls `snapshot_all`;
+   the calc reads `cloud_stored_tb` via `current_or_live` for metered add-ons.
+   Views: customer `GET /billing/usage`; admin `GET /admin/tenants/{id}/usage` +
+   `POST …/usage/snapshot`. Seeded meters: protected data TB, users, cloud stored TB.
 8. **Admin experience** — Plan Management + Add-on Management **DONE** (Phases 2/3);
    **per-tenant subscription line-item panel DONE (Phase 8, this change)** —
    `TenantSubscriptionBreakdown` on the tenant Subscription tab (included/licensed/
