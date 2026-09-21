@@ -93,29 +93,33 @@ def _flag_entitlement_map() -> dict[str, str]:
 
 
 def _plan_addon_grant(tenant, name: str, db=None):
-    """Whether the tenant's PLAN / ADD-ONS grant this flag — the primary control.
+    """Whether the tenant's PLAN / ADD-ONS grant this flag (bool), or ``None`` when
+    the flag isn't entitlement-controlled. See ``_plan_addon_grant_src`` for origin."""
+    return _plan_addon_grant_src(tenant, name, db)[0]
 
-    Returns True/False when the plan (or an add-on) decides the flag, or ``None``
-    when the flag isn't entitlement-controlled (caller falls back to the global
-    default). A known plan that lists the gating entitlement is authoritative; an
-    add-on can only turn a flag ON (never off)."""
+
+def _plan_addon_grant_src(tenant, name: str, db=None):
+    """``(granted, origin)`` where origin is ``"plan"`` or ``"addon"``; ``(None, None)``
+    when the flag isn't entitlement-controlled (caller falls back to the default)."""
     ent_key = _flag_entitlement_map().get(name)
     granted: bool | None = None
+    origin: str | None = None
+    plan = (getattr(tenant, "plan", "") or "").lower() if tenant is not None else ""
     if ent_key is not None and tenant is not None:
         try:
             from .entitlements import registry as ent_registry
-            plan_grants = ent_registry.plan_grants((getattr(tenant, "plan", "") or "").lower())
+            plan_grants = ent_registry.plan_grants(plan)
             if ent_key in plan_grants:                 # known plan decides explicitly
-                granted = bool(plan_grants[ent_key])
+                granted = bool(plan_grants[ent_key]); origin = "plan"
         except Exception:  # noqa: BLE001
             pass
         # The catalog plan version (admin-edited) overrides the code-registry default.
         if db is not None:
             try:
                 from . import catalog
-                v = catalog.effective_version(db, (getattr(tenant, "plan", "") or "").lower())
+                v = catalog.effective_version(db, plan)
                 if v is not None and v.entitlements and ent_key in v.entitlements:
-                    granted = bool(v.entitlements[ent_key])
+                    granted = bool(v.entitlements[ent_key]); origin = "plan"
             except Exception:  # noqa: BLE001
                 pass
     # Add-ons can ENABLE a flag (via their entitlements map or a direct feature_flags
@@ -125,12 +129,31 @@ def _plan_addon_grant(tenant, name: str, db=None):
             from .entitlements import addons
             _qty, bools, flags = addons.grants_for_tenant(db, tenant.id)
             if name in (flags or []):
-                granted = True
+                granted = True; origin = "addon"
             if ent_key is not None and bools.get(ent_key):
-                granted = True
+                granted = True; origin = "addon"
         except Exception:  # noqa: BLE001
             pass
-    return granted
+    return granted, origin
+
+
+def resolve_with_source(user, tenant, name: str, db=None) -> tuple[bool, str]:
+    """Like ``resolve`` but also reports WHY: ``"manual"`` (explicit user/tenant
+    override — set by an Arkive admin), ``"plan"``, ``"addon"``, or ``"default"``."""
+    default = FLAGS.get(name, False)
+    uf = (user.feature_flags or {}) if user else {}
+    tf = (tenant.feature_flags or {}) if tenant else {}
+    shared = _shared(tenant)
+    if not shared and tf.get(name) is False:
+        return False, "manual"                     # tenant legal-hold disable
+    if name in uf:
+        return bool(uf[name]), "manual"            # explicit per-user override
+    if not shared and name in tf:
+        return bool(tf[name]), "manual"            # explicit per-tenant allow
+    granted, origin = _plan_addon_grant_src(tenant, name, db)
+    if granted is not None:
+        return granted, (origin or "plan")
+    return bool(default), "default"
 
 
 def resolve(user, tenant, name: str, db=None) -> bool:
@@ -144,25 +167,7 @@ def resolve(user, tenant, name: str, db=None) -> bool:
 
     Pass ``db`` so add-on grants are consulted; without it only the plan layer +
     overrides + default apply."""
-    default = FLAGS.get(name, False)
-    uf = (user.feature_flags or {}) if user else {}
-    tf = (tenant.feature_flags or {}) if tenant else {}
-    shared = _shared(tenant)
-    # 1. Tenant-level disable is authoritative (legal hold) for org tenants.
-    if not shared and tf.get(name) is False:
-        return False
-    # 2. Explicit per-user override.
-    if name in uf:
-        return bool(uf[name])
-    # 3. Explicit per-tenant allow (org tenants).
-    if not shared and name in tf:
-        return bool(tf[name])
-    # 4. Plan / entitlement / add-on grant — the primary driver.
-    granted = _plan_addon_grant(tenant, name, db)
-    if granted is not None:
-        return granted
-    # 5. Global default.
-    return bool(default)
+    return resolve_with_source(user, tenant, name, db)[0]
 
 
 def effective(user, tenant, db=None) -> dict:

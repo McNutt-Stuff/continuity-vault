@@ -1285,6 +1285,35 @@ def set_user_flags(uid: str, body: FlagsUpdate,
     return {"feature_flags": u.feature_flags}
 
 
+@router.get("/tenants/{tid}/feature-sources")
+def tenant_feature_sources(tid: str, user_id: str = "", db: Session = Depends(get_db)):
+    """Every feature flag for a tenant (or a specific account) with its effective
+    value and WHY it's set: by plan feature, by add-on feature, manually (an Arkive
+    admin override), or the platform default. Powers the Account Features tab."""
+    from .. import features
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    user = db.get(User, user_id) if user_id else None
+    if user_id and (user is None or user.tenant_id != tid):
+        raise HTTPException(404, "user not found")
+    tf = t.feature_flags or {}
+    uf = (user.feature_flags or {}) if user else {}
+    flags = []
+    for name in features.FLAGS:
+        val, src = features.resolve_with_source(user, t, name, db)
+        override = uf.get(name) if (user and name in uf) else (tf.get(name) if name in tf else None)
+        flags.append({
+            "name": name, "label": features.LABELS.get(name, name),
+            "enabled": bool(val), "source": src,
+            "default": bool(features.FLAGS.get(name, False)),
+            "override": override,
+        })
+    return {"tenant_id": tid, "user_id": user_id or None,
+            "scope": "user" if user_id else "tenant",
+            "tenant_type": t.tenant_type or "dedicated", "plan": t.plan, "flags": flags}
+
+
 class TenantUpdate(BaseModel):
     name: str | None = None
     plan: str | None = None

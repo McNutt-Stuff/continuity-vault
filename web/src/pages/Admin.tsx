@@ -119,19 +119,13 @@ async function editUserDialog(u: any, isShared: boolean): Promise<boolean> {
   fields.push({ name: "notification_emails", label: "Additional notification emails",
     type: "textarea", defaultValue: (u.notification_emails || []).join(", "),
     hint: "Extra addresses that also receive this account's email notifications (comma-separated). Never used for login." });
-  // Per-account feature flags. A tenant-level block wins regardless of this.
-  fields.push(...flagFields(await flagCatalog(), u.feature_flags, "user"));
   const r = await formDialog({ title: `Edit ${u.email}`, confirmLabel: "Save", fields, wide: true });
   if (!r) return false;
-  const flags = extractFlags(r, await flagCatalog());
   // Parse the comma/space/semicolon-separated list into the array the API expects.
   r.notification_emails = String(r.notification_emails ?? "")
     .split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean) as any;
   r.is_platform_admin = (r.is_platform_admin === "true") as any;
   await api.put(`/admin/users/${u.id}`, r);
-  if (Object.keys(flags).length) {
-    await api.put(`/admin/users/${u.id}/flags`, { feature_flags: flags });
-  }
   return true;
 }
 
@@ -1277,7 +1271,7 @@ function BillingInfoPanel({ billing }: { billing: UserBilling | null }) {
   );
 }
 
-type UserTab = "overview" | "personal" | "settings" | "usage" | "subscription" | "activity" | "billing";
+type UserTab = "overview" | "personal" | "settings" | "usage" | "features" | "subscription" | "activity" | "billing";
 
 function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void; backLabel: string }) {
   const [u, setU] = useState<any>(null);
@@ -1369,6 +1363,7 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
     { key: "personal", label: "Personal information", icon: "user" },
     { key: "settings", label: "Settings", icon: "puzzle" },
     { key: "usage", label: "Usage", icon: "database" },
+    ...(shared ? [{ key: "features" as UserTab, label: "Account features", icon: "shield" as IconName }] : []),
     ...(shared ? [{ key: "subscription" as UserTab, label: "Subscription", icon: "credit-card" as IconName }] : []),
     { key: "activity", label: "Activity", icon: "activity" },
     { key: "billing", label: "Billing information", icon: "credit-card" },
@@ -1637,14 +1632,17 @@ function UserDetail({ id, onBack, backLabel }: { id: string; onBack: () => void;
         </>
       )}
 
-      {curTab === "billing" && <BillingInfoPanel billing={billing} />}
+      {curTab === "features" && shared && (u.tenant_id || u.tenant?.id) && (
+        <AccountFeatures tenantId={String(u.tenant_id || u.tenant?.id || "")} userId={id} />
+      )}
 
+      {curTab === "billing" && <BillingInfoPanel billing={billing} />}
       {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </>
   );
 }
 
-type TenantTab = "overview" | "settings" | "usage" | "subscription" | "billing";
+type TenantTab = "overview" | "settings" | "usage" | "features" | "subscription" | "billing";
 
 function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [t, setT] = useState<any>(null);
@@ -1687,21 +1685,14 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
       fields.push(
         { name: "plan", label: "License plan", defaultValue: t.plan, options: planOpts },
         { name: "licensed_tb", label: "Licensed data (TB)", defaultValue: String(((t.licensed_bytes || 0) / (1024 ** 4)).toFixed(2)) },
-        // Feature flags are tenant-wide only for dedicated tenants; shared tenants
-        // manage them per-account (per user) instead.
-        ...flagFields(await flagCatalog(), t.feature_flags, "tenant"),
       );
     }
     const r = await formDialog({ title: "Edit tenant", confirmLabel: "Save", fields, wide: true });
     if (!r) return;
-    const flags = extractFlags(r, await flagCatalog());
     const payload: any = { ...r };
     if (r.licensed_tb !== undefined) payload.licensed_tb = Number(r.licensed_tb) || 0;
     try {
       await api.put(`/admin/tenants/${id}`, payload);
-      if (!isShared && Object.keys(flags).length) {
-        await api.put(`/admin/tenants/${id}/flags`, { feature_flags: flags });
-      }
       flash("Saved"); await load();
     } catch { flash("Save failed"); }
   }
@@ -1783,6 +1774,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
     { key: "overview", label: "Overview", icon: "grid" },
     { key: "settings", label: "Settings", icon: "puzzle" },
     { key: "usage", label: "Usage", icon: "database" },
+    ...(!isShared ? [{ key: "features" as TenantTab, label: "Account features", icon: "shield" as IconName }] : []),
     { key: "subscription", label: "Subscription", icon: "credit-card" },
     { key: "billing", label: "Billing information", icon: "credit-card" },
   ];
@@ -2000,6 +1992,8 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
       )}
 
       {tab === "subscription" && !isShared && <TenantSubscriptionBreakdown id={id} />}
+
+      {tab === "features" && !isShared && <AccountFeatures tenantId={id} />}
 
       {tab === "billing" && <BillingInfoPanel billing={billing} />}
 
@@ -6659,6 +6653,86 @@ function TenantSubscriptionBreakdown({ id }: { id: string }) {
           {sub.synced_at && <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>Last synced {timeAgo(sub.synced_at)}</div>}
         </>
       )}
+    </Card>
+  );
+}
+
+// Account Features — feature flags for a tenant (or a single account) with how each
+// is enabled: by a plan feature, by an add-on feature, or manually by an Arkive admin.
+interface FeatureRow { name: string; label: string; enabled: boolean; source: string; default: boolean; override: boolean | null }
+interface FeatureSources { tenant_id: string; user_id: string | null; scope: string; tenant_type: string; plan: string; flags: FeatureRow[] }
+const FEATURE_SOURCE_META: Record<string, { label: string; tone: "info" | "ok" | "warn" }> = {
+  plan: { label: "Plan feature", tone: "info" },
+  addon: { label: "Add-on feature", tone: "ok" },
+  manual: { label: "Manual (Arkive admin)", tone: "warn" },
+  default: { label: "Platform default", tone: "info" },
+};
+
+function AccountFeatures({ tenantId, userId }: { tenantId: string; userId?: string }) {
+  const [data, setData] = useState<FeatureSources | null>(null);
+  const [err, setErr] = useState("");
+  const [toast, setToast] = useState("");
+  const flash = (m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); };
+  async function load() {
+    try { setErr(""); setData(await api.get<FeatureSources>(`/admin/tenants/${tenantId}/feature-sources${userId ? `?user_id=${userId}` : ""}`)); }
+    catch (e) { setErr((e as { message?: string }).message || "Failed to load features"); }
+  }
+  useEffect(() => { void load(); }, [tenantId, userId]);
+  async function manage() {
+    if (!data) return;
+    const cat = await flagCatalog();
+    const fields = cat.map((fl) => {
+      const row = data.flags.find((f) => f.name === fl.name);
+      const ov = row?.override;
+      return {
+        name: `flag_${fl.name}`, label: fl.label,
+        defaultValue: ov === true ? "true" : ov === false ? "false" : "inherit",
+        options: [
+          { label: "Inherit (follow plan / add-on / default)", value: "inherit" },
+          { label: "Force on", value: "true" },
+          { label: "Force off — blocks even if the plan grants it", value: "false" },
+        ], section: "Feature flags",
+      };
+    });
+    const r = await formDialog({ title: userId ? "Manage account features" : "Manage tenant features", confirmLabel: "Save", fields, wide: true });
+    if (!r) return;
+    const flags = extractFlags(r, cat);
+    try {
+      await api.put(userId ? `/admin/users/${userId}/flags` : `/admin/tenants/${tenantId}/flags`, { feature_flags: flags });
+      flash("Features updated"); await load();
+    } catch (e) { flash((e as { message?: string }).message || "Save failed"); }
+  }
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div className="spread" style={{ marginBottom: 6 }}>
+        <div>
+          <h3 style={{ margin: 0 }}>Account features</h3>
+          <div className="faint" style={{ fontSize: 12 }}>
+            Every feature flag {userId ? "for this account" : "for this tenant"} and how it's enabled — by a plan feature, an add-on, or a manual Arkive-admin override.
+          </div>
+        </div>
+        <button className="btn sm" onClick={manage}><Icon name="gear" size={13} /> Manage feature flags</button>
+      </div>
+      {err && <div className="muted" style={{ color: "var(--danger)", fontSize: 12.5 }}>{err}</div>}
+      {!data && !err && <div className="muted" style={{ fontSize: 12.5 }}>Loading…</div>}
+      {data && (
+        <table className="table">
+          <thead><tr><th>Feature</th><th>Status</th><th>Enabled by</th></tr></thead>
+          <tbody>
+            {data.flags.map((f) => {
+              const meta = FEATURE_SOURCE_META[f.source] || { label: f.source, tone: "info" as const };
+              return (
+                <tr key={f.name}>
+                  <td><div style={{ fontWeight: 600 }}>{f.label}</div><div className="faint mono" style={{ fontSize: 11 }}>{f.name}</div></td>
+                  <td><Pill tone={f.enabled ? "ok" : "warn"} dot>{f.enabled ? "Enabled" : "Disabled"}</Pill></td>
+                  <td><Pill tone={meta.tone}>{meta.label}</Pill></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+      {toast && <div className="toast"><Icon name="check" size={15} /> {toast}</div>}
     </Card>
   );
 }
