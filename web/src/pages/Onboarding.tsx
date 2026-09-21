@@ -133,7 +133,15 @@ export default function Onboarding() {
       await recomputeBill(licensedTb);
     } catch { /* best-effort; the bill reflects reality on next load */ }
   }
-  useEffect(() => { if (plan) void recomputeBill(licensedTb); }, [licensedTb, plan, options, qty]);
+  // Debounced so dragging the slider (or rapid toggles) fires ONE preview, not one
+  // per tick — the recompute hits the server and is comparatively expensive.
+  const billTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!plan) return;
+    if (billTimer.current) clearTimeout(billTimer.current);
+    billTimer.current = setTimeout(() => { void recomputeBill(licensedTb); }, 350);
+    return () => { if (billTimer.current) clearTimeout(billTimer.current); };
+  }, [licensedTb, plan, options, qty]);
 
   // Arriving from "Order a new appliance": enable the appliance destination and
   // pre-add one unit (incremental order) so the user just picks capacity + Save.

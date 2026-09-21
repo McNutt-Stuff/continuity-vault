@@ -18,6 +18,10 @@ from sqlalchemy.orm import Session
 
 _TB = 1024 ** 4
 
+# Short-TTL cache for the (comparatively heavy) Arkive-Cloud usage lookup so a
+# preview computing current+proposed, and rapid slider previews, don't rescan.
+_CLOUD_TB_CACHE: dict[str, tuple[float, float]] = {}
+
 
 @dataclass
 class Line:
@@ -64,15 +68,24 @@ def _tb(bytes_: int) -> int:
 
 def _cloud_stored_tb(db: Session, tenant) -> float:
     """Fractional TB of data actually stored in Arkive Cloud (cv-cloud) — the
-    consumption basis for the Arkive Cloud line, so sub-TB usage still bills."""
+    consumption basis for the Arkive Cloud line, so sub-TB usage still bills. Cached
+    briefly since a preview computes it twice (current vs proposed) and it scans the
+    receipts; the estimate tolerates a few seconds of staleness."""
+    import time
+    now = time.time()
+    hit = _CLOUD_TB_CACHE.get(tenant.id)
+    if hit is not None and hit[1] > now:
+        return hit[0]
     from .models import Vault
     from .api.billing import cloud_stored_summary
     try:
         vids = [vid for (vid,) in db.query(Vault.id).filter(Vault.tenant_id == tenant.id).all()]
         _objs, cloud_bytes = cloud_stored_summary(db, tenant, vids)
-        return float(cloud_bytes or 0) / _TB
+        val = float(cloud_bytes or 0) / _TB
     except Exception:  # noqa: BLE001
-        return 0.0
+        val = 0.0
+    _CLOUD_TB_CACHE[tenant.id] = (val, now + 15.0)
+    return val
 
 
 def calculate(db: Session, tenant, *, overrides: dict | None = None) -> Calc:
