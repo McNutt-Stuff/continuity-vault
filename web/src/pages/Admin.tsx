@@ -6753,6 +6753,21 @@ function CatalogAdmin() {
   function setSeats(n: number) { setV(isFamily ? { included_members: n, included_users: 0 } : { included_users: n, included_members: 0 }); }
   function setPerSeat(c: number) { setV(isFamily ? { per_member_cents: c, per_user_cents: 0 } : { per_user_cents: c, per_member_cents: 0 }); }
 
+  // "Features granted" on a plan = the feature-flag-backed entitlements only (stored
+  // in the version's entitlements map as {key: true}); quantity/capacity entitlements
+  // are handled by the Base plan / Usage fields, not this list.
+  const featureOpts = ents.filter((d) => d.feature).map((d) => ({ value: d.key, label: d.title }));
+  const featureKeys = new Set(featureOpts.map((o) => o.value));
+  const featureValue = form ? Object.keys(form.v.entitlements || {})
+    .filter((k) => featureKeys.has(k) && (form.v.entitlements as Record<string, unknown>)[k]) : [];
+  function setFeatures(sel: string[]) {
+    if (!form) return;
+    const keep: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(form.v.entitlements || {})) if (!featureKeys.has(k)) keep[k] = val;
+    for (const k of sel) keep[k] = true;
+    setV({ entitlements: keep });
+  }
+
   if (!plans) return <Card><div className="muted">Loading catalog…</div></Card>;
   return (
     <>
@@ -6806,11 +6821,7 @@ function CatalogAdmin() {
 
           <div className="faint" style={{ fontSize: 11.5, margin: "14px 0 6px", fontWeight: 600 }}>What's included</div>
           <div className="grid grid-2" style={{ gap: 12 }}>
-            <div className="stack" style={{ gap: 3 }}>
-              <span className="faint" style={{ fontSize: 11.5 }}>Entitlements granted</span>
-              <EntitlementPicker registry={ents} value={form.v.entitlements || {}} onChange={(entitlements) => setV({ entitlements })} />
-              <span className="faint" style={{ fontSize: 11 }}>Flag-backed entitlements (Compliance, Microsoft 365, Rules, Insights, …) enable their feature flag automatically — there's no separate "feature flags" list on a plan.</span>
-            </div>
+            <MultiSelect label="Features granted" options={featureOpts} value={featureValue} onChange={setFeatures} placeholder="No features included" />
             <MultiSelect label="Compatible add-ons" options={addonOpts} value={form.v.compatible_addons || []} onChange={(compatible_addons) => setV({ compatible_addons })} placeholder="All add-ons" />
           </div>
 
