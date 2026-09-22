@@ -545,10 +545,18 @@ def appliance_problem_list(db, appliance) -> tuple[list[str], str]:
             problems.append(f"{vol}: device disconnected")
         h = s.health or {}
         drive = str(h.get("drive_health") or h.get("smart") or "").lower()
-        raid = str(h.get("raid") or "").lower()
+        raid_v = h.get("raid")
+        raid = str((raid_v.get("status") if isinstance(raid_v, dict) else raid_v) or "").lower()
         if drive in ("failed", "failing", "bad", "error"):
             problems.append(f"{vol}: drive health {drive}")
             critical = True
+        elif drive in ("degraded", "disconnected"):
+            problems.append(f"{vol}: drive health {drive}")
+        # A mirror volume that's connected but no longer a verified 1:1 copy.
+        mi = h.get("mirror_integrity") if isinstance(h.get("mirror_integrity"), dict) else None
+        if (s.kind or "") == "mirror" and (s.state or "") != "disconnected" \
+                and mi and mi.get("in_sync") is False:
+            problems.append(f"{vol}: mirror out of sync")
         if raid in ("degraded", "failed", "rebuilding"):
             problems.append(f"{vol}: RAID {raid}")
             critical = critical or raid == "failed"

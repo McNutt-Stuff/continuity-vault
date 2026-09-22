@@ -21,6 +21,8 @@ import json
 import os
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Optional
@@ -37,7 +39,7 @@ from .config import get_settings
 from .identity import ApplianceIdentity, build_attestation
 from .state_machine import StateMachine, State
 from .vault import VaultStore
-from . import agent_log, sysinfo
+from . import agent_log, storage_ops, sysinfo
 
 settings = get_settings()
 app = FastAPI(title="Arkive Appliance Agent", version="1.0.0")
@@ -160,6 +162,20 @@ _LOG_FILE = DATA / "agent.log"
 # reused before a background refresh recomputes it.
 _HEAVY_TTL = 60.0
 
+# External (USB) storage: where Arkive mounts set-up drives, the local registry
+# that remembers them (by serial) so a reconnected drive is re-mounted on boot,
+# the request queue to the privileged root helper, and the cached mirror-integrity
+# report (written by the scheduled verify; read by telemetry + `cvtool storage
+# verify`).
+EXT_BASE = DATA / "ext"
+EXT_REGISTRY = DATA / "ext_stores.json"
+EXT_QUEUE = DATA / "storage-queue"
+MIRROR_INTEGRITY = DATA / "mirror_integrity.json"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None).isoformat() + "Z"
+
 
 def _resolve_storage() -> tuple[Path, str, str]:
     """(vault_root, storage_kind, storage_name).
@@ -208,6 +224,14 @@ class Agent:
         self.tamper_state = "normal"
         self.pending_recovery: dict = {}  # snapshot -> awaiting local approval
         self.log = agent_log.setup_logging(_LOG_FILE)
+        # External-storage registry + live mountpoints. Logging is ready above so
+        # the mount path (which logs) is safe to run here. _store_conn tracks each
+        # store's last-known usable state so a change is logged once (not every
+        # heartbeat).
+        self._ext_stores: list[dict] = self._load_ext_registry()
+        self._ext_mounts: dict[str, str] = {}
+        self._store_conn: dict[str, bool] = {}
+        self._mount_ext_stores()
         self._last_update_note = ""
         self._last_latency_ms: Optional[int] = None  # heartbeat round-trip
         # Heavy telemetry (full-vault capacity walk + SMART/RAID subprocesses) is
@@ -499,6 +523,470 @@ class Agent:
         except Exception as exc:
             self.log.warning("could not persist re-pinned bundle: %s", exc)
 
+    # -- external storage (USB / removable) ---------------------------
+
+    def _load_ext_registry(self) -> list[dict]:
+        try:
+            return json.loads(EXT_REGISTRY.read_text()) or []
+        except Exception:
+            return []
+
+    def _save_ext_registry(self) -> None:
+        try:
+            EXT_REGISTRY.write_text(json.dumps(self._ext_stores))
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("could not persist external-storage registry: %s", exc)
+
+    def _excluded_disks(self) -> set:
+        return {sysinfo.system_disk_device(),
+                sysinfo.dedicated_disk_device(settings.dedicated_path)}
+
+    def _delegate_storage(self, action: str, params: dict, timeout: int = 240) -> dict:
+        """Hand a privileged disk op (format/mount/unmount) to the ROOT helper via
+        the storage queue and wait for its result. The helper runs unsandboxed
+        (cv-appliance-storage.service, triggered by cv-appliance-storage.path)."""
+        req_id = uuid.uuid4().hex
+        EXT_QUEUE.mkdir(parents=True, exist_ok=True)
+        res_path = EXT_QUEUE / f"res-{req_id}.json"
+        req_path = EXT_QUEUE / f"req-{req_id}.json"
+        try:
+            req_path.write_text(json.dumps({"action": action, "params": params}))
+        except OSError as exc:
+            self.log.error("storage %s: could not queue request to the root helper at %s: %s",
+                           action, EXT_QUEUE, exc)
+            return {"error": f"could not queue storage request: {exc}"}
+        self.log.info("storage %s: queued request %s for the root helper (%s); waiting up to %ds",
+                      action, req_id, EXT_QUEUE, timeout)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if res_path.exists():
+                try:
+                    result = json.loads(res_path.read_text())
+                finally:
+                    res_path.unlink(missing_ok=True)
+                    req_path.unlink(missing_ok=True)
+                self.log.info("storage %s: root helper responded: %s", action, result)
+                return result
+            time.sleep(0.5)
+        req_path.unlink(missing_ok=True)
+        self.log.error("storage %s: the root helper never responded within %ds — the privileged "
+                       "helper (cv-appliance-storage.service / .path) is likely not installed or "
+                       "not running. Re-run the appliance installer. Queue dir: %s",
+                       action, timeout, EXT_QUEUE)
+        return {"error": "storage helper did not respond (is cv-appliance-storage "
+                         "installed and running?)"}
+
+    def _mount_ext_stores(self) -> None:
+        """Mount every already-set-up external drive that's currently present, then
+        point the vault at any mirror volumes so writes/recoveries duplicate. A
+        drive that isn't present, or can't be mounted, is skipped (logged) — never
+        fatal to startup."""
+        self._ext_mounts = {}
+        for e in self._ext_stores:
+            try:
+                mp = self._mount_known_ext(e)
+                if mp:
+                    self._ext_mounts[e["store_id"]] = mp
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("could not mount external store %s: %s",
+                                 e.get("name"), exc)
+        self._apply_mirror_roots()
+
+    def _mount_known_ext(self, e: dict) -> Optional[str]:
+        """Return the mountpoint of a known external store, mounting it if needed
+        (delegated to the root helper — the sandboxed agent can't mount). Returns
+        None when the drive isn't present or couldn't be mounted."""
+        store_id = e["store_id"]
+        mountpoint = os.path.join(str(EXT_BASE), store_id)
+        if os.path.ismount(mountpoint):
+            return mountpoint
+        if not sysinfo.resolve_device_by_serial(e.get("serial", "")):
+            self.log.info("external store %s (SN %s) not present — skipping mount",
+                          e.get("name"), e.get("serial"))
+            return None
+        res = self._delegate_storage("mount", {
+            "serial": e.get("serial", ""), "storeId": store_id,
+            "name": e.get("name", "External Storage"),
+            "mirrorOfId": e.get("mirror_of_id"), "kind": e.get("kind", "external"),
+        }, timeout=90)
+        if res.get("error"):
+            self.log.warning("could not mount external store %s via the root helper: %s",
+                             e.get("name"), res["error"])
+            return None
+        return res.get("mountpoint")
+
+    def _apply_mirror_roots(self) -> None:
+        roots = [os.path.join(self._ext_mounts[e["store_id"]], "vault")
+                 for e in self._ext_stores
+                 if e.get("kind") == "mirror" and e["store_id"] in self._ext_mounts]
+        try:
+            self.vault.set_mirror_roots(roots)
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("could not apply mirror roots: %s", exc)
+        self.log.info("mirror routing applied: %d mirror volume(s) active", len(roots))
+        if roots:
+            threading.Thread(target=self._sync_mirrors, args=("mirror routing changed",),
+                             daemon=True).start()
+
+    def _sync_mirrors(self, reason: str = "") -> dict:
+        """Reconcile every mirror volume with the primary vault (object data) AND
+        the encrypted search index — a backfill for a newly-added mirror plus repair
+        for anything the live duplication missed. Idempotent."""
+        mirror_mounts = [self._ext_mounts[e["store_id"]] for e in self._ext_stores
+                         if e.get("kind") == "mirror" and e["store_id"] in self._ext_mounts]
+        if not mirror_mounts:
+            return {"mirrors": 0}
+        res: dict = {"mirrors": len(mirror_mounts)}
+        try:
+            res.update(self.vault.sync_mirrors())
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("mirror data sync failed: %s", exc)
+            res["errors"] = res.get("errors", 0) + 1
+        idx_src = DATA / "search-index"
+        idx_copied = idx_pruned = 0
+        if idx_src.is_dir():
+            src_files = {f.name for f in idx_src.glob("*.enc")}
+            for mount in mirror_mounts:
+                dst_dir = Path(mount) / "search-index"
+                try:
+                    dst_dir.mkdir(parents=True, exist_ok=True)
+                    for f in idx_src.glob("*.enc"):
+                        dst = dst_dir / f.name
+                        s = f.stat()
+                        if dst.exists():
+                            d = dst.stat()
+                            if d.st_size == s.st_size and int(d.st_mtime) >= int(s.st_mtime):
+                                continue
+                        data = f.read_bytes()
+                        tmp = dst.with_suffix(dst.suffix + ".tmp")
+                        tmp.write_bytes(data)
+                        if tmp.stat().st_size != len(data):
+                            raise OSError("short index mirror write")
+                        tmp.replace(dst)
+                        idx_copied += 1
+                    if src_files:
+                        for dst in dst_dir.glob("*.enc"):
+                            if dst.name not in src_files:
+                                dst.unlink()
+                                idx_pruned += 1
+                    for stray in dst_dir.glob("*.tmp"):
+                        try:
+                            stray.unlink()
+                        except OSError:
+                            pass
+                except Exception as exc:  # noqa: BLE001
+                    self.log.warning("mirror index sync to %s failed: %s", mount, exc)
+                    res["errors"] = res.get("errors", 0) + 1
+        res["index_files_copied"] = idx_copied
+        res["index_files_pruned"] = idx_pruned
+        self.log.info("mirror sync (%s): %s", reason or "periodic", res)
+        if any(res.get(k) for k in ("files_copied", "files_pruned", "snapshots_pruned",
+                                    "index_files_copied", "index_files_pruned")):
+            try:
+                self._verify_mirrors("after sync")
+            except Exception as exc:  # noqa: BLE001
+                self.log.debug("post-sync verify failed: %s", exc)
+        return res
+
+    def _verify_mirrors(self, reason: str = "") -> dict:
+        """Read-only integrity check: confirm every mirror volume is a true 1:1 copy
+        of the primary vault AND the replicated search index. Caches the report to
+        MIRROR_INTEGRITY for telemetry + `cvtool storage verify`."""
+        mirror_entries = [e for e in self._ext_stores
+                          if e.get("kind") == "mirror" and e["store_id"] in self._ext_mounts]
+        report: dict = {"mirrors": len(mirror_entries),
+                        "checked_at": _now_iso(), "in_sync": True, "stores": []}
+        if not mirror_entries:
+            report["in_sync"] = None
+            self._write_mirror_integrity(report)
+            return report
+        try:
+            vault_rep = self.vault.verify_mirrors()
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("mirror verify (data) failed: %s", exc)
+            vault_rep = {"roots": [], "in_sync": False, "error": str(exc)[:200]}
+        by_root = {r.get("mirror_root"): r for r in vault_rep.get("roots", [])}
+        idx_src = DATA / "search-index"
+        src_idx = {f.name: f.stat().st_size for f in idx_src.glob("*.enc")} if idx_src.is_dir() else {}
+        for e in mirror_entries:
+            sid = e["store_id"]
+            mount = self._ext_mounts.get(sid)
+            data_root = str(Path(mount) / "vault" / "protected") if mount else ""
+            drep = by_root.get(data_root, {})
+            idx_dir = Path(mount) / "search-index" if mount else None
+            mir_idx = ({f.name: f.stat().st_size for f in idx_dir.glob("*.enc")}
+                       if idx_dir and idx_dir.is_dir() else {})
+            idx_missing = sum(1 for n, s in src_idx.items() if mir_idx.get(n) != s)
+            idx_extra = sum(1 for n in mir_idx if n not in src_idx)
+            data_ok = bool(drep.get("in_sync"))
+            store_ok = data_ok and idx_missing == 0 and idx_extra == 0
+            report["stores"].append({
+                "store_id": sid, "name": e.get("name", "Mirror"),
+                "serial": e.get("serial", ""), "mirror_of_id": e.get("mirror_of_id"),
+                "connected": bool(drep.get("connected", bool(mount))),
+                "in_sync": store_ok,
+                "data": {k: drep.get(k) for k in (
+                    "primary_snapshots", "mirror_snapshots", "primary_files",
+                    "mirror_files", "primary_bytes", "mirror_bytes", "missing",
+                    "extra", "sample_missing", "sample_extra")},
+                "index": {"primary_files": len(src_idx), "mirror_files": len(mir_idx),
+                          "missing": idx_missing, "extra": idx_extra},
+            })
+            if not store_ok:
+                report["in_sync"] = False
+        self._write_mirror_integrity(report)
+        self.log.info("mirror verify (%s): in_sync=%s stores=%d",
+                      reason or "scheduled", report["in_sync"], len(report["stores"]))
+        return report
+
+    def _write_mirror_integrity(self, report: dict) -> None:
+        try:
+            MIRROR_INTEGRITY.write_text(json.dumps(report))
+        except Exception as exc:  # noqa: BLE001
+            self.log.debug("could not cache mirror integrity: %s", exc)
+
+    def _read_mirror_integrity(self) -> dict:
+        try:
+            return json.loads(MIRROR_INTEGRITY.read_text())
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _reload_ext_storage(self) -> None:
+        """Re-read the registry and (re)mount known drives, then re-apply mirror
+        routing. Triggered by SIGHUP so a drive that cvtool set up (as root, outside
+        the sandbox) becomes usable without a full restart."""
+        self.log.info("external storage reload requested (SIGHUP)")
+        self._ext_stores = self._load_ext_registry()
+        self._mount_ext_stores()
+        # Drop the heavy-telemetry cache so the next heartbeat reflects the change.
+        self._heavy_at = 0.0
+        self.log.info("external storage reloaded — %d store(s), %d mounted",
+                      len(self._ext_stores), len(self._ext_mounts))
+
+    def _store_usable(self, store_id: str, mount: Optional[str], kind: str) -> tuple[bool, dict]:
+        """Determine whether an external/mirror store is genuinely usable right now,
+        distinguishing 'mounted but dead' (a dropped USB drive whose ext4 is in a
+        shutdown/error state — ismount() still True) from truly connected. Logs the
+        reason once whenever a store's usable state changes so 'why is it offline'
+        is always answerable from the appliance log. Returns (usable, mount_health)."""
+        present = bool(sysinfo.resolve_device_by_serial(
+            next((e.get("serial", "") for e in self._ext_stores
+                  if e.get("store_id") == store_id), "")))
+        mh = sysinfo.mount_health(mount) if mount else {
+            "mounted": False, "healthy": False, "reason": "not mounted", "options": ""}
+        usable = bool(mh.get("healthy"))
+        if not mh.get("mounted") and not present:
+            mh["reason"] = mh.get("reason") or "drive not connected"
+        prev = self._store_conn.get(store_id)
+        if prev != usable:
+            self._store_conn[store_id] = usable
+            if usable:
+                self.log.info("external store %s (%s) is CONNECTED and healthy at %s",
+                              store_id, kind, mount)
+            else:
+                self.log.warning("external store %s (%s) is OFFLINE: %s "
+                                 "(mount=%s options=%s)", store_id, kind,
+                                 mh.get("reason") or "unknown", mount or "-",
+                                 mh.get("options") or "-")
+        return usable, mh
+
+    def _external_storage_telemetry(self) -> tuple[list[dict], list[dict], str]:
+        """(ext_store_rows, detected_devices, worst_drive_health) for the heartbeat.
+
+        ext_store_rows are Arkive-managed stores with per-store capacity + real
+        health (a mounted-but-dead drive reports 'disconnected', not 'healthy');
+        detected_devices are raw removable candidates the cloud offers for setup;
+        worst_drive_health folds every external/mirror store into the appliance-wide
+        drive-health signal so a failed mirror drags the overall status down."""
+        detected = sysinfo.detect_external_storage(self._excluded_disks())
+        rows: list[dict] = []
+        integ = self._read_mirror_integrity()
+        integ_by_store = {s.get("store_id"): s for s in (integ.get("stores") or [])}
+        worst = "healthy"
+        for e in self._ext_stores:
+            sid = e["store_id"]
+            kind = e.get("kind", "external")
+            mount = self._ext_mounts.get(sid)
+            if mount and not os.path.ismount(mount):
+                mount = None  # unmounted since we last mounted it
+            connected, mh = self._store_usable(sid, mount, kind)
+            cap = used = 0
+            if connected:
+                try:
+                    st = os.statvfs(mount)
+                    cap = st.f_blocks * st.f_frsize
+                    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+                except OSError as exc:
+                    self.log.warning("statvfs failed for store %s at %s: %s", sid, mount, exc)
+                    connected = False
+            drive_health = "healthy" if connected else "disconnected"
+            if connected and mh.get("read_only"):
+                drive_health = "degraded"
+            if drive_health != "healthy":
+                worst = "degraded" if worst == "healthy" else worst
+            health = {"drive_health": drive_health,
+                      "device": mount or "", "serial": e.get("serial", ""),
+                      "mirror_of": e.get("mirror_of_id")}
+            if mh.get("reason"):
+                health["reason"] = mh["reason"]
+            if e.get("kind") == "mirror":
+                si = integ_by_store.get(sid)
+                if si is not None:
+                    health["mirror_integrity"] = {
+                        "in_sync": si.get("in_sync"),
+                        "checked_at": integ.get("checked_at"),
+                        "data_missing": (si.get("data") or {}).get("missing"),
+                        "data_extra": (si.get("data") or {}).get("extra"),
+                        "index_missing": (si.get("index") or {}).get("missing"),
+                        "index_extra": (si.get("index") or {}).get("extra"),
+                        "primary_files": (si.get("data") or {}).get("primary_files"),
+                        "mirror_files": (si.get("data") or {}).get("mirror_files"),
+                        "primary_bytes": (si.get("data") or {}).get("primary_bytes"),
+                        "mirror_bytes": (si.get("data") or {}).get("mirror_bytes"),
+                    }
+                    # An out-of-sync (but connected) mirror is a degraded signal.
+                    if connected and si.get("in_sync") is False and worst == "healthy":
+                        worst = "degraded"
+                else:
+                    health["mirror_integrity"] = {"in_sync": None, "checked_at": None}
+            rows.append({
+                "name": e.get("name", "External Storage"),
+                "kind": kind,
+                "store_id": sid,
+                "device_serial": e.get("serial", ""),
+                "mirror_of_id": e.get("mirror_of_id"),
+                "capacity_bytes": cap,
+                "used_bytes": used,
+                "free_bytes": max(cap - used, 0),
+                "connected": connected,
+                "state": "ready" if connected else "disconnected",
+                "health": health,
+            })
+        return rows, detected, worst
+
+    def _setup_external_storage(self, params: dict) -> dict:
+        """Handle a cloud-signed SETUP_STORAGE command. The privileged format+mount
+        runs in the ROOT helper; we then adopt the ready volume in place."""
+        store_id = params.get("storeId")
+        serial = params.get("serial") or ""
+        if not store_id:
+            return {"error": "missing storeId"}
+        res = self._delegate_storage("setup", params, timeout=240)
+        if not res.get("ok"):
+            self.log.error("external storage setup failed for %s (%s): %s",
+                           params.get("name"), serial, res.get("error") or "unknown")
+            return {"error": res.get("error") or "storage setup failed", "store_id": store_id}
+        self._ext_stores = [e for e in self._ext_stores
+                            if e.get("store_id") != store_id and e.get("serial") != serial]
+        self._ext_stores.append({
+            "store_id": store_id, "serial": serial, "name": res["name"],
+            "kind": res["kind"], "mirror_of_id": res.get("mirror_of_id")})
+        self._save_ext_registry()
+        self._ext_mounts[store_id] = res["mountpoint"]
+        self._apply_mirror_roots()
+        self._heavy_at = 0.0
+        self.log.info("external storage set up: %s (%s) at %s",
+                      res["name"], serial, res["mountpoint"])
+        return {"store_id": store_id, "ready": True,
+                "capacity_bytes": res["capacity_bytes"], "used_bytes": res["used_bytes"]}
+
+    def _forget_external_storage(self, params: dict) -> dict:
+        """Unmount + deregister an external store (data on the drive is left intact)."""
+        store_id = params.get("storeId")
+        mount = self._ext_mounts.pop(store_id, None)
+        res = self._delegate_storage(
+            "forget", {"storeId": store_id, "mountpoint": mount}, timeout=60)
+        if not res.get("ok"):
+            self.log.warning("external storage forget helper error for %s: %s",
+                             store_id, res.get("error") or "unknown")
+        self._ext_stores = [e for e in self._ext_stores if e.get("store_id") != store_id]
+        self._store_conn.pop(store_id, None)
+        self._save_ext_registry()
+        self._apply_mirror_roots()
+        self._heavy_at = 0.0
+        self.log.info("external storage forgotten: %s", store_id)
+        return {"store_id": store_id, "forgotten": True}
+
+    def _reconfigure_external_storage(self, params: dict) -> dict:
+        """Toggle a store's mirror role without touching data: update the registry,
+        rewrite the on-disk marker, and re-apply mirror routing."""
+        store_id = params.get("storeId")
+        entry = next((e for e in self._ext_stores if e.get("store_id") == store_id), None)
+        if not entry:
+            return {"error": "unknown store"}
+        entry["kind"] = params.get("kind", entry.get("kind", "external"))
+        entry["mirror_of_id"] = params.get("mirrorOfId")
+        self._save_ext_registry()
+        mount = self._ext_mounts.get(store_id)
+        if mount and os.path.ismount(mount):
+            try:
+                with open(os.path.join(mount, storage_ops.MARKER), "w") as f:
+                    json.dump({"store_id": store_id, "name": entry.get("name"),
+                               "kind": entry["kind"], "mirror_of_id": entry["mirror_of_id"],
+                               "serial": entry.get("serial"), "written_at": int(time.time())}, f)
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("could not rewrite marker for %s: %s", store_id, exc)
+        self._apply_mirror_roots()
+        self._heavy_at = 0.0
+        self.log.info("external storage reconfigured: %s kind=%s mirror_of=%s",
+                      store_id, entry["kind"], entry["mirror_of_id"])
+        return {"store_id": store_id, "kind": entry["kind"],
+                "mirror_of_id": entry["mirror_of_id"]}
+
+    def _stage_index(self, params: dict) -> dict:
+        """Store a DR copy of a scope's encrypted search index (pulled over the
+        authenticated HTTPS channel; tiny legacy payloads may arrive inline). The
+        file stays encrypted at rest."""
+        import base64
+        scope = params.get("scope", "tenant")
+        scope_id = params.get("scopeId", "")
+        store_id = params.get("storeId", "")
+        idx_dir = DATA / "search-index"
+        safe = "".join(c for c in f"{scope}-{scope_id}" if c.isalnum() or c in "-_")
+        path = idx_dir / f"{safe}.sqlite.enc"
+        try:
+            idx_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.log.error("stage index: cannot create %s: %s", idx_dir, exc)
+            return {"error": str(exc)}
+        blob = params.get("indexB64")
+        if blob:
+            self.log.info("stage index: writing inline payload scope=%s:%s", scope, scope_id)
+            try:
+                path.write_bytes(base64.b64decode(blob))
+            except (OSError, ValueError) as exc:
+                self.log.error("stage index (inline) failed scope=%s:%s: %s", scope, scope_id, exc)
+                return {"error": str(exc)}
+        elif params.get("pull"):
+            url = (f"{self._base()}/appliance/index-replica"
+                   f"?scope={scope}&scopeId={scope_id}&storeId={store_id}")
+            self.log.info("stage index: pulling scope=%s:%s (%s bytes expected) from %s",
+                          scope, scope_id, params.get("bytes"), url)
+            try:
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                with httpx.Client(timeout=120) as c:
+                    with c.stream("GET", url, headers=self._headers()) as resp:
+                        if resp.status_code != 200:
+                            body = resp.read()[:200]
+                            self.log.error("stage index: pull HTTP %s for scope=%s:%s — %s",
+                                           resp.status_code, scope, scope_id, body)
+                            return {"error": f"index pull failed: HTTP {resp.status_code}"}
+                        with open(tmp, "wb") as fh:
+                            for chunk in resp.iter_bytes(1024 * 256):
+                                fh.write(chunk)
+                tmp.replace(path)
+            except Exception as exc:  # noqa: BLE001
+                self.log.exception("stage index: pull failed scope=%s:%s", scope, scope_id)
+                return {"error": f"index pull failed: {exc}"}
+        else:
+            self.log.warning("stage index: no payload and no pull flag scope=%s:%s", scope, scope_id)
+            return {"error": "missing index payload"}
+        size = path.stat().st_size
+        self.log.info("staged search index replica scope=%s:%s (%d bytes) at %s",
+                      scope, scope_id, size, path)
+        return {"staged": True, "scope": scope, "scope_id": scope_id,
+                "bytes": size, "object_count": params.get("objectCount")}
+
     def _heavy_telemetry(self) -> dict:
         """The expensive telemetry — a full-vault capacity walk plus the storage
         SMART/RAID/filesystem subprocesses — computed on a BACKGROUND thread and
@@ -520,6 +1008,18 @@ class Agent:
             # the shared system disk fall back to the vault's own content size.
             vol_used = (disk["disk_used_bytes"] if STORAGE_KIND == "dedicated"
                         else cap.get("used_bytes", 0))
+            primary = sysinfo.storage_report(
+                str(STORAGE_ROOT), STORAGE_NAME, STORAGE_KIND, raw_total, vol_used)
+            # External (USB) storage: Arkive-managed store rows + raw detected
+            # devices + the worst external drive-health signal. Runs here (off the
+            # hot path) because it probes each drive (lsblk/statvfs/write test).
+            ext_rows, detected_devices, ext_worst = self._external_storage_telemetry()
+            # Appliance-wide drive health = worst of the primary volume + every
+            # external/mirror store, so a failed/degraded/disconnected drive is
+            # reflected in the overall status instead of always reading "healthy".
+            primary_health = (primary[0].get("health", {}) if primary else {}).get("drive_health", "healthy")
+            order = {"healthy": 0, "degraded": 1, "disconnected": 2, "failing": 3}
+            overall = max((primary_health, ext_worst), key=lambda h: order.get(h, 1))
             self._heavy_cache = {
                 "capacity_total_bytes": raw_total,
                 "capacity_used_bytes": vol_used,
@@ -528,8 +1028,9 @@ class Agent:
                 "objects": cap.get("objects", cap.get("snapshots", 0)),
                 "temperature_c": sysinfo.drive_temperature_c() or 34,
                 "data_mount": sysinfo.mount_device(str(STORAGE_ROOT)),
-                "storages": sysinfo.storage_report(
-                    str(STORAGE_ROOT), STORAGE_NAME, STORAGE_KIND, raw_total, vol_used),
+                "storages": primary + ext_rows,
+                "external_devices": detected_devices,
+                "drive_health": overall,
             }
             self._heavy_at = time.time()
         except Exception as exc:  # noqa: BLE001 — telemetry must never crash the agent
@@ -579,15 +1080,18 @@ class Agent:
             "os_storage": sysinfo.os_disk(),
             "snapshots": heavy.get("snapshots", 0),
             "objects": heavy.get("objects", 0),
-            "drive_health": "healthy",
+            "drive_health": heavy.get("drive_health", "healthy"),
             "power": "ok",
             "temperature_c": heavy.get("temperature_c", 34),
             # Where recovery data physically lives on the appliance.
             "data_path": str(STORAGE_ROOT / "vault" / "protected"),
             "data_mount": heavy.get("data_mount", ""),
             "storage_kind": STORAGE_KIND,
-            # Per-storage capacity + health (mapped onto the cloud storage objects).
+            # Per-storage capacity + health (primary volume + every Arkive-managed
+            # external/mirror store) mapped onto the cloud storage objects, plus the
+            # raw removable devices detected for possible setup.
             "storages": heavy.get("storages", []),
+            "external_devices": heavy.get("external_devices", []),
             # Encryption
             "quantum_safe": bool(pq),
             "content_alg": "AES-256-GCM",
@@ -653,6 +1157,9 @@ class Agent:
             try:
                 if ctype == "OPEN_INGEST_WINDOW":
                     receipt, result = self._do_ingest(payload["parameters"])
+                    if not result.get("error"):
+                        threading.Thread(target=self._sync_mirrors, args=("after ingest",),
+                                         daemon=True).start()
                 elif ctype == "OPEN_RECOVERY_WINDOW":
                     result = self._request_recovery(payload["parameters"])
                 elif ctype == "QUARANTINE":
@@ -666,6 +1173,17 @@ class Agent:
                     result = {"applied": True}
                 elif ctype == "REQUEST_VERIFICATION":
                     result = {"integrity": "verified"}
+                elif ctype == "SETUP_STORAGE":
+                    result = await asyncio.to_thread(self._setup_external_storage, payload["parameters"])
+                elif ctype == "FORGET_STORAGE":
+                    result = await asyncio.to_thread(self._forget_external_storage, payload["parameters"])
+                elif ctype == "RECONFIGURE_STORAGE":
+                    result = self._reconfigure_external_storage(payload["parameters"])
+                elif ctype == "STAGE_INDEX":
+                    result = await asyncio.to_thread(self._stage_index, payload["parameters"])
+                    if not result.get("error"):
+                        threading.Thread(target=self._sync_mirrors, args=("after index stage",),
+                                         daemon=True).start()
                 else:
                     result = {"note": f"acknowledged {ctype}"}
             except Exception as exc:
@@ -913,6 +1431,14 @@ _INTEG_WORKER = None
 async def startup() -> None:
     agent.log.info("appliance agent starting (v%s, model=%s)",
                    settings.software_version, settings.model)
+    # SIGHUP → reload external storage in place (cvtool signals us after it sets
+    # up a drive, so it becomes usable without restarting the agent).
+    try:
+        import signal
+        asyncio.get_running_loop().add_signal_handler(
+            signal.SIGHUP, agent._reload_ext_storage)
+    except Exception as exc:  # noqa: BLE001 — not fatal; restart still works
+        agent.log.debug("could not install SIGHUP handler: %s", exc)
     if not agent.activated and settings.linking_code:
         try:
             await agent.activate(settings.linking_code)
@@ -922,6 +1448,7 @@ async def startup() -> None:
         asyncio.create_task(_heartbeat_loop())
         asyncio.create_task(_integrations_loop())
         asyncio.create_task(_provision_loop())
+        asyncio.create_task(_integrity_loop())
     elif not settings.linking_code:
         # Zero-touch: no linking code was supplied. Register as an un-claimed unit
         # and show a pairing code on the local web UI until a customer claims it.
@@ -950,6 +1477,7 @@ async def _registration_loop() -> None:
         asyncio.create_task(_heartbeat_loop())
         asyncio.create_task(_integrations_loop())
         asyncio.create_task(_provision_loop())
+        asyncio.create_task(_integrity_loop())
 
 
 async def _heartbeat_loop() -> None:
@@ -964,6 +1492,19 @@ async def _heartbeat_loop() -> None:
             else:
                 agent.log.error("heartbeat error: %s", exc)
         await asyncio.sleep(interval)
+
+
+async def _integrity_loop() -> None:
+    """Periodically verify every mirror volume is a true 1:1 copy of the primary
+    (data + index). First pass shortly after boot, then every 6h; the result is
+    cached + shipped in telemetry so the admin/customer views show drive status."""
+    await asyncio.sleep(90)  # let mounts settle + a first sync happen
+    while True:
+        try:
+            await asyncio.to_thread(agent._verify_mirrors, "scheduled")
+        except Exception as exc:  # noqa: BLE001
+            agent.log.warning("scheduled mirror verify failed: %s", exc)
+        await asyncio.sleep(6 * 3600)
 
 
 async def _integrations_loop() -> None:
@@ -1043,6 +1584,7 @@ async def activate_endpoint(body: dict):
     asyncio.create_task(_heartbeat_loop())
     asyncio.create_task(_integrations_loop())
     asyncio.create_task(_provision_loop())
+    asyncio.create_task(_integrity_loop())
     return {"activated": True, "appliance_id": d["appliance_id"]}
 
 

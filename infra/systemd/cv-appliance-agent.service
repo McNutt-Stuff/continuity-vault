@@ -19,7 +19,12 @@ ExecStart=/opt/continuity-vault/.venv/bin/uvicorn agent.main:app --host 0.0.0.0 
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
-NoNewPrivileges=true
+# NoNewPrivileges is intentionally NOT set: the reverse-tunnel remote terminal
+# spawns as a child of this unit, and privileged `cvtool` commands (storage
+# setup/forget, update, restart) auto-elevate with `sudo -n` (whitelisted in
+# /etc/sudoers.d/cvtool). NoNewPrivileges=true would inherit to that shell and
+# block sudo entirely, defeating the sudoers rule. ProtectSystem=strict +
+# ReadWritePaths still confine the agent's own writes.
 ProtectSystem=strict
 ProtectHome=true
 # The system disk data dir plus the optional dedicated Arkive storage volume

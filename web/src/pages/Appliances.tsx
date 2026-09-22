@@ -97,10 +97,14 @@ function healthOf(a: Appliance): { level: HealthLevel; label: string } {
   if (!isOnline(a)) return { level: "warning", label: "Offline" };
   const stores = a.stores ?? [];
   for (const s of stores) {
+    if (s.connected === false || s.state === "disconnected")
+      return { level: "warning", label: `${s.kind === "mirror" ? "Mirror" : "Drive"} disconnected` };
     if (s.capacity_bytes > 0 && s.used_bytes / s.capacity_bytes >= 0.9)
       return { level: "warning", label: "Storage nearly full" };
     if (s.health?.drive_health && s.health.drive_health !== "healthy")
       return { level: "warning", label: "Drive health" };
+    if (s.kind === "mirror" && s.health?.mirror_integrity?.in_sync === false)
+      return { level: "warning", label: "Mirror out of sync" };
   }
   return { level: "healthy", label: "Healthy" };
 }

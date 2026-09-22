@@ -261,18 +261,100 @@ def drive_temperature_c() -> Optional[int]:
     return None
 
 
+def _mount_options(mountpoint: str) -> str:
+    """Comma-joined live mount options for ``mountpoint`` from /proc/self/mountinfo,
+    combining the per-mount option field with the per-superblock options after the
+    ' - ' separator (that's where ext4's 'shutdown'/error flags surface)."""
+    try:
+        with open("/proc/self/mountinfo") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) > 5 and parts[4] == mountpoint:
+                    per_mount = parts[5]
+                    super_opts = ""
+                    if "-" in parts:
+                        sep = parts.index("-")
+                        if len(parts) > sep + 3:
+                            super_opts = parts[sep + 3]
+                    return ",".join(x for x in (per_mount, super_opts) if x)
+    except OSError:
+        pass
+    return ""
+
+
+def mount_health(mountpoint: str) -> dict:
+    """Assess whether a mounted volume is actually USABLE, not merely present.
+
+    A removable/USB drive that drops out (cable, power, controller/IO fault) usually
+    stays in the mount table, but the kernel puts its filesystem into a shutdown or
+    read-only-error state (e.g. ext4 'shutdown' in the mount options). ``os.path.
+    ismount()`` still returns True for such a dead mount, so it must never be trusted
+    on its own. Returns {mounted, healthy, read_only, reason, options}. ``reason`` is
+    a short human string for logging + surfacing why a drive is considered offline."""
+    res = {"mounted": False, "healthy": False, "read_only": False,
+           "reason": "", "options": ""}
+    if not mountpoint:
+        res["reason"] = "no mountpoint"
+        return res
+    try:
+        if not os.path.ismount(mountpoint):
+            res["reason"] = "not mounted"
+            return res
+    except OSError as exc:
+        res["reason"] = f"stat failed: {exc}"
+        return res
+    res["mounted"] = True
+    opts = _mount_options(mountpoint)
+    res["options"] = opts
+    flags = opts.split(",")
+    dead = [f for f in ("shutdown", "error") if f in flags]
+    if dead:
+        # ext4 marks a dropped/errored device as 'shutdown' — the drive is gone.
+        res["reason"] = f"filesystem {'/'.join(dead)} (drive disconnected or I/O error)"
+        return res
+    if "ro" in flags:
+        res["read_only"] = True
+    # statvfs surfaces EIO on a truly dead device (cached metadata can still pass,
+    # so this is a secondary check after the mount-option inspection above).
+    try:
+        os.statvfs(mountpoint)
+    except OSError as exc:
+        res["reason"] = f"statvfs error: {exc}"
+        return res
+    # Definitive probe: a dropped drive fails the write with EROFS/EIO.
+    probe = os.path.join(mountpoint, ".arkive-health")
+    try:
+        with open(probe, "w") as fh:
+            fh.write("ok")
+        os.unlink(probe)
+    except OSError as exc:
+        res["read_only"] = True
+        res["reason"] = f"not writable: {exc}"
+        return res
+    res["healthy"] = True
+    return res
+
+
 def storage_report(path: str, name: str, kind: str, raw_total: int, used_bytes: int) -> list[dict]:
     """Per-storage capacity + health the cloud maps onto ApplianceStorage rows.
 
-    Prototype reports the primary (built-in) volume; extra health probes (SMART,
-    RAID, temperature) populate only when the tooling/hardware is present."""
+    Reports the primary (built-in/dedicated) volume; drive_health is derived from
+    SMART + software-RAID so a failing disk or degraded array is reflected instead
+    of always reading 'healthy'."""
     disk = disk_stats(path)
     total = raw_total or disk["disk_total_bytes"]
     used = used_bytes or disk["disk_used_bytes"]
+    smart = smart_for_path(path)
+    raid = raid_status()
+    drive_health = "healthy"
+    if raid.get("enabled") and raid.get("status") and raid["status"] != "optimal":
+        drive_health = "degraded"
+    if smart.get("enabled") and smart.get("status") == "failing":
+        drive_health = "failing"
     health = {
-        "drive_health": "healthy",
-        "smart": smart_for_path(path),
-        "raid": raid_status(),
+        "drive_health": drive_health,
+        "smart": smart,
+        "raid": raid,
         "filesystem": fs_type(path),
         "device": mount_device(path),
     }

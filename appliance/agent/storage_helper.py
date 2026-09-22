@@ -1,10 +1,10 @@
 """
 Privileged external-storage helper for the appliance.
 
-The agent runs sandboxed (systemd ``NoNewPrivileges=true`` + ``ProtectSystem=strict``
-as ``cvagent``) so it CANNOT partition/format/mount a USB/removable drive itself —
-and it can't ``sudo`` (NoNewPrivileges blocks escalation). So the portal "Set up
-detected drive" flow can't run inside the agent process.
+The agent runs sandboxed (systemd ``ProtectSystem=strict`` as ``cvagent``, writes
+confined to ``ReadWritePaths``) so it CANNOT partition/format/mount a USB/removable
+drive itself. So the portal "Set up detected drive" flow can't run inside the agent
+process — it's delegated to this privileged helper.
 
 This helper runs as ROOT (a tiny oneshot triggered by ``cv-appliance-storage.path``
 whenever the agent drops a request into the queue directory). It performs the
