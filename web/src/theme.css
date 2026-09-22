@@ -141,6 +141,7 @@ h3 { font-size: 15px; }
   border-radius: var(--radius-sm); border: 1px solid var(--border);
   background: var(--bg-elev-2); color: var(--text); cursor: pointer;
   font-weight: 550; font-size: 13.5px; transition: filter .12s, background .12s;
+  white-space: nowrap;
 }
 .btn:hover { filter: brightness(1.12); }
 .btn.primary { background: linear-gradient(135deg, var(--brand), #3a67e6); border-color: transparent; color: #fff; }

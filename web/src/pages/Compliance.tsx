@@ -139,7 +139,7 @@ export default function Compliance() {
              gridAutoRows: "1fr", alignItems: "stretch" }}>
           {frameworks.map((f) => (
             <div key={f.framework} className="card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column",
-                 minHeight: 176, borderColor: f.enabled ? "var(--accent,#4f7cff)" : undefined }}>
+                 height: "100%", marginTop: 0, minHeight: 176, borderColor: f.enabled ? "var(--accent,#4f7cff)" : undefined }}>
               <div className="spread" style={{ alignItems: "flex-start" }}>
                 <div>
                   <div style={{ fontSize: 14, fontWeight: 700 }}>{f.label}</div>
