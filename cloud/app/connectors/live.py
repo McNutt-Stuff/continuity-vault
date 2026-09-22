@@ -129,6 +129,10 @@ def _is_auth_status(code: int) -> bool:
 # error reasons — transient, NOT a loss of authorization.
 _GMAIL_RATE_REASONS = ("rateLimitExceeded", "userRateLimitExceeded",
                        "dailyLimitExceeded", "quotaExceeded")
+# Seconds to wait before resuming after a per-user rate limit (the quota window is
+# per-minute). The streaming pull sets this as the cursor's ``resume_after`` so the
+# background job loop pauses and resumes cleanly instead of hammering the API.
+_GMAIL_RATE_BACKOFF = 45.0
 
 
 class _GmailRateLimited(Exception):
@@ -156,23 +160,27 @@ def _gmail_message(c: httpx.Client, headers: dict, mid: str,
             return None  # deleted between listing and fetch
         if r.status_code == 403:
             # A 403 on ONE message must not abort the whole (back)fill. Gmail's
-            # per-user rate limit surfaces as a 403 (rate/quota reason) — back off
-            # and retry; a genuinely restricted message (confidential mode, admin
-            # policy) is skipped. Only true auth failures are 401 (raised below).
+            # per-user rate limit surfaces as a 403 (rate/quota reason). One quick
+            # retry, then DEFER the whole run (the streaming pull turns this into a
+            # cursor resume_after so the job loop waits for the quota window and
+            # resumes) — rather than skipping the message (data loss) and logging a
+            # warning per message (log spam). A genuine non-rate 403 (confidential
+            # mode / admin policy) skips just that one. Only 401 is a real auth fail.
             reason = _gmail_403_reason(r)
-            if reason in _GMAIL_RATE_REASONS and attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            logger.warning("gmail message %s skipped (HTTP 403 %s)", mid,
-                           reason or "forbidden")
+            if reason in _GMAIL_RATE_REASONS:
+                if attempt < 2:
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                raise _GmailRateLimited(f"Gmail rate limit ({reason}) on messages.get")
+            logger.debug("gmail message %s skipped (403 %s)", mid, reason or "forbidden")
             return None
         if r.status_code >= 500:
             # Transient Gmail backendError (500/503) on ONE message must not abort
             # the crawl: back off and retry, then skip that message.
             if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
+                time.sleep(1.0 * (attempt + 1))
                 continue
-            logger.warning("gmail message %s skipped (HTTP %s)", mid, r.status_code)
+            logger.debug("gmail message %s skipped (HTTP %s)", mid, r.status_code)
             return None
         r.raise_for_status()
         m = r.json()
@@ -377,6 +385,7 @@ def stream_gmail(access_token: str, cursor: Optional[dict] = None,
 
     An optional ``sinceDate`` sets a floor on how deep the backfill goes.
     """
+    import time
     headers = {"Authorization": f"Bearer {access_token}"}
     cursor = cursor or {}
     options = options or {}
@@ -414,10 +423,25 @@ def stream_gmail(access_token: str, cursor: Optional[dict] = None,
             logger.info("gmail history %s expired; resetting the recent watermark "
                         "(older mail is covered by the backfill track)", history_id)
             ids = []
-        for mid in ids:
-            o = _emit(c, mid)
-            if o:
-                yield o
+        except _GmailRateLimited as exc:
+            logger.info("gmail: %s — pausing recent sync ~%ds", exc, int(_GMAIL_RATE_BACKOFF))
+            if state is not None:
+                state["cursor"] = {"history_id": str(history_id), "has_more": True,
+                                   "resume_after": time.time() + _GMAIL_RATE_BACKOFF}
+            return
+        try:
+            for mid in ids:
+                o = _emit(c, mid)
+                if o:
+                    yield o
+        except _GmailRateLimited as exc:
+            # Clean pause: keep the same watermark, let the job loop wait for the
+            # quota window and resume. Already-ingested mail dedups on the retry.
+            logger.info("gmail: %s — pausing recent sync ~%ds", exc, int(_GMAIL_RATE_BACKOFF))
+            if state is not None:
+                state["cursor"] = {"history_id": str(history_id), "has_more": True,
+                                   "resume_after": time.time() + _GMAIL_RATE_BACKOFF}
+            return
         if state is not None:
             state["cursor"] = {"history_id": _gmail_history_id(c, headers)}
 
@@ -427,6 +451,7 @@ def _stream_gmail_backfill(c, headers, cursor, state, base_query_parts,
     """Page the mailbox backwards (newest→oldest) in one resumable chunk. Runs
     independently of the recent track and covers the whole mailbox (content-hash
     dedup makes any overlap with recent a no-op); ``sinceDate`` sets a floor."""
+    import time
     if cursor.get("done"):
         if state is not None:
             state["cursor"] = cursor
@@ -442,19 +467,30 @@ def _stream_gmail_backfill(c, headers, cursor, state, base_query_parts,
     emitted = 0
     exhausted = False
     while emitted < _GMAIL_BACKFILL_CHUNK:
+        page_token = next_token   # the token that fetches THIS page (for resume)
         params: dict = {"maxResults": 500}
         if query:
             params["q"] = query
         if include_spam_trash:
             params["includeSpamTrash"] = "true"
-        if next_token:
-            params["pageToken"] = next_token
-        data = _gmail_list_page(c, headers, params)
-        for ref in data.get("messages", []):
-            o = emit(c, ref["id"])
-            if o:
-                yield o
-                emitted += 1
+        if page_token:
+            params["pageToken"] = page_token
+        try:
+            data = _gmail_list_page(c, headers, params)
+            for ref in data.get("messages", []):
+                o = emit(c, ref["id"])
+                if o:
+                    yield o
+                    emitted += 1
+        except _GmailRateLimited as exc:
+            # Clean pause: re-fetch THIS page after the quota resets (dedup skips
+            # the messages already ingested this chunk). No per-message log spam,
+            # no skipped mail — the job loop waits for resume_after and resumes.
+            logger.info("gmail: %s — pausing backfill ~%ds", exc, int(_GMAIL_RATE_BACKOFF))
+            if state is not None:
+                state["cursor"] = {"page_token": page_token, "has_more": True,
+                                   "resume_after": time.time() + _GMAIL_RATE_BACKOFF}
+            return
         next_token = data.get("nextPageToken")
         if not next_token:
             exhausted = True
