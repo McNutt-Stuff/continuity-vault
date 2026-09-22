@@ -256,6 +256,10 @@ class Agent:
         # Assigned customer node (federated fleets): once set, all signaling,
         # commands and receipts go here instead of the control plane.
         self._node_url: Optional[str] = None
+        # A node that just rejected us (e.g. right after a switchover, before it
+        # replicated our record) is put on a short cooldown so we stay on the
+        # control plane instead of re-adopting it and flip-flopping every beat.
+        self._node_cooldown: dict[str, float] = {}
         self._load_registration()
         if not self.activated:
             self._load_pending()
@@ -418,6 +422,18 @@ class Agent:
             self.log.warning("could not persist node url: %s", exc)
         self.log.info("routing to %s", url or settings.cloud_base_url)
 
+    def _adopt_node(self, url: Optional[str]) -> None:
+        """Adopt the assigned-node URL the CP advertises, UNLESS that node is on a
+        post-rejection cooldown (it just switched over and hasn't replicated our
+        record yet). Staying on the control plane a little longer avoids a per-beat
+        node↔CP flip-flop until the new active node is warm."""
+        url = (url or "").rstrip("/") or None
+        if url and self._node_cooldown.get(url, 0) > time.time():
+            if self._node_url is not None:
+                self._set_node_url(None)  # ride the CP until the cooldown clears
+            return
+        self._set_node_url(url)
+
     async def heartbeat_once(self) -> None:
         # Surface the root self-updater's last outcome (once per run) so a stuck /
         # failing self-update is visible from the control plane.
@@ -441,6 +457,7 @@ class Agent:
                 if self._node_url and base == self._node_url:
                     self.log.warning("assigned node %s unreachable; falling back to control plane",
                                      self._node_url)
+                    self._node_cooldown[self._node_url] = time.time() + 120
                     self._set_node_url(None)
                     base = settings.cloud_base_url
                     r = await client.post(f"{base}/appliance/heartbeat",
@@ -456,6 +473,7 @@ class Agent:
                     and r.status_code in (401, 403, 404)):
                 self.log.warning("assigned node %s rejected heartbeat (%s); falling back to "
                                  "control plane", self._node_url, r.status_code)
+                self._node_cooldown[self._node_url] = time.time() + 120
                 self._set_node_url(None)
                 base = settings.cloud_base_url
                 r = await client.post(f"{base}/appliance/heartbeat",
@@ -475,7 +493,7 @@ class Agent:
                 self.log.warning("heartbeat parse failed: %s", exc)
                 return
             # Adopt the assigned node URL for all subsequent signaling.
-            self._set_node_url(data.get("node_url") or None)
+            self._adopt_node(data.get("node_url") or None)
             # Cloud advertises the current bundle version; the root self-update
             # timer applies it headlessly. Log when an update is pending.
             latest = data.get("latest_version")

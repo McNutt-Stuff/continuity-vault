@@ -287,6 +287,7 @@ def _pull(s) -> int:
         return 0
     n = 0
     skipped = 0
+    deferred: list = []  # rows skipped on the first pass — retried once after all tables land
     with SessionLocal() as db:
         # Deterministic ordering: no autoflush surprises. Each row upserts inside
         # a SAVEPOINT so a single orphan/bad row is skipped (logged) instead of
@@ -294,20 +295,28 @@ def _pull(s) -> int:
         # is durably present before its children (FK safety across tables).
         db.autoflush = False
 
-        def apply_one(model, row) -> bool:
+        def apply_one(model, row, *, quiet=False) -> bool:
             try:
                 pk = list(model.__table__.primary_key.columns)[0].name
                 if not row.get(pk):
-                    logger.warning("replication: skipped %s row with missing pk '%s'",
-                                   getattr(model, "__tablename__", model), pk)
+                    if not quiet:
+                        logger.warning("replication: skipped %s row with missing pk '%s'",
+                                       getattr(model, "__tablename__", model), pk)
                     return False
                 with db.begin_nested():
                     _upsert(db, model, row)
                     db.flush()
                 return True
             except Exception as exc:  # noqa: BLE001
-                logger.warning("replication: skipped a %s row: %s",
-                               getattr(model, "__tablename__", model), str(exc)[:160])
+                # First pass is quiet: a child whose parent lands later in the same
+                # bundle (or mid-failover convergence) is retried below before we
+                # ever warn, so a transient FK skip isn't logged as an error.
+                if quiet:
+                    logger.debug("replication: deferring a %s row: %s",
+                                 getattr(model, "__tablename__", model), str(exc)[:160])
+                else:
+                    logger.warning("replication: skipped a %s row: %s",
+                                   getattr(model, "__tablename__", model), str(exc)[:160])
                 return False
 
         if bundle.get("pricing"):
@@ -318,11 +327,22 @@ def _pull(s) -> int:
             for row in bundle.get(key, []) or []:
                 if exclude:
                     row = {k: v for k, v in row.items() if k not in exclude}
-                if apply_one(model, row):
+                if apply_one(model, row, quiet=True):
                     n += 1
                 else:
-                    skipped += 1
+                    deferred.append((model, row))
             db.commit()  # persist this table before dependent tables
+        # Second pass: every table's parents are now committed, so a row skipped
+        # earlier (its parent came later in the bundle, or a mid-failover ordering
+        # race) usually applies now. Only a row that STILL fails is a genuine
+        # orphan worth a warning — this keeps a switchover's convergence quiet.
+        for model, row in deferred:
+            if apply_one(model, row):
+                n += 1
+            else:
+                skipped += 1
+        if deferred:
+            db.commit()
     # New Config Objects / source links just landed — drop the platform-config
     # cache so OAuth client creds (needed to refresh tokens) resolve immediately.
     try:
