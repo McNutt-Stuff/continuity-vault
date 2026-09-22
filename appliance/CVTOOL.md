@@ -24,6 +24,7 @@ The script lives at `installers/cvtool` and ships in the appliance bundle
 | `cvtool re-link [CODE]` | Unlink, then link again (optionally with a new `CODE`) | yes |
 | `cvtool storage` | List configured Arkive storage + detected removable drives | yes |
 | `cvtool storage setup <SN> --name <NAME> [--mirror <STORE_ID>]` | Format + adopt a detected USB/external drive as Arkive storage (or a 1:1 mirror). DESTRUCTIVE — prompts for `SETUP` confirmation | yes |
+| `cvtool storage repair <STORE_ID>` | Re-mount a disconnected / dead-mount drive (release the stale mount + re-mount by serial). Non-destructive | yes |
 | `cvtool storage forget <STORE_ID>` | Unmount + deregister a drive (data on the drive is kept) | yes |
 | `cvtool help` | Command reference | no |
 

@@ -214,3 +214,46 @@ def unmount(mountpoint: str) -> None:
     """Best-effort unmount of a store's mountpoint (data is left intact)."""
     if mountpoint and os.path.ismount(mountpoint):
         _run(["umount", mountpoint], timeout=30)
+
+
+def repair_device(*, serial: str, store_id: str, name: str, mount_base: str,
+                  mirror_of_id: Optional[str] = None, kind: str = "external") -> dict:
+    """Recover a dead/stale external-drive mount WITHOUT touching data.
+
+    A removable drive that dropped out (cable/power/controller fault) usually stays
+    in the mount table with its ext4 in a 'shutdown' state — ``os.path.ismount()``
+    is still True but every read/write fails. This force-releases that stale mount
+    and re-mounts the drive fresh by serial. If the drive isn't physically present
+    it raises a clear "reconnect it" error. NEVER formats."""
+    mountpoint = os.path.join(mount_base, store_id)
+    # 1) Force-release the (possibly shutdown-state) mount so it can be re-mounted.
+    if os.path.ismount(mountpoint):
+        ok, out = _run(["umount", mountpoint], timeout=30)
+        if not ok and os.path.ismount(mountpoint):
+            print(f"[storage-ops] repair: {mountpoint} busy, lazy-unmounting ({out[:120]})", flush=True)
+            _run(["umount", "-l", mountpoint], timeout=30)
+    _settle()
+    # 2) The drive must actually be attached now (a shutdown mount can outlive the
+    # physical device). Re-resolve by stable serial (its /dev name may have moved).
+    resolved = sysinfo.resolve_device_by_serial(serial)
+    if not resolved:
+        raise StorageOpError("the drive is not connected — reconnect it to the "
+                             "appliance and try repairing again")
+    # 3) Re-mount fresh (mount_known re-resolves + mounts; no format, no data touch).
+    res = mount_known(serial=serial, store_id=store_id, name=name, mount_base=mount_base,
+                      mirror_of_id=mirror_of_id, kind=kind)
+    if not res:
+        raise StorageOpError("could not re-mount the drive after releasing the stale mount")
+    # 4) Prove the re-mounted volume is actually usable (a still-faulty controller
+    # can re-mount then immediately error). A failed write here means the hardware
+    # needs attention, not a software remount.
+    probe = os.path.join(res["mountpoint"], ".arkive-repair")
+    try:
+        with open(probe, "w") as fh:
+            fh.write("ok")
+        os.unlink(probe)
+    except OSError as exc:
+        raise StorageOpError(f"drive re-mounted but is still not writable ({exc}) — "
+                             "the drive or its connection may be failing")
+    print(f"[storage-ops] repair: {name} ({serial}) re-mounted at {res['mountpoint']}", flush=True)
+    return res

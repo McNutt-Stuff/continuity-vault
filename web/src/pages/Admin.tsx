@@ -3950,6 +3950,17 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
     try { const res = await api.post<any>(`/admin/appliances/${id}/reassign`, { tenant_id: r.tenant_id }); flash(`Re-linked to ${res.tenant_name}`); await load(); }
     catch (e) { flash((e as { message?: string }).message || "Re-link failed"); }
   }
+  async function repairStore(s: any) {
+    if (!await confirmDialog({
+      title: "Repair drive",
+      message: `Try to reconnect "${s.name}"? The appliance releases the stale mount and re-mounts the drive by serial — no data is erased. If the drive isn't physically connected, reconnect it first.`,
+      confirmLabel: "Repair" })) return;
+    try {
+      const r = await api.post<any>(`/admin/appliances/${id}/storage/${s.id}/repair`, {});
+      flash(r.appliance_online ? "Repair dispatched — the appliance is re-mounting the drive" : "Appliance offline; repair queued");
+      await load();
+    } catch (e) { flash((e as { message?: string }).message || "Repair failed"); }
+  }
   if (!a) return <Card><button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 10 }}>← Fleet</button><div className="muted">Loading appliance…</div></Card>;
 
   const tel = a.telemetry || {};
@@ -4094,6 +4105,9 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
                 const raid = h.raid || {};
                 const smart = h.smart || {};
                 const open = openStore === s.id;
+                const isExternal = s.kind === "external" || s.kind === "mirror";
+                const brokenDrive = s.connected === false || s.state === "disconnected"
+                  || (!!h.drive_health && h.drive_health !== "healthy");
                 return (
                   <div key={s.id}>
                     <div className="spread" style={{ fontSize: 12.5 }}>
@@ -4116,6 +4130,9 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
                       <button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => setOpenStore(open ? null : s.id)}>
                         {open ? "Hide" : "Drive health"} {open ? "▴" : "▾"}
                       </button>
+                      {isExternal && brokenDrive && (
+                        <button className="btn primary sm" onClick={() => repairStore(s)} title="Release the stale mount and re-mount the drive (no data erased)">Repair</button>
+                      )}
                     </div>
                     {open && (
                       <div style={{ marginTop: 8, padding: "4px 12px", background: "var(--inset)", borderRadius: 8 }}>

@@ -907,6 +907,32 @@ class Agent:
         self.log.info("external storage forgotten: %s", store_id)
         return {"store_id": store_id, "forgotten": True}
 
+    def _repair_external_storage(self, params: dict) -> dict:
+        """Handle a cloud-signed REPAIR_STORAGE command: force-release a dead/stale
+        mount and re-mount the drive by serial (non-destructive), then re-apply
+        mirror routing so a repaired mirror resumes duplicating."""
+        store_id = params.get("storeId")
+        entry = next((e for e in self._ext_stores if e.get("store_id") == store_id), None)
+        if not entry:
+            return {"error": "unknown store"}
+        self.log.info("repairing external store %s (%s)", store_id, entry.get("name"))
+        res = self._delegate_storage("repair", {
+            "storeId": store_id, "serial": entry.get("serial", ""),
+            "name": entry.get("name", "External Storage"),
+            "mirrorOfId": entry.get("mirror_of_id"), "kind": entry.get("kind", "external"),
+        }, timeout=120)
+        if not res.get("ok"):
+            self.log.warning("external storage repair failed for %s: %s",
+                             store_id, res.get("error") or "unknown")
+            return {"error": res.get("error") or "storage repair failed", "store_id": store_id}
+        self._ext_mounts[store_id] = res["mountpoint"]
+        self._store_conn.pop(store_id, None)  # force a fresh connected-state log line
+        self._apply_mirror_roots()
+        self._heavy_at = 0.0
+        self.log.info("external storage repaired: %s at %s", store_id, res["mountpoint"])
+        return {"store_id": store_id, "repaired": True,
+                "capacity_bytes": res.get("capacity_bytes"), "used_bytes": res.get("used_bytes")}
+
     def _reconfigure_external_storage(self, params: dict) -> dict:
         """Toggle a store's mirror role without touching data: update the registry,
         rewrite the on-disk marker, and re-apply mirror routing."""
@@ -1179,6 +1205,11 @@ class Agent:
                     result = await asyncio.to_thread(self._forget_external_storage, payload["parameters"])
                 elif ctype == "RECONFIGURE_STORAGE":
                     result = self._reconfigure_external_storage(payload["parameters"])
+                elif ctype == "REPAIR_STORAGE":
+                    result = await asyncio.to_thread(self._repair_external_storage, payload["parameters"])
+                    if not result.get("error"):
+                        threading.Thread(target=self._sync_mirrors, args=("after repair",),
+                                         daemon=True).start()
                 elif ctype == "STAGE_INDEX":
                     result = await asyncio.to_thread(self._stage_index, payload["parameters"])
                     if not result.get("error"):

@@ -1145,6 +1145,26 @@ def admin_reassign_appliance(aid: str, body: ReassignAppliance,
     return {"ok": True, "tenant_id": target.id, "tenant_name": target.name}
 
 
+@router.post("/appliances/{aid}/storage/{sid}/repair")
+def admin_repair_storage(aid: str, sid: str,
+                         principal: security.Principal = Depends(security.require_platform_admin),
+                         db: Session = Depends(get_db)):
+    """Platform-admin: recover a disconnected / dead-mount external drive on ANY
+    tenant's appliance (non-destructive re-mount). Mirrors the customer endpoint but
+    isn't tenant-scoped."""
+    from ..models import ApplianceStorage
+    from .appliances import _dispatch_storage_repair
+    a = db.get(Appliance, aid)
+    if not a:
+        raise HTTPException(404, "appliance not found")
+    s = db.get(ApplianceStorage, sid)
+    if not s or s.appliance_id != aid:
+        raise HTTPException(404, "storage not found")
+    if s.kind not in ("external", "mirror"):
+        raise HTTPException(400, "only external / mirror drives can be repaired")
+    return _dispatch_storage_repair(db, a, s, principal.user_id, a.tenant_id)
+
+
 @router.get("/crypto-profiles")
 def crypto_profiles():
     """Cryptographic-profile registry + quantum-transition inventory (spec 9.7)."""

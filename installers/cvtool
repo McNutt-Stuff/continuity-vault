@@ -203,9 +203,17 @@ cmd_storage() {
         _agent_reload
         echo "Storage forgotten (data on the drive was kept); the agent has been notified."
       fi ;;
+    repair|remount)
+      local sid="${1:-}"
+      [ -z "$sid" ] && { echo "usage: cvtool storage repair <STORE_ID>"; echo; _storage_py list; return 1; }
+      echo "Releasing the stale mount and re-mounting drive $sid (no data will be erased)…"
+      if _storage_py repair "$sid"; then
+        _agent_reload
+        echo "Drive re-mounted. Run 'cvtool storage' to confirm, or check the portal Appliances → Storage."
+      fi ;;
     verify|integrity)
       _storage_py verify "$@" ;;
-    *) echo "usage: cvtool storage [list | setup <SERIAL> --name <NAME> [--mirror <STORE_ID>] | forget <STORE_ID> | verify]" >&2; return 1 ;;
+    *) echo "usage: cvtool storage [list | setup <SERIAL> --name <NAME> [--mirror <STORE_ID>] | repair <STORE_ID> | forget <STORE_ID> | verify]" >&2; return 1 ;;
   esac
 }
 
@@ -227,6 +235,8 @@ Commands:
   storage              List configured + detected drives
   storage setup <SN> --name <NAME> [--mirror <STORE_ID>]
                        Format + adopt a detected USB/external drive (DESTRUCTIVE)
+  storage repair <STORE_ID>
+                       Re-mount a disconnected / dead-mount drive (no format, no data loss)
   storage forget <STORE_ID>
   storage verify       Show mirror-drive integrity (1:1 with the primary — data + index)
                        Unmount + deregister a drive (data on the drive is kept)

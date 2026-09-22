@@ -142,6 +142,34 @@ def cmd_forget(args) -> int:
     return 0
 
 
+def cmd_repair(args) -> int:
+    """Recover a disconnected / dead-mount drive WITHOUT reformatting: release the
+    stale mount and re-mount by serial."""
+    rows = _load()
+    entry = next((e for e in rows if e.get("store_id") == args.store_id), None)
+    if not entry:
+        print(f"error: no configured store with id {args.store_id!r}", file=sys.stderr)
+        return 2
+    try:
+        res = storage_ops.repair_device(
+            serial=entry.get("serial", ""), store_id=args.store_id,
+            name=entry.get("name", "External Storage"), mount_base=str(EXT_BASE),
+            mirror_of_id=entry.get("mirror_of_id"), kind=entry.get("kind", "external"))
+    except storage_ops.StorageOpError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    # Hand the re-mounted volume back to the agent's service account.
+    try:
+        subprocess.run(["chown", "-R", f"{SERVICE_USER}:{SERVICE_USER}", res["mountpoint"]],
+                       capture_output=True, timeout=30)
+        os.chmod(res["mountpoint"], 0o750)
+    except Exception as exc:  # noqa: BLE001
+        print(f"warning: could not set ownership on {res['mountpoint']}: {exc}", file=sys.stderr)
+    print(json.dumps({"store_id": args.store_id, "repaired": True,
+                      "mountpoint": res["mountpoint"], "capacity_bytes": res["capacity_bytes"]}))
+    return 0
+
+
 def cmd_verify(args) -> int:
     """Show the latest mirror-integrity report (does the mirror match the primary
     1:1, data + index). The agent computes this on a schedule + after each sync;
@@ -193,6 +221,9 @@ def main(argv=None) -> int:
     pf = sub.add_parser("forget", help="unmount + deregister a store (data kept)")
     pf.add_argument("store_id")
     pf.set_defaults(func=cmd_forget)
+    pr = sub.add_parser("repair", help="re-mount a disconnected / dead-mount drive (no format)")
+    pr.add_argument("store_id")
+    pr.set_defaults(func=cmd_repair)
     pv = sub.add_parser("verify", help="show the latest mirror-integrity report")
     pv.add_argument("--json", action="store_true")
     pv.set_defaults(func=cmd_verify)

@@ -92,6 +92,24 @@ def _handle(req: dict) -> dict:
         except Exception as exc:  # noqa: BLE001
             return {**res, "ok": True, "chown_warning": str(exc)}
         return {**res, "ok": True}
+    if action == "repair":
+        # Force-release a dead/stale mount (dropped USB drive whose ext4 is in a
+        # 'shutdown' state) and re-mount it fresh by serial. Non-destructive.
+        store_id = params.get("storeId")
+        if not store_id:
+            return {"error": "missing storeId"}
+        res = storage_ops.repair_device(
+            serial=params.get("serial", ""), store_id=store_id,
+            name=params.get("name", "External Storage"), mount_base=str(EXT_BASE),
+            mirror_of_id=params.get("mirrorOfId"), kind=params.get("kind", "external"))
+        mp = res["mountpoint"]
+        try:
+            subprocess.run(["chown", "-R", f"{SERVICE_USER}:{SERVICE_USER}", mp],
+                           capture_output=True, timeout=60)
+            os.chmod(mp, 0o750)
+        except Exception as exc:  # noqa: BLE001
+            return {**res, "ok": True, "chown_warning": str(exc)}
+        return {**res, "ok": True}
     if action == "forget":
         store_id = params.get("storeId")
         mp = params.get("mountpoint") or str(EXT_BASE / (store_id or ""))

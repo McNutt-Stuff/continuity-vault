@@ -848,6 +848,50 @@ def configure_mirror(appliance_id: str, storage_id: str, body: MirrorRequest,
     return {"id": s.id, "name": s.name, "kind": s.kind, "mirror_of_id": s.mirror_of_id}
 
 
+def _dispatch_storage_repair(db: Session, a: Appliance, s: ApplianceStorage,
+                             actor: str, tenant_id: str) -> dict:
+    """Issue a signed REPAIR_STORAGE command for one external/mirror store (shared
+    by the customer + admin repair endpoints). Non-destructive — the appliance
+    force-releases the stale mount and re-mounts the drive by serial."""
+    logger.info("storage repair requested: appliance=%s store=%s (%s, serial=%s) by=%s",
+                a.id, s.id, s.name, s.device_serial, actor)
+    try:
+        cmd = fleet.issue_command(db, a, "REPAIR_STORAGE", actor, {
+            "storeId": s.id, "serial": s.device_serial or "",
+            "name": s.name, "kind": s.kind, "mirrorOfId": s.mirror_of_id})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("storage repair: could not issue REPAIR_STORAGE for appliance=%s store=%s",
+                         a.id, s.id)
+        raise HTTPException(502, f"Could not dispatch the repair command to the appliance: {exc}")
+    online = bool(a.last_heartbeat_at and (_now() - a.last_heartbeat_at).total_seconds() < 90)
+    audit.record(db, actor=actor, action="appliance.storage_repair",
+                 tenant_id=tenant_id, resource=a.id, severity="notice",
+                 detail={"storage": s.name, "serial": s.device_serial})
+    logger.info("storage repair dispatched: appliance=%s store=%s command=%s online=%s",
+                a.id, s.id, cmd.id, online)
+    return {"ok": True, "store_id": s.id, "command_id": cmd.id, "appliance_online": online}
+
+
+@fleet_router.post("/{appliance_id}/storage/{storage_id}/repair")
+def repair_storage(appliance_id: str, storage_id: str,
+                   principal: security.Principal = Depends(security.get_principal),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    """Recover a disconnected / dead-mount external drive WITHOUT reformatting: the
+    appliance force-releases the stale mount and re-mounts the drive by serial. If
+    the drive isn't physically attached it reports a clear "reconnect it" error."""
+    a = db.get(Appliance, appliance_id)
+    if not a or a.tenant_id != tenant.id:
+        raise HTTPException(404, "appliance not found")
+    s = db.get(ApplianceStorage, storage_id)
+    if not s or s.tenant_id != tenant.id or s.appliance_id != appliance_id:
+        raise HTTPException(404, "storage not found")
+    _require_can_manage_appliance(principal, tenant, appliance_id, db)
+    if s.kind not in ("external", "mirror"):
+        raise HTTPException(400, "only external / mirror drives can be repaired")
+    return _dispatch_storage_repair(db, a, s, principal.user_id, tenant.id)
+
+
 @fleet_router.put("/{appliance_id}/storage/{storage_id}")
 def rename_storage(appliance_id: str, storage_id: str, body: StorageRequest,
                    principal: security.Principal = Depends(security.get_principal),

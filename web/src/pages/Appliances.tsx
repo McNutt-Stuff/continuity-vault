@@ -15,7 +15,7 @@ interface StoreHealth {
   drive_health?: string; temperature_c?: number; power?: string;
   smart?: { enabled: boolean; status?: string };
   raid?: { enabled: boolean; status?: string };
-  device?: string; mirror_of?: string | null; setup_error?: string;
+  device?: string; mirror_of?: string | null; setup_error?: string; reason?: string;
   mirror_integrity?: {
     in_sync?: boolean | null; checked_at?: string | null;
     data_missing?: number; data_extra?: number;
@@ -492,6 +492,24 @@ function ApplianceDetail({ a, onCommand, onRemove, reload, onBack, prodVersion }
     try { await api.del(`/appliances/${a.id}/storage/${s.id}`); await reload(); }
     catch (e) { await notify({ title: "Couldn't remove storage", message: (e as ApiError).message, tone: "danger" }); }
   }
+  // Recover a disconnected / dead-mount drive without erasing it: the appliance
+  // force-releases the stale mount and re-mounts the drive by serial.
+  async function repairStorage(s: Store) {
+    const ok = await confirmDialog({
+      title: "Repair drive",
+      message: `Try to reconnect "${s.name}"? Arkive will release the stale mount and re-mount the drive — no data is erased. If the drive isn't physically connected, reconnect it first.`,
+      confirmLabel: "Repair" });
+    if (!ok) return;
+    try {
+      const r = await api.post<{ appliance_online?: boolean }>(`/appliances/${a.id}/storage/${s.id}/repair`, {});
+      await notify({ title: "Repair started",
+        message: r.appliance_online
+          ? "The appliance is re-mounting the drive — refresh in a moment to see its status."
+          : "The appliance is offline; the repair will run automatically when it reconnects.",
+        tone: "info" });
+      await reload();
+    } catch (e) { await notify({ title: "Couldn't repair drive", message: (e as ApiError).message, tone: "danger" }); }
+  }
 
   function showAdvanced() {
     const rows: [string, string][] = [
@@ -631,7 +649,7 @@ function ApplianceDetail({ a, onCommand, onRemove, reload, onBack, prodVersion }
       </div>
 
       {tab === "storage" && (
-        <StorageCard a={a} canManage={canManage} onRename={renameStorage} onDelete={deleteStorage} onAdvanced={setKv} onSetup={setupStorage} onMirror={configureMirror} />
+        <StorageCard a={a} canManage={canManage} onRename={renameStorage} onDelete={deleteStorage} onAdvanced={setKv} onSetup={setupStorage} onMirror={configureMirror} onRepair={repairStorage} />
       )}
 
       {tab === "data" && <StoredDataCard a={a} />}
@@ -713,10 +731,10 @@ function fmtUptime(s: number): string {
   return `${m}m`;
 }
 
-function StorageCard({ a, canManage, onRename, onDelete, onAdvanced, onSetup, onMirror }: {
+function StorageCard({ a, canManage, onRename, onDelete, onAdvanced, onSetup, onMirror, onRepair }: {
   a: Appliance; canManage: boolean; onRename: (s: Store) => void; onDelete: (s: Store) => void;
   onAdvanced: (m: { title: string; rows: [string, string][] }) => void;
-  onSetup: (d: DetectedDevice) => void; onMirror: (s: Store) => void;
+  onSetup: (d: DetectedDevice) => void; onMirror: (s: Store) => void; onRepair: (s: Store) => void;
 }) {
   const stores = a.stores ?? [];
   const detected = a.detected_storage ?? [];
@@ -770,7 +788,7 @@ function StorageCard({ a, canManage, onRename, onDelete, onAdvanced, onSetup, on
           <div className="progress"><span style={{ width: `${pct}%`, background: barTone }} /></div>
         </div>
       )}
-      {stores.map((s) => <StorageItem key={s.id} s={s} canManage={canManage} onRename={onRename} onDelete={onDelete} onAdvanced={onAdvanced} onMirror={onMirror} mirrorSourceName={storeName} />)}
+      {stores.map((s) => <StorageItem key={s.id} s={s} canManage={canManage} onRename={onRename} onDelete={onDelete} onAdvanced={onAdvanced} onMirror={onMirror} onRepair={onRepair} mirrorSourceName={storeName} />)}
       {stores.length === 0 && <div className="muted">No storage volumes reported yet.</div>}
       {a.telemetry?.os_storage && <SystemDiskRow os={a.telemetry.os_storage} />}
     </Card>
@@ -945,10 +963,10 @@ function NetworkCard({ a }: { a: Appliance }) {
   );
 }
 
-function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, mirrorSourceName }:
+function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, onRepair, mirrorSourceName }:
   { s: Store; canManage: boolean; onRename: (s: Store) => void; onDelete: (s: Store) => void;
     onAdvanced: (m: { title: string; rows: [string, string][] }) => void;
-    onMirror: (s: Store) => void; mirrorSourceName: (id?: string | null) => string }) {
+    onMirror: (s: Store) => void; onRepair: (s: Store) => void; mirrorSourceName: (id?: string | null) => string }) {
   const pct = s.capacity_bytes ? Math.min(100, (s.used_bytes / s.capacity_bytes) * 100) : 0;
   const h = s.health || {};
   const kindLabel = STORE_KIND_LABEL[s.kind] || "External storage";
@@ -958,6 +976,10 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, m
   const disconnected = s.connected === false || s.state === "disconnected";
   const provisioning = s.state === "provisioning";
   const errored = s.state === "error";
+  // A drive that's mounted but unhealthy (e.g. ext4 shutdown after a USB drop) is
+  // also repairable — re-mounting clears the stale mount.
+  const unhealthy = !!h.drive_health && h.drive_health !== "healthy";
+  const repairable = canManage && isExternal && (disconnected || unhealthy) && !provisioning;
   const barTone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : undefined;
   const mi = h.mirror_integrity;
   const chips: { label: string; value: string; tone: "ok" | "warn" | "danger" | "info" }[] = [];
@@ -1031,13 +1053,15 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, m
             <Icon name="gear" size={13} />
           </button>
           {canManage && <button className="btn sm ghost" onClick={() => onRename(s)}>Rename</button>}
+          {repairable && <button className="btn sm primary" onClick={() => onRepair(s)} title="Release the stale mount and re-mount the drive (no data erased)"><Icon name="repeat" size={13} /> Repair</button>}
           {canManage && isExternal && <button className="btn sm ghost" onClick={() => onMirror(s)} title="Mirror settings">{isMirror ? "Mirror…" : "Make mirror"}</button>}
           {canManage && isExternal && <button className="btn sm ghost" onClick={() => onDelete(s)}>Remove</button>}
         </div>
       </div>
       {disconnected ? (
         <div className="faint" style={{ fontSize: 12, margin: "10px 0 2px" }}>
-          Drive not currently connected. Reconnect it to this appliance to resume{isMirror ? " mirroring" : " use"}.
+          {h.reason ? `${h.reason}. ` : "Drive not currently connected. "}
+          Reconnect it to this appliance and use <b>Repair</b> to resume{isMirror ? " mirroring" : " use"}.
         </div>
       ) : provisioning ? (
         <div className="faint" style={{ fontSize: 12, margin: "10px 0 2px" }}>
