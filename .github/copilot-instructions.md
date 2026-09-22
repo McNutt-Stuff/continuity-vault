@@ -19,6 +19,12 @@ client/server-encrypted; storage holds only ciphertext.
 - **Federation-aware.** Customer nodes run their OWN Postgres + search index and replicate to the CP over
   HTTPS. File operations (search/retrieve/recovered/restore/fs) are proxied CP→node by `api/node_proxy.py`.
   Anything that reads/writes a tenant's data or index must work on the node that owns the tenant.
+- **Tenant HA (active/passive).** A tenant's `node_id` is its ACTIVE node; an optional `standby_node_id` is a
+  warm PASSIVE replica kept in sync (config+keys+receipts+search index). `placement.switchover` flips them
+  (metadata only — bytes are in shared storage / on devices that retarget on heartbeat); a brief maintenance
+  window (`placement_state=="switching"`) shows a portal dialog. Automatic failover is gated by the
+  `ha_auto_failover` flag; manual admin switchover always works. All HA code is a no-op when no standby is
+  assigned. See `.github/instructions/federation-ha.instructions.md`.
 - **Secrets never go through the model.** Don't log credentials. Don't route passwords through tools.
 - **Ensure logging is verbose at every level** enasure logs for appliances, endpoints and nodes are detailed and catch info, debug error and warnings and save to the right place. 
 - **All logs MUST be viewable from the control plane (one place).** Logs are a first-class product surface,
