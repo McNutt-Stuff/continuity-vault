@@ -360,6 +360,7 @@ function TopologyAdmin() {
                       <b>{n.name}</b>{n.is_self && <span className="faint" style={{ fontSize: 10 }}>· this</span>}
                       <span className="faint">· {n.role}</span>
                       {n.role === "customer-tenant" && <span className="faint">· {n.tenants} tnt</span>}
+                      {n.standby_tenants > 0 && <span title="Warm standby for other nodes' tenants" className="row" style={{ gap: 3, color: "var(--accent, #7c9cff)" }}><Icon name="shield" size={11} /> {n.standby_tenants} standby</span>}
                     </span>
                     <span className="row" style={{ gap: 10, alignItems: "center" }}>
                       <span className="row" style={{ gap: 6 }}>
@@ -372,6 +373,31 @@ function TopologyAdmin() {
                   </div>
                 ))}
               </div>
+              {/* Active/passive HA pairs — active → standby for this cluster's tenants */}
+              {(c.ha_pairs || []).length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 }}>
+                    <Icon name="shield" size={11} /> High availability · {c.ha_pairs.length} pair{c.ha_pairs.length === 1 ? "" : "s"}
+                  </div>
+                  <div className="stack" style={{ gap: 4 }}>
+                    {c.ha_pairs.map((p: any) => (
+                      <div key={p.tenant_id} className="row" style={{ gap: 8, fontSize: 12, alignItems: "center", flexWrap: "wrap",
+                        padding: "5px 8px", borderRadius: 8, background: "var(--inset)",
+                        border: p.placement_state === "switching" ? "1px solid var(--warn)" : "1px solid var(--border-soft)" }}>
+                        <b style={{ minWidth: 90 }}>{p.tenant_name}</b>
+                        <span className="row" style={{ gap: 4 }}><Pill tone="ok" dot>active</Pill>{p.active_node_name}</span>
+                        <Icon name="repeat" size={12} />
+                        <span className="row" style={{ gap: 4 }}>
+                          <Pill tone={p.standby_online ? "info" : "warn"} dot>{p.standby_online ? "standby" : "standby · offline"}</Pill>
+                          {p.standby_node_name}
+                          {!p.standby_in_cluster && <span className="faint" title="Standby node is in another cluster">· cross-cluster</span>}
+                        </span>
+                        {p.placement_state === "switching" && <Pill tone="warn" dot>switching…</Pill>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {/* Add an existing node (unassigned or from another cluster) */}
               {allNodes.filter((n) => n.cluster_id !== c.id).length > 0 && (
                 <select className="input sm" style={{ marginTop: 8, width: 240 }} defaultValue=""

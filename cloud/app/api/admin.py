@@ -2327,6 +2327,7 @@ def _node_view(db: Session, n: Node) -> dict:
     mem = tel.get("memory") or {}
     stg = tel.get("storage") or {}
     tenant_count = db.query(func.count(Tenant.id)).filter(Tenant.node_id == n.id).scalar()
+    standby_count = db.query(func.count(Tenant.id)).filter(Tenant.standby_node_id == n.id).scalar()
     backup_ids = list(n.backup_service_ids or [])
     from .. import versions
     node_prod = versions.node_production_version()
@@ -2353,6 +2354,7 @@ def _node_view(db: Session, n: Node) -> dict:
         "cpus": tel.get("cpus"),
         "uptime_seconds": tel.get("uptime_seconds"),
         "tenants": int(tenant_count or 0),
+        "standby_tenants": int(standby_count or 0),
         "cluster_id": n.cluster_id,
         "cluster_name": (db.get(Cluster, n.cluster_id).name if n.cluster_id else None),
         "storage_service_id": n.storage_service_id,

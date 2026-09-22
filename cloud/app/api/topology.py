@@ -7,6 +7,8 @@ serves one or more customer-facing Regions. New accounts are geo-routed to a reg
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -18,6 +20,10 @@ from ..models import Cluster, Node, Region, Tenant
 
 router = APIRouter(prefix="/admin", tags=["topology"],
                    dependencies=[Depends(security.require_platform_admin)])
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _norm_provider(cloud: dict | None) -> str:
@@ -86,8 +92,33 @@ def _cluster_view(db: Session, c: Cluster) -> dict:
         "id": n["id"], "name": n["name"], "role": n["role"], "status": n["status"],
         "is_self": n["is_self"], "endpoint": n["endpoint"], "online": n["online"],
         "version": n["version"], "tenants": n["tenants"], "health": n["health"],
+        "standby_tenants": n.get("standby_tenants") or 0,
         "cloud": n.get("cloud") or {}, "platform": _norm_provider(n.get("cloud")),
     } for n in nodes]
+
+    # Active/passive HA pairs whose ACTIVE node lives in this cluster, so the
+    # topology can draw the active → standby relationship visually.
+    node_ids = [n["id"] for n in nodes]
+    node_names = {n["id"]: n["name"] for n in nodes}
+    ha_pairs = []
+    if node_ids:
+        pair_rows = (db.query(Tenant)
+                     .filter(Tenant.node_id.in_(node_ids),
+                             Tenant.standby_node_id.isnot(None)).all())
+        for t in pair_rows:
+            sb = db.get(Node, t.standby_node_id) if t.standby_node_id else None
+            sb_online = bool(sb and sb.last_heartbeat_at and
+                             (_now() - sb.last_heartbeat_at).total_seconds() < 180) if sb else False
+            ha_pairs.append({
+                "tenant_id": t.id, "tenant_name": t.name,
+                "active_node_id": t.node_id,
+                "active_node_name": node_names.get(t.node_id, t.node_id),
+                "standby_node_id": t.standby_node_id,
+                "standby_node_name": (sb.name if sb else t.standby_node_id),
+                "standby_in_cluster": t.standby_node_id in node_ids,
+                "standby_online": sb_online,
+                "placement_state": t.placement_state or "",
+            })
 
     return {
         "id": c.id, "code": c.code, "name": c.name, "description": c.description or "",
@@ -99,6 +130,7 @@ def _cluster_view(db: Session, c: Cluster) -> dict:
         "platform": platform, "platforms": providers,
         "health": health, "warnings": warnings,
         "nodes": compact,
+        "ha_pairs": ha_pairs,
         "regions": [{"code": r.code, "name": r.name} for r in regions],
         "summary": {
             "nodes_online": online, "nodes_total": len(nodes), "tenants": tenants,
