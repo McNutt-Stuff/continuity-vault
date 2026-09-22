@@ -261,6 +261,13 @@ def _price_table(rows: list[dict], total_label: str, total: str) -> str:
 def _portal_url() -> str:
     from .config import get_settings
     s = get_settings()
+    # The customer portal + static assets (source-icon SVGs) live ONLY on the
+    # control plane. Customer-tenant nodes are API-only — their domain 404s
+    # /source-icons and the portal — so an email a NODE sends must link to the
+    # control plane, not the node's own rp_origin (which is its API host).
+    cp = (getattr(s, "control_plane_url", "") or "").rstrip("/")
+    if cp:
+        return cp[:-4] if cp.endswith("/api") else cp
     base = (getattr(s, "rp_origin", "") or "").rstrip("/")
     return base or f"https://{getattr(s, 'domain', 'vault.arkive.life')}"
 

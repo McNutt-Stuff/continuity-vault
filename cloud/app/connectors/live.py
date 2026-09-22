@@ -148,6 +148,15 @@ def _gmail_403_reason(r) -> str:
         return ""
 
 
+def _gmail_rate_limited(r) -> bool:
+    """True when a Gmail response is a transient per-user rate/quota limit — HTTP
+    429 (Too Many Requests), OR HTTP 403 with a rate/quota reason. NOT an auth
+    failure, so the run defers + retries instead of flagging re-authorization."""
+    if r.status_code == 429:
+        return True
+    return r.status_code == 403 and _gmail_403_reason(r) in _GMAIL_RATE_REASONS
+
+
 def _gmail_message(c: httpx.Client, headers: dict, mid: str,
                    cap: int = _DEFAULT_CAP) -> Optional[SourceObject]:
     # format=raw returns the full RFC822 message (body + attachments) plus
@@ -158,21 +167,18 @@ def _gmail_message(c: httpx.Client, headers: dict, mid: str,
         r = c.get(f"{GMAIL}/messages/{mid}", headers=headers, params={"format": "raw"})
         if r.status_code == 404:
             return None  # deleted between listing and fetch
-        if r.status_code == 403:
-            # A 403 on ONE message must not abort the whole (back)fill. Gmail's
-            # per-user rate limit surfaces as a 403 (rate/quota reason). One quick
+        if _gmail_rate_limited(r):
+            # Per-user rate/quota limit (HTTP 429, or 403 rate reason). One quick
             # retry, then DEFER the whole run (the streaming pull turns this into a
             # cursor resume_after so the job loop waits for the quota window and
-            # resumes) — rather than skipping the message (data loss) and logging a
-            # warning per message (log spam). A genuine non-rate 403 (confidential
-            # mode / admin policy) skips just that one. Only 401 is a real auth fail.
-            reason = _gmail_403_reason(r)
-            if reason in _GMAIL_RATE_REASONS:
-                if attempt < 2:
-                    time.sleep(1.0 * (attempt + 1))
-                    continue
-                raise _GmailRateLimited(f"Gmail rate limit ({reason}) on messages.get")
-            logger.debug("gmail message %s skipped (403 %s)", mid, reason or "forbidden")
+            # resumes) rather than skipping the message (data loss). Only 401 is a
+            # real auth fail; a genuine non-rate 403 skips just that one message.
+            if attempt < 2:
+                time.sleep(1.0 * (attempt + 1))
+                continue
+            raise _GmailRateLimited(f"Gmail rate limit (HTTP {r.status_code}) on messages.get")
+        if r.status_code == 403:
+            logger.debug("gmail message %s skipped (403 %s)", mid, _gmail_403_reason(r) or "forbidden")
             return None
         if r.status_code >= 500:
             # Transient Gmail backendError (500/503) on ONE message must not abort
@@ -224,16 +230,13 @@ def _gmail_list_page(c: httpx.Client, headers: dict, params: dict) -> dict:
     r = None
     for attempt in range(4):
         r = c.get(f"{GMAIL}/messages", headers=headers, params=params)
-        if r.status_code == 403:
-            reason = _gmail_403_reason(r)
-            if reason in _GMAIL_RATE_REASONS:
-                if attempt < 3:
-                    time.sleep(1.5 * (attempt + 1))
-                    continue
-                raise _GmailRateLimited(
-                    f"Gmail rate limit ({reason}) on messages.list — will retry next run")
-            # A non-rate 403 (scope/permission) is a genuine auth problem → raise.
-        elif r.status_code >= 500 and attempt < 3:
+        if _gmail_rate_limited(r):
+            if attempt < 3:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise _GmailRateLimited(
+                f"Gmail rate limit (HTTP {r.status_code}) on messages.list — will retry next run")
+        if r.status_code >= 500 and attempt < 3:
             time.sleep(1.5 * (attempt + 1))
             continue
         r.raise_for_status()
@@ -283,18 +286,16 @@ def _gmail_history_ids(c: httpx.Client, headers: dict, start_history_id: str,
             r = c.get(f"{GMAIL}/history", headers=headers, params=params)
             if r.status_code in (404, 410):
                 raise _HistoryGone()
-            if r.status_code == 403:
-                # Gmail's per-user rate/quota limit surfaces as a 403 here too —
-                # back off and retry; if it persists, defer (non-auth) so the
-                # source isn't wrongly flagged as needing re-authorization. A
+            if _gmail_rate_limited(r):
+                # Per-user rate/quota limit (HTTP 429, or 403 rate reason) — back
+                # off and retry; if it persists, defer (non-auth) so the source is
+                # not wrongly flagged as needing re-authorization. A genuine
                 # non-rate 403 (scope/permission) is a real auth error → raise.
-                reason = _gmail_403_reason(r)
-                if reason in _GMAIL_RATE_REASONS:
-                    if attempt < 3:
-                        time.sleep(1.5 * (attempt + 1))
-                        continue
-                    raise _GmailRateLimited(
-                        f"Gmail rate limit ({reason}) on history — will retry next run")
+                if attempt < 3:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise _GmailRateLimited(
+                    f"Gmail rate limit (HTTP {r.status_code}) on history — will retry next run")
             if r.status_code >= 500 and attempt < 3:
                 time.sleep(1.5 * (attempt + 1))
                 continue
