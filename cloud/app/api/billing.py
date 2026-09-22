@@ -727,8 +727,42 @@ def update_plan(body: PlanUpdate,
                 principal: security.Principal = Depends(security.get_principal),
                 tenant: Tenant = Depends(security.get_tenant),
                 db: Session = Depends(get_db)):
-    valid = {t["id"] for t in STORAGE_TIERS}
+    from ..config import get_settings
     user = db.get(User, principal.user_id)
+    dedicated = (tenant.tenant_type or "dedicated") != "shared"
+    if dedicated and not (security.is_org_admin(principal.role) or principal.is_platform_admin):
+        raise HTTPException(403, "security-admin role required")
+    # Tenant/User are CONTROL-PLANE authoritative and fully replicated CP→node. On a
+    # customer-tenant node a local write is clobbered by the next pull (~30s), so the
+    # plan change is applied on the CP and mirrored back down. We forward it there,
+    # then optimistically mirror it locally so the UI is correct before the pull.
+    if (get_settings().node_role or "control-plane") != "control-plane":
+        from ..workers.node_replication import _post
+        res = _post("/nodes/sync/tenant-plan", {
+            "tenant_id": tenant.id, "actor": principal.user_id, "role": principal.role,
+            "is_platform_admin": bool(principal.is_platform_admin),
+            "options": body.options, "licensed_tb": body.licensed_tb,
+            "licensed_seats": body.licensed_seats, "appliance_plan": body.appliance_plan})
+        if not res or not res.get("ok"):
+            raise HTTPException(502, "Couldn't reach the control plane to save your plan — "
+                                     "please try again in a moment.")
+        try:
+            _apply_plan_change(db, tenant=tenant, user=user, actor_role=principal.role,
+                               is_platform_admin=principal.is_platform_admin, body=body, notify=False)
+        except Exception:  # noqa: BLE001 — optimistic mirror only; the CP is the source of truth
+            db.rollback()
+        return res.get("view") or plan_view(db, user, tenant)
+    return _apply_plan_change(db, tenant=tenant, user=user, actor_role=principal.role,
+                              is_platform_admin=principal.is_platform_admin, body=body, notify=True)
+
+
+def _apply_plan_change(db: Session, *, tenant: Tenant, user, actor_role: str,
+                       is_platform_admin: bool, body: PlanUpdate, notify: bool = True) -> dict:
+    """Apply a Protection Setup change to the CANONICAL records. Extracted so a
+    customer-tenant node can forward it to the control plane (which owns Tenant/User)
+    instead of writing locally, where the next replication pull would revert it."""
+    valid = {t["id"] for t in STORAGE_TIERS}
+    actor_id = user.id if user else None
     # Shared-tenant personal accounts each manage their own protection destinations
     # (no org role required); org tenants keep the security-admin-gated tenant-wide plan.
     if (tenant.tenant_type or "dedicated") == "shared":
@@ -738,19 +772,20 @@ def update_plan(body: PlanUpdate,
             new = {o for o in body.options if o in valid}
             user.protection_options = list(new)
             _apply_cloud_unsubscribe(user, prev, new)
-            _sync_cloud_addon(db, tenant, "cv-cloud" in new, principal.user_id)
+            _sync_cloud_addon(db, tenant, "cv-cloud" in new, actor_id)
             for o in sorted(new - prev):
                 summary.append(f"Enabled {_OPTION_LABELS.get(o, o)}")
             for o in sorted(prev - new):
                 summary.append(f"Disabled {_OPTION_LABELS.get(o, o)}")
         db.commit()
-        audit.record(db, actor=principal.user_id, action="billing.plan_updated",
-                     tenant_id=tenant.id, resource=user.id,
+        audit.record(db, actor=actor_id, action="billing.plan_updated",
+                     tenant_id=tenant.id, resource=actor_id,
                      detail={"options": user.protection_options})
         view = plan_view(db, user, tenant)
-        _notify_plan_change(db, user, view, summary)
+        if notify:
+            _notify_plan_change(db, user, view, summary)
         return view
-    if not (security.is_org_admin(principal.role) or principal.is_platform_admin):
+    if not (security.is_org_admin(actor_role) or is_platform_admin):
         raise HTTPException(403, "security-admin role required")
     # Snapshot the whole plan up-front so we reliably notify on ANY change —
     # including appliance removals / capacity changes the old per-field checks missed.
@@ -761,7 +796,7 @@ def update_plan(body: PlanUpdate,
         new = {o for o in body.options if o in valid}
         tenant.protection_options = list(new)
         _apply_cloud_unsubscribe(tenant, prev, new)
-        _sync_cloud_addon(db, tenant, "cv-cloud" in new, principal.user_id)
+        _sync_cloud_addon(db, tenant, "cv-cloud" in new, actor_id)
         for o in sorted(new - prev):
             summary.append(f"Enabled {_OPTION_LABELS.get(o, o)}")
         for o in sorted(prev - new):
@@ -788,14 +823,14 @@ def update_plan(body: PlanUpdate,
             summary.append(f"Updated appliance plan to {new_qty} unit{'s' if new_qty != 1 else ''}")
         # Mirror the appliance selection into per-tier appliance add-ons so it flows
         # through entitlements + the calc (recurring lease + one-time setup).
-        _sync_appliance_addons(db, tenant, tenant.appliance_plan, principal.user_id)
+        _sync_appliance_addons(db, tenant, tenant.appliance_plan, actor_id)
     if body.licensed_seats is not None:
         prev_seats = int(tenant.licensed_seats or 0)
         tenant.licensed_seats = max(0, int(body.licensed_seats))
         if tenant.licensed_seats != prev_seats:
             summary.append(f"Licensed {tenant.licensed_seats} user{'s' if tenant.licensed_seats != 1 else ''}")
     db.commit()
-    audit.record(db, actor=principal.user_id, action="billing.plan_updated",
+    audit.record(db, actor=actor_id, action="billing.plan_updated",
                  tenant_id=tenant.id, resource=tenant.id,
                  detail={"options": tenant.protection_options,
                          "licensed_bytes": tenant.licensed_bytes})
@@ -805,7 +840,8 @@ def update_plan(body: PlanUpdate,
     after_sig = _plan_sig(tenant.protection_options, tenant.licensed_bytes, tenant.appliance_plan)
     if not summary and before_sig != after_sig:
         summary.append("Updated your protection plan")
-    _notify_plan_change(db, user, view, summary)
+    if notify:
+        _notify_plan_change(db, user, view, summary)
     return view
 
 

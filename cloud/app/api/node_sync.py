@@ -784,3 +784,37 @@ def node_purge(body: PurgeReq, authorization: str = Header(default=""),
     db.commit()
     return {"ok": True, **counts}
 
+
+class TenantPlanReq(BaseModel):
+    tenant_id: str
+    actor: str | None = None
+    role: str | None = None
+    is_platform_admin: bool = False
+    options: list[str] | None = None
+    licensed_tb: float | None = None
+    licensed_seats: int | None = None
+    appliance_plan: list[dict] | None = None
+
+
+@router.post("/tenant-plan")
+def node_tenant_plan(body: TenantPlanReq, authorization: str = Header(default=""),
+                     db: Session = Depends(get_db)):
+    """A customer-tenant node forwards a Protection Setup change here so it's applied
+    on the control plane — which OWNS Tenant/User and replicates them back down.
+    Applying it only on the node would be reverted by the next CP→node pull."""
+    _require_fleet(authorization)
+    from ..models import Tenant, User
+    from .billing import PlanUpdate, _apply_plan_change
+    tenant = db.get(Tenant, body.tenant_id)
+    if tenant is None:
+        raise HTTPException(404, "unknown tenant")
+    user = db.get(User, body.actor) if body.actor else None
+    if user is None:
+        user = (db.query(User)
+                .filter(User.tenant_id == tenant.id, User.role == "owner").first())
+    pu = PlanUpdate(options=body.options, licensed_tb=body.licensed_tb,
+                    licensed_seats=body.licensed_seats, appliance_plan=body.appliance_plan)
+    view = _apply_plan_change(db, tenant=tenant, user=user, actor_role=(body.role or ""),
+                              is_platform_admin=bool(body.is_platform_admin), body=pu, notify=True)
+    return {"ok": True, "view": view}
+
