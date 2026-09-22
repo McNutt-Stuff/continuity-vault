@@ -98,7 +98,17 @@ EOF
     fi
   fi
   chmod 600 /etc/continuity-vault/appliance.env
-  chown -R "$CV_USER":"$CV_USER" "$INSTALL_DIR" "$DATA_DIR" /etc/continuity-vault
+  # Own the install + data + config, but NEVER descend into mounted external /
+  # mirror drives (they live under $DATA_DIR/data/ext/<id>). A failing USB drive
+  # whose ext4 is in a 'shutdown' / I/O-error state would EIO here and, under
+  # `set -Eeuo pipefail`, abort the ENTIRE software update — leaving the appliance
+  # stuck on the old version. `find -xdev` stays on each path's own filesystem, so
+  # external mounts are skipped; errors never fail the update.
+  local _p
+  for _p in "$INSTALL_DIR" "$DATA_DIR" /etc/continuity-vault; do
+    [ -e "$_p" ] || continue
+    find "$_p" -xdev -print0 2>/dev/null | xargs -0r chown "$CV_USER":"$CV_USER" 2>/dev/null || true
+  done
 }
 
 # Detect a dedicated Arkive storage volume (a separate RAID disk mounted at

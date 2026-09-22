@@ -655,9 +655,22 @@ class Agent:
         return res.get("mountpoint")
 
     def _apply_mirror_roots(self) -> None:
-        roots = [os.path.join(self._ext_mounts[e["store_id"]], "vault")
-                 for e in self._ext_stores
-                 if e.get("kind") == "mirror" and e["store_id"] in self._ext_mounts]
+        # Only route mirroring to volumes that are actually healthy right now. A
+        # drive that's mounted but dead (ext4 'shutdown' after an I/O fault) is
+        # EXCLUDED so backups + _sync_mirrors don't hammer it with failing writes;
+        # it's reported disconnected and resumes once repaired/reconnected.
+        roots: list[str] = []
+        for e in self._ext_stores:
+            if e.get("kind") != "mirror":
+                continue
+            mount = self._ext_mounts.get(e["store_id"])
+            if not mount:
+                continue
+            if not sysinfo.mount_health(mount).get("healthy"):
+                self.log.warning("mirror volume %s at %s is not usable (drive I/O error?) — "
+                                 "excluding from mirroring until repaired", e.get("name"), mount)
+                continue
+            roots.append(os.path.join(mount, "vault"))
         try:
             self.vault.set_mirror_roots(roots)
         except Exception as exc:  # noqa: BLE001
