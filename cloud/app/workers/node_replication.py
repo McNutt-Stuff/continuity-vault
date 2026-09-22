@@ -59,6 +59,7 @@ from ..models import (
 logger = logging.getLogger("cv.replication")
 
 _thread: threading.Thread | None = None
+_log_thread: threading.Thread | None = None
 _running_jobs: set[str] = set()
 _running_insights: set[str] = set()
 
@@ -458,15 +459,6 @@ def _push(s) -> int:
         except ValueError:
             alerts_since = None
     alerts_high = alerts_since
-    log_entries: list = []
-    log_cursor = _read_state().get("logs_cursor")
-    log_since = None
-    if log_cursor:
-        try:
-            log_since = datetime.fromisoformat(log_cursor)
-        except ValueError:
-            log_since = None
-    log_high = log_since
     m365_identities: list = []
     m365_sources: list = []
     managed_collections: list = []
@@ -556,17 +548,6 @@ def _push(s) -> int:
             alerts.append(_row(row))
             if row.created_at and (alerts_high is None or row.created_at > alerts_high):
                 alerts_high = row.created_at
-        # Unified logs — everything this node captured since the last confirmed
-        # push (app logs + the appliances/agents it manages + audit dual-writes).
-        # The cursor only advances on a confirmed delivery, so a failed push
-        # retries the whole batch next cycle and no log line is ever dropped.
-        lq = db.query(LogEntry)
-        if log_since is not None:
-            lq = lq.filter(LogEntry.created_at > log_since)
-        for row in lq.order_by(LogEntry.created_at.asc()).limit(5000).all():
-            log_entries.append(_sanitize_log(_row(row)))
-            if row.created_at and (log_high is None or row.created_at > log_high):
-                log_high = row.created_at
         # Microsoft 365: Entra identities discovered + managed sources provisioned
         # on this node flow UP so the portal (CP) shows discovery + collection state.
         if _m365m is not None:
@@ -595,8 +576,10 @@ def _push(s) -> int:
     if not (receipts or documents or accounts or jobs or agents or appliances
             or appliance_storages or insights
             or integ_instances or net_clients or net_apps or net_usage or integ_runs
-            or communications or alerts or log_entries
+            or communications or alerts
             or m365_identities or m365_sources):
+        # Nothing to replicate, but this node's own logs still must reach the CP.
+        _push_logs(s)
         return 0
     node = s.node_name or s.domain
     role = s.node_role or "customer-tenant"
@@ -640,12 +623,8 @@ def _push(s) -> int:
                         len(integ_instances),
                         len(net_clients) + len(net_apps) + len(net_usage),
                         len(m365_identities) + len(m365_sources))
-    if log_entries:
-        lres = _post("/nodes/sync/push", {"node": node, "role": role, "log_entries": log_entries})
-        if lres and lres.get("ok"):
-            if log_high is not None:
-                st = _read_state(); st["logs_cursor"] = log_high.isoformat(); _write_state(st)
-            logger.info("replication push: logs=%d", len(log_entries))
+    # Forward this node's logs (own cursor, independent of the data push above).
+    _push_logs(s)
     return len(receipts) + len(documents)
 
 
@@ -674,6 +653,74 @@ def _sanitize_log(d: dict) -> dict:
         except Exception:  # noqa: BLE001
             d["meta"] = {"_unserializable": True}
     return d
+
+
+def _push_logs(s) -> int:
+    """Forward this node's captured log lines to the control plane's unified log
+    store — INDEPENDENT of data replication, so EVERY non-control-plane node's logs
+    reach Platform Logs even with no assigned tenants or with federation off. The
+    logs_cursor advances only on confirmed delivery, so a failed push retries the
+    whole batch next cycle and no line is dropped."""
+    if not s.control_plane_url or not s.node_secret:
+        return 0
+    log_entries: list = []
+    log_cursor = _read_state().get("logs_cursor")
+    log_since = None
+    if log_cursor:
+        try:
+            log_since = datetime.fromisoformat(log_cursor)
+        except ValueError:
+            log_since = None
+    log_high = log_since
+    with SessionLocal() as db:
+        lq = db.query(LogEntry)
+        if log_since is not None:
+            lq = lq.filter(LogEntry.created_at > log_since)
+        for row in lq.order_by(LogEntry.created_at.asc()).limit(5000).all():
+            log_entries.append(_sanitize_log(_row(row)))
+            if row.created_at and (log_high is None or row.created_at > log_high):
+                log_high = row.created_at
+    if not log_entries:
+        return 0
+    node = s.node_name or s.domain
+    role = s.node_role or "customer-tenant"
+    lres = _post("/nodes/sync/push", {"node": node, "role": role, "log_entries": log_entries})
+    if lres and lres.get("ok"):
+        if log_high is not None:
+            st = _read_state(); st["logs_cursor"] = log_high.isoformat(); _write_state(st)
+        logger.info("log forward: logs=%d", len(log_entries))
+        return len(log_entries)
+    return 0
+
+
+def start_log_forwarder() -> None:
+    """Forward node logs to the control plane on EVERY non-control-plane node,
+    independent of federation/data replication, so all logs are viewable from the
+    control plane (a node with no tenants, or with node_sync_scope off, still
+    forwards its logs). On a federated node the replication loop already forwards
+    logs via _push_logs, so this only runs when replication ISN'T."""
+    global _log_thread
+    s = get_settings()
+    if _log_thread is not None:
+        return
+    if not s.control_plane_url or not s.node_secret:
+        logger.warning("log forwarding disabled: control_plane_url / node_secret not set")
+        return
+    interval = max(15, min(45, s.heartbeat_interval_seconds or 30))
+
+    def loop() -> None:
+        time.sleep(8)
+        while True:
+            try:
+                _push_logs(s)
+            except Exception:  # noqa: BLE001
+                logger.exception("log forward cycle failed")
+            time.sleep(interval)
+
+    _log_thread = threading.Thread(target=loop, name="cv-log-forwarder", daemon=True)
+    _log_thread.start()
+    logger.info("node log forwarding started (control plane=%s, every %ds)",
+                s.control_plane_url, interval)
 
 
 def start_replication() -> None:

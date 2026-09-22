@@ -264,6 +264,18 @@ def startup() -> None:
     else:
         start_scheduler()
 
+    # Log forwarding is DECOUPLED from federation: every non-control-plane node
+    # must push its unified logs to the CP so all logs are viewable in one place
+    # (golden rule) — even a node with no assigned tenants or with node_sync_scope
+    # off. A federated node already forwards logs inside its replication push, so
+    # start the dedicated forwarder only when replication ISN'T running.
+    if role != "control-plane" and not (settings.node_sync_scope):
+        try:
+            from .workers.node_replication import start_log_forwarder
+            start_log_forwarder()
+        except Exception:  # noqa: BLE001
+            _logging.getLogger("cv.startup").exception("log forwarder start failed")
+
     # Every node drains its own durable activity queue (retries to offline
     # appliances / unreachable storage) so pending backups deliver on reconnect.
     from .workers.queue import start_queue_worker
