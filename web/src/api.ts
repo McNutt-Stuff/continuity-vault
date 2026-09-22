@@ -52,7 +52,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       onUnauthorized?.();
     }
     // A 503 maintenance signal = the tenant is mid-HA-switchover; show a dialog.
-    if (res.status === 503 && payload?.maintenance) {
+    if (res.status === 503 && (payload?.maintenance || payload?.node_not_ready)) {
       onMaintenance?.(detail, Number(payload?.retry_after) || 15);
       throw new ApiError(res.status, detail, true);
     }

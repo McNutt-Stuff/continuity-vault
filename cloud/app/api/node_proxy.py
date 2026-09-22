@@ -162,6 +162,22 @@ async def middleware(request: Request, call_next):
         if h in resp.headers:
             relay[h] = resp.headers[h]
 
+    # The CP already authenticated this session to route it here, so a 401 from the
+    # node means the node can't yet authenticate it — almost always because the
+    # user/tenant hasn't finished replicating after a switchover, NOT a real session
+    # expiry. Relaying the 401 would make the portal sign the customer out. Return a
+    # 503 "node not ready" instead so the session survives and the client retries.
+    if resp.status_code == 401:
+        await resp.aclose()
+        logger.warning("assigned node %s returned 401 for %s — node not ready "
+                       "(user/tenant still replicating?); returning 503 not logout",
+                       node_url, request.url.path)
+        return JSONResponse(
+            {"detail": "Your data is briefly unavailable while your account finishes "
+                       "syncing to its server — please try again in a moment.",
+             "node_not_ready": True, "retry_after": 10},
+            status_code=503, headers={"Retry-After": "10"})
+
     async def _stream():
         try:
             async for chunk in resp.aiter_bytes():
