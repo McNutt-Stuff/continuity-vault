@@ -338,6 +338,7 @@ def _pull(s) -> int:
     s_docs = bundle.get("standby_documents") or []
     if s_recs or s_docs:
         applied = 0
+        skipped = 0
         with SessionLocal() as db:
             db.autoflush = False
             for model, rows in ((SnapshotReceipt, s_recs), (SearchDocument, s_docs)):
@@ -348,6 +349,7 @@ def _pull(s) -> int:
                             db.flush()
                         applied += 1
                     except Exception as exc:  # noqa: BLE001
+                        skipped += 1
                         logger.debug("standby: skipped a %s row: %s",
                                      getattr(model, "__tablename__", model), str(exc)[:120])
             db.commit()
@@ -357,9 +359,15 @@ def _pull(s) -> int:
         if bundle.get("standby_doc_cursor"):
             st["standby_doc_cursor"] = bundle["standby_doc_cursor"]
         _write_state(st)
-        logger.info("replication standby: warm-replicated %d receipt(s) + %d doc(s)%s",
-                    len(s_recs), len(s_docs),
-                    " (more pending)" if bundle.get("standby_more") else "")
+        # Forwarded to Platform Logs via _push_logs — surface warm-replica health.
+        if skipped:
+            logger.warning("replication standby: warm-replicated %d row(s) but %d "
+                           "FAILED to apply (tenants=%s) — will retry", applied, skipped,
+                           ",".join(bundle.get("standby_tenant_ids") or []) or "?")
+        else:
+            logger.info("replication standby: warm-replicated %d receipt(s) + %d doc(s)%s",
+                        len(s_recs), len(s_docs),
+                        " (more pending)" if bundle.get("standby_more") else "")
     # Forwarded agent commands (portal "Sync now" for node-routed agents): append
     # to the local agent queue so the node delivers them on the agent's next
     # heartbeat. enqueue_command dedupes, so a re-forward is harmless.

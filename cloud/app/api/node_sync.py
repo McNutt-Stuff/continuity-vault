@@ -236,6 +236,11 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
             doc_next = docs[-1].created_at.isoformat()
         standby_more = len(recs) >= _LIMIT or len(docs) >= _LIMIT
 
+    # Stamp replication freshness so the admin can see how current each node is
+    # (drives the HA "in sync" indicator for a standby node in the topology view).
+    node.last_sync_at = datetime.utcnow()
+    db.commit()
+
     pricing = db.get(PricingConfig, "default")
     # Integrations for the node's tenants + platform enable/disable, so the node
     # can serve its appliances' integration pull/report locally.
@@ -515,18 +520,30 @@ def push(body: PushPayload, authorization: str = Header(default=""),
     # attribute + drill down. Record last_log_push_at so node details show the
     # push freshness.
     from ..models import LogEntry
+    dropped_logs = 0
     for le in body.log_entries:
-        if not _known(le) or not _has_pk(LogEntry, le):
+        if not _has_pk(LogEntry, le) or not _known(le):
+            dropped_logs += 1
             continue
         if db.get(LogEntry, le.get("id")) is None:
             kw = _deser(LogEntry, le)
+            # Attribute to the pushing node whenever the row lacks it. A node with
+            # no is_self row in its (replicated) DB stamps node_id=None locally, so
+            # setdefault would leave it unattributed — override empty values too so
+            # EVERY node's logs are viewable + scopable in Platform Logs.
             if push_node is not None:
-                kw.setdefault("node_id", push_node.id)
-                kw.setdefault("node_name", push_node.name)
+                if not kw.get("node_id"):
+                    kw["node_id"] = push_node.id
+                if not kw.get("node_name"):
+                    kw["node_name"] = push_node.name
             db.add(LogEntry(**kw))
             counts["logs"] += 1
     if push_node is not None and body.log_entries:
         push_node.last_log_push_at = datetime.utcnow()
+        if dropped_logs:
+            logger.warning("node-sync: dropped %d/%d log rows from node %s "
+                           "(unknown tenant or missing id)", dropped_logs,
+                           len(body.log_entries), push_node.name)
     db.commit()
     return {"ok": True, **counts}
 

@@ -2365,6 +2365,7 @@ def _node_view(db: Session, n: Node) -> dict:
         "backup_services": [nm for nm in (_svc_name(s) for s in backup_ids) if nm],
         "last_heartbeat_at": n.last_heartbeat_at.isoformat() if n.last_heartbeat_at else None,
         "last_log_push_at": n.last_log_push_at.isoformat() if n.last_log_push_at else None,
+        "last_sync_at": n.last_sync_at.isoformat() if n.last_sync_at else None,
     }
 
 
@@ -2900,7 +2901,23 @@ def node_tenants(nid: str, db: Session = Depends(get_db)):
         r["heavy"] = bool(total and r["bytes"] and
                           r["share"] >= max(30.0, (100.0 / max(1, len(rows))) * 2.5))
     rows.sort(key=lambda r: -r["bytes"])
-    return {"node": n.name, "total_bytes": total, "tenants": rows}
+    # Warm-standby tenants: this node keeps a passive replica (config+keys+
+    # receipts+index) for these but their workers run on the ACTIVE node.
+    standby_rows = []
+    for t in db.query(Tenant).filter(Tenant.standby_node_id == nid).all():
+        active = db.get(Node, t.node_id) if t.node_id else None
+        used = db.query(func.coalesce(func.sum(SnapshotReceipt.total_bytes), 0)).filter(
+            SnapshotReceipt.tenant_id == t.id).scalar() or 0
+        rps = db.query(func.count(SnapshotReceipt.id)).filter(
+            SnapshotReceipt.tenant_id == t.id).scalar() or 0
+        standby_rows.append({"id": t.id, "name": t.name,
+                             "tenant_type": t.tenant_type or "dedicated",
+                             "bytes": int(used), "recovery_points": int(rps),
+                             "active_node": (active.name if active else "control plane"),
+                             "placement_state": t.placement_state or ""})
+    return {"node": n.name, "total_bytes": total, "tenants": rows,
+            "standby_tenants": standby_rows,
+            "last_sync_at": n.last_sync_at.isoformat() if n.last_sync_at else None}
 
 
 @router.get("/nodes/{nid}/config")

@@ -117,6 +117,8 @@ def _cluster_view(db: Session, c: Cluster) -> dict:
                 "standby_node_name": (sb.name if sb else t.standby_node_id),
                 "standby_in_cluster": t.standby_node_id in node_ids,
                 "standby_online": sb_online,
+                "standby_synced_at": (sb.last_sync_at.isoformat()
+                                      if sb and sb.last_sync_at else None),
                 "placement_state": t.placement_state or "",
             })
 

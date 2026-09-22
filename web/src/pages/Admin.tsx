@@ -392,7 +392,9 @@ function TopologyAdmin() {
                           {p.standby_node_name}
                           {!p.standby_in_cluster && <span className="faint" title="Standby node is in another cluster">· cross-cluster</span>}
                         </span>
-                        {p.placement_state === "switching" && <Pill tone="warn" dot>switching…</Pill>}
+                        {p.placement_state === "switching"
+                          ? <Pill tone="warn" dot>switching…</Pill>
+                          : <span className="faint" title="Warm-replica freshness">{p.standby_synced_at ? `synced ${timeAgo(p.standby_synced_at)}` : "not yet synced"}</span>}
                       </div>
                     ))}
                   </div>
@@ -2740,6 +2742,8 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
           {live?.hostname && <Fact label="Hostname" value={live.hostname} />}
           {live?.os && <Fact label="OS" value={live.os} />}
           <Fact label="Last log push" value={node.last_log_push_at ? timeAgo(node.last_log_push_at) : (node.is_self ? "n/a" : "never")} />
+          {node.role === "customer-tenant" && <Fact label="Last sync" value={node.last_sync_at ? timeAgo(node.last_sync_at) : "never"} />}
+          {node.standby_tenants > 0 && <Fact label="Warm standby for" value={`${node.standby_tenants} tenant${node.standby_tenants === 1 ? "" : "s"}`} />}
         </div>
       </Card>
 
@@ -2977,6 +2981,32 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
               {(!tenants?.tenants || tenants.tenants.length === 0) && <tr><td colSpan={7} className="muted">No tenants on this node.</td></tr>}
             </tbody>
           </table>
+          {(tenants?.standby_tenants || []).length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <div className="spread" style={{ marginBottom: 6 }}>
+                <h3 style={{ margin: 0, fontSize: 14 }}><Icon name="shield" size={13} /> Warm standby (passive replica)</h3>
+                <span className="faint" style={{ fontSize: 12 }}>
+                  {tenants.standby_tenants.length} tenant{tenants.standby_tenants.length === 1 ? "" : "s"}
+                  {tenants.last_sync_at ? ` · synced ${timeAgo(tenants.last_sync_at)}` : ""}
+                </span>
+              </div>
+              <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>This node keeps a synced copy (config, keys, recovery points, search index) for these tenants; their workers run on the active node until a switchover.</div>
+              <table className="table">
+                <thead><tr><th>Tenant</th><th>Active node</th><th>Data</th><th>Recovery pts</th><th>State</th></tr></thead>
+                <tbody>
+                  {tenants.standby_tenants.map((t: any) => (
+                    <tr key={t.id}>
+                      <td><div style={{ fontWeight: 600 }}>{t.name}</div><div className="faint" style={{ fontSize: 11 }}>{t.tenant_type}</div></td>
+                      <td className="faint">{t.active_node}</td>
+                      <td>{bytes(t.bytes)}</td>
+                      <td className="faint">{t.recovery_points}</td>
+                      <td>{t.placement_state === "switching" ? <Pill tone="warn" dot>switching…</Pill> : <Pill tone="info" dot>in sync</Pill>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Card>
       )}
       {tab === "config" && (

@@ -74,10 +74,13 @@ def set_standby(db: Session, tenant: Tenant, standby_node_id: str | None, *,
     prev = tenant.standby_node_id
     tenant.standby_node_id = standby_node_id or None
     db.commit()
+    to_name = _node_name(db, standby_node_id) if standby_node_id else "none"
+    msg = (f"HA standby set to {to_name}" if standby_node_id
+           else "HA standby cleared")
     _audit(db, actor, "tenant.standby_set", tenant,
-           {"from": prev, "to": standby_node_id})
-    logger.info("placement: tenant %s standby %s -> %s (by %s)",
-                tenant.id, prev, standby_node_id, actor)
+           {"from": prev, "to": standby_node_id, "to_name": to_name, "message": msg})
+    logger.warning("placement: tenant %s (%s) standby %s -> %s (by %s)",
+                   tenant.id, tenant.name, prev, standby_node_id, actor)
     return {"tenant_id": tenant.id, "standby_node_id": tenant.standby_node_id}
 
 
@@ -103,11 +106,19 @@ def switchover(db: Session, tenant: Tenant, *, actor: str = "system",
     tenant.placement_state = "switching"
     tenant.switchover_at = _now()
     db.commit()
-    _audit(db, actor, "tenant.switchover", tenant, {
-        "reason": reason, "from_node": old_active, "to_node": new_active})
     an = _node_name(db, new_active)
-    logger.warning("placement: SWITCHOVER tenant %s %s -> %s (%s, by %s)",
-                   tenant.id, old_active, new_active, reason, actor)
+    on = _node_name(db, old_active)
+    devices = _device_counts(db, tenant.id)
+    _audit(db, actor, "tenant.switchover", tenant, {
+        "reason": reason, "from_node": old_active, "to_node": new_active,
+        "appliances": devices["appliances"], "agents": devices["agents"],
+        "message": f"switched over {on} -> {an} ({reason}); "
+                   f"{devices['appliances']} appliance(s) + {devices['agents']} "
+                   f"agent(s) retarget on next heartbeat"})
+    logger.warning("placement: SWITCHOVER tenant %s (%s) %s -> %s (%s, by %s); "
+                   "%d appliance(s) + %d agent(s) will retarget",
+                   tenant.id, tenant.name, on, an, reason, actor,
+                   devices["appliances"], devices["agents"])
     return {"tenant_id": tenant.id, "active_node_id": new_active,
             "active_node_name": an, "standby_node_id": old_active, "reason": reason}
 
@@ -132,6 +143,22 @@ def _node_name(db: Session, node_id: str | None) -> str:
         return "control plane"
     n = db.get(Node, node_id)
     return (n.name if n else node_id) or node_id
+
+
+def _device_counts(db: Session, tenant_id: str) -> dict:
+    """How many appliances + desktop agents will retarget to the new active node
+    (they discover it via their next heartbeat's node_url)."""
+    out = {"appliances": 0, "agents": 0}
+    try:
+        from .models import Appliance, DesktopAgent
+        from sqlalchemy import func
+        out["appliances"] = int(db.query(func.count(Appliance.id))
+                                .filter(Appliance.tenant_id == tenant_id).scalar() or 0)
+        out["agents"] = int(db.query(func.count(DesktopAgent.id))
+                            .filter(DesktopAgent.tenant_id == tenant_id).scalar() or 0)
+    except Exception:  # noqa: BLE001
+        logger.debug("device count failed for tenant %s", tenant_id, exc_info=True)
+    return out
 
 
 def _audit(db: Session, actor: str, action: str, tenant: Tenant, detail: dict) -> None:
