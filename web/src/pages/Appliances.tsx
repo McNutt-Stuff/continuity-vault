@@ -493,19 +493,26 @@ function ApplianceDetail({ a, onCommand, onRemove, reload, onBack, prodVersion }
     catch (e) { await notify({ title: "Couldn't remove storage", message: (e as ApiError).message, tone: "danger" }); }
   }
   // Recover a disconnected / dead-mount drive without erasing it: the appliance
-  // force-releases the stale mount and re-mounts the drive by serial.
+  // force-releases the stale mount and re-mounts the drive by serial. Also used to
+  // force a resync of a connected mirror that verified out of sync.
   async function repairStorage(s: Store) {
+    const resync = s.kind === "mirror" && s.connected !== false && s.state !== "disconnected"
+      && s.health?.mirror_integrity?.in_sync === false;
     const ok = await confirmDialog({
-      title: "Repair drive",
-      message: `Try to reconnect "${s.name}"? Arkive will release the stale mount and re-mount the drive — no data is erased. If the drive isn't physically connected, reconnect it first.`,
-      confirmLabel: "Repair" });
+      title: resync ? "Resync mirror" : "Repair drive",
+      message: resync
+        ? `Re-sync "${s.name}" with the primary vault now? Arkive re-copies any missing objects + index files to the mirror — no data is erased.`
+        : `Try to reconnect "${s.name}"? Arkive will release the stale mount and re-mount the drive — no data is erased. If the drive isn't physically connected, reconnect it first.`,
+      confirmLabel: resync ? "Resync" : "Repair" });
     if (!ok) return;
     try {
       const r = await api.post<{ appliance_online?: boolean }>(`/appliances/${a.id}/storage/${s.id}/repair`, {});
-      await notify({ title: "Repair started",
+      await notify({ title: resync ? "Resync started" : "Repair started",
         message: r.appliance_online
-          ? "The appliance is re-mounting the drive — refresh in a moment to see its status."
-          : "The appliance is offline; the repair will run automatically when it reconnects.",
+          ? (resync
+            ? "The appliance is re-syncing the mirror — refresh in a moment to see its status."
+            : "The appliance is re-mounting the drive — refresh in a moment to see its status.")
+          : "The appliance is offline; it will run automatically when it reconnects.",
         tone: "info" });
       await reload();
     } catch (e) { await notify({ title: "Couldn't repair drive", message: (e as ApiError).message, tone: "danger" }); }
@@ -979,9 +986,12 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, o
   // A drive that's mounted but unhealthy (e.g. ext4 shutdown after a USB drop) is
   // also repairable — re-mounting clears the stale mount.
   const unhealthy = !!h.drive_health && h.drive_health !== "healthy";
-  const repairable = canManage && isExternal && (disconnected || unhealthy) && !provisioning;
-  const barTone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : undefined;
   const mi = h.mirror_integrity;
+  // A connected mirror that verified out of sync is repairable too — Repair kicks
+  // a re-mount + forced resync so it re-duplicates the primary (auto-heal backup).
+  const outOfSync = isMirror && !disconnected && !!mi && mi.in_sync === false && !mi.syncing;
+  const repairable = canManage && isExternal && (disconnected || unhealthy || outOfSync) && !provisioning;
+  const barTone = pct >= 90 ? "#f2545b" : pct >= 75 ? "#f5a623" : undefined;
   const chips: { label: string; value: string; tone: "ok" | "warn" | "danger" | "info" }[] = [];
   if (!disconnected && !provisioning) {
     if (h.drive_health) chips.push({ label: "Drive", value: h.drive_health, tone: h.drive_health === "healthy" ? "ok" : "danger" });
@@ -1053,7 +1063,7 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, o
             <Icon name="gear" size={13} />
           </button>
           {canManage && <button className="btn sm ghost" onClick={() => onRename(s)}>Rename</button>}
-          {repairable && <button className="btn sm primary" onClick={() => onRepair(s)} title="Release the stale mount and re-mount the drive (no data erased)"><Icon name="repeat" size={13} /> Repair</button>}
+          {repairable && <button className="btn sm primary" onClick={() => onRepair(s)} title={outOfSync ? "Re-sync this mirror with the primary vault (no data erased)" : "Release the stale mount and re-mount the drive (no data erased)"}><Icon name="repeat" size={13} /> {outOfSync ? "Resync" : "Repair"}</button>}
           {canManage && isExternal && <button className="btn sm ghost" onClick={() => onMirror(s)} title="Mirror settings">{isMirror ? "Mirror…" : "Make mirror"}</button>}
           {canManage && isExternal && <button className="btn sm ghost" onClick={() => onDelete(s)}>Remove</button>}
         </div>
@@ -1079,6 +1089,12 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, o
           </div>
           <div className="progress"><span style={{ width: `${pct}%`, background: barTone }} /></div>
         </>
+      )}
+      {outOfSync && (
+        <div className="faint" style={{ fontSize: 12, margin: "8px 0 2px", color: "var(--warn)" }}>
+          This mirror drifted out of sync with the primary vault. The appliance re-syncs
+          automatically, but you can force it now with <b>Resync</b>.
+        </div>
       )}
       {chips.length > 0 && (
         <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>

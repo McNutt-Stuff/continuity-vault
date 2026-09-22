@@ -1614,14 +1614,39 @@ async def _heartbeat_loop() -> None:
 async def _integrity_loop() -> None:
     """Periodically verify every mirror volume is a true 1:1 copy of the primary
     (data + index). First pass shortly after boot, then every 6h; the result is
-    cached + shipped in telemetry so the admin/customer views show drive status."""
+    cached + shipped in telemetry so the admin/customer views show drive status.
+    Self-healing: if a CONNECTED mirror verifies out of sync, kick a repair sync
+    (backfill missed objects/index) automatically, then re-check soon to confirm."""
     await asyncio.sleep(90)  # let mounts settle + a first sync happen
+    delay = 6 * 3600
+    healed_last = False  # true right after an auto-repair, so the next pass is a confirm
     while True:
         try:
-            await asyncio.to_thread(agent._verify_mirrors, "scheduled")
+            rep = await asyncio.to_thread(agent._verify_mirrors, "scheduled")
+            # Auto-repair drift on a still-connected mirror — the live duplication
+            # missed a write (e.g. a transient I/O error) and no ingest/reconnect
+            # has since re-synced it. _sync_mirrors is idempotent + self-verifying.
+            needs_heal = (rep.get("in_sync") is False and any(
+                s.get("connected") and s.get("in_sync") is False
+                for s in rep.get("stores", []) or []))
+            if needs_heal and not healed_last:
+                agent.log.warning("scheduled verify found mirror(s) out of sync — "
+                                  "auto-repairing (backfill resync)")
+                await asyncio.to_thread(agent._sync_mirrors,
+                                        "auto-repair (drift detected)", True)
+                healed_last, delay = True, 900  # confirm the resync settled in 15 min
+            elif needs_heal:
+                # The resync didn't clear it — likely an unhealthy drive that needs
+                # a physical Repair. Stop hammering; surface it and back off.
+                agent.log.warning("mirror still out of sync after auto-repair — manual "
+                                  "Repair/Resync may be needed (drive fault?)")
+                healed_last, delay = False, 6 * 3600
+            else:
+                healed_last, delay = False, 6 * 3600
         except Exception as exc:  # noqa: BLE001
             agent.log.warning("scheduled mirror verify failed: %s", exc)
-        await asyncio.sleep(6 * 3600)
+            healed_last, delay = False, 6 * 3600
+        await asyncio.sleep(delay)
 
 
 async def _integrations_loop() -> None:
