@@ -385,6 +385,14 @@ def _auto_failover_node(db, offline_node, now) -> None:
                 logger.warning("auto-failover skipped for tenant %s: standby node %s is also offline",
                                t.id, sb.name or sb.id)
                 continue
+            # Never fail over to an INCOMPLETE replica — the object bytes are safe in
+            # shared storage, so switching to a not-yet-synced standby would only
+            # show the customer an empty/partial view. Wait for it to catch up.
+            if not placement.is_standby_ready(t):
+                logger.warning("auto-failover skipped for tenant %s: standby not fully "
+                               "synced yet (pending=%s) — bytes are safe; holding",
+                               t.id, t.standby_pending)
+                continue
             placement.switchover(db, t, actor="system:auto-failover",
                                  reason="node-offline", force=True)
             logger.warning("auto-failover: tenant %s promoted standby node %s (active %s offline)",

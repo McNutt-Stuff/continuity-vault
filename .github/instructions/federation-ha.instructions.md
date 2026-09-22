@@ -58,6 +58,23 @@ shared storage or on devices). Replication is additive on top of the existing pu
 - **Scheduler auto-skips standbys**: the standby's scheduler filters `Tenant.node_id == self`, so a standby
   tenant (whose `node_id` points at the OTHER node) is never double-collected. This is why the design is safe.
 
+## Truthful readiness (never a false "in sync")
+
+A pull happening is NOT proof the data applied. The standby node reports its ACTUAL apply health back on the
+next pull (`NodeIdent.standby_report`): per-tenant `pending` (rows that failed to apply) + `caught_up` (the
+receipt/index stream had no more pages). The CP records it via `node_sync._record_standby_report`:
+
+- **`Tenant.standby_synced_at`** — last time the standby confirmed a CLEAN, caught-up apply.
+- **`Tenant.standby_pending`** — rows still failing to apply (>0 = the replica is INCOMPLETE).
+
+`placement.is_standby_ready(tenant)` = `standby_synced_at is not None AND standby_pending == 0`. This gates
+everything: `can_switch` refuses a manual switchover to an unready replica, and auto-failover **skips** an
+unready standby (the object bytes are safe in shared storage, so switching to an empty/partial index would
+only show the customer a broken view). `set_standby` clears readiness so a freshly-assigned standby shows
+"syncing" until the node confirms. The admin UI (topology pair + TenantDetail + node detail) shows the real
+state — `in sync` only when ready, else `syncing · N pending`. **Never surface "synced" from `last_sync_at`
+alone** — that only means the node pulled, not that the tenant's rows landed.
+
 ## Switchover (`placement.py`)
 
 `switchover(A→B)` is a **metadata flip** — no data movement, because the standby is warm:

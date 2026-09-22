@@ -140,6 +140,33 @@ class NodeIdent(BaseModel):
     # replication (receipts + search index for tenants this node is the STANDBY for).
     standby_rcpt_cursor: str | None = None
     standby_doc_cursor: str | None = None
+    # Warm-standby apply health from the node's PREVIOUS pull: which standby tenants
+    # had rows fail to apply (pending>0 = incomplete replica) + whether the data
+    # stream was caught up. Lets the CP show a truthful readiness + gate switchover.
+    standby_report: dict | None = None
+
+
+def _record_standby_report(db: Session, node: Node, report: dict) -> None:
+    """Fold a standby node's apply-health report into per-tenant readiness. A tenant
+    is marked synced (standby_synced_at=now, standby_pending=0) only when the node
+    applied ALL its rows (pending==0) AND the data stream was caught up. Any pending
+    rows leave standby_pending>0 so the UI shows "syncing" and switchover refuses."""
+    try:
+        pending = report.get("pending") or {}
+        caught_up = bool(report.get("caught_up"))
+        now = datetime.utcnow()
+        for tid, cnt in pending.items():
+            t = db.get(Tenant, tid)
+            # Only trust the report for tenants this node is truly the standby for.
+            if t is None or t.standby_node_id != node.id:
+                continue
+            t.standby_pending = int(cnt or 0)
+            if int(cnt or 0) == 0 and caught_up:
+                t.standby_synced_at = now
+        db.commit()
+    except Exception:  # noqa: BLE001 — a bad report must never break the pull
+        db.rollback()
+        logger.exception("failed to record standby report from node %s", node.id)
 
 
 @router.post("/pull")
@@ -152,6 +179,11 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
     if node is None:
         # Not registered yet (heartbeat runs on its own cadence) — nothing to do.
         return {"node_id": None, "tenants": [], "assigned": 0}
+    # Record the warm-standby readiness the node reported for its LAST apply, so the
+    # portal shows a TRUTHFUL "in sync" and switchover can refuse an incomplete
+    # replica. Only tenants this node is actually the standby for are trusted.
+    if body.standby_report:
+        _record_standby_report(db, node, body.standby_report)
     # Active tenants (this node runs their workers) + STANDBY tenants (this node
     # keeps a warm read-only replica for HA). Config for BOTH goes down; the node's
     # scheduler naturally skips standby tenants because their node_id points at the

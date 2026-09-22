@@ -394,7 +394,9 @@ function TopologyAdmin() {
                         </span>
                         {p.placement_state === "switching"
                           ? <Pill tone="warn" dot>switching…</Pill>
-                          : <span className="faint" title="Warm-replica freshness">{p.standby_synced_at ? `synced ${timeAgo(p.standby_synced_at)}` : "not yet synced"}</span>}
+                          : p.standby_ready
+                            ? <span className="row" style={{ gap: 4 }}><Pill tone="ok" dot>in sync</Pill><span className="faint">{p.standby_synced_at ? timeAgo(p.standby_synced_at) : ""}</span></span>
+                            : <Pill tone="warn" dot>{p.standby_pending > 0 ? `syncing · ${p.standby_pending} pending` : "syncing…"}</Pill>}
                       </div>
                     ))}
                   </div>
@@ -1965,12 +1967,17 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
                 <div className="faint" style={{ fontSize: 11.5, textTransform: "uppercase", letterSpacing: ".05em" }}>High availability (active / passive)</div>
                 <div className="row" style={{ gap: 6 }}>
                   <button className="btn ghost sm" onClick={setStandby}><Icon name="server" size={12} /> {t.standby_node ? "Change standby" : "Assign standby"}</button>
-                  {t.standby_node && <button className="btn sm" onClick={switchover}><Icon name="repeat" size={12} /> Switch over</button>}
+                  {t.standby_node && <button className="btn sm" disabled={!t.standby_ready} title={t.standby_ready ? "Promote the standby to active" : "The standby isn't fully synced yet"} onClick={switchover}><Icon name="repeat" size={12} /> Switch over</button>}
                 </div>
               </div>
               <Row2 label="Active node" value={<span className="row" style={{ gap: 6 }}><Pill tone="ok" dot>active</Pill>{t.node?.name || "Control plane"}</span>} />
               <Row2 label="Standby node" value={t.standby_node
-                ? <span className="row" style={{ gap: 6 }}><Pill tone={t.standby_node.online ? "ok" : "warn"} dot>{t.standby_node.online ? "online" : "offline"}</Pill>{t.standby_node.name}</span>
+                ? <span className="row" style={{ gap: 6 }}>
+                    <Pill tone={t.standby_node.online ? "ok" : "warn"} dot>{t.standby_node.online ? "online" : "offline"}</Pill>{t.standby_node.name}
+                    {t.standby_ready
+                      ? <Pill tone="ok" dot>in sync{t.standby_synced_at ? ` · ${timeAgo(t.standby_synced_at)}` : ""}</Pill>
+                      : <Pill tone="warn" dot>{t.standby_pending > 0 ? `syncing · ${t.standby_pending} pending` : "syncing…"}</Pill>}
+                  </span>
                 : <span className="muted" style={{ fontSize: 12.5 }}>None — no warm replica. Assign one for failover.</span>} />
               {t.placement_state === "switching" && (
                 <Row2 label="Placement" value={<Pill tone="warn" dot>switching over…</Pill>} />
@@ -3000,7 +3007,7 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
                       <td className="faint">{t.active_node}</td>
                       <td>{bytes(t.bytes)}</td>
                       <td className="faint">{t.recovery_points}</td>
-                      <td>{t.placement_state === "switching" ? <Pill tone="warn" dot>switching…</Pill> : <Pill tone="info" dot>in sync</Pill>}</td>
+                      <td>{t.placement_state === "switching" ? <Pill tone="warn" dot>switching…</Pill> : t.ready ? <Pill tone="ok" dot>in sync</Pill> : <Pill tone="warn" dot>{t.pending > 0 ? `syncing · ${t.pending}` : "syncing…"}</Pill>}</td>
                     </tr>
                   ))}
                 </tbody>

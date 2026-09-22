@@ -317,6 +317,9 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE tenants ADD COLUMN standby_node_id VARCHAR",
         "ALTER TABLE tenants ADD COLUMN placement_state VARCHAR DEFAULT ''",
         "ALTER TABLE tenants ADD COLUMN switchover_at TIMESTAMP",
+        # Warm-standby readiness reported by the standby node (real apply health).
+        "ALTER TABLE tenants ADD COLUMN standby_synced_at TIMESTAMP",
+        "ALTER TABLE tenants ADD COLUMN standby_pending INTEGER DEFAULT 0",
         # Free-trial support: a billing profile can be trialing (auto-bills at trial end).
         "ALTER TABLE billing_profiles ADD COLUMN trial_ends_at TIMESTAMP",
         "ALTER TABLE appliances ADD COLUMN version_updated_at TIMESTAMP",

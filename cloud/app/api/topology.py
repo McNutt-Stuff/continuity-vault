@@ -117,8 +117,12 @@ def _cluster_view(db: Session, c: Cluster) -> dict:
                 "standby_node_name": (sb.name if sb else t.standby_node_id),
                 "standby_in_cluster": t.standby_node_id in node_ids,
                 "standby_online": sb_online,
-                "standby_synced_at": (sb.last_sync_at.isoformat()
-                                      if sb and sb.last_sync_at else None),
+                # TRUTHFUL replica readiness (confirmed apply), not just "pulled".
+                "standby_ready": bool(t.standby_synced_at is not None
+                                      and not (t.standby_pending or 0)),
+                "standby_pending": int(t.standby_pending or 0),
+                "standby_synced_at": (t.standby_synced_at.isoformat()
+                                      if t.standby_synced_at else None),
                 "placement_state": t.placement_state or "",
             })
 

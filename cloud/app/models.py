@@ -71,6 +71,13 @@ class Tenant(Base):
     # When the tenant last switched active nodes (migration/failover) — drives a
     # cooldown so a flapping node can't ping-pong the tenant.
     switchover_at = Column(DateTime, nullable=True)
+    # Warm-standby readiness (reported BY the standby node after it applies a pull):
+    # standby_synced_at = last time the standby confirmed a CLEAN, caught-up apply;
+    # standby_pending = rows that FAILED to apply on the standby last pull (>0 means
+    # the replica is incomplete — NOT safe to switch to). These reflect ACTUAL apply
+    # success, not just that a pull happened, so the UI never shows a false "in sync".
+    standby_synced_at = Column(DateTime, nullable=True)
+    standby_pending = Column(Integer, default=0)
     # The geographic region this tenant was routed to at signup (e.g. "nam-east"),
     # derived from the address they provided. Drives node placement + data locality.
     region_code = Column(String, default="", index=True)

@@ -289,11 +289,16 @@ def _pull(s) -> int:
         # STANDBY for) — advanced only after a confirmed apply below.
         "standby_rcpt_cursor": _st0.get("standby_rcpt_cursor"),
         "standby_doc_cursor": _st0.get("standby_doc_cursor"),
+        # Warm-standby readiness from our PREVIOUS apply (per-tenant rows that
+        # failed to apply + whether the data stream was caught up), so the CP can
+        # show a truthful "in sync" and refuse a switchover to an incomplete replica.
+        "standby_report": _st0.get("standby_report") or None,
     })
     if not bundle:
         return 0
     n = 0
     skipped = 0
+    skip_by_tenant: dict = {}  # tenant_id -> count of rows that failed to apply
     deferred: list = []  # rows skipped on the first pass — retried once after all tables land
     with SessionLocal() as db:
         # Deterministic ordering: no autoflush surprises. Each row upserts inside
@@ -348,6 +353,9 @@ def _pull(s) -> int:
                 n += 1
             else:
                 skipped += 1
+                tid = row.get("tenant_id")
+                if tid:
+                    skip_by_tenant[tid] = skip_by_tenant.get(tid, 0) + 1
         if deferred:
             db.commit()
     # New Config Objects / source links just landed — drop the platform-config
@@ -365,7 +373,7 @@ def _pull(s) -> int:
     s_docs = bundle.get("standby_documents") or []
     if s_recs or s_docs:
         applied = 0
-        skipped = 0
+        s_skipped = 0
         with SessionLocal() as db:
             db.autoflush = False
             for model, rows in ((SnapshotReceipt, s_recs), (SearchDocument, s_docs)):
@@ -376,7 +384,10 @@ def _pull(s) -> int:
                             db.flush()
                         applied += 1
                     except Exception as exc:  # noqa: BLE001
-                        skipped += 1
+                        s_skipped += 1
+                        tid = row.get("tenant_id")
+                        if tid:
+                            skip_by_tenant[tid] = skip_by_tenant.get(tid, 0) + 1
                         logger.debug("standby: skipped a %s row: %s",
                                      getattr(model, "__tablename__", model), str(exc)[:120])
             db.commit()
@@ -387,9 +398,9 @@ def _pull(s) -> int:
             st["standby_doc_cursor"] = bundle["standby_doc_cursor"]
         _write_state(st)
         # Forwarded to Platform Logs via _push_logs — surface warm-replica health.
-        if skipped:
+        if s_skipped:
             logger.warning("replication standby: warm-replicated %d row(s) but %d "
-                           "FAILED to apply (tenants=%s) — will retry", applied, skipped,
+                           "FAILED to apply (tenants=%s) — will retry", applied, s_skipped,
                            ",".join(bundle.get("standby_tenant_ids") or []) or "?")
         else:
             logger.info("replication standby: warm-replicated %d receipt(s) + %d doc(s)%s",
@@ -426,6 +437,22 @@ def _pull(s) -> int:
     # index and push the report back to the control plane.
     for uid in bundle.get("pending_insights", []) or []:
         _run_insight_request(uid)
+    # Build a truthful warm-standby readiness report for the tenants we're the
+    # STANDBY for and stash it to send on the NEXT pull. pending = rows that failed
+    # to apply for that tenant; caught_up = the data stream had no more pages. The
+    # CP marks a tenant "in sync" only when pending==0 AND caught_up.
+    standby_tids = bundle.get("standby_tenant_ids") or []
+    if standby_tids:
+        st = _read_state()
+        st["standby_report"] = {
+            "at": datetime.utcnow().isoformat(),
+            "caught_up": not bundle.get("standby_more"),
+            "pending": {tid: int(skip_by_tenant.get(tid, 0)) for tid in standby_tids},
+        }
+        _write_state(st)
+    elif _st0.get("standby_report"):
+        # We reported last time but are no longer a standby for anyone — clear it.
+        st = _read_state(); st.pop("standby_report", None); _write_state(st)
     logger.info("replication pull: %d assigned tenant(s), %d row(s) synced%s",
                 bundle.get("assigned", 0), n, f", {skipped} skipped" if skipped else "")
     return n

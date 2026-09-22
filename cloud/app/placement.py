@@ -53,10 +53,23 @@ def can_switch(tenant: Tenant) -> tuple[bool, str]:
         return False, "no standby node assigned"
     if tenant.standby_node_id == tenant.node_id:
         return False, "standby is the same as the active node"
+    if not is_standby_ready(tenant):
+        if tenant.standby_synced_at is None:
+            return False, "the standby replica hasn't finished its first sync yet"
+        return False, (f"the standby replica is still syncing "
+                       f"({tenant.standby_pending or 0} item(s) pending)")
     at = tenant.switchover_at
     if at and (_now() - at).total_seconds() < SWITCH_COOLDOWN_SECONDS:
         return False, "a switchover happened recently — try again shortly"
     return True, ""
+
+
+def is_standby_ready(tenant: Tenant) -> bool:
+    """True when the standby has a CONFIRMED, complete replica (the node reported a
+    clean, caught-up apply and nothing is pending). This reflects ACTUAL apply
+    success, so a node that pulled but skipped the tenant's rows is NOT 'ready'."""
+    return bool(tenant.standby_node_id and tenant.standby_synced_at is not None
+                and not (tenant.standby_pending or 0))
 
 
 def set_standby(db: Session, tenant: Tenant, standby_node_id: str | None, *,
@@ -73,6 +86,10 @@ def set_standby(db: Session, tenant: Tenant, standby_node_id: str | None, *,
             raise ValueError("the standby node has no endpoint yet")
     prev = tenant.standby_node_id
     tenant.standby_node_id = standby_node_id or None
+    # A freshly (re)assigned standby is NOT synced until the node confirms a clean
+    # apply — clear readiness so the UI shows "syncing" and switchover refuses it.
+    tenant.standby_synced_at = None
+    tenant.standby_pending = 0 if not standby_node_id else 1
     db.commit()
     to_name = _node_name(db, standby_node_id) if standby_node_id else "none"
     msg = (f"HA standby set to {to_name}" if standby_node_id

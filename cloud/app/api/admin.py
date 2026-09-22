@@ -1306,6 +1306,12 @@ def _tenant_view(db: Session, t: Tenant, detail: bool = False) -> dict:
     v["standby_node_id"] = t.standby_node_id
     v["placement_state"] = t.placement_state or ""
     v["switchover_at"] = t.switchover_at.isoformat() if t.switchover_at else None
+    # TRUTHFUL readiness — reflects the standby node's confirmed apply, not just a
+    # pull. standby_ready gates switchover; standby_pending>0 = replica incomplete.
+    v["standby_synced_at"] = t.standby_synced_at.isoformat() if t.standby_synced_at else None
+    v["standby_pending"] = int(t.standby_pending or 0)
+    from .. import placement as _placement
+    v["standby_ready"] = _placement.is_standby_ready(t)
     sn = db.get(Node, t.standby_node_id) if t.standby_node_id else None
     v["standby_node"] = ({"id": sn.id, "name": sn.name, "role": sn.role,
                           "endpoint": sn.endpoint, "status": sn.status,
@@ -2914,7 +2920,11 @@ def node_tenants(nid: str, db: Session = Depends(get_db)):
                              "tenant_type": t.tenant_type or "dedicated",
                              "bytes": int(used), "recovery_points": int(rps),
                              "active_node": (active.name if active else "control plane"),
-                             "placement_state": t.placement_state or ""})
+                             "placement_state": t.placement_state or "",
+                             "ready": bool(t.standby_synced_at is not None
+                                           and not (t.standby_pending or 0)),
+                             "pending": int(t.standby_pending or 0),
+                             "synced_at": t.standby_synced_at.isoformat() if t.standby_synced_at else None})
     return {"node": n.name, "total_bytes": total, "tenants": rows,
             "standby_tenants": standby_rows,
             "last_sync_at": n.last_sync_at.isoformat() if n.last_sync_at else None}
