@@ -425,7 +425,7 @@ rely on them. Rule matches are also written to the audit log.
         help_routes=["/rules"], required_plan="business"),
 
     _doc(
-        "compliance", "Compliance engine", "Security & Account", _SECURITY, 35, "shield",
+        "compliance", "Compliance engine", "Your Data", _YOUR_DATA, 60, "shield",
         "Score your organization against NIST CSF, CIS and HIPAA from live evidence Arkive and "
         "its integrations provide — and track your posture improving over time.",
         """
@@ -470,69 +470,22 @@ whether you're improving or regressing.
 
 ## Frameworks
 Enable the frameworks you're measured against. Each has a **dedicated dashboard**
-(open it from its card): the score and its trend over time, all controls with their
-evidence, the **drivers** behind the score, the **open issues**, and the specific
-**troubling accounts or systems** (for example admins without a passkey, or a source
-that needs re‑consent). Every framework below maps its controls onto the same shared
-capabilities, so a single improvement (say, enrolling MFA or tightening retention)
-lifts your score across all of them at once.
+(open it from its card) — the score and its trend, all controls with their evidence,
+the **drivers** behind the score, the **open issues**, and the specific **troubling
+accounts or systems** — and its own guide here detailing the exact controls Arkive
+covers and the evidence behind each:
 
-### NIST CSF 2.0
-The NIST Cybersecurity Framework 2.0 organises outcomes into six functions —
-**Govern, Identify, Protect, Detect, Respond, Recover**. Arkive evidences the
-data‑centric outcomes: asset/data **inventory** and **classification** (Identify);
-**encryption** at rest & in transit, **least‑privilege** and gated cross‑member
-**access control**, and **data minimization** (Protect); tamper‑evident **audit
-logging** and monitoring (Detect); incident context from the audit chain (Respond);
-and **backups, recoverable recovery points and retention** (Recover). Govern is
-evidenced through your governance rules, retention schedules and audited overrides.
+- [NIST CSF 2.0](/support/compliance-nist-csf)
+- [CIS Controls v8](/support/compliance-cis)
+- [HIPAA Security Rule](/support/compliance-hipaa)
+- [ISO/IEC 27001:2022](/support/compliance-iso-27001)
+- [SOC 2 (Trust Services Criteria)](/support/compliance-soc2)
+- [GDPR](/support/compliance-gdpr)
 
-### CIS Controls v8
-The Center for Internet Security Critical Security Controls, v8. Arkive maps to the
-safeguards it can genuinely prove: **Control 3 – Data Protection** (encryption at
-rest/in transit, classification, retention and secure disposal), **Control 6 –
-Access Control Management** (least privilege, MFA/passkeys, access approvals),
-**Control 8 – Audit Log Management** (a tamper‑evident, retained audit trail) and
-**Control 11 – Data Recovery** (automated backups, tested recovery, offsite/immutable
-copies). Implementation‑Group progress is visible as your capabilities improve.
-
-### HIPAA Security Rule
-The administrative, physical and technical safeguards for **electronic protected
-health information (ePHI)**. Arkive evidences the Security Rule's data safeguards:
-the **Data Backup Plan** and **Disaster Recovery Plan** (§164.308(a)(7)),
-**encryption & decryption** and transmission security (§164.312(a)(2)(iv) / (e)),
-**access control** and unique user identification (§164.312(a)), **audit controls**
-(§164.312(b)) and **integrity** of ePHI (§164.312(c)). Record retention is tracked
-against §164.316(b)(2). Physical and workforce safeguards Arkive can't observe are
-flagged for **manual attestation** rather than scored.
-
-### ISO/IEC 27001:2022
-The Annex A controls Arkive can evidence from its own operation: **A.8.13
-Information backup** and redundancy of information‑processing facilities, **A.8.24
-Use of cryptography**, **A.5.15–A.5.18 access control** and privileged access,
-**A.8.15 Logging** and **A.8.16 Monitoring**, and **information classification and
-retention** (A.5.12, A.5.10). Together they give your Statement of Applicability a
-continuously‑updated technical evidence base instead of a point‑in‑time review.
-
-### SOC 2 (Trust Services Criteria)
-The AICPA Trust Services Criteria most relevant to protected data — **Security
-(Common Criteria)**, **Availability** and **Confidentiality**. Arkive evidences
-logical **access controls** (CC6), **change / audit logging and monitoring** (CC7),
-backup and **availability & recovery** (A1), and **confidentiality** through
-encryption and controlled **disposal** (C1). The evidence trail and posture history
-are exactly what a SOC 2 examination expects to see maintained across the period.
-
-### GDPR
-The EU General Data Protection Regulation's technical obligations Arkive helps meet:
-**security of processing** (Art. 32 — encryption, resilience, restore‑ability and
-regular testing), **records of processing / inventory** (Art. 30), **data
-minimization** (Art. 5(1)(c), via governance rules), **storage limitation /
-retention** (Art. 5(1)(e)) and **data residency** (region‑pinned storage). It
-evidences your security‑and‑accountability posture — it is not a substitute for your
-broader lawful‑basis and data‑subject‑rights programme.
-
-More frameworks (PCI DSS, CMMC…) are on the roadmap; the engine is designed so a
-new framework is a registry entry, not a rebuild.
+Every framework maps its controls onto the same shared capabilities, so a single
+improvement (say, enrolling MFA or tightening retention) lifts your score across all
+of them at once. More frameworks (PCI DSS, CMMC…) are on the roadmap; the engine is
+designed so a new framework is a registry entry, not a rebuild.
 
 ## Controls, evidence & scoring
 Open a framework to see its **controls**. Each shows:
@@ -1477,4 +1430,92 @@ _SOURCE_PAGES = [
 ]
 
 DEFAULT_SUPPORT_DOCS.extend(_SOURCE_PAGES)
+
+
+# --------------------------------------------------------------------------- #
+# Per-framework compliance sub-pages — GENERATED from the live control registry #
+# so the docs always match exactly what the engine scores (add a control there  #
+# and its page updates on the next seed). Nested under the Compliance engine    #
+# page in the Your Data section.                                                #
+# --------------------------------------------------------------------------- #
+def _compliance_framework_docs() -> list[dict]:
+    try:
+        from .compliance.registry import CAPABILITIES, FRAMEWORKS
+    except Exception:  # noqa: BLE001 — never let a doc build break seeding
+        return []
+
+    order = ["nist_csf", "cis", "hipaa", "iso_27001", "soc2", "gdpr"]
+    out: list[dict] = []
+    for i, fw in enumerate([f for f in order if f in FRAMEWORKS]
+                           + [f for f in FRAMEWORKS if f not in order]):
+        spec = FRAMEWORKS.get(fw) or {}
+        label = spec.get("label", fw)
+        version = spec.get("version", "")
+        authority = spec.get("authority", "")
+        url = spec.get("url", "")
+        controls = spec.get("controls", [])
+
+        lines: list[str] = [f"# {label}", ""]
+        meta = "  ·  ".join(x for x in (authority, f"v{version}" if version else "") if x)
+        if meta:
+            lines.append(f"*{meta}*" + (f"  ·  [Official reference]({url})" if url else ""))
+            lines.append("")
+        if spec.get("description"):
+            lines.append(spec["description"])
+            lines.append("")
+        lines.append(
+            "> Arkive covers the **data‑protection, backup, recovery, retention, "
+            "access‑governance and audit** domains of this framework — the controls it can "
+            "genuinely evidence from live platform state. It is not a whole‑framework GRC "
+            "tool; anything it can't observe (physical/workforce safeguards, policy "
+            "documents, lawful basis, data‑subject rights…) is flagged for **manual "
+            "attestation**, not scored.")
+        lines.append("")
+        lines.append("## Controls Arkive covers")
+        lines.append(
+            "Each control below is **auto‑assessed** from the capabilities Arkive (and your "
+            "connected integrations) evidence. Open this framework under **Compliance** to see "
+            "the live state, the evidence behind each control, and its history over time.")
+        lines.append("")
+
+        by_family: dict[str, list] = {}
+        for c in controls:
+            by_family.setdefault(c.get("family", "Controls"), []).append(c)
+        caps_used: list[str] = []
+        for fam, ctrls in by_family.items():
+            lines.append(f"### {fam}")
+            for c in ctrls:
+                for cap in c.get("capabilities", []):
+                    if cap not in caps_used:
+                        caps_used.append(cap)
+                cap_titles = ", ".join(CAPABILITIES.get(cap, {}).get("title", cap)
+                                       for cap in c.get("capabilities", []))
+                lines.append(f"- **{c.get('id','')} — {c.get('title','')}**  ")
+                if c.get("guidance"):
+                    lines.append(f"  {c['guidance']}  ")
+                lines.append(f"  *Arkive evidence: {cap_titles}.*")
+            lines.append("")
+
+        lines.append("## What Arkive evidences here")
+        lines.append("Across this framework, Arkive contributes evidence for these capabilities:")
+        for cap in caps_used:
+            info = CAPABILITIES.get(cap, {})
+            lines.append(f"- **{info.get('title', cap)}** — {info.get('description', '')}")
+        lines.append("")
+        lines.append(
+            "As you improve a capability (enrol admin passkeys, keep managed sources protected, "
+            "tighten retention…), every control that depends on it — here and in the other "
+            "frameworks — moves up together.")
+
+        summary = (f"The {label} controls Arkive covers — backup, recovery, encryption, access, "
+                   "audit and retention — mapped to the evidence behind each.")
+        out.append(_doc(
+            "compliance-" + fw.replace("_", "-"), label, "Your Data", _YOUR_DATA, 61 + i, "shield",
+            summary, "\n".join(lines),
+            help_routes=[f"/compliance/{fw}"], required_plan="business",
+            parent_slug="compliance"))
+    return out
+
+
+DEFAULT_SUPPORT_DOCS.extend(_compliance_framework_docs())
 
