@@ -351,7 +351,12 @@ def _stored_data(db: Session, a: Appliance, allowed_vault_ids: list[str] | None 
     from ..models import Collection, ConnectorAccount, Vault, ApplianceStorage as _AS  # noqa
     if allowed_vault_ids is not None and not allowed_vault_ids:
         return {"recovery_points": 0, "objects": 0, "bytes": 0, "sources": [], "items": []}
-    rq = (db.query(SnapshotReceipt)
+    # Select only the light columns — never load the heavy per-receipt `receipt`
+    # JSON blob (an appliance with a lot of data has thousands of these).
+    rq = (db.query(SnapshotReceipt.snapshot_id, SnapshotReceipt.collection_id,
+                   SnapshotReceipt.destination, SnapshotReceipt.object_count,
+                   SnapshotReceipt.total_bytes, SnapshotReceipt.recoverable,
+                   SnapshotReceipt.created_at)
           .filter(SnapshotReceipt.appliance_id == a.id))
     if allowed_vault_ids is not None:
         rq = rq.filter(SnapshotReceipt.vault_id.in_(allowed_vault_ids))
@@ -423,8 +428,8 @@ def _stored_data(db: Session, a: Appliance, allowed_vault_ids: list[str] | None 
 
     return {
         "recovery_points": len(receipts),
-        "objects": sum(r.object_count for r in receipts),
-        "bytes": sum(r.total_bytes for r in receipts),
+        "objects": sum((r.object_count or 0) for r in receipts),
+        "bytes": sum((r.total_bytes or 0) for r in receipts),
         "sources": sorted(summary.values(), key=lambda x: x["bytes"], reverse=True),
         "items": items,
     }

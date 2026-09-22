@@ -281,22 +281,39 @@ class VaultStore:
         return report
 
     def capacity(self) -> dict:
-        used = sum(f.stat().st_size for f in self._protected.rglob("*")
-                   if f.is_file()) if self._protected.exists() else 0
-        return {"used_bytes": used, "snapshots": self._count_snapshots(),
-                "objects": self._count_objects()}
-
-    def _count_snapshots(self) -> int:
-        if not self._protected.exists():
-            return 0
-        return sum(1 for d in self._protected.iterdir() if d.is_dir())
-
-    def _count_objects(self) -> int:
-        if not self._protected.exists():
-            return 0
-        # Stored object files, excluding the per-snapshot manifest.
-        return sum(1 for f in self._protected.rglob("*")
-                   if f.is_file() and f.name != "manifest.json")
+        """Used bytes + snapshot/object counts in a SINGLE scandir pass (was three
+        rglob traversals). Still O(files), so on a large vault this is seconds‑to‑
+        minutes — callers on the hot path (telemetry/heartbeat/status) must use a
+        cached value and never call this inline."""
+        root = self._protected
+        if not root.exists():
+            return {"used_bytes": 0, "snapshots": 0, "objects": 0}
+        used = 0
+        objects = 0
+        snapshots = 0
+        stack = [(str(root), 0)]
+        while stack:
+            path, depth = stack.pop()
+            try:
+                with os.scandir(path) as it:
+                    for e in it:
+                        try:
+                            if e.is_dir(follow_symlinks=False):
+                                if depth == 0:
+                                    snapshots += 1
+                                stack.append((e.path, depth + 1))
+                            elif e.is_file(follow_symlinks=False):
+                                try:
+                                    used += e.stat(follow_symlinks=False).st_size
+                                except OSError:
+                                    pass
+                                if e.name != "manifest.json":
+                                    objects += 1
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return {"used_bytes": used, "snapshots": snapshots, "objects": objects}
 
     def seal(self, signer: HybridSigner, appliance_id: str, snapshot_id: str,
              manifest_hash: str, object_count: int, total_bytes: int) -> dict:

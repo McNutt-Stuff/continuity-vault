@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 from json import JSONDecodeError
 from pathlib import Path
@@ -155,6 +156,10 @@ _REG = DATA / "registration.json"
 _PENDING = DATA / "pending.json"
 _LOG_FILE = DATA / "agent.log"
 
+# How long a heavy-telemetry snapshot (full-vault capacity + drive health) is
+# reused before a background refresh recomputes it.
+_HEAVY_TTL = 60.0
+
 
 def _resolve_storage() -> tuple[Path, str, str]:
     """(vault_root, storage_kind, storage_name).
@@ -205,6 +210,12 @@ class Agent:
         self.log = agent_log.setup_logging(_LOG_FILE)
         self._last_update_note = ""
         self._last_latency_ms: Optional[int] = None  # heartbeat round-trip
+        # Heavy telemetry (full-vault capacity walk + SMART/RAID subprocesses) is
+        # computed on a BACKGROUND thread and cached, so /status and heartbeat never
+        # block on a large vault. See _heavy_telemetry.
+        self._heavy_cache: dict = {}
+        self._heavy_at: float = 0.0
+        self._heavy_refreshing = False
         # Zero-touch pairing: when installed WITHOUT a linking code the appliance
         # registers with the control plane as an un-claimed unit and shows a
         # pairing code on its local web UI until a customer claims it.
@@ -488,18 +499,50 @@ class Agent:
         except Exception as exc:
             self.log.warning("could not persist re-pinned bundle: %s", exc)
 
+    def _heavy_telemetry(self) -> dict:
+        """The expensive telemetry — a full-vault capacity walk plus the storage
+        SMART/RAID/filesystem subprocesses — computed on a BACKGROUND thread and
+        cached, so /status and heartbeat return instantly and never freeze the
+        appliance on a large vault. Returns the last snapshot immediately and kicks
+        off a refresh when it's stale."""
+        now = time.time()
+        if (now - self._heavy_at) > _HEAVY_TTL and not self._heavy_refreshing:
+            self._heavy_refreshing = True
+            threading.Thread(target=self._refresh_heavy, name="cv-telemetry", daemon=True).start()
+        return self._heavy_cache
+
+    def _refresh_heavy(self) -> None:
+        try:
+            cap = self.vault.capacity()
+            disk = sysinfo.disk_stats(str(STORAGE_ROOT))
+            raw_total = disk["disk_total_bytes"]
+            # On a dedicated volume the filesystem usage is the real footprint; on
+            # the shared system disk fall back to the vault's own content size.
+            vol_used = (disk["disk_used_bytes"] if STORAGE_KIND == "dedicated"
+                        else cap.get("used_bytes", 0))
+            self._heavy_cache = {
+                "capacity_total_bytes": raw_total,
+                "capacity_used_bytes": vol_used,
+                "disk_free_bytes": disk["disk_free_bytes"],
+                "snapshots": cap.get("snapshots", 0),
+                "objects": cap.get("objects", cap.get("snapshots", 0)),
+                "temperature_c": sysinfo.drive_temperature_c() or 34,
+                "data_mount": sysinfo.mount_device(str(STORAGE_ROOT)),
+                "storages": sysinfo.storage_report(
+                    str(STORAGE_ROOT), STORAGE_NAME, STORAGE_KIND, raw_total, vol_used),
+            }
+            self._heavy_at = time.time()
+        except Exception as exc:  # noqa: BLE001 — telemetry must never crash the agent
+            self.log.warning("telemetry refresh failed: %s", exc)
+        finally:
+            self._heavy_refreshing = False
+
     def _telemetry(self) -> dict:
-        cap = self.vault.capacity()
+        # Heavy fields (capacity walk + drive health) come from the background cache;
+        # cheap live stats (cpu/mem/load/net) are computed inline so they stay fresh.
+        heavy = self._heavy_telemetry()
         plat = sysinfo.detect_platform()
         sysd = sysinfo.system_stats()
-        # Capacity + usage reflect the volume the vault actually writes to — the
-        # dedicated Arkive RAID volume when present, else the system disk.
-        disk = sysinfo.disk_stats(str(STORAGE_ROOT))
-        raw_total = disk["disk_total_bytes"]
-        # On a dedicated volume the filesystem usage is the real footprint; on the
-        # shared system disk fall back to the vault's own content size.
-        vol_used = (disk["disk_used_bytes"] if STORAGE_KIND == "dedicated"
-                    else cap.get("used_bytes", 0))
         pq = sysinfo.pq_available()
         net = sysinfo.net_io()
         return {
@@ -527,26 +570,24 @@ class Agent:
             "channel_encryption": ("TLS 1.3" if settings.cloud_base_url.startswith("https")
                                    else "insecure (dev)"),
             "cloud_latency_ms": self._last_latency_ms,
-            # Storage / stored data
-            "capacity_total_bytes": raw_total,
-            "capacity_used_bytes": vol_used,
-            "disk_free_bytes": disk["disk_free_bytes"],
+            # Storage / stored data (from the background heavy-telemetry cache)
+            "capacity_total_bytes": heavy.get("capacity_total_bytes", 0),
+            "capacity_used_bytes": heavy.get("capacity_used_bytes", 0),
+            "disk_free_bytes": heavy.get("disk_free_bytes", 0),
             # The built-in OS / system disk, tracked separately from the dedicated
-            # Arkive storage volume (admins monitor both).
+            # Arkive storage volume (admins monitor both). shutil.disk_usage = fast.
             "os_storage": sysinfo.os_disk(),
-            "snapshots": cap.get("snapshots", 0),
-            "objects": cap.get("objects", cap.get("snapshots", 0)),
+            "snapshots": heavy.get("snapshots", 0),
+            "objects": heavy.get("objects", 0),
             "drive_health": "healthy",
             "power": "ok",
-            "temperature_c": sysinfo.drive_temperature_c() or 34,
+            "temperature_c": heavy.get("temperature_c", 34),
             # Where recovery data physically lives on the appliance.
             "data_path": str(STORAGE_ROOT / "vault" / "protected"),
-            "data_mount": sysinfo.mount_device(str(STORAGE_ROOT)),
+            "data_mount": heavy.get("data_mount", ""),
             "storage_kind": STORAGE_KIND,
             # Per-storage capacity + health (mapped onto the cloud storage objects).
-            "storages": sysinfo.storage_report(
-                str(STORAGE_ROOT), STORAGE_NAME, STORAGE_KIND,
-                raw_total, vol_used),
+            "storages": heavy.get("storages", []),
             # Encryption
             "quantum_safe": bool(pq),
             "content_alg": "AES-256-GCM",
