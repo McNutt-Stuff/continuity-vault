@@ -1145,6 +1145,27 @@ def admin_reassign_appliance(aid: str, body: ReassignAppliance,
     return {"ok": True, "tenant_id": target.id, "tenant_name": target.name}
 
 
+@router.post("/appliances/{aid}/update")
+def admin_update_appliance(aid: str,
+                           principal: security.Principal = Depends(security.require_platform_admin),
+                           db: Session = Depends(get_db)):
+    """Platform-admin: force a stuck appliance to run its self-updater now (issues a
+    signed APPLY_UPDATE command; the appliance kicks its root self-updater and
+    reports the outcome back via update-status.json on the next heartbeat)."""
+    from .. import fleet
+    a = db.get(Appliance, aid)
+    if not a:
+        raise HTTPException(404, "appliance not found")
+    try:
+        cmd = fleet.issue_command(db, a, "APPLY_UPDATE", principal.user_id, {})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Could not dispatch the update command: {exc}")
+    audit.record(db, actor=principal.user_id, action="admin.appliance_update",
+                 tenant_id=a.tenant_id, resource=aid, category="admin", severity="notice")
+    online = bool(a.last_heartbeat_at and (_now() - a.last_heartbeat_at).total_seconds() < 90)
+    return {"ok": True, "command_id": cmd.id, "appliance_online": online}
+
+
 @router.post("/appliances/{aid}/storage/{sid}/repair")
 def admin_repair_storage(aid: str, sid: str,
                          principal: security.Principal = Depends(security.require_platform_admin),

@@ -3961,6 +3961,17 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
       await load();
     } catch (e) { flash((e as { message?: string }).message || "Repair failed"); }
   }
+  async function updateNow() {
+    if (!await confirmDialog({
+      title: "Update appliance now?",
+      message: `Force ${a.name || a.serial} to run its self-updater now. It pulls the latest bundle from the control plane and restarts the agent. The outcome appears here and in Platform Logs.`,
+      confirmLabel: "Update now" })) return;
+    try {
+      const r = await api.post<any>(`/admin/appliances/${id}/update`, {});
+      flash(r.appliance_online ? "Update dispatched — the appliance is updating" : "Appliance offline; update queued");
+      await load();
+    } catch (e) { flash((e as { message?: string }).message || "Update failed to dispatch"); }
+  }
   if (!a) return <Card><button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 10 }}>← Fleet</button><div className="muted">Loading appliance…</div></Card>;
 
   const tel = a.telemetry || {};
@@ -3992,6 +4003,11 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
             <button className="btn sm" onClick={reassign} title="Move this appliance to another account/tenant (re-link)">
               <Icon name="link" size={13} /> Re-link
             </button>
+            {a.update_available && (
+              <button className="btn sm primary" onClick={updateNow} title="Force this appliance to run its self-updater now">
+                <Icon name="repeat" size={13} /> Update now
+              </button>
+            )}
             <a className="btn sm ghost" href={`/admin/logs?appliance_id=${id}`} title="View this appliance's logs in Platform Logs">
               <Icon name="note" size={13} /> Logs
             </a>
@@ -4001,6 +4017,38 @@ function ApplianceAdminDetail({ id, profiles, onBack }: { id: string; profiles: 
       </div>
 
       {term && <RemoteTerminal id={id} name={a.name || a.serial} onClose={() => setTerm(false)} />}
+
+      {(a.update_available || tel.update_status?.ran_at) && (() => {
+        const us = tel.update_status || {};
+        const failed = us.result === "failed";
+        return (
+          <Card style={{ marginBottom: 14, borderLeft: `3px solid ${failed ? "#f2545b" : a.update_available ? "#f5a623" : "#35d0a5"}` }}>
+            <div className="spread" style={{ alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+              <div>
+                <div style={{ fontWeight: 650 }}>Software updates</div>
+                <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>
+                  Installed v{a.software_version} · latest v{a.production_version}{" "}
+                  {a.update_available ? "· update available" : "· up to date"}
+                </div>
+                {us.ran_at && (
+                  <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
+                    Last self-update {new Date(us.ran_at).toLocaleString()} —{" "}
+                    <b style={{ color: failed ? "#f2545b" : undefined }}>{us.result || "—"}</b>
+                    {us.from_version ? ` (${us.from_version} → ${us.to_version || us.remote_version || "?"})` : ""}
+                    {us.message ? `: ${us.message}` : ""}
+                  </div>
+                )}
+                {!us.ran_at && a.update_available && (
+                  <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
+                    No self-update run reported yet — click Update now, or the appliance retries automatically every ~10 min.
+                  </div>
+                )}
+              </div>
+              {a.update_available && <button className="btn sm primary" onClick={updateNow}><Icon name="repeat" size={13} /> Update now</button>}
+            </div>
+          </Card>
+        );
+      })()}
 
       <Card style={{ marginBottom: 14 }}>
         <div className="spread">

@@ -171,6 +171,10 @@ EXT_BASE = DATA / "ext"
 EXT_REGISTRY = DATA / "ext_stores.json"
 EXT_QUEUE = DATA / "storage-queue"
 MIRROR_INTEGRITY = DATA / "mirror_integrity.json"
+# Written by the root self-updater (installers/appliance-update.sh) each run, read
+# here so the agent can forward the self-update outcome to the control plane.
+UPDATE_STATUS = DATA / "update-status.json"
+UPDATE_LOG = DATA / "update.log"
 
 
 def _now_iso() -> str:
@@ -234,6 +238,9 @@ class Agent:
         self._mount_ext_stores()
         self._last_update_note = ""
         self._last_latency_ms: Optional[int] = None  # heartbeat round-trip
+        # Last self-update run we've already forwarded to the control plane (so a
+        # new run is logged once, not every heartbeat).
+        self._last_update_ran_at = ""
         # Heavy telemetry (full-vault capacity walk + SMART/RAID subprocesses) is
         # computed on a BACKGROUND thread and cached, so /status and heartbeat never
         # block on a large vault. See _heavy_telemetry.
@@ -412,6 +419,9 @@ class Agent:
         self.log.info("routing to %s", url or settings.cloud_base_url)
 
     async def heartbeat_once(self) -> None:
+        # Surface the root self-updater's last outcome (once per run) so a stuck /
+        # failing self-update is visible from the control plane.
+        self._forward_update_status()
         body = {
             "state": self.sm.state.value,
             "isolation_state": self.sm.isolation_state,
@@ -522,6 +532,35 @@ class Agent:
             _REG.write_text(json.dumps(d))
         except Exception as exc:
             self.log.warning("could not persist re-pinned bundle: %s", exc)
+
+    # -- self-update status (from the root self-updater) --------------
+
+    def _read_update_status(self) -> dict:
+        try:
+            return json.loads(UPDATE_STATUS.read_text())
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _forward_update_status(self) -> None:
+        """Log the outcome of the ROOT self-updater once per run so a stuck/failed
+        self-update is visible in Platform Logs. The updater (a separate root
+        service) writes update-status.json; the agent — which forwards logs — turns
+        each new run into a log line (WARNING on failure so it surfaces at the
+        default log level)."""
+        st = self._read_update_status()
+        ran = st.get("ran_at") or ""
+        if not ran or ran == self._last_update_ran_at:
+            return
+        self._last_update_ran_at = ran
+        result = st.get("result")
+        frm, to = st.get("from_version") or "?", st.get("to_version") or "?"
+        msg = st.get("message") or ""
+        if result == "failed":
+            self.log.warning("appliance self-update FAILED (%s -> %s): %s", frm, to, msg)
+        elif result == "updated":
+            self.log.info("appliance self-update applied: %s -> %s", frm, to)
+        else:  # up-to-date / unknown — don't spam Platform Logs every 10 min
+            self.log.debug("appliance self-update: %s (%s)", result, msg)
 
     # -- external storage (USB / removable) ---------------------------
 
@@ -1126,6 +1165,9 @@ class Agent:
             # Logs (forwarded like the endpoint agent)
             "recent_logs": agent_log.tail(_LOG_FILE, 50),
             "software_version": settings.software_version,
+            # Last outcome of the root self-updater (from update-status.json) so the
+            # admin can see WHY a "update available" appliance isn't updating.
+            "update_status": self._read_update_status(),
         }
 
     def _verify_command(self, command: dict) -> bool:
@@ -1196,7 +1238,7 @@ class Agent:
                 elif ctype == "STAGE_UPDATE":
                     result = self._stage_update(payload["parameters"])
                 elif ctype == "APPLY_UPDATE":
-                    result = {"applied": True}
+                    result = self._trigger_self_update()
                 elif ctype == "REQUEST_VERIFICATION":
                     result = {"integrity": "verified"}
                 elif ctype == "SETUP_STORAGE":
@@ -1330,6 +1372,24 @@ class Agent:
         staged = DATA / "staged_update.json"
         staged.write_text(json.dumps(params))
         return {"staged": True, "version": params.get("version")}
+
+    def _trigger_self_update(self) -> dict:
+        """Kick the root self-updater now (operator-initiated 'Update now'). Runs
+        detached via cvtool (whitelisted in sudoers) so restarting the agent
+        mid-update doesn't kill the updater; the outcome is reported back via
+        update-status.json on the next heartbeat."""
+        import shutil
+        import subprocess
+        cvtool = shutil.which("cvtool") or "/usr/local/bin/cvtool"
+        try:
+            subprocess.Popen(["sudo", "-n", cvtool, "update", "--force"],
+                             start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.log.info("self-update triggered (operator-initiated)")
+            return {"triggered": True}
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("could not trigger self-update: %s", exc)
+            return {"error": str(exc)}
 
     # -- remote terminal ----------------------------------------------
 
