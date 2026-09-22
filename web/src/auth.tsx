@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { startRegistration, startAuthentication } from "@simplewebauthn/browser";
-import { api, setToken, getToken, setOnUnauthorized, ApiError, Me, LoginResponse } from "./api";
+import { api, setToken, getToken, setOnUnauthorized, setOnMaintenance, ApiError, Me, LoginResponse } from "./api";
 import { setUserTimezone } from "./components/ui";
 
 interface StartResult {
@@ -42,6 +42,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
   const [sessionExpired, setSessionExpired] = useState(false);
+  const [maintenance, setMaintenance] = useState<string | null>(null);
 
   async function refresh() {
     try {
@@ -71,6 +72,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSessionExpired(true);
     });
     return () => setOnUnauthorized(null);
+  }, []);
+
+  // A 503 maintenance signal (tenant mid-HA-switchover) shows a brief dialog that
+  // auto-dismisses after the retry window so the customer can resume seamlessly.
+  useEffect(() => {
+    setOnMaintenance((detail, retryAfter) => {
+      setMaintenance(detail);
+      window.setTimeout(() => setMaintenance(null), Math.max(3, retryAfter) * 1000);
+    });
+    return () => setOnMaintenance(null);
   }, []);
 
   useEffect(() => {
@@ -179,6 +190,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }}
     >
       {children}
+      {maintenance && (
+        <div className="modal-backdrop" style={{ zIndex: 9999 }} role="alertdialog" aria-modal>
+          <div className="modal" style={{ textAlign: "center", maxWidth: 420 }}>
+            <div className="spinner" style={{ margin: "0 auto 14px" }} aria-hidden />
+            <h3 style={{ marginTop: 0 }}>Brief maintenance</h3>
+            <p className="muted" style={{ margin: 0 }}>{maintenance}</p>
+          </div>
+        </div>
+      )}
     </Ctx.Provider>
   );
 }

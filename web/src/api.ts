@@ -21,6 +21,13 @@ export function setOnUnauthorized(cb: (() => void) | null) {
   onUnauthorized = cb;
 }
 
+// Global maintenance hook: a 503 {maintenance:true} means the tenant is briefly
+// unavailable during an HA switchover. The app shows a friendly dialog and retries.
+let onMaintenance: ((detail: string, retryAfter: number) => void) | null = null;
+export function setOnMaintenance(cb: ((detail: string, retryAfter: number) => void) | null) {
+  onMaintenance = cb;
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(BASE + path, {
     method,
@@ -32,8 +39,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   });
   if (!res.ok) {
     let detail = res.statusText;
+    let payload: any = null;
     try {
-      detail = (await res.json()).detail ?? detail;
+      payload = await res.json();
+      detail = payload?.detail ?? detail;
     } catch {
       /* ignore */
     }
@@ -42,6 +51,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     if (res.status === 401 && token && !path.startsWith("/auth/")) {
       onUnauthorized?.();
     }
+    // A 503 maintenance signal = the tenant is mid-HA-switchover; show a dialog.
+    if (res.status === 503 && payload?.maintenance) {
+      onMaintenance?.(detail, Number(payload?.retry_after) || 15);
+      throw new ApiError(res.status, detail, true);
+    }
     throw new ApiError(res.status, detail);
   }
   if (res.status === 204) return undefined as T;
@@ -49,7 +63,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, message: string, public maintenance = false) {
     super(message);
   }
 }

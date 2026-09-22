@@ -1701,6 +1701,40 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
     try { await api.del(`/admin/tenants/${id}`); flash("Tenant suspended"); await load(); } catch { flash("Failed"); }
   }
 
+  // Active/passive HA — assign a warm standby node and switch over to it.
+  async function setStandby() {
+    let opts: { id: string; name: string; role: string }[] = [];
+    try { opts = await api.get<any[]>("/admin/nodes"); } catch { /* ignore */ }
+    const choices = opts
+      .filter((n) => n.role === "customer-tenant" && n.id !== t.node_id)
+      .map((n) => ({ label: n.name, value: n.id }));
+    const r = await formDialog({
+      title: "Assign warm standby node",
+      confirmLabel: "Save standby",
+      fields: [{
+        name: "node_id", label: "Standby node", defaultValue: t.standby_node_id || "",
+        options: [{ label: "— None (clear standby) —", value: "" }, ...choices],
+      }],
+    });
+    if (!r) return;
+    try {
+      await api.put(`/admin/tenants/${id}/standby`, { node_id: r.node_id || null });
+      flash(r.node_id ? "Standby assigned — warming replica" : "Standby cleared"); await load();
+    } catch (e) { flash((e as { message?: string }).message || "Failed to set standby"); }
+  }
+  async function switchover() {
+    if (!t.standby_node) { void notify({ title: "No standby", message: "Assign a warm standby node first.", tone: "warn" }); return; }
+    if (!await confirmDialog({
+      title: `Switch over to ${t.standby_node.name}?`,
+      message: `Promote the standby node to active for ${t.name}. Devices retarget on their next heartbeat and the customer portal shows a brief maintenance window. The current active node becomes the new warm standby.`,
+      confirmLabel: "Switch over",
+    })) return;
+    try {
+      await api.post(`/admin/tenants/${id}/switchover`, {});
+      flash(`Switched over to ${t.standby_node.name}`); await load();
+    } catch (e) { flash((e as { message?: string }).message || "Switchover failed"); }
+  }
+
   async function newUser() {
     const isShared = t.tenant_type === "shared";
     // Shared tenants hold isolated 1:1 personal accounts — richer contact
@@ -1896,6 +1930,25 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
           <Row2 label="Tenant type" value={<Pill tone={TENANT_TYPE_TONE[t.tenant_type] || "info"}>{TENANT_TYPE_LABEL[t.tenant_type] || t.tenant_type}</Pill>} />
           <Row2 label="Status" value={<Pill tone={t.status === "active" ? "ok" : "warn"} dot>{t.status}</Pill>} />
           <Row2 label="Processing node" value={t.node?.name || "Control plane"} />
+          {!isShared && (
+            <>
+              <div className="divider" />
+              <div className="spread" style={{ marginBottom: 6 }}>
+                <div className="faint" style={{ fontSize: 11.5, textTransform: "uppercase", letterSpacing: ".05em" }}>High availability (active / passive)</div>
+                <div className="row" style={{ gap: 6 }}>
+                  <button className="btn ghost sm" onClick={setStandby}><Icon name="server" size={12} /> {t.standby_node ? "Change standby" : "Assign standby"}</button>
+                  {t.standby_node && <button className="btn sm" onClick={switchover}><Icon name="repeat" size={12} /> Switch over</button>}
+                </div>
+              </div>
+              <Row2 label="Active node" value={<span className="row" style={{ gap: 6 }}><Pill tone="ok" dot>active</Pill>{t.node?.name || "Control plane"}</span>} />
+              <Row2 label="Standby node" value={t.standby_node
+                ? <span className="row" style={{ gap: 6 }}><Pill tone={t.standby_node.online ? "ok" : "warn"} dot>{t.standby_node.online ? "online" : "offline"}</Pill>{t.standby_node.name}</span>
+                : <span className="muted" style={{ fontSize: 12.5 }}>None — no warm replica. Assign one for failover.</span>} />
+              {t.placement_state === "switching" && (
+                <Row2 label="Placement" value={<Pill tone="warn" dot>switching over…</Pill>} />
+              )}
+            </>
+          )}
           <Row2 label="Key ownership" value={t.key_ownership_model} />
           {!isShared && <Row2 label="License plan" value={t.plan} />}
           {!isShared && <Row2 label="Licensed capacity" value={`${licensedTb} TB`} />}
