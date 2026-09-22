@@ -140,6 +140,39 @@ export const useCases = {
   ],
 };
 
+// Business-only value — surfaced on the Use Cases page (business audiences) and
+// nowhere in the consumer story.
+export const business = {
+  eyebrow: "Built for teams & regulated organizations",
+  h1: "Managed integrations, governance and continuous compliance.",
+  lead: "Everything in Arkive — plus the admin-governed integrations, data governance and always-on compliance that teams and regulated organizations need, without the operational overhead.",
+  capabilities: [
+    {
+      ico: "🗄️", h: "Microsoft 365, managed",
+      p: "Admin-governed, per-user backup of Exchange Online, OneDrive, SharePoint and Teams — no per-employee sign-in and no stored passwords. Read-only, app-only Microsoft consent.",
+      points: ["Exchange, OneDrive, SharePoint & Teams", "Central admin control · per-user licensing", "First-class in search, reports & recovery"],
+    },
+    {
+      ico: "📋", h: "Continuous compliance",
+      p: "A live posture score against the frameworks you're measured against — computed from evidence Arkive already generates, not questionnaires — with a full trail for auditors.",
+      points: ["NIST CSF 2.0, CIS v8, HIPAA, ISO 27001, SOC 2 & GDPR", "Control-by-control evidence & history", "Exceptions, overrides & auditor-ready export"],
+    },
+    {
+      ico: "⚙️", h: "Data governance",
+      p: "Classify, restrict, obfuscate or minimize data the moment it's captured — one policy engine across every source, including your managed Microsoft 365.",
+      points: ["Label & classify at ingest", "Restrict, obfuscate or don't-index", "Feeds your compliance posture"],
+    },
+    {
+      ico: "🛡️", h: "Admin controls & audit",
+      p: "Role-based access, approval quorums for high-stakes recovery, gated and audited cross-member access, and a tamper-evident ledger of every action.",
+      points: ["Roles, approvals & quorum", "Gated, audited cross-member access", "Hash-chained, tamper-evident audit log"],
+    },
+  ],
+  frameworksLabel: "Compliance frameworks scored from your live evidence",
+  frameworks: ["NIST CSF 2.0", "CIS Controls v8", "HIPAA Security Rule", "ISO/IEC 27001", "SOC 2", "GDPR"],
+  cta: { label: "Talk to sales", to: "/contact" },
+};
+
 export const security = {
   h1: "Security that assumes the worst — so you don't have to.",
   lead: "Arkive is engineered for a zero-trust, post-quantum world. Your data is protected in transit, at rest, and against threats that don't exist yet.",

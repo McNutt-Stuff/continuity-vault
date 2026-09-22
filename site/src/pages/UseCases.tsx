@@ -1,5 +1,6 @@
 import { Section, SectionHead, CTABand } from "../components/Layout";
-import { useCases } from "../content";
+import { Link } from "react-router-dom";
+import { useCases, business } from "../content";
 
 export default function UseCases() {
   return (
@@ -44,6 +45,38 @@ export default function UseCases() {
               </div>
             </div>
           ))}
+        </div>
+      </Section>
+
+      {/* For business & regulated organizations — business-only value */}
+      <Section className="tight" id="business">
+        <SectionHead eyebrow={business.eyebrow} title={business.h1} lead={business.lead} />
+        <div className="grid grid-2" style={{ marginTop: 32 }}>
+          {business.capabilities.map((c) => (
+            <div className="card" key={c.h}>
+              <div className="ico">{c.ico}</div>
+              <h3>{c.h}</h3>
+              <p>{c.p}</p>
+              <div style={{ display: "grid", gap: 9, marginTop: 14 }}>
+                {c.points.map((pt) => (
+                  <div key={pt} style={{ display: "flex", gap: 10, fontSize: 14, color: "var(--muted)" }}>
+                    <span style={{ color: "var(--brand-2)" }}>✓</span> {pt}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="card" style={{ marginTop: 24, textAlign: "center" }}>
+          <div className="eyebrow" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><span className="dot" /> {business.frameworksLabel}</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "center", marginTop: 14 }}>
+            {business.frameworks.map((f) => (
+              <span key={f} style={{ padding: "7px 14px", border: "1px solid var(--border)", borderRadius: 999, fontSize: 13.5, fontWeight: 600, color: "var(--muted)" }}>{f}</span>
+            ))}
+          </div>
+          <div style={{ marginTop: 22 }}>
+            <Link className="btn primary lg" to={business.cta.to}>{business.cta.label}</Link>
+          </div>
         </div>
       </Section>
       <CTABand />
