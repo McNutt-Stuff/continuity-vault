@@ -59,6 +59,18 @@ class Tenant(Base):
     # appliance/agent channels and storage. NULL = processed on the control plane
     # itself (single-box default). Assigning a node offloads tenant processing.
     node_id = Column(String, ForeignKey("nodes.id"), nullable=True, index=True)
+    # Active/passive HA: a SECOND customer-node that keeps a warm, read-only replica
+    # of this tenant (config + keys + receipts + search index) so the tenant can
+    # survive an active-node failure and switch over. node_id is the ACTIVE node;
+    # standby_node_id is the PASSIVE replica. NULL = no HA pairing (single node).
+    standby_node_id = Column(String, ForeignKey("nodes.id"), nullable=True, index=True)
+    # Placement lifecycle: "" = normal (active on node_id); "switching" = a
+    # switchover/migration is in flight (file ops briefly return maintenance);
+    # "degraded" = the active node is unreachable and failover is pending/blocked.
+    placement_state = Column(String, default="")
+    # When the tenant last switched active nodes (migration/failover) — drives a
+    # cooldown so a flapping node can't ping-pong the tenant.
+    switchover_at = Column(DateTime, nullable=True)
     # The geographic region this tenant was routed to at signup (e.g. "nam-east"),
     # derived from the address they provided. Drives node placement + data locality.
     region_code = Column(String, default="", index=True)

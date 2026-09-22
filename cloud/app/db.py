@@ -311,6 +311,11 @@ def _apply_additive_migrations() -> None:
         # existing nodes/tenants tables.
         "ALTER TABLE nodes ADD COLUMN cluster_id VARCHAR",
         "ALTER TABLE tenants ADD COLUMN region_code VARCHAR DEFAULT ''",
+        # Active/passive HA: a tenant's warm standby node + placement lifecycle so it
+        # can survive an active-node failure and switch over (node_id = active).
+        "ALTER TABLE tenants ADD COLUMN standby_node_id VARCHAR",
+        "ALTER TABLE tenants ADD COLUMN placement_state VARCHAR DEFAULT ''",
+        "ALTER TABLE tenants ADD COLUMN switchover_at TIMESTAMP",
         # Free-trial support: a billing profile can be trialing (auto-bills at trial end).
         "ALTER TABLE billing_profiles ADD COLUMN trial_ends_at TIMESTAMP",
         "ALTER TABLE appliances ADD COLUMN version_updated_at TIMESTAMP",

@@ -48,6 +48,10 @@ FLAGS: dict[str, bool] = {
     # visibility-only until a cohort is switched on. Derivation + the admin view
     # are always available regardless of this flag.
     "entitlements_enforced": False,
+    # Active/passive HA: automatically fail a tenant over to its standby node when
+    # the active node goes offline (a standby must be assigned). OFF by default —
+    # manual switchover always works; this only enables UNATTENDED failover.
+    "ha_auto_failover": False,
 }
 
 # Human labels for the admin UI.
@@ -63,6 +67,7 @@ LABELS = {
     "admin_cross_member_access": "Admin cross-member data access (search & recover)",
     "cross_member_recovery_approval": "Require approval for cross-member recovery",
     "entitlements_enforced": "Enforce entitlement/seat limits (rollout)",
+    "ha_auto_failover": "Automatic failover to standby node (HA)",
 }
 
 

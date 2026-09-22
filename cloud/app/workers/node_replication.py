@@ -275,8 +275,14 @@ def _upsert(db, model, data: dict) -> None:
 
 
 def _pull(s) -> int:
-    bundle = _post("/nodes/sync/pull",
-                   {"name": s.node_name or s.domain, "role": s.node_role or "customer-tenant"})
+    _st0 = _read_state()
+    bundle = _post("/nodes/sync/pull", {
+        "name": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
+        # Warm-standby data cursors (receipts + search index for tenants we're the
+        # STANDBY for) — advanced only after a confirmed apply below.
+        "standby_rcpt_cursor": _st0.get("standby_rcpt_cursor"),
+        "standby_doc_cursor": _st0.get("standby_doc_cursor"),
+    })
     if not bundle:
         return 0
     n = 0
@@ -324,6 +330,36 @@ def _pull(s) -> int:
         platform_config.invalidate()
     except Exception:
         pass
+    # Warm-standby data replication: apply the recovery points (SnapshotReceipt) +
+    # search index (SearchDocument) for tenants this node is the STANDBY for, so it
+    # can serve search/recovery the moment it's promoted. Idempotent upsert by pk;
+    # cursors advance only after a successful apply (retried whole next cycle).
+    s_recs = bundle.get("standby_receipts") or []
+    s_docs = bundle.get("standby_documents") or []
+    if s_recs or s_docs:
+        applied = 0
+        with SessionLocal() as db:
+            db.autoflush = False
+            for model, rows in ((SnapshotReceipt, s_recs), (SearchDocument, s_docs)):
+                for row in rows:
+                    try:
+                        with db.begin_nested():
+                            _upsert(db, model, row)
+                            db.flush()
+                        applied += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("standby: skipped a %s row: %s",
+                                     getattr(model, "__tablename__", model), str(exc)[:120])
+            db.commit()
+        st = _read_state()
+        if bundle.get("standby_rcpt_cursor"):
+            st["standby_rcpt_cursor"] = bundle["standby_rcpt_cursor"]
+        if bundle.get("standby_doc_cursor"):
+            st["standby_doc_cursor"] = bundle["standby_doc_cursor"]
+        _write_state(st)
+        logger.info("replication standby: warm-replicated %d receipt(s) + %d doc(s)%s",
+                    len(s_recs), len(s_docs),
+                    " (more pending)" if bundle.get("standby_more") else "")
     # Forwarded agent commands (portal "Sync now" for node-routed agents): append
     # to the local agent queue so the node delivers them on the agent's next
     # heartbeat. enqueue_command dedupes, so a re-forward is harmless.
@@ -471,7 +507,20 @@ def _push(s) -> int:
             m365_since = None
     m365_high = m365_since
     with SessionLocal() as db:
+        # Only push data for tenants THIS node is ACTIVE for. A warm-standby node
+        # also holds other tenants' replicated receipts/docs in its local DB — those
+        # must NEVER be echoed back to the CP (it's their source). For a non-HA node
+        # every local row is owned, so this filter is a no-op.
+        self_node = (db.query(Node).filter(
+                        Node.name == (s.node_name or s.domain),
+                        Node.role == (s.node_role or "customer-tenant")).first()
+                     or db.query(Node).filter(Node.is_self.is_(True)).first())
+        owned_tids = ([tid for (tid,) in db.query(Tenant.id)
+                       .filter(Tenant.node_id == self_node.id).all()]
+                      if self_node else None)
         rq = db.query(SnapshotReceipt)
+        if owned_tids is not None:
+            rq = rq.filter(SnapshotReceipt.tenant_id.in_(owned_tids))
         if since is not None:
             rq = rq.filter(SnapshotReceipt.created_at > since)
         for r in rq.order_by(SnapshotReceipt.created_at.asc()).limit(2000).all():
@@ -479,6 +528,8 @@ def _push(s) -> int:
             if r.created_at and (high is None or r.created_at > high):
                 high = r.created_at
         dq = db.query(SearchDocument)
+        if owned_tids is not None:
+            dq = dq.filter(SearchDocument.tenant_id.in_(owned_tids))
         if since is not None:
             dq = dq.filter(SearchDocument.created_at > since)
         for d in dq.order_by(SearchDocument.created_at.asc()).limit(5000).all():

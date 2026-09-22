@@ -107,6 +107,17 @@ def _has_pk(model, row: dict) -> bool:
     return bool(row.get(pk))
 
 
+def _parse_iso(s: str | None) -> datetime | None:
+    """A naive-UTC datetime from an ISO cursor string, else None."""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt.replace(tzinfo=None) if dt.tzinfo else dt
+    except ValueError:
+        return None
+
+
 def _upsert(db: Session, model, data: dict):
     kw = _deser(model, data)
     pk = list(model.__table__.primary_key.columns)[0].name
@@ -125,6 +136,10 @@ class NodeIdent(BaseModel):
     name: str
     role: str = "customer-tenant"
     since: str | None = None  # ISO cursor for incremental pull (unused in v1)
+    # Active/passive HA: separate ISO cursors for the incremental warm-standby data
+    # replication (receipts + search index for tenants this node is the STANDBY for).
+    standby_rcpt_cursor: str | None = None
+    standby_doc_cursor: str | None = None
 
 
 @router.post("/pull")
@@ -137,8 +152,16 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
     if node is None:
         # Not registered yet (heartbeat runs on its own cadence) — nothing to do.
         return {"node_id": None, "tenants": [], "assigned": 0}
-    tenants = db.query(Tenant).filter(Tenant.node_id == node.id).all()
+    # Active tenants (this node runs their workers) + STANDBY tenants (this node
+    # keeps a warm read-only replica for HA). Config for BOTH goes down; the node's
+    # scheduler naturally skips standby tenants because their node_id points at the
+    # OTHER (active) node, so there's no double-collection.
+    active_tenants = db.query(Tenant).filter(Tenant.node_id == node.id).all()
+    standby_tenants = db.query(Tenant).filter(Tenant.standby_node_id == node.id,
+                                              Tenant.node_id != node.id).all()
+    tenants = active_tenants + standby_tenants
     tids = [t.id for t in tenants]
+    standby_tids = [t.id for t in standby_tenants]
     if not tids:
         return {"node_id": node.id, "tenants": [], "assigned": 0}
 
@@ -183,6 +206,35 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
 
     # Wrapped key material for each vault (fleet-shared KEK → usable on the node).
     key_records = {v.id: keybroker.export_key_records(v.id) for v in vaults}
+
+    # Warm-standby data replication: for tenants this node is the STANDBY for, ship
+    # their recovery points (SnapshotReceipt) + search index (SearchDocument)
+    # incrementally so the standby can serve search/recovery immediately on
+    # switchover. Object BYTES aren't shipped — they live in shared cloud storage
+    # (both nodes read the same bucket) or on the appliance (which re-targets the
+    # new active node on switchover). Separate ISO cursors keep each stream correct.
+    standby_receipts, standby_documents = [], []
+    rcpt_next, doc_next = body.standby_rcpt_cursor, body.standby_doc_cursor
+    standby_more = False
+    if standby_tids:
+        _LIMIT = 3000
+        rcpt_since = _parse_iso(body.standby_rcpt_cursor)
+        doc_since = _parse_iso(body.standby_doc_cursor)
+        rq = db.query(SnapshotReceipt).filter(SnapshotReceipt.tenant_id.in_(standby_tids))
+        if rcpt_since is not None:
+            rq = rq.filter(SnapshotReceipt.created_at > rcpt_since)
+        recs = rq.order_by(SnapshotReceipt.created_at.asc()).limit(_LIMIT).all()
+        dq = db.query(SearchDocument).filter(SearchDocument.tenant_id.in_(standby_tids))
+        if doc_since is not None:
+            dq = dq.filter(SearchDocument.created_at > doc_since)
+        docs = dq.order_by(SearchDocument.created_at.asc()).limit(_LIMIT).all()
+        standby_receipts = [_ser(r) for r in recs]
+        standby_documents = [_ser(d) for d in docs]
+        if recs and recs[-1].created_at:
+            rcpt_next = recs[-1].created_at.isoformat()
+        if docs and docs[-1].created_at:
+            doc_next = docs[-1].created_at.isoformat()
+        standby_more = len(recs) >= _LIMIT or len(docs) >= _LIMIT
 
     pricing = db.get(PricingConfig, "default")
     # Integrations for the node's tenants + platform enable/disable, so the node
@@ -238,6 +290,14 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "pending_insights": pending_insights,
         "agent_commands": agent_commands,
         "key_records": key_records,
+        # Active/passive HA: which of the returned tenants this node holds as a
+        # warm STANDBY replica, plus their incremental data + advanced cursors.
+        "standby_tenant_ids": standby_tids,
+        "standby_receipts": standby_receipts,
+        "standby_documents": standby_documents,
+        "standby_rcpt_cursor": rcpt_next,
+        "standby_doc_cursor": doc_next,
+        "standby_more": standby_more,
     }
 
 
