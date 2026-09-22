@@ -17,7 +17,7 @@ interface StoreHealth {
   raid?: { enabled: boolean; status?: string };
   device?: string; mirror_of?: string | null; setup_error?: string; reason?: string;
   mirror_integrity?: {
-    in_sync?: boolean | null; checked_at?: string | null;
+    in_sync?: boolean | null; checked_at?: string | null; syncing?: boolean;
     data_missing?: number; data_extra?: number;
     index_missing?: number; index_extra?: number;
     primary_files?: number; mirror_files?: number;
@@ -990,7 +990,7 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, o
     if (h.temperature_c != null) chips.push({ label: "Temp", value: `${h.temperature_c}°C`, tone: h.temperature_c >= 60 ? "warn" : "info" });
     if (h.power) chips.push({ label: "Power", value: h.power, tone: h.power === "ok" ? "ok" : "danger" });
     if (isMirror && mi) chips.push(mi.in_sync == null
-      ? { label: "Mirror", value: "verifying…", tone: "info" }
+      ? { label: "Mirror", value: mi.syncing ? "resyncing…" : "verifying…", tone: "info" }
       : mi.in_sync
         ? { label: "Mirror", value: "in sync", tone: "ok" }
         : { label: "Mirror", value: "out of sync", tone: "danger" });
@@ -1016,7 +1016,7 @@ function StorageItem({ s, canManage, onRename, onDelete, onAdvanced, onMirror, o
       ["Temperature", h.temperature_c != null ? `${h.temperature_c}°C` : "—"],
       ["Power", h.power || "—"],
       ...(isMirror && mi ? ([
-        ["Mirror integrity", mi.in_sync == null ? "Verifying…" : mi.in_sync ? "In sync (verified 1:1)" : "Out of sync"],
+        ["Mirror integrity", mi.in_sync == null ? (mi.syncing ? "Resyncing…" : "Verifying…") : mi.in_sync ? "In sync (verified 1:1)" : "Out of sync"],
         ["Last verified", mi.checked_at ? new Date(mi.checked_at).toLocaleString() : "—"],
         ["Data files (mirror/primary)", `${mi.mirror_files ?? "?"} / ${mi.primary_files ?? "?"}`],
         ["Data missing / extra", `${mi.data_missing ?? 0} / ${mi.data_extra ?? 0}`],

@@ -654,7 +654,7 @@ class Agent:
             return None
         return res.get("mountpoint")
 
-    def _apply_mirror_roots(self) -> None:
+    def _apply_mirror_roots(self, force_verify: bool = False) -> None:
         # Only route mirroring to volumes that are actually healthy right now. A
         # drive that's mounted but dead (ext4 'shutdown' after an I/O fault) is
         # EXCLUDED so backups + _sync_mirrors don't hammer it with failing writes;
@@ -677,10 +677,10 @@ class Agent:
             self.log.warning("could not apply mirror roots: %s", exc)
         self.log.info("mirror routing applied: %d mirror volume(s) active", len(roots))
         if roots:
-            threading.Thread(target=self._sync_mirrors, args=("mirror routing changed",),
+            threading.Thread(target=self._sync_mirrors, args=("mirror routing changed", force_verify),
                              daemon=True).start()
 
-    def _sync_mirrors(self, reason: str = "") -> dict:
+    def _sync_mirrors(self, reason: str = "", force_verify: bool = False) -> dict:
         """Reconcile every mirror volume with the primary vault (object data) AND
         the encrypted search index — a backfill for a newly-added mirror plus repair
         for anything the live duplication missed. Idempotent."""
@@ -688,6 +688,9 @@ class Agent:
                          if e.get("kind") == "mirror" and e["store_id"] in self._ext_mounts]
         if not mirror_mounts:
             return {"mirrors": 0}
+        # Show "resyncing…" (in_sync=null) while the backfill runs so the UI doesn't
+        # display a stale "out of sync" during/right after a repair.
+        self._mark_mirror_syncing()
         res: dict = {"mirrors": len(mirror_mounts)}
         try:
             res.update(self.vault.sync_mirrors())
@@ -732,8 +735,8 @@ class Agent:
         res["index_files_copied"] = idx_copied
         res["index_files_pruned"] = idx_pruned
         self.log.info("mirror sync (%s): %s", reason or "periodic", res)
-        if any(res.get(k) for k in ("files_copied", "files_pruned", "snapshots_pruned",
-                                    "index_files_copied", "index_files_pruned")):
+        if force_verify or any(res.get(k) for k in ("files_copied", "files_pruned", "snapshots_pruned",
+                                                    "index_files_copied", "index_files_pruned")):
             try:
                 self._verify_mirrors("after sync")
             except Exception as exc:  # noqa: BLE001
@@ -802,6 +805,17 @@ class Agent:
             return json.loads(MIRROR_INTEGRITY.read_text())
         except Exception:  # noqa: BLE001
             return {}
+
+    def _mark_mirror_syncing(self) -> None:
+        """Flag mirror integrity as pending (in_sync=null / syncing) so the UI shows
+        'resyncing…' instead of a stale 'out of sync' while a backfill/repair sync is
+        running; the follow-up verify writes the real state."""
+        rep = self._read_mirror_integrity() or {}
+        rep["in_sync"] = None
+        rep["syncing"] = True
+        for s in rep.get("stores", []) or []:
+            s["in_sync"] = None
+        self._write_mirror_integrity(rep)
 
     def _reload_ext_storage(self) -> None:
         """Re-read the registry and (re)mount known drives, then re-apply mirror
@@ -979,7 +993,7 @@ class Agent:
             return {"error": res.get("error") or "storage repair failed", "store_id": store_id}
         self._ext_mounts[store_id] = res["mountpoint"]
         self._store_conn.pop(store_id, None)  # force a fresh connected-state log line
-        self._apply_mirror_roots()
+        self._apply_mirror_roots(force_verify=True)
         self._heavy_at = 0.0
         self.log.info("external storage repaired: %s at %s", store_id, res["mountpoint"])
         return {"store_id": store_id, "repaired": True,
@@ -1261,10 +1275,9 @@ class Agent:
                 elif ctype == "RECONFIGURE_STORAGE":
                     result = self._reconfigure_external_storage(payload["parameters"])
                 elif ctype == "REPAIR_STORAGE":
+                    # _repair_external_storage already re-applies mirror routing and
+                    # kicks a forced resync+verify, so no extra sync here.
                     result = await asyncio.to_thread(self._repair_external_storage, payload["parameters"])
-                    if not result.get("error"):
-                        threading.Thread(target=self._sync_mirrors, args=("after repair",),
-                                         daemon=True).start()
                 elif ctype == "STAGE_INDEX":
                     result = await asyncio.to_thread(self._stage_index, payload["parameters"])
                     if not result.get("error"):
