@@ -1810,7 +1810,7 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
   const [busy, setBusy] = useState("");
   const [identities, setIdentities] = useState<M365Identity[]>([]);
   const [members, setMembers] = useState<M365Member[]>([]);
-  const [sources, setSources] = useState<{ id: string; workload: string; name: string; ownership_type?: string; state: string; objects?: number; bytes?: number; last_error?: string | null; last_collected_at: string | null }[]>([]);
+  const [sources, setSources] = useState<{ id: string; workload: string; name: string; ownership_type?: string; state: string; objects?: number; bytes?: number; last_error?: string | null; last_note?: string | null; last_collected_at: string | null }[]>([]);
   const [workloadRollup, setWorkloadRollup] = useState<{ workload: string; label: string; sources: number; active: number; objects: number; bytes: number; errors: number }[]>([]);
   const [totalObjects, setTotalObjects] = useState(0);
   const [totalBytes, setTotalBytes] = useState(0);
