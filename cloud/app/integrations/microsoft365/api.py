@@ -951,6 +951,7 @@ def list_managed_sources(instance_id: str = "",
             "objects": objects, "bytes": vbytes,
             "last_collected_at": s.last_collected_at.isoformat() if s.last_collected_at else None,
             "last_error": last.get("error"),
+            "last_note": last.get("note"),
         })
         r = rollup.setdefault(s.workload, {
             "workload": s.workload, "label": _WL_LABEL.get(s.workload, s.workload),

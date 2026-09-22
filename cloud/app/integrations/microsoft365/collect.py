@@ -54,6 +54,26 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _apponly_unsupported_reason(workload: str, err: str) -> str:
+    """When a workload/resource can't be collected with an APP-ONLY token even though
+    the Application permission IS granted, return a human note; else "". These are
+    Microsoft Graph limitations / per-resource locks, NOT customer-fixable consent
+    gaps — so the source is marked ``source_unavailable`` (quiet, informational)
+    rather than ``permission_required`` (which nags the owner to re-consent)."""
+    e = err.lower()
+    if workload == "onenote" and ("40001" in err
+                                  or "does not contain a valid authentication token" in e):
+        return ("OneNote can't be collected with an app-only token — Microsoft Graph's "
+                "OneNote API doesn't support application permissions (HTTP 401 / 40001).")
+    if workload == "copilot" and ("401" in err or "403" in err):
+        return ("Microsoft 365 Copilot interaction history isn't available to app-only "
+                "access on this tenant.")
+    if workload == "sharepoint" and "accessdenied" in e:
+        return ("This SharePoint site denies application access — a site-level policy, or "
+                "Sites.Selected without a grant for this specific site.")
+    return ""
+
+
 def audit_cycle(db: Session, inst, *, objects: int, sources: int, trigger: str,
                 actor: str = "m365") -> None:
     """Record a managed-collection result to the audit ledger + Platform Logs (and
@@ -358,6 +378,17 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
         source.state = "delayed"
         db.commit()
         return {"ok": False, "error": "no vault for owner"}
+    # A source known-unavailable via app-only (Graph limitation / site-locked) is
+    # retried at most daily so it can recover if access is later granted, without
+    # hammering Graph or re-logging the same failure every cycle.
+    if source.state == "source_unavailable":
+        last_at = ((source.config or {}).get("last_result") or {}).get("at")
+        try:
+            if last_at and (_now() - datetime.fromisoformat(last_at)).total_seconds() < 24 * 3600:
+                return {"ok": True, "objects": 0, "workload": source.workload,
+                        "skipped": "source_unavailable"}
+        except Exception:  # noqa: BLE001
+            pass
     coll = _managed_collection(db, inst, source, vault)
     cap = get_settings().content_max_bytes
     key = source.source_key
@@ -409,17 +440,24 @@ def collect_source(db: Session, inst, source, app_token: str) -> dict:
                 app_token, cursor=cfg.get("cursor"), content_cap=cap,
                 state=state, resource=f"users/{key}/chats"))
     except Exception as e:  # noqa: BLE001
-        is_auth = "401" in str(e) or "403" in str(e)
-        source.state = "permission_required" if is_auth else "delayed"
+        err = str(e)
+        is_auth = "401" in err or "403" in err
+        # Distinguish a real, customer-fixable consent gap (permission_required →
+        # nag to re-consent) from a resource/API that simply can't be read with an
+        # app-only token even WITH the grant (source_unavailable → quiet, noted).
+        note = _apponly_unsupported_reason(source.workload, err)
+        source.state = ("source_unavailable" if note
+                        else "permission_required" if is_auth else "delayed")
         cfg["last_result"] = {"at": _now().isoformat(), "objects": 0,
-                              "error": str(e)[:200], "ok": False}
+                              "error": err[:200], "note": note or None, "ok": False}
         source.config = cfg
         source.last_collected_at = _now()
         db.commit()
-        logger.warning("m365 collect failed (source=%s key=%s state=%s): %s",
-                       source.workload, source.source_key, source.state, str(e)[:200])
-        _record_source_activity(db, inst, source, objects=0, error=str(e)[:200])
-        return {"ok": False, "error": str(e)[:200]}
+        logger.warning("m365 collect failed (source=%s key=%s state=%s): %s%s",
+                       source.workload, source.source_key, source.state, err[:200],
+                       f" — {note}" if note else "")
+        _record_source_activity(db, inst, source, objects=0, error=err[:200])
+        return {"ok": False, "error": err[:200]}
 
     if objs:
         dests = coll.destinations or ["cv-cloud"]

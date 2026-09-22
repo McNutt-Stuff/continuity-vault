@@ -1844,7 +1844,7 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
       setIdentities(r.identities || []);
       const m = await api.get<{ members: M365Member[] }>("/integrations/microsoft365/members");
       setMembers(m.members || []);
-      const s = await api.get<{ collect_enabled: boolean; total_objects?: number; total_bytes?: number; workloads?: { workload: string; label: string; sources: number; active: number; objects: number; bytes: number; errors: number }[]; sources: { id: string; workload: string; name: string; ownership_type?: string; state: string; objects?: number; bytes?: number; last_error?: string | null; last_collected_at: string | null }[] }>(`/integrations/microsoft365/sources?${iq}`);
+      const s = await api.get<{ collect_enabled: boolean; total_objects?: number; total_bytes?: number; workloads?: { workload: string; label: string; sources: number; active: number; objects: number; bytes: number; errors: number }[]; sources: { id: string; workload: string; name: string; ownership_type?: string; state: string; objects?: number; bytes?: number; last_error?: string | null; last_note?: string | null; last_collected_at: string | null }[] }>(`/integrations/microsoft365/sources?${iq}`);
       setSources(s.sources || []); setCollectEnabled(!!s.collect_enabled);
       setWorkloadRollup(s.workloads || []); setTotalObjects(s.total_objects || 0); setTotalBytes(s.total_bytes || 0);
       const sc = await api.get<{ rules: M365ScopeRules }>(`/integrations/microsoft365/scope?${iq}`);
@@ -2399,7 +2399,7 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
                           {s.name}
                         </span>
                       </td>
-                      <td title={s.last_error || undefined}><Pill tone={s.state === "active" ? "ok" : (s.state === "credential_error" || s.state === "permission_required") ? "danger" : "warn"}>{s.state}</Pill></td>
+                      <td title={s.last_note || s.last_error || undefined}><Pill tone={s.state === "active" ? "ok" : (s.state === "credential_error" || s.state === "permission_required") ? "danger" : s.state === "source_unavailable" ? "info" : "warn"}>{s.state === "source_unavailable" ? "unavailable" : s.state}</Pill></td>
                       <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                         <div>{(s.objects ?? 0).toLocaleString()}</div>
                         <div className="faint" style={{ fontSize: 11 }}>{bytes(s.bytes ?? 0)}</div>

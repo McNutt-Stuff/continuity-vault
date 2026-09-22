@@ -422,9 +422,13 @@ def _source_issues(db, user: User) -> list[dict]:
                      and (now - ref).total_seconds() > stale_after_min * 60)
         # Stuck setup: a re-auth/verification the appliance can't finish (it stops
         # pulling non-idle/done states, so collection silently halts) that has sat
-        # in a non-terminal provisioning state for a while.
+        # in a non-terminal provisioning state for a while. Microsoft 365 uses the
+        # admin-consent redirect (not the appliance OTP handshake) and surfaces its
+        # own consent state + real errors via the error path, so it's excluded here
+        # to avoid a false "sign-in didn't complete" nag from a stale node-side state.
         setup_ref = inst.updated_at or inst.last_run_at
-        setup_stuck = bool(prov in ("starting", "verifying", "awaiting_otp")
+        setup_stuck = bool(inst.integration_type != "microsoft365"
+                           and prov in ("starting", "verifying", "awaiting_otp")
                            and setup_ref is not None
                            and (now - setup_ref).total_seconds() > 2 * 3600)
         # Successful-but-EMPTY: the run reports ok (last_success stays current) but
