@@ -86,6 +86,13 @@ _PULL_ORDER = [
 # would clobber a just-recorded sync error/cursor before it's ever pushed).
 _PULL_EXCLUDE = {
     "desktop_agents": {"pending_commands", "last_scan", "fs_expansions"},
+    # A node's cluster_id is an FK to `clusters`, which lives ONLY on the control
+    # plane (customer nodes don't replicate cluster topology). Pulling it would make
+    # every remote node row un-insertable (FK violation) — which, once HA makes a
+    # tenant reference the OTHER node via node_id/standby_node_id, cascades into the
+    # tenant → vault → collection chain failing to apply. Customer nodes don't use
+    # cluster_id, so strip it and let node rows insert cleanly.
+    "nodes": {"cluster_id"},
     "connector_accounts": {"sync_cursor", "last_sync_at", "last_object_count",
                            "last_error", "last_error_at", "auth_status"},
     # The node's scheduler owns each mapping's run stamp; pulling the control
