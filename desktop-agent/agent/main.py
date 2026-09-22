@@ -109,6 +109,10 @@ class Agent:
         # Assigned customer node URL (federated fleets): once set, all signaling +
         # ingest goes here instead of the control plane. Persisted in registration.
         self._node_url: Optional[str] = (self.reg or {}).get("node_url")
+        # A node that just failed us (e.g. right after a switchover, before it
+        # replicated this agent) is put on a short cooldown so we ride the control
+        # plane instead of re-adopting it and flip-flopping every heartbeat.
+        self._node_cooldown: dict = {}
         self._last_update_attempt = 0.0
         self._last_telemetry: dict = {}
         # Per-collector advisory notices surfaced to the cloud on heartbeat (e.g.
@@ -207,6 +211,18 @@ class Agent:
             else:
                 self.reg.pop("node_url", None)
         self.log.info("routing to %s", url or self.cfg.cloud_base_url)
+
+    def _adopt_node(self, url: Optional[str]) -> None:
+        """Adopt the assigned-node URL the cloud advertises, UNLESS that node is on a
+        post-failure cooldown (it just switched over and hasn't replicated this
+        agent yet). Riding the control plane a little longer avoids a per-heartbeat
+        node↔CP flip-flop until the new active node is warm."""
+        url = (url or "").rstrip("/") or None
+        if url and self._node_cooldown.get(url, 0) > time.time():
+            if self._node_url is not None:
+                self._set_node_url(None)
+            return
+        self._set_node_url(url)
 
     def activate(self, code: str) -> dict:
         body = {
@@ -318,6 +334,7 @@ class Agent:
             if self._node_url and base == self._node_url:
                 self.log.warning("assigned node %s unreachable; falling back to control plane",
                                  self._node_url)
+                self._node_cooldown[self._node_url] = time.time() + 120
                 self._set_node_url(None)
                 r = httpx.post(f"{self.cfg.cloud_base_url}/agent/heartbeat",
                                json=body, headers=self._headers(), timeout=30)
@@ -337,7 +354,7 @@ class Agent:
         # Per-node routing: once the tenant is pinned to a customer node the cloud
         # hands us that node's API base; from then on ALL signaling, commands and
         # ingest go there instead of the control plane.
-        self._set_node_url(data.get("node_url") or data.get("ingest_url") or None)
+        self._adopt_node(data.get("node_url") or data.get("ingest_url") or None)
         self.cfg.registration_file.write_text(json.dumps(self.reg))
         # Auto-update: pull a new bundle when the cloud advertises a newer version.
         self._maybe_self_update(data.get("latest_version"))
