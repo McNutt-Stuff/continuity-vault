@@ -190,6 +190,15 @@ def _byos_provider_map(db: Session, tenant_id: str) -> dict[str, str]:
                        .filter(CustomerStorage.tenant_id == tenant_id).all())}
 
 
+def _is_managed_exchange(c) -> bool:
+    """A managed Microsoft 365 Exchange collection — stored under the Outlook
+    connector's source_type ("outlook") but surfaced as Exchange Online (its own
+    identity + brand icon) everywhere, matching the dashboard and notifications."""
+    cfg = c.config or {}
+    return (c.source_type == "outlook" and bool(cfg.get("managed"))
+            and cfg.get("m365_workload") == "exchange")
+
+
 @router.get("/taxonomy")
 def taxonomy(principal: security.Principal = Depends(security.get_principal)):
     """The canonical information model (categories + kinds) used across sources."""
@@ -616,6 +625,7 @@ def _search_fast(db: Session, tenant: Tenant, allowed: list[str], *, q: str,
     coll_label: dict[str, str] = {}
     coll_username: dict[str, str] = {}
     coll_display: dict[str, str] = {}
+    mex_colls: set[str] = set()   # managed Exchange Online collections (stored as "outlook")
     if coll_ids:
         for c in db.query(Collection).filter(Collection.id.in_(coll_ids)).all():
             account = (db.get(ConnectorAccount, c.connector_account_id)
@@ -623,8 +633,12 @@ def _search_fast(db: Session, tenant: Tenant, allowed: list[str], *, q: str,
             coll_label[c.id] = account.account_label if account else c.name
             if account and account.account_username:
                 coll_username[c.id] = account.account_username
-            conn = get_connector(c.source_type)
-            coll_display[c.id] = conn.display_name if conn else c.source_type
+            if _is_managed_exchange(c):
+                mex_colls.add(c.id)
+                coll_display[c.id] = "Exchange Online"
+            else:
+                conn = get_connector(c.source_type)
+                coll_display[c.id] = conn.display_name if conn else c.source_type
     source_display: dict[str, str] = {}
     for st in set(by_source) | {r.source_type for r in rows}:
         conn = get_connector(st)
@@ -697,7 +711,7 @@ def _search_fast(db: Session, tenant: Tenant, allowed: list[str], *, q: str,
         "object_id": r.object_id,
         "snapshot_id": r.snapshot_id,
         "collection_id": r.collection_id,
-        "source_type": r.source_type,
+        "source_type": ("exchange" if r.collection_id in mex_colls else r.source_type),
         "source_label": coll_label.get(r.collection_id, source_display.get(r.source_type, r.source_type)),
         "source_username": coll_username.get(r.collection_id),
         "source_display": coll_display.get(r.collection_id, source_display.get(r.source_type, r.source_type)),
@@ -1032,6 +1046,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
     coll_label: dict[str, str] = {}
     coll_username: dict[str, str] = {}
     coll_display: dict[str, str] = {}
+    mex_colls: set[str] = set()   # managed Exchange Online collections (stored as "outlook")
     if coll_ids:
         for c in (db.query(Collection)
                   .filter(Collection.id.in_(coll_ids)).all()):
@@ -1040,8 +1055,12 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
             coll_label[c.id] = account.account_label if account else c.name
             if account and account.account_username:
                 coll_username[c.id] = account.account_username
-            conn = get_connector(c.source_type)
-            coll_display[c.id] = conn.display_name if conn else c.source_type
+            if _is_managed_exchange(c):
+                mex_colls.add(c.id)
+                coll_display[c.id] = "Exchange Online"
+            else:
+                conn = get_connector(c.source_type)
+                coll_display[c.id] = conn.display_name if conn else c.source_type
     source_display: dict[str, str] = {}
     for st in {r.source_type for r in unique}:
         conn = get_connector(st)
@@ -1155,7 +1174,7 @@ def search(q: str = "", source_type: str | None = None, doc_type: str | None = N
         "object_id": r.object_id,
         "snapshot_id": r.snapshot_id,
         "collection_id": r.collection_id,
-        "source_type": r.source_type,
+        "source_type": ("exchange" if r.collection_id in mex_colls else r.source_type),
         "source_label": coll_label.get(r.collection_id, source_display.get(r.source_type, r.source_type)),
         "source_username": coll_username.get(r.collection_id),
         "source_display": coll_display.get(r.collection_id, source_display.get(r.source_type, r.source_type)),

@@ -130,7 +130,14 @@ def activity(limit: int = 40, scope: str = "me",
 
     def _source_type(collection_id: str) -> str:
         c = colls.get(collection_id)
-        return c.source_type if c else ""
+        if not c:
+            return ""
+        # Managed Microsoft 365 Exchange is stored under "outlook" but shown as
+        # Exchange Online (its own brand icon), matching search + the dashboard.
+        cfg = c.config or {}
+        if c.source_type == "outlook" and cfg.get("managed") and cfg.get("m365_workload") == "exchange":
+            return "exchange"
+        return c.source_type
 
     # Recently completed snapshot receipts (the concrete "data landed" events).
     # Pull a deeper slice than the job/audit limit so the Data Map can show each
