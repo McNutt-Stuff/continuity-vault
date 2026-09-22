@@ -259,17 +259,25 @@ def _price_table(rows: list[dict], total_label: str, total: str) -> str:
 
 
 def _portal_url() -> str:
+    """Base URL of the customer portal + its static assets (source-icon SVGs).
+
+    The portal lives ONLY on the control plane, so this must resolve to the control
+    plane — NEVER the sending host. On a customer-tenant node that's
+    ``control_plane_url`` (the node's own domain is API-only and 404s /source-icons
+    + the portal); on the control plane it's the local portal origin. Purely
+    config-driven — no hard-coded host."""
     from .config import get_settings
     s = get_settings()
-    # The customer portal + static assets (source-icon SVGs) live ONLY on the
-    # control plane. Customer-tenant nodes are API-only — their domain 404s
-    # /source-icons and the portal — so an email a NODE sends must link to the
-    # control plane, not the node's own rp_origin (which is its API host).
     cp = (getattr(s, "control_plane_url", "") or "").rstrip("/")
-    if cp:
+    if cp:  # non-CP node → the control plane it federates to
         return cp[:-4] if cp.endswith("/api") else cp
-    base = (getattr(s, "rp_origin", "") or "").rstrip("/")
-    return base or f"https://{getattr(s, 'domain', 'vault.arkive.life')}"
+    origin = (getattr(s, "rp_origin", "") or "").rstrip("/")
+    if origin:  # control plane → its own portal origin
+        return origin
+    api = (getattr(s, "api_base_url", "") or "").rstrip("/")
+    if api:
+        return api[:-4] if api.endswith("/api") else api
+    return f"https://{getattr(s, 'domain', '')}".rstrip("/")
 
 
 # --------------------------------------------------------------------------- #
