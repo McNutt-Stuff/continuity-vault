@@ -43,6 +43,9 @@ NOTIFICATION_TYPES = [
     {"key": "appliance_problem", "label": "Appliance problem alerts", "icon": "server",
      "default": True, "scope": "user",
      "desc": "Get notified when one of your secure appliances goes offline or needs attention."},
+    {"key": "appliance_recovered", "label": "Appliance recovery alerts", "icon": "server",
+     "default": True, "scope": "user",
+     "desc": "Get notified when a secure appliance that had a problem (e.g. a disconnected drive) is healthy again."},
     {"key": "storage_problem", "label": "Storage problem alerts", "icon": "database",
      "default": True, "scope": "user",
      "desc": "Get notified when one of your storage destinations fails or needs attention."},
@@ -503,6 +506,13 @@ def _appliance_issues(db, user: User) -> list[dict]:
     return out
 
 
+def _appliance_recipients(db, appliance) -> list[User]:
+    """Active users in the appliance's tenant — the same audience that receives
+    appliance_problem notifications for it (used for the 'healthy again' alert)."""
+    return (db.query(User)
+            .filter(User.tenant_id == appliance.tenant_id, User.status == "active").all())
+
+
 def appliance_problem_list(db, appliance) -> tuple[list[str], str]:
     """Health problems for ONE appliance as (messages, severity) — used by the
     scheduler's appliance-health sweep (audit + admin alert). Returns ([], "") when
@@ -838,6 +848,25 @@ def build_appliance_problem(db, user: User, issues: list[dict] | None = None) ->
     }
 
 
+def build_appliance_recovered(db, user: User, appliance_name: str | None = None) -> dict | None:
+    """The positive counterpart to build_appliance_problem — sent when an appliance
+    that had a health problem (e.g. a disconnected mirror drive) is healthy again."""
+    name = appliance_name or "Your appliance"
+    parts = [f'<p style="margin:0 0 12px;">Good news — <b>{name}</b> is healthy again. '
+             f'The problem we alerted you about (for example a disconnected drive) has cleared, '
+             f'so off-site protection and monitoring have resumed.</p>']
+    parts.append(_rows([{"icon": "server", "name": name,
+                         "detail": "Healthy — all storage volumes online"}]))
+    return {
+        "subject": f'“{name}” is healthy again',
+        "title": "Your appliance is healthy again",
+        "body_html": "".join(parts),
+        "text": f"{name} is healthy again — the previously reported problem has cleared.",
+        "cta": {"label": "View appliances", "url": f"{_portal_url()}/appliances"},
+        "preheader": f"{name} recovered",
+    }
+
+
 def build_storage_problem(db, user: User, issues: list[dict] | None = None) -> dict | None:
     issues = issues if issues is not None else _storage_issues(db, user)
     if not issues:
@@ -1016,6 +1045,8 @@ def _build(db, user: User, key: str, ctx: dict) -> dict | None:
         return build_source_problem(db, user, ctx.get("issues"))
     if key == "appliance_problem":
         return build_appliance_problem(db, user, ctx.get("issues"))
+    if key == "appliance_recovered":
+        return build_appliance_recovered(db, user, ctx.get("appliance_name"))
     if key == "storage_problem":
         return build_storage_problem(db, user, ctx.get("issues"))
     if key == "plan_change":

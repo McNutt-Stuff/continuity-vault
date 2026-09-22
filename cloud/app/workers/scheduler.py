@@ -233,6 +233,9 @@ def _alert_admins_storage_failed(db, cs, err: str) -> None:
 
 
 _last_appliance_health: datetime | None = None
+# Appliance ids we've alerted as having a health problem this episode (cleared +
+# a "recovered" alert sent when their problems clear).
+_appliance_problem_alerted: set = set()
 
 
 def _recent_audit_exists(db, tenant_id: str, action: str, resource: str, hours: int) -> bool:
@@ -261,7 +264,19 @@ def _check_appliance_health() -> None:
             try:
                 probs, sev = notif.appliance_problem_list(db, a)
                 if not probs:
+                    # Recovered: if we previously alerted on this appliance, tell
+                    # admins + the owner it's healthy again (mirrors node-online).
+                    if a.id in _appliance_problem_alerted:
+                        _appliance_problem_alerted.discard(a.id)
+                        audit.record(db, actor="system", action="appliance.health_recovered",
+                                     tenant_id=a.tenant_id, resource=a.id, category="appliance",
+                                     severity="info", detail={"name": a.name})
+                        _alert_admins_appliance_recovered(db, a)
+                        _notify_owner_appliance_recovered(db, notif, a)
                     continue
+                # Track the problem episode BEFORE the dedupe check so a recovery
+                # still fires even when the repeat-audit is suppressed.
+                _appliance_problem_alerted.add(a.id)
                 if _recent_audit_exists(db, a.tenant_id, "appliance.health_problem", a.id, repeat_h):
                     continue
                 audit.record(db, actor="system", action="appliance.health_problem",
@@ -293,6 +308,42 @@ def _alert_admins_appliance_problem(db, appliance, probs: list, sev: str) -> Non
             dedupe_key=f"appliance:{appliance.id}", dedupe_within_hours=6)
     except Exception:  # noqa: BLE001
         logger.exception("admin appliance-problem alert failed for %s", getattr(appliance, "id", "?"))
+
+
+def _alert_admins_appliance_recovered(db, appliance) -> None:
+    """Notify platform admins that an appliance's health problems have cleared —
+    the positive counterpart to _alert_admins_appliance_problem (e.g. a mirror
+    drive that was disconnected is back and healthy)."""
+    try:
+        from .. import admin_notifications
+        from ..models import Tenant
+        tenant = db.get(Tenant, appliance.tenant_id)
+        cust = (tenant.name if tenant else None) or appliance.tenant_id
+        admin_notifications.raise_alert(
+            db, "platform_health",
+            subject=f"[Arkive] Appliance healthy again — {appliance.name or appliance.id}",
+            title="Appliance health recovered",
+            intro=f"{appliance.name or 'An appliance'} ({cust}) is healthy again — the "
+                  f"previously reported problems have cleared.",
+            rows=[{"icon": "appliance", "name": appliance.name or "Appliance", "detail": cust},
+                  {"icon": "shield", "name": "All storage volumes healthy", "detail": ""}],
+            severity="info", tenant_id=appliance.tenant_id,
+            dedupe_key=f"appliance_ok:{appliance.id}", dedupe_within_hours=1)
+    except Exception:  # noqa: BLE001
+        logger.exception("admin appliance-recovered alert failed for %s", getattr(appliance, "id", "?"))
+
+
+def _notify_owner_appliance_recovered(db, notif, appliance) -> None:
+    """Send the appliance's owner(s) a 'healthy again' notification — the recovery
+    counterpart to the appliance_problem (drive disconnected) notification."""
+    try:
+        for user in notif._appliance_recipients(db, appliance):
+            notif.send_notification(
+                db, user, "appliance_recovered",
+                dedupe_key=f"applok:{appliance.id}:{int(datetime.utcnow().timestamp() // 3600)}",
+                appliance_name=appliance.name or "Your appliance")
+    except Exception:  # noqa: BLE001
+        logger.exception("owner appliance-recovered notify failed for %s", getattr(appliance, "id", "?"))
 
 
 _last_node_health: datetime | None = None
