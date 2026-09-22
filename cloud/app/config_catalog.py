@@ -54,6 +54,11 @@ CONFIG_CATALOG: list[dict] = [
     {"key": "service.storage", "label": "Arkive Cloud storage service",
      "type": "string", "group": "Services", "choices": "storage-service",
      "description": "Which storage ServiceObject this node uses for Arkive Cloud object storage."},
+    {"key": "service.backup", "label": "Infrastructure backup destination",
+     "type": "string", "group": "Services", "choices": "storage-service",
+     "description": "Which storage ServiceObject this node backs its infrastructure up to "
+                    "(database + config + search index). The same storage services shown on the "
+                    "Backups page; when set it overrides that node's per-node backup destinations."},
     {"key": "service.email", "label": "Email service",
      "type": "string", "group": "Services", "choices": "email-service",
      "description": "Which email ServiceObject this node uses to send mail (SES / SendGrid / SMTP)."},

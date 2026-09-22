@@ -7310,7 +7310,7 @@ function StorageUsageAdmin() {
 // --------------------------------------------------------------------------- //
 interface BackupDest { service_id: string; name: string; kind: string; status: string; bytes: number; error?: string | null; }
 interface BackupRunView { id: string; status: string; total_bytes: number; components: string[]; destinations: BackupDest[]; message?: string; error?: string; has_log?: boolean; created_at?: string | null; finished_at?: string | null; }
-interface BackupNode { id: string; name: string; role: string; category: string; is_self: boolean; backup_service_ids: string[]; backup_services: string[]; last_backup: BackupRunView | null; }
+interface BackupNode { id: string; name: string; role: string; category: string; is_self: boolean; backup_service_ids: string[]; backup_services: string[]; backup_source?: "config" | "node"; last_backup: BackupRunView | null; }
 interface BackupService { id: string; name: string; kind: string; kind_label: string; enabled: boolean; settings: Record<string, string>; nodes: string[]; bytes: number; backup_count?: number; backed_up_nodes: number; }
 interface StoredBackup {
   id: string; node_name: string; role: string; status: string; total_bytes: number;
@@ -7468,12 +7468,19 @@ function BackupsAdmin() {
                           <button className="btn primary sm" onClick={() => saveEdit(n.id)}>Save</button>
                           <button className="btn ghost sm" onClick={() => setEditNode(null)}>Cancel</button>
                         </div>
+                        {n.backup_source === "config" && (
+                          <span className="faint" style={{ fontSize: 11 }}>
+                            A config profile sets this node's backup destination (service.backup) — it
+                            overrides this per-node list until cleared.
+                          </span>
+                        )}
                       </div>
                     ) : (
-                      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                      <div className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                         {n.backup_services.length
                           ? n.backup_services.map((nm) => <Pill key={nm} tone="info">{nm}</Pill>)
                           : <span className="faint" style={{ fontSize: 12 }}>None assigned</span>}
+                        {n.backup_source === "config" && <Pill tone="ok">via config profile</Pill>}
                       </div>
                     )}
                   </td>

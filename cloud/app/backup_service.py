@@ -322,6 +322,16 @@ def _execute_backup(db, run, node, node_name: str, role: str) -> None:
     (no value) on skip / fatal build error; run.status carries the outcome."""
     from .models import ServiceObject
     svc_ids = list((node.backup_service_ids or []) if node else [])
+    # A configuration profile / override can set this node's backup destination
+    # (service.backup) — it wins over the per-node list when present, mirroring how
+    # service.storage / service.email / service.payment are resolved from config.
+    try:
+        from . import node_config
+        cfg_backup = (node_config.get(db, "service.backup", "") or "").strip()
+    except Exception:  # noqa: BLE001 — config resolution must never break a backup
+        cfg_backup = ""
+    if cfg_backup:
+        svc_ids = [cfg_backup]
     # Capture everything we need from the ORM (incl. decrypted destination config)
     # WHILE the session is open, then release it — the pg_dump + upload below can
     # take minutes, and holding an open transaction the whole time leaves the

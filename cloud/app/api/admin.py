@@ -4109,9 +4109,17 @@ def backups_overview(db: Session = Depends(get_db)):
 
     node_rows = []
     protected = 0
+    from .. import services as _services
+    # A config profile / override (service.backup) wins over a node's per-node
+    # backup_service_ids — resolve the EFFECTIVE destination so the page shows what
+    # the backup will actually use.
+    eff_backup: dict = {}
+    for n in nodes:
+        cfg = str((_services._node_effective(db, n) or {}).get("service.backup") or "").strip()
+        eff_backup[n.id] = ([cfg] if cfg else list(n.backup_service_ids or []), bool(cfg))
     for n in nodes:
         r = latest.get(n.id)
-        ids = list(n.backup_service_ids or [])
+        ids, from_config = eff_backup[n.id]
         if ids:
             protected += 1
         node_rows.append({
@@ -4120,6 +4128,7 @@ def backups_overview(db: Session = Depends(get_db)):
             "is_self": bool(n.is_self),
             "backup_service_ids": ids,
             "backup_services": [svc_by_id[s].name for s in ids if s in svc_by_id],
+            "backup_source": "config" if from_config else "node",
             "last_backup": _run_row(r) if r else None,
         })
     node_rows.sort(key=lambda x: (not x["is_self"], x["name"] or ""))
@@ -4141,7 +4150,7 @@ def backups_overview(db: Session = Depends(get_db)):
 
     svc_used: dict = {}  # which nodes ASSIGN each service for backup
     for n in nodes:
-        for sid in (n.backup_service_ids or []):
+        for sid in eff_backup[n.id][0]:
             svc_used.setdefault(sid, []).append(n.name)
     services = []
     for s in db.query(ServiceObject).filter(ServiceObject.kind.like("storage-%")).all():
