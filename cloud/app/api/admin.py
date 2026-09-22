@@ -1302,6 +1302,16 @@ def _tenant_view(db: Session, t: Tenant, detail: bool = False) -> dict:
     n = db.get(Node, t.node_id) if t.node_id else None
     v["node"] = ({"id": n.id, "name": n.name, "role": n.role,
                   "endpoint": n.endpoint, "status": n.status} if n else None)
+    # Active/passive HA placement (warm standby + switchover lifecycle).
+    v["standby_node_id"] = t.standby_node_id
+    v["placement_state"] = t.placement_state or ""
+    v["switchover_at"] = t.switchover_at.isoformat() if t.switchover_at else None
+    sn = db.get(Node, t.standby_node_id) if t.standby_node_id else None
+    v["standby_node"] = ({"id": sn.id, "name": sn.name, "role": sn.role,
+                          "endpoint": sn.endpoint, "status": sn.status,
+                          "online": bool(sn.last_heartbeat_at and
+                                         (_now() - sn.last_heartbeat_at).total_seconds() < 180)}
+                         if sn else None)
     if detail:
         from .billing import _compute_plan, get_pricing
         pricing = get_pricing(db)
@@ -1566,6 +1576,46 @@ def update_tenant(tid: str, body: TenantUpdate,
                  detail={"status": t.status, "plan": t.plan, "tenant_type": t.tenant_type,
                          "node_id": t.node_id})
     return _tenant_view(db, t, detail=True)
+
+
+class StandbyBody(BaseModel):
+    node_id: str | None = None   # null clears the standby
+
+
+@router.put("/tenants/{tid}/standby")
+def set_tenant_standby(tid: str, body: StandbyBody,
+                       principal: security.Principal = Depends(security.require_platform_admin),
+                       db: Session = Depends(get_db)):
+    """Assign / change / clear a tenant's warm STANDBY node (active/passive HA). The
+    standby is kept in sync automatically (config + keys + receipts + search index)
+    and can be promoted to active via /switchover or automatic failover."""
+    from .. import placement
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    try:
+        placement.set_standby(db, t, body.node_id or None, actor=principal.user_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return _tenant_view(db, t, detail=True)
+
+
+@router.post("/tenants/{tid}/switchover")
+def switchover_tenant(tid: str,
+                      principal: security.Principal = Depends(security.require_platform_admin),
+                      db: Session = Depends(get_db)):
+    """Promote a tenant's standby node to active (manual switchover / migration).
+    Immediate metadata flip — the standby is a warm replica; devices retarget on
+    their next heartbeat and portal file ops show a brief maintenance window."""
+    from .. import placement
+    t = db.get(Tenant, tid)
+    if not t:
+        raise HTTPException(404, "tenant not found")
+    try:
+        res = placement.switchover(db, t, actor=principal.user_id, reason="manual")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, **res, "tenant": _tenant_view(db, t, detail=True)}
 
 
 @router.delete("/tenants/{tid}")

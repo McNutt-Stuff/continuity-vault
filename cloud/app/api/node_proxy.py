@@ -97,6 +97,31 @@ def _node_for(request: Request) -> str | None:
         return None
 
 
+def _target_for(request: Request) -> tuple[str | None, bool]:
+    """(assigned-node URL, is-switching) for the request's tenant. is-switching is
+    True during the brief HA switchover window so file ops show a maintenance
+    message instead of routing to a node mid-migration."""
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return None, False
+    try:
+        principal = security._decode(auth.split(" ", 1)[1])
+    except Exception:
+        return None, False
+    try:
+        from ..models import Tenant
+        from .. import placement
+        with SessionLocal() as db:
+            t = db.get(Tenant, principal.tenant_id)
+            if t is None:
+                return None, False
+            return services.tenant_node_url(db, t.id), placement.is_switching(t)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("node lookup failed (%s) — handling %s locally",
+                       exc, request.url.path)
+        return None, False
+
+
 async def middleware(request: Request, call_next):
     # Only the control plane proxies; a node executes these locally.
     if not (settings.node_sync_scope
@@ -106,7 +131,15 @@ async def middleware(request: Request, call_next):
         return await call_next(request)
     # Run the (synchronous) DB lookup off the event loop so it never blocks other
     # requests while waiting on the connection pool.
-    node_url = await run_in_threadpool(_node_for, request)
+    node_url, switching = await run_in_threadpool(_target_for, request)
+    if switching:
+        # Brief HA switchover — the tenant is moving to a healthier node. Return a
+        # friendly maintenance signal the portal shows as a dialog (retry shortly).
+        return JSONResponse({
+            "detail": "Your data is briefly unavailable while we move it to a healthier "
+                      "server. This usually takes under a minute — please try again shortly.",
+            "maintenance": True, "retry_after": 15}, status_code=503,
+            headers={"Retry-After": "15"})
     if not node_url:
         return await call_next(request)  # unassigned tenant → handled locally
 

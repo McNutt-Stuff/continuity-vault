@@ -352,6 +352,47 @@ _node_offline_alerted: set = set()
 _NODE_OFFLINE_SECONDS = 180  # heartbeat gap before we consider a node offline
 
 
+def _node_online(node, now) -> bool:
+    hb = getattr(node, "last_heartbeat_at", None)
+    return bool(hb) and (now - hb).total_seconds() < _NODE_OFFLINE_SECONDS
+
+
+def _auto_failover_node(db, offline_node, now) -> None:
+    """Fail a downed node's tenants over to their warm standby — but ONLY when the
+    tenant has ``ha_auto_failover`` enabled AND its standby node is itself healthy.
+    Switchover is a metadata flip (the standby is already warm: config, keys,
+    receipts and the search index are replicated), so devices retarget on their
+    next heartbeat and the portal shows a brief maintenance window. Once a tenant
+    is switched its ``node_id`` no longer points at the offline node, so this is
+    naturally one-shot per episode and never flaps."""
+    from .. import placement
+    from ..models import Node, Tenant
+    try:
+        candidates = (db.query(Tenant)
+                      .filter(Tenant.node_id == offline_node.id,
+                              Tenant.standby_node_id.isnot(None)).all())
+    except Exception:  # noqa: BLE001
+        logger.exception("auto-failover candidate query failed for node %s", offline_node.id)
+        return
+    for t in candidates:
+        try:
+            if not bool((t.feature_flags or {}).get("ha_auto_failover")):
+                continue
+            sb = db.get(Node, t.standby_node_id)
+            if sb is None or bool(getattr(sb, "is_self", False)):
+                continue
+            if not _node_online(sb, now):
+                logger.warning("auto-failover skipped for tenant %s: standby node %s is also offline",
+                               t.id, sb.name or sb.id)
+                continue
+            placement.switchover(db, t, actor="system:auto-failover",
+                                 reason="node-offline", force=True)
+            logger.warning("auto-failover: tenant %s promoted standby node %s (active %s offline)",
+                           t.id, sb.name or sb.id, offline_node.name or offline_node.id)
+        except Exception:  # noqa: BLE001
+            logger.exception("auto-failover failed for tenant %s", getattr(t, "id", "?"))
+
+
 def _check_node_health() -> None:
     """Control-plane only: detect customer/remote nodes that stopped heartbeating
     (and ones that recover) and alert platform admins. Deduped per offline episode
@@ -364,7 +405,7 @@ def _check_node_health() -> None:
     if _last_node_health and (now - _last_node_health) < timedelta(minutes=2):
         return
     _last_node_health = now
-    from .. import admin_notifications
+    from .. import admin_notifications, placement
     from ..models import Node
     with SessionLocal() as db:
         for n in db.query(Node).filter(Node.is_self.is_(False)).all():
@@ -392,8 +433,18 @@ def _check_node_health() -> None:
                         intro=f"Node \"{n.name or n.id}\" ({n.role}) is sending heartbeats again.",
                         rows=[{"icon": "server", "name": n.name or n.id, "detail": "online"}],
                         severity="info", dedupe_key=f"node_online:{n.id}", dedupe_within_hours=1)
+                # HA: attempt automatic failover of this node's tenants to their
+                # standby (flag-gated, standby must be healthy) while it stays down.
+                if offline:
+                    _auto_failover_node(db, n, now)
             except Exception:  # noqa: BLE001
                 logger.exception("node health check failed for %s", getattr(n, "id", "?"))
+        # Clear switchover "maintenance" state once the brief grace window elapsed.
+        try:
+            placement.clear_stale_switching(db)
+        except Exception:  # noqa: BLE001
+            logger.exception("clear_stale_switching failed")
+
 
 
 def _run_due_purges() -> None:
