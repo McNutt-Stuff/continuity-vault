@@ -49,9 +49,8 @@ export default function Privacy() {
 
         <h2 id="terms">Terms of Service</h2>
         <p>
-          By using Arkive you agree to use the service lawfully and to safeguard the credentials and recovery
-          keys that unlock your data. Arkive provides continuity and recovery tooling; you remain responsible
-          for the accounts and data you connect. Full terms are available on request.
+          Your use of Arkive is also governed by our <a href="/terms">Terms of Service</a>, which explain
+          your responsibilities for the accounts, credentials, and data you connect.
         </p>
 
         <h2>Contact</h2>

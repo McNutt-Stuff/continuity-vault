@@ -10,6 +10,7 @@ import Pricing from "./pages/Pricing";
 import Security from "./pages/Security";
 import About from "./pages/About";
 import Privacy from "./pages/Privacy";
+import Terms from "./pages/Terms";
 import Contact from "./pages/Contact";
 import Support from "./pages/Support";
 import Start from "./pages/Start";
@@ -30,6 +31,7 @@ const SEO: Record<string, { title: string; desc: string }> = {
     desc: "Simple per-terabyte pricing. Personal, family, and business plans with cloud, bring-your-own storage, and offline appliances." },
   "/about": { title: "About — Arkive", desc: "Our mission: make your digital continuity certain." },
   "/privacy": { title: "Privacy — Arkive", desc: "How Arkive protects your privacy with zero-knowledge, end-to-end encryption." },
+  "/terms": { title: "Terms of Service — Arkive", desc: "The terms that govern your use of Arkive's continuity, backup, and recovery service." },
   "/contact": { title: "Contact — Arkive", desc: "Get in touch with the Arkive team." },
   "/support": { title: "Help Center — Arkive", desc: "Guides and answers for setting up and using Arkive." },
   "/start": { title: "Start your 7-day free trial — Arkive", desc: "Try Arkive free for 7 days. Quantum-safe backup and instant recovery, set up in minutes. No charge today, cancel anytime." },
@@ -74,6 +76,7 @@ export default function App() {
         <Route path="/pricing" element={<Pricing />} />
         <Route path="/about" element={<About />} />
         <Route path="/privacy" element={<Privacy />} />
+        <Route path="/terms" element={<Terms />} />
         <Route path="/contact" element={<Contact />} />
         <Route path="/support" element={<Support />} />
         <Route path="/support/:slug" element={<Support />} />

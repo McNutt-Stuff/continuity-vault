@@ -64,7 +64,7 @@ export function Layout({ children }: { children: ReactNode }) {
             <div>
               <h4>Legal</h4>
               <Link to="/privacy">Privacy policy</Link>
-              <Link to="/privacy#terms">Terms of service</Link>
+              <Link to="/terms">Terms of service</Link>
             </div>
           </div>
           <div className="footer-bottom">
