@@ -17,7 +17,25 @@
 # even when already up to date. For private repos, use an https token URL or an
 # SSH deploy key on the host.
 #
+# On the control plane, add --update-nodes (or CV_UPDATE_NODES=1) to ALSO fan the
+# update out to every connected downstream fleet node — it queues each node's
+# self-update (delivered on its next heartbeat), e.g.:
+#   ./git-update.sh cloud --update-nodes
+#
 set -Eeuo pipefail
+
+# Flags (order-independent) — strip them out before reading the positional
+# COMPONENT. --update-nodes (or CV_UPDATE_NODES=1) fans the update out to every
+# connected downstream fleet node after a successful control-plane update.
+UPDATE_NODES="${CV_UPDATE_NODES:-0}"
+_args=()
+for _a in "$@"; do
+  case "$_a" in
+    --update-nodes) UPDATE_NODES=1 ;;
+    *) _args+=("$_a") ;;
+  esac
+done
+set -- "${_args[@]:-}"
 
 COMPONENT="${1:-cloud}"
 CV_SRC_DIR="${CV_SRC_DIR:-/opt/arkive-src}"
@@ -111,6 +129,35 @@ ensure_control_perms() {
   chown -R "$user":"$user" /opt/continuity-vault /var/lib/continuity-vault 2>/dev/null || true
 }
 
+# Detect this host's node role (env > persisted marker > env file; default CP).
+detect_role() {
+  local role="${CV_NODE_ROLE:-}"
+  [[ -z "$role" && -f /etc/arkive/role ]] && role="$(cat /etc/arkive/role)"
+  if [[ -z "$role" && -f /etc/continuity-vault.env ]]; then
+    role="$(sed -n 's/^CV_NODE_ROLE=//p' /etc/continuity-vault.env | head -1)"
+  fi
+  echo "${role:-control-plane}"
+}
+
+# Fan the update out to every connected downstream fleet node using the mechanism
+# we already ship: queue a per-node self-update (Node.pending_update_at) that each
+# node applies on its NEXT heartbeat (heartbeat → 'self-update' →
+# cv-node-update.service). Control-plane only; non-fatal if it can't run.
+trigger_node_updates() {
+  local app="/opt/continuity-vault" py="/opt/continuity-vault/.venv/bin/python"
+  if [[ ! -x "$py" || ! -d "$app/app" ]]; then
+    echo "!! --update-nodes: app venv not found at ${app}; skipping fleet update"
+    return 0
+  fi
+  echo "==> Queuing self-update on downstream fleet nodes"
+  (
+    set -a
+    [[ -f /etc/continuity-vault.env ]] && source /etc/continuity-vault.env
+    set +a
+    cd "$app" && "$py" -m app.manage update-nodes
+  ) || echo "!! fleet update trigger failed (non-fatal) — nodes still self-update on their own timer"
+}
+
 run_installer() {
   if [[ "$COMPONENT" == "cloud" ]]; then
     # Preserve this node's role across updates so only its components redeploy.
@@ -137,6 +184,15 @@ run_installer() {
 if run_installer; then
   echo "==> Update to ${TARGET:0:12} complete."
   [[ "$COMPONENT" == "cloud" ]] && ensure_control_perms
+  # Fan out to downstream nodes when asked — control plane only (a customer node
+  # has no fleet to update, and its DB is a replica).
+  if [[ "$UPDATE_NODES" == "1" && "$COMPONENT" == "cloud" ]]; then
+    if [[ "$(detect_role)" == "control-plane" ]]; then
+      trigger_node_updates
+    else
+      echo "==> --update-nodes ignored (this is not a control-plane node)"
+    fi
+  fi
 else
   echo "!! Update failed — rolling back to ${PREV:0:12}"
   git reset --hard --quiet "$PREV"

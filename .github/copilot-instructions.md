@@ -109,6 +109,9 @@ client/server-encrypted; storage holds only ciphertext.
 ## Deploy loop
 - Push, then `sudo /opt/arkive-src/updater/git-update.sh cloud` on the control plane. A failing WEB build
   silently rolls back the whole deploy (including backend fixes) — keep TS building.
+- Add `--update-nodes` on the control plane to ALSO fan the update out to every connected downstream fleet
+  node (`git-update.sh cloud --update-nodes`): it queues each node's self-update (`manage.py update-nodes` →
+  `Node.pending_update_at`), delivered on the node's next heartbeat.
 - Customer nodes + public-web self-update from the CP bundle; appliances + desktop agents self-update from
   their bundles. Only systemd unit / plist changes need an installer re-run.
 

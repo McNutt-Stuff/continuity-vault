@@ -16,7 +16,7 @@ import argparse
 import secrets
 
 from .db import SessionLocal
-from .models import Collection, ConnectorAccount, SyncJob, Tenant, User
+from .models import Collection, ConnectorAccount, Node, SyncJob, Tenant, User
 
 
 def _platform_tenant(db) -> Tenant:
@@ -220,6 +220,32 @@ def list_schedule(all_rows: bool = False) -> None:
                       f"see them and the reason)")
 
 
+def update_nodes(role: str = "all") -> None:
+    """Queue a self-update on connected downstream fleet nodes: set pending_update_at
+    so each node runs its self-update service on its NEXT heartbeat — the SAME
+    directive the admin per-node 'Update' button uses (heartbeat → 'self-update' →
+    cv-node-update.service). The control plane (this host) is excluded. Default: all
+    non-control-plane nodes; pass a role to narrow. A node offline now picks it up
+    when it next checks in, since the flag persists until delivered."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with SessionLocal() as db:
+        q = db.query(Node).filter(Node.role != "control-plane", Node.is_self.is_(False))
+        if role and role != "all":
+            q = q.filter(Node.role == role)
+        nodes = q.order_by(Node.role, Node.name).all()
+        for node in nodes:
+            node.pending_update_at = now
+        db.commit()
+        for node in nodes:
+            online = bool(node.last_heartbeat_at and
+                          (now - node.last_heartbeat_at).total_seconds() < 180)
+            print(f"  queued self-update: {node.name} ({node.role}) "
+                  f"[{'online' if online else 'offline — will apply on reconnect'}]")
+        print(f"Queued self-update on {len(nodes)} node(s) — they pull the new bundle "
+              f"and restart on their next heartbeat.")
+
+
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="app.manage")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -237,6 +263,11 @@ def main(argv=None) -> None:
                         help="show the backup cadence + why sources do/don't auto-run")
     ls.add_argument("--all", action="store_true",
                     help="include mappings that never auto-run (with the reason)")
+    un = sub.add_parser("update-nodes",
+                        help="queue a self-update on downstream fleet nodes (heartbeat-delivered)")
+    un.add_argument("--role", default="all",
+                    choices=["all", "customer-tenant", "public-web"],
+                    help="which nodes to update (default: all non-control-plane)")
     args = p.parse_args(argv)
     if args.cmd == "add-admin":
         add_admin(args.email, args.name)
@@ -250,6 +281,8 @@ def main(argv=None) -> None:
         kill_job(args.job_id)
     elif args.cmd == "list-schedule":
         list_schedule(all_rows=args.all)
+    elif args.cmd == "update-nodes":
+        update_nodes(role=args.role)
 
 
 if __name__ == "__main__":
