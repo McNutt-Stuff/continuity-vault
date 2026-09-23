@@ -144,12 +144,18 @@ detect_role() {
 # node applies on its NEXT heartbeat (heartbeat → 'self-update' →
 # cv-node-update.service). Control-plane only; non-fatal if it can't run.
 trigger_node_updates() {
-  # The app runs from /opt/continuity-vault/cloud (WorkingDirectory in the unit),
-  # so `python -m app.manage` must run there; the venv is at $INSTALL_DIR/.venv.
-  local install="/opt/continuity-vault"
-  local appdir="${install}/cloud" py="${install}/.venv/bin/python"
-  if [[ ! -x "$py" || ! -d "$appdir/app" ]]; then
-    echo "!! --update-nodes: app not found (py=${py}, dir=${appdir}/app); skipping fleet update"
+  # Locate the installed app package + its venv. The unit runs from
+  # /opt/continuity-vault/cloud with the venv at /opt/continuity-vault/.venv, but
+  # probe a couple of layouts so a path change can't silently skip the fan-out.
+  local base="/opt/continuity-vault" py="" appdir=""
+  for d in "$base/cloud" "$base"; do
+    if [[ -x "$base/.venv/bin/python" && -d "$d/app" ]]; then
+      py="$base/.venv/bin/python"; appdir="$d"; break
+    fi
+  done
+  if [[ -z "$py" ]]; then
+    echo "!! --update-nodes: couldn't locate the app venv/package under ${base}[/cloud]; skipping fleet update"
+    echo "   (looked for ${base}/.venv/bin/python + <dir>/app) — run git-update.sh again once this update lands"
     return 0
   fi
   echo "==> --update-nodes: fanning this update out to downstream fleet nodes"
