@@ -138,6 +138,11 @@ def build_userdata(*, role: str, name: str, fqdn: str, cp_url: str, secret: str,
         f"export CV_NODE_ROLE={role}", f"export CV_NODE_NAME={name}",
         f"export CV_DOMAIN={fqdn}", f"export CV_CONTROL_PLANE_URL={cp}",
         f"export CV_NODE_SECRET={secret}", f'TOKEN="{progress_token}"',
+    ]
+    if role == "customer-tenant":
+        # Federation is core to a customer-tenant node (it replicates its tenants).
+        lines.append("export CV_NODE_SYNC_SCOPE=true")
+    lines += [
         # Exported so the installer (lib.sh) streams each named setup step back to
         # the control plane's auto-provision job log.
         f"export CV_PROVISION_TOKEN={progress_token}", f"export CV_PROVISION_URL={cp}",

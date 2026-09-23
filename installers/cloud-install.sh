@@ -108,6 +108,16 @@ fi
 # arrives by replication from the control plane, so it must not seed its own.
 if [[ "$CV_NODE_ROLE" == "control-plane" ]]; then SEED_DEMO=true; else SEED_DEMO=false; fi
 
+# Federation (per-node data plane) is CORE to a customer-tenant node: it replicates
+# its assigned tenants' config/keys/index from the control plane and cannot serve
+# them without it. Bake sync scope ON for customer-tenant nodes as standard; other
+# roles default off (honor an explicit override for edge cases).
+if [[ "$CV_NODE_ROLE" == "customer-tenant" ]]; then
+  CV_NODE_SYNC_SCOPE=true
+else
+  CV_NODE_SYNC_SCOPE="${CV_NODE_SYNC_SCOPE:-false}"
+fi
+
 # Native liboqs version to build for real post-quantum crypto (ML-KEM / ML-DSA /
 # SLH-DSA). MUST match the liboqs-python binding version installed below so the
 # binding loads our system library instead of auto-building its own.
@@ -268,6 +278,7 @@ CV_NODE_ROLE=${CV_NODE_ROLE}
 CV_NODE_NAME=${CV_NODE_NAME}
 CV_NODE_SECRET=${CV_NODE_SECRET}
 CV_CONTROL_PLANE_URL=${CV_CONTROL_PLANE_URL}
+CV_NODE_SYNC_SCOPE=${CV_NODE_SYNC_SCOPE}
 CV_SITE_CONTENT_PATH=${INSTALL_DIR}/site/dist/site.json
 # Email delivery for sign-in / verification codes. Without SMTP, codes are
 # written to the service log (journalctl -u cv-cloud). Uncomment to enable:
@@ -298,6 +309,7 @@ EOF
   local k v
   for kv in "CV_NODE_ROLE=${CV_NODE_ROLE}" "CV_NODE_NAME=${CV_NODE_NAME}" \
             "CV_NODE_SECRET=${CV_NODE_SECRET}" "CV_CONTROL_PLANE_URL=${CV_CONTROL_PLANE_URL}" \
+            "CV_NODE_SYNC_SCOPE=${CV_NODE_SYNC_SCOPE}" \
             "CV_SITE_CONTENT_PATH=${INSTALL_DIR}/site/dist/site.json" \
             "CV_SUPPORT_CONTENT_PATH=${INSTALL_DIR}/site/dist/support.json"; do
     k="${kv%%=*}"; v="${kv#*=}"

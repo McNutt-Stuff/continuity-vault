@@ -526,6 +526,10 @@ def node_installer(body: NodeInstallerRequest,
     if role != "control-plane":
         env.append(f'CV_CONTROL_PLANE_URL="{origin}"')
         env.append(f'CV_NODE_SECRET="{secret}"')
+    if role == "customer-tenant":
+        # Federation is core to a customer-tenant node — make it explicit so the
+        # standard build always replicates its tenants (installer forces it too).
+        env.append('CV_NODE_SYNC_SCOPE="true"')
     env_str = " ".join(env)
     command = (f'curl -fsSL "{api}/nodes/bootstrap" -o /tmp/arkive-node.sh && '
                f'sudo {env_str} bash /tmp/arkive-node.sh')
