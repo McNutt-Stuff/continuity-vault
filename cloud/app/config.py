@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import model_validator
 
 
 class Settings(BaseSettings):
@@ -147,6 +148,17 @@ class Settings(BaseSettings):
     # node_sync /fleet-secrets + node_replication._sync_fleet_secrets), so a
     # mismatched hand-set value self-heals instead of silently failing every sync.
     node_sync_scope: bool = False          # CV_NODE_SYNC_SCOPE (enable federation)
+
+    @model_validator(mode="after")
+    def _force_customer_tenant_federation(self):
+        # A customer-tenant node CANNOT function without federation: it holds no
+        # tenant data unless it replicates from the control plane. A missing
+        # CV_NODE_SYNC_SCOPE would otherwise silently cripple it (no config pull →
+        # its tenants' users/vaults never land → proxied search/recovery 401). The
+        # role IMPLIES sync scope, so force it on rather than trust the env flag.
+        if (self.node_role or "control-plane") == "customer-tenant" and not self.node_sync_scope:
+            object.__setattr__(self, "node_sync_scope", True)
+        return self
 
 
 @lru_cache(maxsize=1)
