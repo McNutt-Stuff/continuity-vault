@@ -193,6 +193,14 @@ app.include_router(updates.public_router, prefix=API)
 
 @app.on_event("startup")
 def startup() -> None:
+    # Apply any fleet secrets this node previously adopted from the control plane
+    # BEFORE any crypto/DB use, so credentials + vault keys decrypt with the shared
+    # KEK instead of a per-node random one (InvalidTag). No-op on the control plane.
+    try:
+        from . import fleet_secrets
+        fleet_secrets.load_persisted()
+    except Exception:  # noqa: BLE001
+        pass
     # The database (Postgres) may still be accepting connections a moment after
     # the service starts; retry briefly so the worker doesn't crash-loop.
     import time

@@ -81,6 +81,17 @@ class EmailRelay(BaseModel):
     category: str = "email"
 
 
+@router.post("/fleet-secrets")
+def fleet_secrets(authorization: str = Header(default="")):
+    """Hand the fleet-shared CV_KEK_SECRET + CV_SESSION_SECRET to an AUTHENTICATED
+    fleet node so it can decrypt replicated connector credentials + vault keys — all
+    fleet members must share the SAME KEK, else every cross-node decrypt fails with
+    InvalidTag. HTTPS + fleet-secret authenticated; never exposed elsewhere."""
+    _require_fleet(authorization)
+    from .. import fleet_secrets as fs
+    return fs.cp_bundle()
+
+
 @router.post("/email-relay")
 def email_relay(body: EmailRelay, authorization: str = Header(default="")):
     """Deliver an email on behalf of a fleet node that has no email service of its

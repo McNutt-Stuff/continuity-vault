@@ -203,6 +203,25 @@ def _load_cursor() -> str | None:
     return _read_state().get("push_cursor")
 
 
+_secrets_synced = False
+
+
+def _sync_fleet_secrets(s) -> None:
+    """Fetch the control plane's fleet-shared secrets and adopt them (once per
+    process, retried until it succeeds). Aligns CV_KEK_SECRET + session so this node
+    decrypts replicated connector credentials + vault keys instead of InvalidTag."""
+    global _secrets_synced
+    try:
+        bundle = _post("/nodes/sync/fleet-secrets", {})
+        if not bundle:
+            return
+        from .. import fleet_secrets as fs
+        fs.adopt(bundle.get("kek") or "", bundle.get("session") or "")
+        _secrets_synced = True
+    except Exception:  # noqa: BLE001
+        logger.exception("fleet secret sync failed — will retry next pull")
+
+
 def _save_cursor(iso: str) -> None:
     st = _read_state()
     st["push_cursor"] = iso
@@ -320,6 +339,13 @@ def _reconcile_user_email_conflicts(db, users_bundle) -> int:
 
 def _pull(s) -> int:
     _st0 = _read_state()
+    # Align this node's fleet secrets (CV_KEK_SECRET + session) with the control
+    # plane ONCE per process before any decryption — the installer may have set a
+    # per-node random KEK, which makes every replicated-credential/vault-key decrypt
+    # fail with InvalidTag until the CP's shared KEK is adopted.
+    global _secrets_synced
+    if not _secrets_synced:
+        _sync_fleet_secrets(s)
     bundle = _post("/nodes/sync/pull", {
         "name": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
         # Warm-standby data cursors (receipts + search index for tenants we're the
