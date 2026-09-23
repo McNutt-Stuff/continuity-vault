@@ -348,6 +348,8 @@ class PushPayload(BaseModel):
     agents: list[dict] = []
     appliances: list[dict] = []
     appliance_storages: list[dict] = []
+    # BYOS storage health probed on the owning node (health fields only, never creds).
+    customer_storage_health: list[dict] = []
     insights: list[dict] = []
     integration_instances: list[dict] = []
     network_clients: list[dict] = []
@@ -372,6 +374,8 @@ _AGENT_FIELDS = ("state", "version", "telemetry", "last_heartbeat_at", "collecto
 _APPLIANCE_FIELDS = ("state", "isolation_state", "software_version", "telemetry",
                      "tamper_state", "attestation_ok", "last_heartbeat_at",
                      "last_attestation_at", "model", "version_updated_at")
+_CS_HEALTH_FIELDS = ("status", "used_bytes", "last_test_at", "last_test_ok",
+                     "last_test_error")
 
 
 def _push_is_stale(incoming: dict, stored, field: str = "last_heartbeat_at") -> bool:
@@ -523,6 +527,15 @@ def push(body: PushPayload, authorization: str = Header(default=""),
             continue
         _upsert(db, ApplianceStorage, st)
         counts["appliance_storages"] += 1
+    # BYOS storage HEALTH the owning node probed (it has the creds + network path).
+    # Apply ONLY the health fields — never credentials/config (CP-authoritative).
+    for ch in body.customer_storage_health:
+        if not _known(ch) or not _has_pk(CustomerStorage, ch):
+            continue
+        row = db.get(CustomerStorage, ch.get("id"))
+        if row is not None:
+            _apply(row, ch, _CS_HEALTH_FIELDS)
+            counts["customer_storage_health"] = counts.get("customer_storage_health", 0) + 1
     # Digital-footprint insights the node computed for its tenants. Key on user_id
     # (not the row id, which differs between the node and any control-plane
     # pending marker) so there's exactly one report per user. Skip a row whose

@@ -109,6 +109,11 @@ _PULL_EXCLUDE = {
     # Per-storage capacity/health come from the appliance's heartbeat telemetry,
     # applied on the node — the CP's copy would be stale/empty.
     "appliance_storages": {"capacity_bytes", "used_bytes", "health"},
+    # Customer (BYOS) storage health is probed on the OWNING node (it has the creds
+    # + network path) and pushed UP; pulling the CP's copy back down would clobber a
+    # just-recorded probe result. Config + credentials still flow CP→node normally.
+    "customer_storages": {"status", "used_bytes", "last_test_at", "last_test_ok",
+                          "last_test_error"},
     # Integration instances are created + driven on the node (portal calls are
     # proxied there), so they're node-authoritative and pushed up, never pulled.
 }
@@ -575,6 +580,7 @@ def _push(s) -> int:
     receipts, documents, accounts = [], [], []
     jobs, agents, appliances = [], [], []
     appliance_storages = []
+    customer_storage_health: list = []
     insights = []
     integ_cursor = _read_state().get("integrations_cursor")
     integ_since = None
@@ -661,6 +667,20 @@ def _push(s) -> int:
         # the real drive-health drill-down instead of the telemetry fallback.
         for st in db.query(ApplianceStorage).all():
             appliance_storages.append(_row(st))
+        # Customer (BYOS) storage HEALTH we probed locally (this node owns the creds
+        # + network path for its tenants). Push only the health fields UP so the
+        # portal reflects our probe — never the credentials/config (CP-authoritative).
+        csq = db.query(CustomerStorage)
+        if owned_tids is not None:
+            csq = csq.filter(CustomerStorage.tenant_id.in_(owned_tids))
+        for cs in csq.all():
+            customer_storage_health.append({
+                "id": cs.id, "tenant_id": cs.tenant_id, "status": cs.status,
+                "used_bytes": int(cs.used_bytes or 0),
+                "last_test_at": cs.last_test_at.isoformat() if cs.last_test_at else None,
+                "last_test_ok": bool(cs.last_test_ok),
+                "last_test_error": cs.last_test_error,
+            })
         # Digital-footprint insights refreshed since the last push (daily job or
         # an admin/user request) — report them so the portal stays authoritative.
         iq = db.query(UserInsights)
@@ -733,7 +753,7 @@ def _push(s) -> int:
             if (c.config or {}).get("managed"):
                 managed_collections.append(_row(c))
     if not (receipts or documents or accounts or jobs or agents or appliances
-            or appliance_storages or insights
+            or appliance_storages or customer_storage_health or insights
             or integ_instances or net_clients or net_apps or net_usage or integ_runs
             or communications or alerts
             or m365_identities or m365_sources):
@@ -747,7 +767,8 @@ def _push(s) -> int:
     # symptom: the portal stops seeing collection + SharePoint/Teams while the
     # node keeps heartbeating). Each advances only its own cursors on success.
     has_data = (receipts or documents or accounts or jobs or agents or appliances
-                or appliance_storages or insights or integ_instances or net_clients
+                or appliance_storages or customer_storage_health or insights
+                or integ_instances or net_clients
                 or net_apps or net_usage or integ_runs or communications or alerts
                 or m365_identities or m365_sources)
     if has_data:
@@ -756,6 +777,7 @@ def _push(s) -> int:
             "receipts": receipts, "documents": documents, "connector_accounts": accounts,
             "jobs": jobs, "agents": agents, "appliances": appliances,
             "appliance_storages": appliance_storages, "insights": insights,
+            "customer_storage_health": customer_storage_health,
             "integration_instances": integ_instances, "network_clients": net_clients,
             "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
             "communications": communications, "admin_alerts": alerts,

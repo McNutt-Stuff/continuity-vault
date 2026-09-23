@@ -187,10 +187,28 @@ def _test_customer_storages() -> None:
         return
     _last_storage_test = now
     from .. import audit, customer_storage as cs_mod
-    from ..models import CustomerStorage
+    from ..models import CustomerStorage, Node, Tenant
+    settings = get_settings()
+    is_cp = (settings.node_role or "control-plane") == "control-plane"
     with SessionLocal() as db:
+        # Probe ONLY on the node that is ACTIVE for the tenant (it has the creds +
+        # network path): the CP owns tenants not assigned to a node; a customer node
+        # owns tenants whose node_id is itself (NOT the ones it's merely a warm
+        # standby for). Probing elsewhere fails with no credentials and flaps health.
+        if is_cp:
+            owned = {tid for (tid,) in
+                     db.query(Tenant.id).filter(Tenant.node_id.is_(None)).all()}
+        else:
+            self_node = (db.query(Node).filter(Node.is_self.is_(True)).first()
+                         or db.query(Node).filter(
+                             Node.name == (settings.node_name or settings.domain)).first())
+            owned = ({tid for (tid,) in db.query(Tenant.id)
+                      .filter(Tenant.node_id == self_node.id).all()}
+                     if self_node else set())
         for cs in (db.query(CustomerStorage)
                    .filter(CustomerStorage.enabled == True).all()):  # noqa: E712
+            if cs.tenant_id not in owned:
+                continue
             try:
                 was_ok = cs.last_test_ok is not False  # True/None -> treat as previously ok
                 ok, err = cs_mod.test_storage(db, cs)
