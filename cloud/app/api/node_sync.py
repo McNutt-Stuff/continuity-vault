@@ -350,6 +350,9 @@ class PushPayload(BaseModel):
     appliance_storages: list[dict] = []
     # BYOS storage health probed on the owning node (health fields only, never creds).
     customer_storage_health: list[dict] = []
+    # Compliance posture signals the node collected (M365 posture etc.) — the CP's
+    # compliance engine evaluates them. Non-secret; upserted by natural key.
+    compliance_signals: list[dict] = []
     insights: list[dict] = []
     integration_instances: list[dict] = []
     network_clients: list[dict] = []
@@ -536,6 +539,28 @@ def push(body: PushPayload, authorization: str = Header(default=""),
         if row is not None:
             _apply(row, ch, _CS_HEALTH_FIELDS)
             counts["customer_storage_health"] = counts.get("customer_storage_health", 0) + 1
+    # Compliance posture signals the node collected (M365 posture etc.). The engine
+    # runs on the CP, so it needs these. Upsert by the natural key (tenant, provider,
+    # capability, scope) since row ids differ between node + CP. Skip unknown tenants.
+    if body.compliance_signals:
+        from ..compliance.models import ComplianceSignal
+        _CS_COLS = {c.name for c in ComplianceSignal.__table__.columns}
+        for cs in body.compliance_signals:
+            if not _known(cs):
+                continue
+            existing = (db.query(ComplianceSignal)
+                        .filter(ComplianceSignal.tenant_id == cs.get("tenant_id"),
+                                ComplianceSignal.provider == (cs.get("provider") or ""),
+                                ComplianceSignal.capability == (cs.get("capability") or ""),
+                                ComplianceSignal.scope == (cs.get("scope") or "")).first())
+            kw = _deser(ComplianceSignal, {k: v for k, v in cs.items() if k in _CS_COLS})
+            if existing is not None:
+                for k, v in kw.items():
+                    if k != "id":
+                        setattr(existing, k, v)
+            else:
+                db.add(ComplianceSignal(**kw))
+            counts["compliance_signals"] = counts.get("compliance_signals", 0) + 1
     # Digital-footprint insights the node computed for its tenants. Key on user_id
     # (not the row id, which differs between the node and any control-plane
     # pending marker) so there's exactly one report per user. Skip a row whose

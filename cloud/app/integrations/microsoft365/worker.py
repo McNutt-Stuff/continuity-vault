@@ -43,7 +43,7 @@ def run_due(db) -> int:
     from ... import platform_config
     from ...config import get_settings
     from ...models import IntegrationInstance, Tenant
-    from . import collect, discovery, graph, models as m, provisioning
+    from . import collect, discovery, graph, models as m, posture, provisioning
 
     vals = platform_config.integration_values(INTEGRATION_TYPE)
     client_id = (vals.get("client_id") or "").strip()
@@ -133,6 +133,14 @@ def run_due(db) -> int:
                     _trigger_managed_now(db, inst)
                 except Exception:  # noqa: BLE001
                     logger.exception("m365 trigger-now failed (instance=%s)", inst.id)
+        # Compliance posture (MFA/CA/sharing/residency/coverage) — collected on the
+        # OWNING box (this node for a federated tenant, the CP for a CP-hosted one)
+        # so it has the creds + node-only data; the signals replicate UP to the CP's
+        # compliance engine. Throttled internally (~6h), best-effort.
+        try:
+            posture.refresh(db, inst)
+        except Exception:  # noqa: BLE001
+            logger.exception("m365 posture refresh failed (instance=%s)", inst.id)
     return ran
 
 

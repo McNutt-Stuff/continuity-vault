@@ -78,8 +78,18 @@ register_provider("microsoft365", _m365_evidence)
 
 def _refresh(db: Session, tenant) -> None:
     """Collect live M365 Graph posture (MFA/conditional access/DLP/sharing/residency)
-    into compliance signals before evaluation."""
+    into compliance signals before evaluation.
+
+    Posture is collected on the tenant's OWNING box (its assigned node for a
+    federated tenant; the control plane for a CP-hosted one) by the M365 worker and,
+    for a node, replicated UP. So during a CP evaluate we must NOT re-probe a
+    node-owned tenant — the CP has no credentials for it and would clobber the good
+    replicated signals with permission-denied unknowns."""
+    from ...config import get_settings
     from . import posture
+    role = (get_settings().node_role or "control-plane")
+    if role == "control-plane" and getattr(tenant, "node_id", None):
+        return
     posture.refresh_for_tenant(db, tenant)
 
 

@@ -581,6 +581,7 @@ def _push(s) -> int:
     jobs, agents, appliances = [], [], []
     appliance_storages = []
     customer_storage_health: list = []
+    compliance_signals: list = []
     insights = []
     integ_cursor = _read_state().get("integrations_cursor")
     integ_since = None
@@ -681,6 +682,20 @@ def _push(s) -> int:
                 "last_test_ok": bool(cs.last_test_ok),
                 "last_test_error": cs.last_test_error,
             })
+        # Compliance posture SIGNALS the node collected (M365 MFA/CA/sharing/
+        # residency/coverage/etc.) — the node has the creds + node-only data, so it
+        # records them locally; push them UP so the CP's compliance engine (which
+        # runs there) can evaluate them. Full row (all non-secret scoped fields);
+        # the CP upserts by the natural key (tenant, provider, capability, scope).
+        try:
+            from ..compliance.models import ComplianceSignal
+            sq = db.query(ComplianceSignal)
+            if owned_tids is not None:
+                sq = sq.filter(ComplianceSignal.tenant_id.in_(owned_tids))
+            for sig in sq.all():
+                compliance_signals.append(_row(sig))
+        except Exception:  # noqa: BLE001 — compliance is optional; never break push
+            logger.debug("compliance signal collection failed", exc_info=True)
         # Digital-footprint insights refreshed since the last push (daily job or
         # an admin/user request) — report them so the portal stays authoritative.
         iq = db.query(UserInsights)
@@ -753,7 +768,7 @@ def _push(s) -> int:
             if (c.config or {}).get("managed"):
                 managed_collections.append(_row(c))
     if not (receipts or documents or accounts or jobs or agents or appliances
-            or appliance_storages or customer_storage_health or insights
+            or appliance_storages or customer_storage_health or compliance_signals or insights
             or integ_instances or net_clients or net_apps or net_usage or integ_runs
             or communications or alerts
             or m365_identities or m365_sources):
@@ -767,7 +782,7 @@ def _push(s) -> int:
     # symptom: the portal stops seeing collection + SharePoint/Teams while the
     # node keeps heartbeating). Each advances only its own cursors on success.
     has_data = (receipts or documents or accounts or jobs or agents or appliances
-                or appliance_storages or customer_storage_health or insights
+                or appliance_storages or customer_storage_health or compliance_signals or insights
                 or integ_instances or net_clients
                 or net_apps or net_usage or integ_runs or communications or alerts
                 or m365_identities or m365_sources)
@@ -778,6 +793,7 @@ def _push(s) -> int:
             "jobs": jobs, "agents": agents, "appliances": appliances,
             "appliance_storages": appliance_storages, "insights": insights,
             "customer_storage_health": customer_storage_health,
+            "compliance_signals": compliance_signals,
             "integration_instances": integ_instances, "network_clients": net_clients,
             "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
             "communications": communications, "admin_alerts": alerts,
