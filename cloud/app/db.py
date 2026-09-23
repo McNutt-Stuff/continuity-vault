@@ -383,6 +383,11 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP",
         "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS entities JSON DEFAULT '[]'",
         "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS remediation VARCHAR DEFAULT ''",
+        # Versioned + coverage-aware posture snapshots (labels the scoring boundary).
+        "ALTER TABLE compliance_snapshots ADD COLUMN IF NOT EXISTS scoring_version VARCHAR DEFAULT ''",
+        "ALTER TABLE compliance_snapshots ADD COLUMN IF NOT EXISTS coverage_expected INTEGER DEFAULT 0",
+        "ALTER TABLE compliance_snapshots ADD COLUMN IF NOT EXISTS coverage_covered INTEGER DEFAULT 0",
+        "ALTER TABLE compliance_snapshots ADD COLUMN IF NOT EXISTS coverage_failed INTEGER DEFAULT 0",
     ]
     for statement in statements:
         try:

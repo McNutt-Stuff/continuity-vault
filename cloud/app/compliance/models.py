@@ -101,6 +101,13 @@ class ComplianceSnapshot(Base):
     controls_total = Column(Integer, default=0)
     controls_met = Column(Integer, default=0)
     exceptions = Column(Integer, default=0)
+    # The scoring algorithm version that produced this score — so a calculation
+    # change is a labeled boundary in the trend, never a silent rewrite of history.
+    scoring_version = Column(String, default="")
+    # Framework-level coverage rollup (sum over controls' in-scope populations).
+    coverage_expected = Column(Integer, default=0)
+    coverage_covered = Column(Integer, default=0)
+    coverage_failed = Column(Integer, default=0)
     taken_at = Column(DateTime, default=_now, index=True)
 
 

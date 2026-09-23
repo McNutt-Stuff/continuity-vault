@@ -29,6 +29,10 @@ _STATE_SCORE = {"operating": 100, "implemented": 100, "exception": 100,
                 "partially_implemented": 50, "planned": 0, "not_assessed": 0,
                 "failed": 0, "not_applicable": None}
 
+# Scoring algorithm version — bumped when the calculation changes so the trend
+# shows a labeled boundary instead of a silent rewrite (spec §3.3).
+SCORING_VERSION = "2.0-scope-aware"
+
 
 def available(db: Session, tenant) -> list[dict]:
     """Every framework in the registry with enabled state + latest score."""
@@ -96,34 +100,96 @@ def enable_pack(db: Session, tenant, framework: str, enabled: bool, actor: str =
     return pack
 
 
-def _derive(caps: list[str], by_cap: dict) -> tuple[str, int, list]:
-    """Best-status-per-capability → control state + score + evidence rows kept."""
-    scores: list[int] = []
-    kept = []
-    all_status: list[str] = []
+def _derive(caps: list[str], by_cap: dict) -> tuple[str, int, list, dict]:
+    """Scope-aware aggregation (spec §3.3): evaluate the applicable POPULATION for
+    each capability, not best-status-wins. A capability's status comes from its
+    coverage (covered / expected across every scope), so a healthy core signal can't
+    conceal a failed M365 scope. Unknown/expired evidence never counts as met.
+
+    Distinguishes three cases so scores aren't unfairly tanked:
+      * capability with NO provider evidence at all  -> not assessable, excluded;
+      * capability CONNECTED but unverifiable (unknown/permission) -> counts as 0;
+      * capability with population evidence -> scored by coverage.
+
+    Returns (state, score, kept_evidence, coverage_info)."""
+    cap_scores: list[int] = []
+    cap_statuses: list[str] = []   # "met"|"partial"|"unmet"|"unknown"|"none"
+    kept: list = []
+    tot_exp = tot_cov = tot_fail = 0.0
+    tot_unknown = 0
+    entities: list = []
+    levels: set = set()
+
     for cap in caps:
         rows = by_cap.get(cap, [])
+        if not rows:
+            cap_statuses.append("none")   # no provider covers this — not assessable
+            continue
         kept.extend(rows)
-        applicable = [r for r in rows if r.status != "not_applicable"]
-        if not applicable:
-            best = "unknown"
+        exp = cov = fail = 0.0
+        unk = 0
+        for r in rows:
+            if r.status == "not_applicable":
+                continue
+            if getattr(r, "entities", None):
+                entities.extend(r.entities)
+            lvl = getattr(r, "evidence_level", "") or ""
+            if lvl:
+                levels.add(lvl)
+            if int(getattr(r, "expected", 0) or 0) > 0:
+                exp += int(r.expected)
+                cov += int(getattr(r, "covered", 0) or 0)
+                fail += int(getattr(r, "failed", 0) or 0)
+            else:
+                # A binary (non-population) row is a synthetic population of one.
+                s = r.status
+                if s == "met":
+                    exp += 1; cov += 1
+                elif s == "partial":
+                    exp += 1; cov += 0.5
+                elif s == "unmet":
+                    exp += 1; fail += 1
+                elif s == "unknown":
+                    unk += 1
+        if exp <= 0:
+            # Rows exist but none were assessable (all unknown / not_applicable).
+            if unk > 0:
+                # Connected but unverifiable — penalize (never inflate to met).
+                cap_statuses.append("unknown")
+                cap_scores.append(0)
+                tot_unknown += unk
+            else:
+                cap_statuses.append("none")
+            continue
+        coverage = max(0.0, min(1.0, cov / exp))
+        tot_exp += exp; tot_cov += cov; tot_fail += fail
+        if coverage >= 0.999 and fail == 0 and unk == 0:
+            st = "met"
+        elif coverage <= 0.0 and fail > 0:
+            st = "unmet"
         else:
-            best = max((r.status for r in applicable), key=lambda s: _STATUS_RANK.get(s, 0))
-        all_status.append(best)
-        if best != "unknown":
-            scores.append(_STATUS_SCORE.get(best, 0))
-    if not scores:
-        return "not_assessed", 0, kept
-    score = round(sum(scores) / len(scores))
-    if all(s == "met" for s in all_status):
+            st = "partial"
+        cap_statuses.append(st)
+        cap_scores.append(round(coverage * 100))
+
+    coverage_info = {
+        "expected": round(tot_exp), "covered": round(tot_cov),
+        "failed": round(tot_fail), "unknown": tot_unknown,
+        "evidence_levels": sorted(levels), "entities": entities[:50],
+    }
+    meaningful = [s for s in cap_statuses if s != "none"]
+    if not meaningful:
+        return "not_assessed", 0, kept, coverage_info
+    score = round(sum(cap_scores) / len(cap_scores)) if cap_scores else 0
+    if all(s == "met" for s in meaningful):
         state = "operating"
-    elif all(s in ("unmet", "unknown") for s in all_status):
+    elif all(s in ("unmet", "unknown") for s in meaningful):
         state = "planned"
     elif score >= 100:
         state = "implemented"
     else:
         state = "partially_implemented"
-    return state, score, kept
+    return state, score, kept, coverage_info
 
 
 def evaluate(db: Session, tenant, actor: str = "", only_framework: str = "") -> dict:
@@ -143,17 +209,28 @@ def evaluate(db: Session, tenant, actor: str = "", only_framework: str = "") -> 
         controls = (db.query(m.ComplianceControl)
                     .filter(m.ComplianceControl.pack_id == pack.id).all())
         met = 0
+        fw_cov_exp = fw_cov_cov = fw_cov_fail = 0
         for c in controls:
-            state, score, kept = _derive(c.capabilities or [], by_cap)
+            state, score, kept, coverage = _derive(c.capabilities or [], by_cap)
             # Refresh the evidence trail for this control.
             db.query(m.ComplianceEvidence).filter(
                 m.ComplianceEvidence.control_id == c.id).delete(synchronize_session=False)
             for r in kept:
+                detail = dict(r.detail or {})
+                lvl = getattr(r, "evidence_level", "") or ""
+                if lvl and "evidence_level" not in detail:
+                    detail["evidence_level"] = lvl
                 db.add(m.ComplianceEvidence(
                     tenant_id=tenant.id, control_id=c.id, capability=r.capability,
                     provider=r.provider, status=r.status, summary=r.summary,
-                    detail=r.detail or {}))
+                    detail=detail))
+            fw_cov_exp += int(coverage.get("expected", 0) or 0)
+            fw_cov_cov += int(coverage.get("covered", 0) or 0)
+            fw_cov_fail += int(coverage.get("failed", 0) or 0)
             prior = c.state
+            # Keep the coverage rollup on the control so the UI can show num/den,
+            # failed entities, evidence levels and staleness without re-deriving.
+            c.meta = {**(c.meta or {}), "coverage": coverage}
             if c.id in exceptions:
                 c.state = "exception"
             elif not c.auto:
@@ -163,7 +240,8 @@ def evaluate(db: Session, tenant, actor: str = "", only_framework: str = "") -> 
                     _event(db, tenant, kind="control_state", framework=pack.framework,
                            control_id=c.control_id, actor="engine",
                            summary=f"{c.control_id}: {prior} → {state}",
-                           detail={"from": prior, "to": state, "score": score})
+                           detail={"from": prior, "to": state, "score": score,
+                                   "coverage": coverage})
                 c.state = state
                 c.score = score
             c.last_evaluated_at = _now()
@@ -174,9 +252,14 @@ def evaluate(db: Session, tenant, actor: str = "", only_framework: str = "") -> 
         db.add(m.ComplianceSnapshot(tenant_id=tenant.id, framework=pack.framework,
                                     score=fw_score, controls_total=len(controls),
                                     controls_met=met,
-                                    exceptions=sum(1 for c in controls if c.state == "exception")))
+                                    exceptions=sum(1 for c in controls if c.state == "exception"),
+                                    scoring_version=SCORING_VERSION,
+                                    coverage_expected=fw_cov_exp, coverage_covered=fw_cov_cov,
+                                    coverage_failed=fw_cov_fail))
         results.append({"framework": pack.framework, "score": fw_score,
-                        "met": met, "total": len(controls)})
+                        "met": met, "total": len(controls),
+                        "coverage": {"expected": fw_cov_exp, "covered": fw_cov_cov,
+                                     "failed": fw_cov_fail}})
     db.commit()
     return {"frameworks": results, "evaluated_at": _now().isoformat()}
 
@@ -201,6 +284,7 @@ def controls_view(db: Session, tenant, framework: str) -> list[dict]:
     for c in rows:
         spec = spec_by_id.get(c.control_id, {})
         e = exc.get(c.id)
+        cov = (c.meta or {}).get("coverage") or {}
         out.append({
             "id": c.id, "control_id": c.control_id, "title": c.title,
             "family": c.family, "state": c.state, "score": c.score,
@@ -208,11 +292,19 @@ def controls_view(db: Session, tenant, framework: str) -> list[dict]:
             "guidance": spec.get("guidance", ""),
             "capabilities": c.capabilities or [],
             "last_evaluated_at": c.last_evaluated_at.isoformat() if c.last_evaluated_at else None,
+            # Scoped coverage (num/den, failed entities, evidence levels) so the UI
+            # can show technical state honestly — spec §3.3/§6.
+            "coverage": {"expected": cov.get("expected", 0), "covered": cov.get("covered", 0),
+                         "failed": cov.get("failed", 0), "unknown": cov.get("unknown", 0),
+                         "evidence_levels": cov.get("evidence_levels", [])},
             "evidence": [{"capability": x.capability, "provider": x.provider,
-                          "status": x.status, "summary": x.summary}
+                          "status": x.status, "summary": x.summary,
+                          "evidence_level": (x.detail or {}).get("evidence_level", ""),
+                          "stale": bool((x.detail or {}).get("stale"))}
                          for x in ev_by_ctrl.get(c.id, [])],
             "exception": ({"reason": e.reason, "approved_by": e.approved_by,
-                           "expires_at": e.expires_at.isoformat() if e.expires_at else None}
+                           "expires_at": e.expires_at.isoformat() if e.expires_at else None,
+                           "expired": bool(e.expires_at and e.expires_at < _now())}
                           if e else None),
         })
     return out
@@ -239,6 +331,10 @@ def report(db: Session, tenant) -> dict:
             "met": cur.controls_met if cur else 0,
             "total": cur.controls_total if cur else 0,
             "delta": (cur.score - prev.score) if (cur and prev) else 0,
+            "scoring_version": (cur.scoring_version or "") if cur else "",
+            "coverage": ({"expected": cur.coverage_expected or 0,
+                          "covered": cur.coverage_covered or 0,
+                          "failed": cur.coverage_failed or 0} if cur else None),
         })
         if cur:
             tot_met += cur.controls_met
@@ -275,7 +371,8 @@ def framework_detail(db: Session, tenant, framework: str) -> dict:
                      m.ComplianceSnapshot.framework == framework)
              .order_by(m.ComplianceSnapshot.taken_at.asc()).all())
     trend = [{"score": s.score, "met": s.controls_met, "total": s.controls_total,
-              "at": s.taken_at.isoformat()} for s in snaps]
+              "scoring_version": s.scoring_version or "", "at": s.taken_at.isoformat()}
+             for s in snaps]
     cur = snaps[-1] if snaps else None
     prev = snaps[-2] if len(snaps) > 1 else None
 
@@ -338,6 +435,10 @@ def framework_detail(db: Session, tenant, framework: str) -> dict:
         "total": cur.controls_total if cur else (len(spec["controls"]) if not enabled else 0),
         "delta": (cur.score - prev.score) if (cur and prev) else 0,
         "last_assessed_at": cur.taken_at.isoformat() if cur else None,
+        "scoring_version": (cur.scoring_version or "") if cur else "",
+        "coverage": ({"expected": cur.coverage_expected or 0,
+                      "covered": cur.coverage_covered or 0,
+                      "failed": cur.coverage_failed or 0} if cur else None),
         "trend": trend, "controls": controls, "drivers": drivers_out,
         "open_issues": open_issues, "entities": entities, "events": events,
     }
