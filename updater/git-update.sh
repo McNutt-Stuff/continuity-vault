@@ -144,19 +144,22 @@ detect_role() {
 # node applies on its NEXT heartbeat (heartbeat → 'self-update' →
 # cv-node-update.service). Control-plane only; non-fatal if it can't run.
 trigger_node_updates() {
-  local app="/opt/continuity-vault" py="/opt/continuity-vault/.venv/bin/python"
-  if [[ ! -x "$py" || ! -d "$app/app" ]]; then
-    echo "!! --update-nodes: app venv not found at ${app}; skipping fleet update"
+  # The app runs from /opt/continuity-vault/cloud (WorkingDirectory in the unit),
+  # so `python -m app.manage` must run there; the venv is at $INSTALL_DIR/.venv.
+  local install="/opt/continuity-vault"
+  local appdir="${install}/cloud" py="${install}/.venv/bin/python"
+  if [[ ! -x "$py" || ! -d "$appdir/app" ]]; then
+    echo "!! --update-nodes: app not found (py=${py}, dir=${appdir}/app); skipping fleet update"
     return 0
   fi
   echo "==> --update-nodes: fanning this update out to downstream fleet nodes"
-  echo "    \$ ${py} -m app.manage update-nodes"
+  echo "    \$ (cd ${appdir} && ${py} -m app.manage update-nodes)"
   local rc=0
   (
     set -a
     [[ -f /etc/continuity-vault.env ]] && source /etc/continuity-vault.env
     set +a
-    cd "$app" && "$py" -m app.manage update-nodes
+    cd "$appdir" && "$py" -m app.manage update-nodes
   ) || rc=$?
   if [[ "$rc" -eq 0 ]]; then
     echo "==> Fleet self-update queued — each node applies it on its next heartbeat."
