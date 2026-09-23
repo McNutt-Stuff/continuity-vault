@@ -149,13 +149,20 @@ trigger_node_updates() {
     echo "!! --update-nodes: app venv not found at ${app}; skipping fleet update"
     return 0
   fi
-  echo "==> Queuing self-update on downstream fleet nodes"
+  echo "==> --update-nodes: fanning this update out to downstream fleet nodes"
+  echo "    \$ ${py} -m app.manage update-nodes"
+  local rc=0
   (
     set -a
     [[ -f /etc/continuity-vault.env ]] && source /etc/continuity-vault.env
     set +a
     cd "$app" && "$py" -m app.manage update-nodes
-  ) || echo "!! fleet update trigger failed (non-fatal) — nodes still self-update on their own timer"
+  ) || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    echo "==> Fleet self-update queued — each node applies it on its next heartbeat."
+  else
+    echo "!! fleet update trigger failed (rc=${rc}, non-fatal) — nodes still self-update on their own timer"
+  fi
 }
 
 run_installer() {

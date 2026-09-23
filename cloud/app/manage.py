@@ -234,13 +234,18 @@ def update_nodes(role: str = "all") -> None:
         if role and role != "all":
             q = q.filter(Node.role == role)
         nodes = q.order_by(Node.role, Node.name).all()
+        print(f"update-nodes: issuing self-update to {len(nodes)} downstream node(s) "
+              f"(role={role}) …")
+        if not nodes:
+            print("  (no matching downstream nodes registered — nothing to do)")
+            return
         for node in nodes:
             node.pending_update_at = now
         db.commit()
         for node in nodes:
             online = bool(node.last_heartbeat_at and
                           (now - node.last_heartbeat_at).total_seconds() < 180)
-            print(f"  queued self-update: {node.name} ({node.role}) "
+            print(f"  ✓ queued self-update: {node.name} ({node.role}) "
                   f"[{'online' if online else 'offline — will apply on reconnect'}]")
         print(f"Queued self-update on {len(nodes)} node(s) — they pull the new bundle "
               f"and restart on their next heartbeat.")
