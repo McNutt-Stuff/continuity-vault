@@ -281,6 +281,38 @@ def _upsert(db, model, data: dict) -> None:
         db.add(model(**kw))
 
 
+def _reconcile_user_email_conflicts(db, users_bundle) -> int:
+    """The CP is authoritative for users. If a local user squats on an email that the
+    CP assigns to a DIFFERENT user id (a re-seeded/re-created tenant left stale rows),
+    the global uq_user_email constraint blocks the CP's real user from replicating —
+    and the node then can't resolve the session's user id, so proxied requests 401.
+
+    Park the STALE local user's email (only when its id is NOT in the CP's authoritative
+    set, i.e. it's genuinely stale) so the real user lands. We do NOT delete the stale
+    rows: its old vaults/collections stay but are inert (owned by the old id, never
+    surfaced to the real user) and can be pruned separately."""
+    from ..models import User
+    want = {u.get("email"): u.get("id") for u in users_bundle if u.get("email")}
+    if not want:
+        return 0
+    bundle_ids = {u.get("id") for u in users_bundle}
+    parked = 0
+    for local in db.query(User).filter(User.email.in_(list(want))).all():
+        want_id = want.get(local.email)
+        # Leave it alone if it's already the right user, or a legit current CP user.
+        if not want_id or local.id == want_id or local.id in bundle_ids:
+            continue
+        new_email = f"stale+{local.id}@replica.invalid"
+        logger.warning("replication reconcile: local user %s squats email %s that the CP "
+                       "assigns to %s — parking stale address as %s so the authoritative "
+                       "user can replicate", local.id, local.email, want_id, new_email)
+        local.email = new_email
+        parked += 1
+    if parked:
+        db.commit()
+    return parked
+
+
 def _pull(s) -> int:
     _st0 = _read_state()
     bundle = _post("/nodes/sync/pull", {
@@ -296,6 +328,14 @@ def _pull(s) -> int:
     })
     if not bundle:
         return 0
+    # Free any email a STALE local user is squatting on before applying users, so
+    # the CP's authoritative user (needed to resolve the session id, else 401) can
+    # replicate instead of hitting the global uq_user_email constraint.
+    try:
+        with SessionLocal() as _rdb:
+            _reconcile_user_email_conflicts(_rdb, bundle.get("users") or [])
+    except Exception:  # noqa: BLE001 — reconcile must never break the pull
+        logger.exception("user email reconcile failed")
     n = 0
     skipped = 0
     skip_by_tenant: dict = {}  # tenant_id -> count of rows that failed to apply
@@ -327,8 +367,14 @@ def _pull(s) -> int:
                     logger.debug("replication: deferring a %s row: %s",
                                  getattr(model, "__tablename__", model), str(exc)[:160])
                 else:
-                    logger.warning("replication: skipped a %s row: %s",
-                                   getattr(model, "__tablename__", model), str(exc)[:160])
+                    # Granular detail so a genuine orphan is triageable from Platform
+                    # Logs: the row's own id + tenant/vault refs + the full DB DETAIL
+                    # (which names the exact missing key), never truncated to hide it.
+                    logger.warning("replication: skipped a %s row: id=%s tenant=%s "
+                                   "vault=%s :: %s",
+                                   getattr(model, "__tablename__", model),
+                                   row.get("id"), row.get("tenant_id"),
+                                   row.get("vault_id"), str(exc)[:500])
                 return False
 
         if bundle.get("pricing"):
