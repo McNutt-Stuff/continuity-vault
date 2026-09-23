@@ -32,6 +32,19 @@ class CapabilityEvidence:
     summary: str = ""
     provider: str = "arkive"
     detail: dict = field(default_factory=dict)
+    # --- Scoped evidence contract (spec §3.2), all optional/back-compat ---
+    scope_type: str = ""             # organization|workload|user|mailbox|site|drive|team|agent|destination
+    scope_id: str = ""
+    # Coverage over the applicable population — lets the engine aggregate by scope
+    # instead of best-status-wins. 0/0 means "not a population capability".
+    expected: int = 0
+    covered: int = 0
+    failed: int = 0
+    evidence_level: str = "observed"  # configuration|observed|verified_test|manual
+    policy_version: str = ""
+    expires_at: object = None         # datetime | None — stale after this (never met)
+    entities: list = field(default_factory=list)  # affected [{kind,label,status,note}]
+    remediation: str = ""
 
 
 # provider name -> callable(db, tenant, scope) -> list[CapabilityEvidence]
@@ -276,9 +289,29 @@ def _integration_signals(db: Session, tenant, scope: dict) -> list[CapabilityEvi
     from . import signals
     out: list[CapabilityEvidence] = []
     for s in signals.for_tenant(db, tenant.id):
-        out.append(CapabilityEvidence(capability=s.capability, status=s.status,
-                                      summary=s.summary, provider=s.provider,
-                                      detail=s.detail or {}))
+        # Expired/stale evidence is treated as unknown — never counts as met.
+        status = signals.effective_status(s)
+        detail = dict(s.detail or {})
+        # Fold the scoped contract into the evidence detail so the engine + UI can
+        # show coverage, provenance and affected entities without new plumbing.
+        if s.expected_population:
+            detail.setdefault("expected", int(s.expected_population))
+            detail.setdefault("covered", int(s.covered_population or 0))
+            detail.setdefault("failed", int(s.failed_population or 0))
+        if s.entities and "entities" not in detail:
+            detail["entities"] = s.entities
+        if s.evidence_level:
+            detail.setdefault("evidence_level", s.evidence_level)
+        if signals.is_expired(s):
+            detail["stale"] = True
+        out.append(CapabilityEvidence(
+            capability=s.capability, status=status, summary=s.summary,
+            provider=s.provider, detail=detail,
+            scope_type=s.scope_type or "", scope_id=s.scope_id or "",
+            expected=int(s.expected_population or 0), covered=int(s.covered_population or 0),
+            failed=int(s.failed_population or 0), evidence_level=s.evidence_level or "observed",
+            policy_version=s.policy_version or "", expires_at=s.expires_at,
+            entities=list(s.entities or []), remediation=s.remediation or ""))
     return out
 
 

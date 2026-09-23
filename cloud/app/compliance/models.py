@@ -134,9 +134,26 @@ class ComplianceSignal(Base):
     tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
     provider = Column(String, default="", index=True)   # microsoft365|ubiquiti|desktop|…
     capability = Column(String, default="", index=True)  # -> registry.CAPABILITIES key
-    scope = Column(String, default="")                   # optional sub-scope (e.g. a workload/site)
+    scope = Column(String, default="")                   # slot key (e.g. scope_type:scope_id or a workload/site)
     status = Column(String, default="unknown")           # met|partial|unmet|not_applicable|unknown
     summary = Column(String, default="")
     detail = Column(JSON, default=dict)                  # non-secret signal detail
     observed_at = Column(DateTime, default=_now, index=True)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
+    # --- Scoped evidence contract (spec §3.2). All additive + nullable so existing
+    # signals keep working; a driver fills what it can measure. NEVER secrets/PII. ---
+    integration_instance_id = Column(String, default="", index=True)  # which M365/etc. instance
+    scope_type = Column(String, default="")   # organization|workload|user|mailbox|site|drive|team|agent|destination
+    scope_id = Column(String, default="")     # stable id within scope_type (entra_object_id, site id, …)
+    # Coverage: evaluate EVERY required in-scope entity (not best-status-wins).
+    expected_population = Column(Integer, default=0)   # in-scope entities that SHOULD be covered
+    covered_population = Column(Integer, default=0)    # of those, actually covered/met
+    failed_population = Column(Integer, default=0)     # of those, failing/unprotected
+    # Evidence provenance + confidence — configuration ≠ observed ≠ verified_test ≠ manual.
+    evidence_level = Column(String, default="observed")  # configuration|observed|verified_test|manual
+    policy_version = Column(String, default="")          # org policy version this was compared against
+    evidence_ref = Column(String, default="")            # bounded reference/hash of the underlying evidence
+    # Freshness: unknown/expired evidence NEVER counts as met.
+    expires_at = Column(DateTime, nullable=True)         # stale after this; NULL = no explicit deadline
+    entities = Column(JSON, default=list)                # affected entities [{kind,label,status,note}] (non-secret)
+    remediation = Column(String, default="")             # remediation link/text

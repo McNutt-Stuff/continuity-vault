@@ -369,6 +369,20 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE addons ADD COLUMN setup_cents INTEGER DEFAULT 0",
         # Licensed seats (protected users/members) the tenant pays for.
         "ALTER TABLE tenants ADD COLUMN licensed_seats INTEGER DEFAULT 0",
+        # Compliance scoped-evidence contract — additive columns on the existing
+        # compliance_signals table (create_all won't alter an existing table).
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS integration_instance_id VARCHAR DEFAULT ''",
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS scope_type VARCHAR DEFAULT ''",
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS scope_id VARCHAR DEFAULT ''",
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS expected_population INTEGER DEFAULT 0",
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS covered_population INTEGER DEFAULT 0",
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS failed_population INTEGER DEFAULT 0",
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS evidence_level VARCHAR DEFAULT 'observed'",
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS policy_version VARCHAR DEFAULT ''",
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS evidence_ref VARCHAR DEFAULT ''",
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP",
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS entities JSON DEFAULT '[]'",
+        "ALTER TABLE compliance_signals ADD COLUMN IF NOT EXISTS remediation VARCHAR DEFAULT ''",
     ]
     for statement in statements:
         try:
