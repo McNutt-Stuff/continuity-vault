@@ -374,6 +374,20 @@ _APPLIANCE_FIELDS = ("state", "isolation_state", "software_version", "telemetry"
                      "last_attestation_at", "model", "version_updated_at")
 
 
+def _push_is_stale(incoming: dict, stored, field: str = "last_heartbeat_at") -> bool:
+    """True when a pushed device row is OLDER than what we already have — the
+    appliance/agent is currently reporting elsewhere (e.g. the control plane after a
+    switchover cooldown), so this node's copy is stale and must not clobber fresher
+    liveness/attestation/state (which would flip a healthy device to a false alarm)."""
+    cur = getattr(stored, field, None)
+    if cur is None:
+        return False  # we have no baseline — accept the push
+    inc = _parse_iso(incoming.get(field))
+    if inc is None:
+        return True   # the node never heard from this device but we have — keep ours
+    return inc < cur
+
+
 def _apply(obj, data: dict, fields: tuple) -> None:
     for f in fields:
         if f not in data:
@@ -480,6 +494,8 @@ def push(body: PushPayload, authorization: str = Header(default=""),
             continue
         ag = db.get(DesktopAgent, a.get("id"))
         if ag:
+            if _push_is_stale(a, ag):
+                continue
             _apply(ag, a, _AGENT_FIELDS)
             counts["agents"] += 1
     for a in body.appliances:
@@ -487,6 +503,13 @@ def push(body: PushPayload, authorization: str = Header(default=""),
             continue
         ap = db.get(Appliance, a.get("id"))
         if ap:
+            # A node that ISN'T currently receiving this device's heartbeats (it's
+            # riding the control plane after a switchover cooldown) would otherwise
+            # push its STALE default row up and clobber the CP's fresh liveness +
+            # attestation (→ a false "Attestation failed"). Only apply when the
+            # pushed heartbeat is at least as new as what we already have.
+            if _push_is_stale(a, ap):
+                continue
             _apply(ap, a, _APPLIANCE_FIELDS)
             counts["appliances"] += 1
     # Per-volume storage the node's appliances reported (built-in + dedicated
