@@ -165,6 +165,30 @@ def _upsert(db: Session, model, data: dict):
     return obj
 
 
+def _upsert_by_unique(db: Session, model, data: dict, unique_cols: list[str]):
+    """Upsert reconciling on a SECONDARY unique key when the primary key doesn't
+    match. A node can generate its own primary id for a row that already exists on
+    the CP under a DIFFERENT id but the same natural key (e.g. an M365 identity keyed
+    by ``(microsoft_tenant_id, entra_object_id)``); a blind insert then violates the
+    unique constraint and — poisoning the transaction — aborts the whole push, which
+    stalls the node's cursor and freezes replication. Reconciling here updates the
+    existing row in place instead."""
+    kw = _deser(model, data)
+    pk = list(model.__table__.primary_key.columns)[0].name
+    obj = db.get(model, kw.get(pk))
+    if obj is None:
+        obj = db.query(model).filter(
+            *[getattr(model, c) == kw.get(c) for c in unique_cols]).first()
+    if obj is not None:
+        for k, v in kw.items():
+            if k != pk:  # keep the CP's canonical id
+                setattr(obj, k, v)
+        return obj
+    obj = model(**kw)
+    db.add(obj)
+    return obj
+
+
 class NodeIdent(BaseModel):
     name: str
     role: str = "customer-tenant"
@@ -798,17 +822,25 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict,
                     return {**row, "integration_instance_id": canon}
                 return row
 
-            for row in body.m365_external_identities:
-                if not _ok(row):
-                    continue
-                _upsert(db, _m365.ExternalIdentity, _reparent(row))
-                counts["integrations"] += 1
-            for row in body.m365_managed_sources:
-                owner = row.get("owner_user_id")
-                if not _ok(row) or (owner and owner not in valid_users):
-                    continue
-                _upsert(db, _m365.ManagedSource, _reparent(row))
-                counts["integrations"] += 1
+            # SAVEPOINT: an M365 ingest hiccup must NEVER 500 the push (which would
+            # stall the node's document cursor and freeze search replication). On
+            # failure only this nested block rolls back; the already-flushed
+            # receipts/documents/jobs and the outer transaction survive.
+            with db.begin_nested():
+                for row in body.m365_external_identities:
+                    if not _ok(row):
+                        continue
+                    # Reconcile on the durable identity key so a node's own id for an
+                    # identity the CP already has doesn't violate uq_m365_ext_identity.
+                    _upsert_by_unique(db, _m365.ExternalIdentity, _reparent(row),
+                                      ["microsoft_tenant_id", "entra_object_id"])
+                    counts["integrations"] += 1
+                for row in body.m365_managed_sources:
+                    owner = row.get("owner_user_id")
+                    if not _ok(row) or (owner and owner not in valid_users):
+                        continue
+                    _upsert(db, _m365.ManagedSource, _reparent(row))
+                    counts["integrations"] += 1
         except Exception:  # noqa: BLE001 — package optional; never fail the push
             logger.exception("m365 push ingest failed")
 
