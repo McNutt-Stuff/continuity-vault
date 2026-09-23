@@ -342,6 +342,58 @@ def send_via_service(kind: str, config: dict, to: str, subject: str, html: str,
         return {"ok": False, "error": str(exc)}
 
 
+def _should_relay_to_cp() -> bool:
+    """True when THIS box is a fleet node WITHOUT a live email service of its own —
+    it must relay outbound mail through the control plane (which has one)."""
+    s = get_settings()
+    if (s.node_role or "control-plane") == "control-plane" or not s.control_plane_url:
+        return False
+    cfg = _config()
+    return not (cfg.get("enabled") and _SENDERS.get(cfg.get("provider") or ""))
+
+
+def _relay_via_cp(to: str, subject: str, html: str, text: str, category: str) -> dict:
+    """Relay a fully-composed email to the control plane's email-relay endpoint so a
+    node without its own email service still delivers mail. Best-effort; returns
+    {ok, error, provider}."""
+    s = get_settings()
+    base = (s.control_plane_url or "").rstrip("/")
+    if not base or not s.node_secret:
+        return {"ok": False, "error": "no control-plane URL / node secret"}
+    body = json.dumps({"to": to, "subject": subject, "html": html,
+                       "text": text, "category": category}).encode()
+    req = urllib.request.Request(
+        base + "/api/nodes/sync/email-relay", data=body, method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {s.node_secret}"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8", "ignore") or "{}")
+            return {"ok": bool(data.get("ok")), "error": data.get("error"),
+                    "provider": data.get("provider")}
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": f"relay HTTP {e.code}: "
+                f"{e.read().decode('utf-8', 'ignore')[:200]}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+def transport_local(to: str, subject: str, html: str, text: str = "") -> dict:
+    """Transport an already-composed email via THIS box's own resolved email service
+    — no pixel/record (the origin node did those). Used by the CP email-relay
+    endpoint for nodes without a service. Returns {ok, error, provider}."""
+    cfg = _config()
+    provider = cfg["provider"] if cfg.get("enabled") else "log"
+    sender = _SENDERS.get(provider)
+    if not sender:
+        return {"ok": False, "error": f"no live email provider ({provider})", "provider": provider}
+    try:
+        sender(cfg, to, subject, html, text or " ")
+        return {"ok": True, "error": None, "provider": provider}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "provider": provider}
+
+
 def send_verbose(to: str, subject: str, *, html: str, text: str = "",
                  category: str = "email") -> dict:
     """Send one branded email, returning {channel, error, provider}. ``channel``
@@ -368,6 +420,17 @@ def send_verbose(to: str, subject: str, *, html: str, text: str = "",
         except Exception as exc:  # never raise into request paths
             log.error("email send failed (%s -> %s): %s", provider, to, exc)
             channel, error = "error", str(exc)
+    elif _should_relay_to_cp():
+        # This node has no live email service of its own — relay the send through
+        # the control plane (which does). Without this, a tenant migrated to an
+        # email-less node would get NO notifications (the CP skips node-assigned
+        # tenants, and the node can only log). The html already carries the pixel.
+        r = _relay_via_cp(to, subject, html, text, category)
+        if r.get("ok"):
+            channel, provider = "relayed", (r.get("provider") or "relayed")
+        else:
+            log.warning("email relay to control plane failed (-> %s): %s", to, r.get("error"))
+            channel, error = "error", r.get("error")
     else:
         # Log mode (no live provider): emit the subject plus each body line as its
         # own short, tagged record so sign-in codes are always readable/greppable

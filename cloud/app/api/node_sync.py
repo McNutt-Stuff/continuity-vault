@@ -73,6 +73,28 @@ def _require_fleet(authorization: str) -> None:
         raise HTTPException(401, "invalid node credentials")
 
 
+class EmailRelay(BaseModel):
+    to: str
+    subject: str
+    html: str
+    text: str = ""
+    category: str = "email"
+
+
+@router.post("/email-relay")
+def email_relay(body: EmailRelay, authorization: str = Header(default="")):
+    """Deliver an email on behalf of a fleet node that has no email service of its
+    own (e.g. a tenant migrated to a node without one). The node composed + recorded
+    it already; the CP just transports via its own service so mail still reaches the
+    customer. Returns {ok, error, provider}."""
+    _require_fleet(authorization)
+    from .. import emailer
+    res = emailer.transport_local(body.to, body.subject, body.html, body.text)
+    if not res.get("ok"):
+        logger.warning("email-relay transport failed (-> %s): %s", body.to, res.get("error"))
+    return res
+
+
 def _ser(obj) -> dict:
     """Serialize a SQLAlchemy row to a JSON-safe dict (datetimes → ISO)."""
     out = {}
