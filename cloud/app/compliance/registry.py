@@ -140,6 +140,16 @@ CAPABILITIES: dict[str, dict] = {
         "title": "Guest / external account governance",
         "description": "External/guest accounts are limited, known and governed.",
         "domain": "protect"},
+    "integrity_verified": {
+        "title": "Recovery-point integrity verification",
+        "description": "Recovery points are cryptographically sealed (hybrid-signed manifests) and their "
+                       "stored copies are integrity-verified.",
+        "domain": "resilience"},
+    "restore_test": {
+        "title": "Restore verification",
+        "description": "Protected data is periodically read back, decrypted and verified intact "
+                       "(restore/recoverability testing).",
+        "domain": "resilience"},
 }
 
 # --------------------------------------------------------------------------- #
@@ -183,7 +193,7 @@ FRAMEWORKS: dict[str, dict] = {
              "capabilities": ["incident_response"],
              "guidance": "Surface failures and security events for response."},
             {"id": "RC.RP-01", "title": "Recovery execution", "family": "Recover",
-             "capabilities": ["recovery", "backup_coverage", "versioning"],
+             "capabilities": ["recovery", "backup_coverage", "versioning", "restore_test", "integrity_verified"],
              "guidance": "Execute point-in-time recovery of data from backups."},
             {"id": "RC.RP-04", "title": "Backup redundancy & integrity", "family": "Recover",
              "capabilities": ["offsite_copy", "air_gapped_copy", "immutability"],
@@ -220,7 +230,7 @@ FRAMEWORKS: dict[str, dict] = {
             {"id": "11.2", "title": "Perform automated backups", "family": "Data recovery",
              "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "versioning"], "guidance": "Automated backups with version history."},
             {"id": "11.1", "title": "Data recovery process", "family": "Data recovery",
-             "capabilities": ["recovery"], "guidance": "Maintain a recovery process."},
+             "capabilities": ["recovery", "restore_test", "integrity_verified"], "guidance": "Maintain a recovery process."},
             {"id": "11.3", "title": "Protect recovery data", "family": "Data recovery",
              "capabilities": ["encryption_at_rest", "immutability"], "guidance": "Protect backups."},
             {"id": "11.4", "title": "Isolated recovery copy", "family": "Data recovery",
@@ -236,7 +246,7 @@ FRAMEWORKS: dict[str, dict] = {
             {"id": "164.308(a)(7)(ii)(A)", "title": "Data backup plan", "family": "Administrative",
              "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "offsite_copy"], "guidance": "Back up ePHI; keep an offsite copy."},
             {"id": "164.308(a)(7)(ii)(B)", "title": "Disaster recovery plan", "family": "Administrative",
-             "capabilities": ["recovery", "backup_coverage"], "guidance": "Restore ePHI."},
+             "capabilities": ["recovery", "backup_coverage", "restore_test", "integrity_verified"], "guidance": "Restore ePHI."},
             {"id": "164.312(a)(2)(iv)", "title": "Encryption & decryption", "family": "Technical",
              "capabilities": ["encryption_at_rest"], "guidance": "Encrypt ePHI at rest."},
             {"id": "164.312(e)(2)(ii)", "title": "Transmission encryption", "family": "Technical",
@@ -271,7 +281,7 @@ FRAMEWORKS: dict[str, dict] = {
              "capabilities": ["mfa", "conditional_access", "phishing_resistant_mfa", "privileged_mfa", "privileged_access_review"],
              "guidance": "Strong authentication and conditional access for privileged use."},
             {"id": "A.8.13", "title": "Information backup", "family": "Technological",
-             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "recovery", "versioning", "offsite_copy"],
+             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "recovery", "versioning", "offsite_copy", "restore_test", "integrity_verified"],
              "guidance": "Back up information; keep offsite copies with version history and test recovery."},
             {"id": "A.8.14", "title": "Redundancy of information processing", "family": "Technological",
              "capabilities": ["offsite_copy", "air_gapped_copy"],
@@ -312,7 +322,7 @@ FRAMEWORKS: dict[str, dict] = {
              "capabilities": ["incident_response"],
              "guidance": "Evaluate and respond to security events."},
             {"id": "A1.2", "title": "Backup & recovery for availability", "family": "Availability (A1)",
-             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "recovery", "offsite_copy", "versioning"],
+             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "recovery", "offsite_copy", "versioning", "restore_test", "integrity_verified"],
              "guidance": "Back up data and maintain recoverability for availability commitments."},
             {"id": "A1.3", "title": "Recovery testing / redundancy", "family": "Availability (A1)",
              "capabilities": ["offsite_copy", "air_gapped_copy", "immutability"],
@@ -338,7 +348,7 @@ FRAMEWORKS: dict[str, dict] = {
              "capabilities": ["access_control", "mfa", "external_sharing_control", "phishing_resistant_mfa", "privileged_mfa", "privileged_access_review", "guest_access"],
              "guidance": "Ensure ongoing confidentiality via access control and strong auth."},
             {"id": "Art.32(1)(c)", "title": "Restore availability after an incident", "family": "Security of processing",
-             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "recovery", "offsite_copy", "versioning"],
+             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "recovery", "offsite_copy", "versioning", "restore_test", "integrity_verified"],
              "guidance": "Restore availability and access to personal data in a timely manner."},
             {"id": "Art.32(1)(d)", "title": "Monitoring & audit of processing", "family": "Security of processing",
              "capabilities": ["audit_logging", "monitoring"],

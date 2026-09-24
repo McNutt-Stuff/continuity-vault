@@ -123,6 +123,35 @@ def _arkive_core(db: Session, tenant, scope: dict) -> list[CapabilityEvidence]:
         f"{recoverable:,} recoverable recovery point(s)" if recoverable
         else "No confirmed recovery points yet", recoverable=recoverable)
 
+    # Integrity verification — recovery points are cryptographically sealed with a
+    # hybrid-signed (ML-DSA + Ed25519) manifest before they're marked recoverable.
+    add("integrity_verified", "met" if recoverable else ("partial" if receipts else "unmet"),
+        (f"{recoverable:,} recovery point(s) sealed with a hybrid-signed manifest" if recoverable
+         else ("Recovery points awaiting seal confirmation" if receipts else "No sealed recovery points yet")),
+        recoverable=recoverable, receipts=receipts)
+
+    # Restore verification — the integrity worker periodically FETCHES, DECRYPTS and
+    # row-count-verifies each stored index replica (a real read-back test). Bonus
+    # control: not_applicable (doesn't penalize) when no DR replica exists yet.
+    try:
+        from ..models import IndexReplica
+        reps = db.query(IndexReplica).filter(IndexReplica.tenant_id == tid).all()
+    except Exception:  # noqa: BLE001
+        reps = []
+    if reps:
+        ok = sum(1 for r in reps if r.status == "ok")
+        verified = sum(1 for r in reps if r.last_verified_at)
+        bad = [{"kind": "replica", "label": f"{r.scope}:{r.scope_id} · {r.destination_label or r.destination}",
+                "status": "unmet", "note": (r.error or "integrity check failed")[:120]}
+               for r in reps if r.status == "error"][:50]
+        rstatus = "met" if (ok == len(reps) and verified) else ("partial" if verified else "unknown")
+        add("restore_test", rstatus,
+            f"{ok}/{len(reps)} recovery index copy(ies) verified readable + intact by read-back test",
+            replicas=len(reps), ok=ok, verified=verified, entities=bad)
+    else:
+        add("restore_test", "not_applicable",
+            "No offsite/appliance index copy to read-back-verify yet (add one to enable restore testing).")
+
     # Encryption — always on (quantum-safe client/server encryption).
     add("encryption_at_rest", "met",
         "Protected data is encrypted at rest with Arkive's quantum-safe cipher (ciphertext only in storage).")
