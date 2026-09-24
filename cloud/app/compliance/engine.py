@@ -192,6 +192,35 @@ def _derive(caps: list[str], by_cap: dict) -> tuple[str, int, list, dict]:
     return state, score, kept, coverage_info
 
 
+def _reconcile_controls(db: Session, tenant, pack) -> None:
+    """Sync a pack's stored controls to the CURRENT registry: add controls newly
+    added to the framework and refresh each existing control's capability map +
+    title/family. This lets registry changes (e.g. a new capability mapped into an
+    existing control) reach already-enabled tenants on the next assessment, without
+    a re-enable. Preserves each control's state/owner/exceptions."""
+    spec = registry.framework(pack.framework)
+    if not spec:
+        return
+    have = {c.control_id: c for c in db.query(m.ComplianceControl)
+            .filter(m.ComplianceControl.pack_id == pack.id).all()}
+    for ctrl in spec["controls"]:
+        caps = ctrl.get("capabilities", [])
+        cur = have.get(ctrl["id"])
+        if cur is None:
+            db.add(m.ComplianceControl(
+                tenant_id=tenant.id, pack_id=pack.id, framework=pack.framework,
+                control_id=ctrl["id"], title=ctrl["title"], family=ctrl.get("family", ""),
+                capabilities=caps, state="not_assessed"))
+            continue
+        if (cur.capabilities or []) != caps:
+            cur.capabilities = caps
+        if cur.title != ctrl["title"]:
+            cur.title = ctrl["title"]
+        if cur.family != ctrl.get("family", ""):
+            cur.family = ctrl.get("family", "")
+    db.flush()
+
+
 def evaluate(db: Session, tenant, actor: str = "", only_framework: str = "") -> dict:
     """Re-assess every enabled pack from live evidence; write evidence, events + a
     posture snapshot per framework. Returns a short report."""
@@ -206,6 +235,11 @@ def evaluate(db: Session, tenant, actor: str = "", only_framework: str = "") -> 
     for pack in packs:
         if only_framework and pack.framework != only_framework:
             continue
+        # Reconcile the pack's controls to the CURRENT registry before scoring, so a
+        # registry change (new capabilities mapped into existing controls, new
+        # controls) reaches already-enabled tenants without a re-enable — otherwise
+        # newly-mapped capabilities/evidence never surface.
+        _reconcile_controls(db, tenant, pack)
         controls = (db.query(m.ComplianceControl)
                     .filter(m.ComplianceControl.pack_id == pack.id).all())
         met = 0

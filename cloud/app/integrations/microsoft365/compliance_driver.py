@@ -43,7 +43,8 @@ def _m365_evidence(db: Session, tenant, scope: dict) -> list[CapabilityEvidence]
             m.ManagedSource.state.notin_(("paused_by_admin", "decommissioned", "planned"))).count()
         for s in db.query(m.ManagedSource).filter(
                 m.ManagedSource.integration_instance_id == inst.id,
-                m.ManagedSource.state.in_(("permission_required", "credential_error"))).all():
+                m.ManagedSource.state.in_(("permission_required", "credential_error",
+                                           "source_unavailable", "disconnected"))).all():
             needs_attention += 1
             trouble.append({"kind": "source", "label": s.name or s.source_key,
                             "status": "unmet",
