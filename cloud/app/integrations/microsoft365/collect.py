@@ -346,6 +346,7 @@ def run_managed_collection(db: Session, collection, destinations=None, progress=
     if inst is None or source is None:
         logger.warning("m365 managed collection %s missing instance/source", collection.id)
         collection.config = {**cfg, "m365_has_more": False}
+        db.commit()  # commit so the job's chunk loop (which db.refresh()es) stops re-running
         return None
     token = _app_token_for_instance(db, inst)
     if not token:

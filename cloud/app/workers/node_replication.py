@@ -130,10 +130,17 @@ try:
         ("m365_scope_policies", _m365m.IdentityScopePolicy),
         ("m365_bindings", _m365m.ExternalIdentityBinding),
         ("m365_desired_states", _m365m.IntegrationDesiredState),
+        # Managed sources are CP-authoritative (provisioned in the portal); ship them
+        # down so the node's managed Collections resolve their source. After
+        # m365_instances (FK: integration_instance_id).
+        ("m365_managed_sources", _m365m.ManagedSource),
     ]
     _PULL_EXCLUDE["m365_instances"] = {"status", "provision_state", "provision_message",
                                        "last_run_at", "last_success_at", "last_error",
                                        "last_stats"}
+    # Collection RUNTIME on the source is node-owned (it runs collection); don't let
+    # the CP's replicated copy clobber the node's live state/progress.
+    _PULL_EXCLUDE["m365_managed_sources"] = {"state", "last_collected_at"}
     # The node acknowledges desired state locally; don't let the CP's copy reset it.
     _PULL_EXCLUDE["m365_desired_states"] = {"applied_version", "applied_at", "status"}
 except Exception:  # noqa: BLE001 — package optional

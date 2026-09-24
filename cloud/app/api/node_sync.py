@@ -342,6 +342,7 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
     # collection. Ship those CP-owned records down so the node can reconcile.
     m365_instances, m365_credentials, m365_scope = [], [], []
     m365_bindings, m365_desired = [], []
+    m365_sources = []
     try:
         from ..integrations.microsoft365 import models as _m365
         m365_instances = [_ser(i) for i in integration_instances
@@ -354,6 +355,11 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
                          .filter(_m365.ExternalIdentityBinding.tenant_id.in_(tids)).all()]
         m365_desired = [_ser(d) for d in db.query(_m365.IntegrationDesiredState)
                         .filter(_m365.IntegrationDesiredState.tenant_id.in_(tids)).all()]
+        # Managed sources are CP-authoritative (provisioned in the portal); the node
+        # runs their Collections and MUST resolve them locally, else every managed
+        # M365 collection logs "missing instance/source" and never collects.
+        m365_sources = [_ser(s) for s in db.query(_m365.ManagedSource)
+                        .filter(_m365.ManagedSource.tenant_id.in_(tids)).all()]
     except Exception:  # noqa: BLE001 — package optional; never break a pull
         pass
     return {
@@ -378,6 +384,7 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "m365_scope_policies": m365_scope,
         "m365_bindings": m365_bindings,
         "m365_desired_states": m365_desired,
+        "m365_managed_sources": m365_sources,
         "nodes": [_ser(n) for n in db.query(Node).all()],
         "pricing": _ser(pricing) if pricing else None,
         "pending_jobs": [_ser(j) for j in pending_jobs],

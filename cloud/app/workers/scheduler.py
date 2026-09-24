@@ -1012,13 +1012,29 @@ def run_due() -> int:
         default_minutes = max(1, node_config.get_int(
             db, "CV_SYNC_INTERVAL_MINUTES", settings.sync_interval_minutes))
         assigned: set[str] = set()
+        active_only: set[str] | None = None
         if skip_assigned:
             assigned = {tid for (tid,) in
                         db.query(Tenant.id).filter(Tenant.node_id.isnot(None)).all()}
+        else:
+            # A customer node's local DB ALSO holds tenants it merely warm-STANDBYs
+            # (their collections replicate for fast failover). Only run the ones this
+            # node is ACTIVE for (node_id == self); the standby's active node runs the
+            # rest — otherwise the standby double-runs backups (and spams when it lacks
+            # node-created state like a managed M365 source).
+            self_node = (db.query(Node).filter(Node.is_self.is_(True)).first()
+                         or db.query(Node).filter(
+                             Node.name == (settings.node_name or settings.domain)).first())
+            if self_node:
+                active_only = {tid for (tid,) in db.query(Tenant.id)
+                               .filter(Tenant.node_id == self_node.id).all()}
         for c in db.query(Collection).all():
             total += 1
             if c.tenant_id in assigned:
                 skipped_node += 1
+                continue
+            if active_only is not None and c.tenant_id not in active_only:
+                skipped_node += 1  # this node is only a warm standby for this tenant
                 continue
             try:
                 e, d, r = _process_collection(db, c, now, default_minutes)
