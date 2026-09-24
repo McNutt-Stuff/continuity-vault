@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -209,6 +209,15 @@ def list_attestations(principal: security.Principal = Depends(require_compliance
     from ..compliance.models import ComplianceAttestation
     rows = {a.capability: a for a in db.query(ComplianceAttestation)
             .filter(ComplianceAttestation.tenant_id == tenant.id).all()}
+    docs_by_cap: dict[str, list] = {}
+    from ..compliance.models import ComplianceEvidenceDoc
+    for d in (db.query(ComplianceEvidenceDoc)
+              .filter(ComplianceEvidenceDoc.tenant_id == tenant.id)
+              .order_by(ComplianceEvidenceDoc.uploaded_at.desc()).all()):
+        docs_by_cap.setdefault(d.capability, []).append({
+            "id": d.id, "filename": d.filename, "size_bytes": d.size_bytes,
+            "content_type": d.content_type, "uploaded_by": d.uploaded_by,
+            "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None})
     # Which enabled frameworks reference each attestable capability (for context).
     fw_by_cap: dict[str, list[str]] = {}
     enabled = {p.framework for p in db.query(m.CompliancePack)
@@ -237,6 +246,7 @@ def list_attestations(principal: security.Principal = Depends(require_compliance
             "attested_at": (a.attested_at.isoformat() if (a and a.attested_at) else None),
             "review_due_at": (a.review_due_at.isoformat() if (a and a.review_due_at) else None),
             "stale": bool(a and a.review_due_at and a.review_due_at < now),
+            "documents": docs_by_cap.get(cap, []),
         })
     items.sort(key=lambda x: (x["domain"], x["title"]))
     return {"attestations": items}
@@ -287,4 +297,99 @@ def submit_attestation(body: AttestationBody,
         engine.evaluate(db, tenant, actor=row.attested_by)
     except Exception:  # noqa: BLE001 — never fail the attestation on a re-score hiccup
         pass
+    return {"ok": True}
+
+
+_MAX_DOC_BYTES = 25 * 1024 * 1024  # policy documents are small; cap at 25 MB
+
+
+def _tenant_prefix(tenant: Tenant) -> str:
+    return getattr(tenant, "storage_prefix", None) or f"t-{tenant.id[:8]}"
+
+
+@router.post("/attestations/{capability}/document")
+async def upload_evidence_doc(capability: str, file: UploadFile = File(...),
+                              principal: security.Principal = Depends(require_compliance),
+                              db: Session = Depends(get_db)):
+    """Attach an encrypted proof document (policy/plan PDF) to an attestable
+    capability. Stored ciphertext-only in Arkive Cloud under the tenant prefix."""
+    import hashlib
+    from ..compliance.models import ComplianceEvidenceDoc
+    from .. import credstore
+    from ..storage import build_destination
+    tenant = _tenant(db, principal)
+    spec = registry.CAPABILITIES.get(capability)
+    if not spec or not spec.get("attestable"):
+        raise HTTPException(400, "not an attestable capability")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "empty file")
+    if len(raw) > _MAX_DOC_BYTES:
+        raise HTTPException(413, "file too large (25 MB max)")
+    user = db.get(User, principal.user_id)
+    doc = ComplianceEvidenceDoc(
+        tenant_id=tenant.id, capability=capability,
+        filename=(file.filename or "document")[:200],
+        content_type=(file.content_type or "application/octet-stream")[:100],
+        size_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+        uploaded_by=((user.email if user else None) or principal.user_id or ""),
+        storage_dest="cv-cloud")
+    doc.storage_key = f"compliance/{doc.id}"
+    cipher = credstore.encrypt_bytes(f"compliance:{tenant.id}", raw)
+    try:
+        build_destination("cv-cloud").put_object(_tenant_prefix(tenant), doc.storage_key,
+                                                 cipher, immutable=False)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"couldn't store the document: {exc}")
+    db.add(doc)
+    db.commit()
+    audit.record(db, actor=doc.uploaded_by, action="compliance.evidence_upload",
+                 tenant_id=tenant.id, resource=capability, category="admin", severity="info",
+                 detail={"capability": capability, "filename": doc.filename, "bytes": doc.size_bytes})
+    return {"id": doc.id, "filename": doc.filename, "size_bytes": doc.size_bytes,
+            "content_type": doc.content_type, "uploaded_by": doc.uploaded_by,
+            "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None}
+
+
+@router.get("/documents/{doc_id}")
+def download_evidence_doc(doc_id: str,
+                          principal: security.Principal = Depends(require_compliance),
+                          db: Session = Depends(get_db)):
+    """Stream a decrypted evidence document (org-admin gated + audited)."""
+    from ..compliance.models import ComplianceEvidenceDoc
+    from .. import credstore
+    from ..storage import build_destination
+    tenant = _tenant(db, principal)
+    doc = db.get(ComplianceEvidenceDoc, doc_id)
+    if doc is None or doc.tenant_id != tenant.id:
+        raise HTTPException(404, "document not found")
+    try:
+        cipher = build_destination(doc.storage_dest or "cv-cloud").get_object(
+            _tenant_prefix(tenant), doc.storage_key)
+        raw = credstore.decrypt_bytes(f"compliance:{tenant.id}", cipher)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"couldn't read the document: {exc}")
+    audit.record(db, actor=principal.user_id, action="compliance.evidence_download",
+                 tenant_id=tenant.id, resource=doc.capability, category="admin", severity="info",
+                 detail={"document": doc.id, "filename": doc.filename})
+    return Response(content=raw, media_type=doc.content_type or "application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="{doc.filename}"'})
+
+
+@router.delete("/documents/{doc_id}")
+def delete_evidence_doc(doc_id: str,
+                        principal: security.Principal = Depends(require_compliance),
+                        db: Session = Depends(get_db)):
+    from ..compliance.models import ComplianceEvidenceDoc
+    tenant = _tenant(db, principal)
+    doc = db.get(ComplianceEvidenceDoc, doc_id)
+    if doc is None or doc.tenant_id != tenant.id:
+        raise HTTPException(404, "document not found")
+    cap = doc.capability
+    fn = doc.filename
+    db.delete(doc)  # the encrypted object is left orphaned (unreadable) — no WORM delete
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="compliance.evidence_delete",
+                 tenant_id=tenant.id, resource=cap, category="admin", severity="warning",
+                 detail={"document": doc_id, "filename": fn})
     return {"ok": True}

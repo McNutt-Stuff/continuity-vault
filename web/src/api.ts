@@ -68,12 +68,42 @@ export class ApiError extends Error {
   }
 }
 
+async function uploadRequest<T>(path: string, form: FormData): Promise<T> {
+  // Multipart upload — let the browser set the Content-Type (with boundary).
+  const res = await fetch(BASE + path, {
+    method: "POST",
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: form,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json())?.detail ?? detail; } catch { /* ignore */ }
+    if (res.status === 401 && token && !path.startsWith("/auth/")) onUnauthorized?.();
+    throw new ApiError(res.status, detail);
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json() as Promise<T>;
+}
+
+async function blobRequest(path: string): Promise<Blob> {
+  const res = await fetch(BASE + path, {
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
+  if (!res.ok) {
+    if (res.status === 401 && token) onUnauthorized?.();
+    throw new ApiError(res.status, res.statusText);
+  }
+  return res.blob();
+}
+
 export const api = {
   get: <T,>(p: string) => request<T>("GET", p),
   post: <T,>(p: string, b?: unknown) => request<T>("POST", p, b),
   put: <T,>(p: string, b?: unknown) => request<T>("PUT", p, b),
   patch: <T,>(p: string, b?: unknown) => request<T>("PATCH", p, b),
   del: <T,>(p: string) => request<T>("DELETE", p),
+  upload: <T,>(p: string, form: FormData) => uploadRequest<T>(p, form),
+  blob: (p: string) => blobRequest(p),
 };
 
 // --- Types ---

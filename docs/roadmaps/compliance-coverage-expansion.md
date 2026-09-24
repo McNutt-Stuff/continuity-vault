@@ -56,9 +56,9 @@ Turn the procedural controls into first-class, scored evidence.
   link proof, set the review date; audited + re-scored.
 - **Docs** — Help Center questionnaire guidance.
 
-**Phase 1b (fast follow):** real **document upload** — attach the policy PDF as the
-proof (stored encrypted like any object), shown against the control; auditor export
-includes it.
+**Phase 1b (delivered):** real **document upload** — attach the policy PDF as the
+proof (encrypted in Arkive Cloud, ciphertext-only, org-admin gated + audited on
+upload/download), shown against the attestation with a doc count on the control.
 
 ## Phase 2 — Deepen Microsoft 365 (highest ROI automation)
 - **Microsoft Secure Score** (`Reports.Read.All` / `SecurityEvents.Read.All`) → a

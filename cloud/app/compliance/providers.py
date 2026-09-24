@@ -362,6 +362,17 @@ def _attestations(db: Session, tenant, scope: dict) -> list[CapabilityEvidence]:
         return []
     rows = {a.capability: a for a in db.query(ComplianceAttestation)
             .filter(ComplianceAttestation.tenant_id == tenant.id).all()}
+    # Count proof documents per capability so the evidence shows "proof attached".
+    doc_counts: dict[str, int] = {}
+    try:
+        from .models import ComplianceEvidenceDoc
+        from sqlalchemy import func
+        for cap, n in (db.query(ComplianceEvidenceDoc.capability, func.count(ComplianceEvidenceDoc.id))
+                       .filter(ComplianceEvidenceDoc.tenant_id == tenant.id)
+                       .group_by(ComplianceEvidenceDoc.capability).all()):
+            doc_counts[cap] = int(n)
+    except Exception:  # noqa: BLE001
+        doc_counts = {}
     out: list[CapabilityEvidence] = []
     for cap in attestable:
         a = rows.get(cap)
@@ -383,7 +394,8 @@ def _attestations(db: Session, tenant, scope: dict) -> list[CapabilityEvidence]:
             evidence_level="manual", expires_at=a.review_due_at,
             detail={"attestable": True, "attested": True, "attested_by": a.attested_by,
                     "attested_at": a.attested_at.isoformat() if a.attested_at else None,
-                    "evidence_url": a.evidence_url or "", "stale": stale}))
+                    "evidence_url": a.evidence_url or "", "documents": doc_counts.get(cap, 0),
+                    "stale": stale}))
     return out
 
 

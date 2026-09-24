@@ -30,6 +30,7 @@ interface Attestation {
   capability: string; title: string; description: string; domain: string; frameworks: string[];
   status: string; note: string; evidence_url: string; attested_by: string;
   attested_at: string | null; review_due_at: string | null; stale: boolean;
+  documents: { id: string; filename: string; size_bytes: number; content_type: string; uploaded_by: string; uploaded_at: string | null }[];
 }
 
 const STATES = ["not_assessed", "planned", "partially_implemented", "implemented", "operating", "not_applicable", "failed"];
@@ -186,7 +187,7 @@ export default function Compliance() {
         </div>
       </Card>
 
-      {attestations.length > 0 && <Questionnaire items={attestations} onSave={saveAttestation} />}
+      {attestations.length > 0 && <Questionnaire items={attestations} onSave={saveAttestation} reload={load} />}
 
       {open && openSpec && (
         <Card style={{ marginBottom: 16 }}>
@@ -282,9 +283,10 @@ const ATTEST_STATUS = ["met", "partial", "unmet", "not_applicable"];
 const attStatusTone = (s: string): "ok" | "warn" | "danger" | "info" =>
   s === "met" ? "ok" : s === "partial" ? "info" : s === "unmet" ? "danger" : "warn";
 
-function Questionnaire({ items, onSave }: {
+function Questionnaire({ items, onSave, reload }: {
   items: Attestation[];
   onSave: (cap: string, patch: { status: string; note: string; evidence_url: string; review_months: number }) => Promise<void>;
+  reload: () => Promise<void>;
 }) {
   const answered = items.filter((i) => i.status).length;
   return (
@@ -295,19 +297,20 @@ function Questionnaire({ items, onSave }: {
       </div>
       <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>
         These framework controls are organizational — policies, plans, training, reviews — that Arkive can't
-        measure automatically. Attest to each, link your proof, and set a review date. Unanswered items count
+        measure automatically. Attest to each, attach your proof, and set a review date. Unanswered items count
         as <b>not yet demonstrated</b>.
       </div>
       <div className="stack" style={{ gap: 0 }}>
-        {items.map((it) => <AttestRow key={it.capability} it={it} onSave={onSave} />)}
+        {items.map((it) => <AttestRow key={it.capability} it={it} onSave={onSave} reload={reload} />)}
       </div>
     </Card>
   );
 }
 
-function AttestRow({ it, onSave }: {
+function AttestRow({ it, onSave, reload }: {
   it: Attestation;
   onSave: (cap: string, patch: { status: string; note: string; evidence_url: string; review_months: number }) => Promise<void>;
+  reload: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState(it.status || "");
@@ -321,11 +324,34 @@ function AttestRow({ it, onSave }: {
     try { await onSave(it.capability, { status, note, evidence_url: url, review_months: months }); setOpen(false); }
     finally { setBusy(false); }
   }
+  async function upload(f: File) {
+    setBusy(true);
+    try {
+      const form = new FormData(); form.append("file", f);
+      await api.upload(`/compliance/attestations/${it.capability}/document`, form);
+      await reload();
+      notify({ message: "Proof document uploaded.", tone: "ok" });
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Upload failed", tone: "danger" }); }
+    finally { setBusy(false); }
+  }
+  async function download(id: string, filename: string) {
+    try {
+      const blob = await api.blob(`/compliance/documents/${id}`);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) { notify({ message: (e as { message?: string }).message || "Download failed", tone: "danger" }); }
+  }
+  async function removeDoc(id: string) {
+    try { await api.del(`/compliance/documents/${id}`); await reload(); }
+    catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't remove", tone: "danger" }); }
+  }
   return (
     <div style={{ borderBottom: "1px solid var(--border-soft)", padding: "8px 0" }}>
       <div className="row" style={{ gap: 8, alignItems: "center", cursor: "pointer" }} onClick={() => setOpen(!open)}>
         {it.status ? <Pill tone={attStatusTone(it.status)}>{it.status.replace(/_/g, " ")}</Pill> : <Pill tone="warn">not attested</Pill>}
         {it.stale && <Pill tone="warn">review due</Pill>}
+        {it.documents.length > 0 && <Pill tone="info">{it.documents.length} doc{it.documents.length === 1 ? "" : "s"}</Pill>}
         <span style={{ fontWeight: 600, fontSize: 12.5 }}>{it.title}</span>
         <span className="flex1 faint" style={{ fontSize: 11.5 }}>{it.frameworks.join(", ")}</span>
         <span className="faint" style={{ fontSize: 11 }}>{open ? "▴" : "▾"}</span>
@@ -338,7 +364,7 @@ function AttestRow({ it, onSave }: {
               <option value="">— answer —</option>
               {ATTEST_STATUS.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
             </select>
-            <input className="input sm" style={{ minWidth: 240 }} placeholder="Proof link (policy URL / document)"
+            <input className="input sm" style={{ minWidth: 240 }} placeholder="Proof link (policy URL)"
                    value={url} onChange={(e) => setUrl(e.target.value)} />
             <label className="faint" style={{ fontSize: 11.5 }}>Review in
               <select className="input sm" style={{ marginLeft: 4 }} value={months} onChange={(e) => setMonths(Number(e.target.value))}>
@@ -349,8 +375,26 @@ function AttestRow({ it, onSave }: {
           <textarea className="input" style={{ marginTop: 8, width: "100%", minHeight: 52, fontSize: 12.5 }}
                     placeholder="How is this satisfied? (scope, owner, where the evidence lives)"
                     value={note} onChange={(e) => setNote(e.target.value)} />
-          <div className="row" style={{ gap: 8, marginTop: 6, alignItems: "center" }}>
+          {/* Proof documents */}
+          {it.documents.length > 0 && (
+            <div className="stack" style={{ gap: 3, marginTop: 8 }}>
+              {it.documents.map((d) => (
+                <div key={d.id} className="row" style={{ gap: 8, alignItems: "center", fontSize: 12 }}>
+                  <Icon name="file" size={13} />
+                  <button className="btn ghost sm" onClick={() => download(d.id, d.filename)}>{d.filename}</button>
+                  <span className="faint" style={{ fontSize: 11 }}>{(d.size_bytes / 1024).toFixed(0)} KB · {d.uploaded_by}</span>
+                  <button className="btn ghost sm" onClick={() => removeDoc(d.id)} title="Remove"><Icon name="trash" size={12} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="row" style={{ gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
             <button className="btn primary sm" disabled={!status || busy} onClick={save}>{busy ? "Saving…" : "Save attestation"}</button>
+            <label className="btn ghost sm" style={{ cursor: "pointer" }}>
+              <Icon name="plus" size={12} /> Attach proof
+              <input type="file" style={{ display: "none" }} disabled={busy}
+                     onChange={(e) => { const f = e.target.files?.[0]; if (f) void upload(f); e.target.value = ""; }} />
+            </label>
             {it.attested_by && <span className="faint" style={{ fontSize: 11 }}>Last: {it.attested_by}{it.attested_at ? ` · ${new Date(it.attested_at + "Z").toLocaleDateString()}` : ""}</span>}
           </div>
         </div>

@@ -185,3 +185,24 @@ class ComplianceAttestation(Base):
     review_due_at = Column(DateTime, nullable=True)  # attestation goes stale (unknown) after this
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
+
+class ComplianceEvidenceDoc(Base):
+    """An uploaded proof document (policy/procedure/plan) attached to an attestable
+    capability — the actual evidence behind a self-attestation. Stored ENCRYPTED in
+    object storage (only Arkive / a fleet node with the KEK can read it); the row
+    holds non-secret metadata + a plaintext SHA-256 for integrity."""
+
+    __tablename__ = "compliance_evidence_docs"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    capability = Column(String, default="", index=True)   # attestable capability it proves
+    filename = Column(String, default="")
+    content_type = Column(String, default="")
+    size_bytes = Column(Integer, default=0)
+    storage_dest = Column(String, default="cv-cloud")     # where the ciphertext lives
+    storage_key = Column(String, default="")              # object key within the tenant prefix
+    sha256 = Column(String, default="")                   # plaintext integrity hash
+    uploaded_by = Column(String, default="")
+    uploaded_at = Column(DateTime, default=_now)
+
+
