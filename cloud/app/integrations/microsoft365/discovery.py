@@ -115,7 +115,8 @@ def run_discovery(db: Session, inst, *, client_id: str, client_secret: str,
             if not oid:
                 continue
             ident = (db.query(m.ExternalIdentity)
-                     .filter(m.ExternalIdentity.microsoft_tenant_id == cred.microsoft_tenant_id,
+                     .filter(m.ExternalIdentity.tenant_id == inst.tenant_id,
+                             m.ExternalIdentity.microsoft_tenant_id == cred.microsoft_tenant_id,
                              m.ExternalIdentity.entra_object_id == oid).first())
             if ident is None:
                 ident = m.ExternalIdentity(

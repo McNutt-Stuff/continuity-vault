@@ -830,10 +830,13 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict,
                 for row in body.m365_external_identities:
                     if not _ok(row):
                         continue
-                    # Reconcile on the durable identity key so a node's own id for an
-                    # identity the CP already has doesn't violate uq_m365_ext_identity.
+                    # Reconcile on the tenant-scoped durable identity key so a node's
+                    # own id for an identity it already pushed updates in place, WITHOUT
+                    # ever touching another tenant's row for the same Entra identity
+                    # (two Arkive tenants can share one Microsoft 365 org).
                     _upsert_by_unique(db, _m365.ExternalIdentity, _reparent(row),
-                                      ["microsoft_tenant_id", "entra_object_id"])
+                                      ["tenant_id", "microsoft_tenant_id",
+                                       "entra_object_id"])
                     counts["integrations"] += 1
                 for row in body.m365_managed_sources:
                     owner = row.get("owner_user_id")

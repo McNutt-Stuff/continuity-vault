@@ -388,6 +388,15 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE compliance_snapshots ADD COLUMN IF NOT EXISTS coverage_expected INTEGER DEFAULT 0",
         "ALTER TABLE compliance_snapshots ADD COLUMN IF NOT EXISTS coverage_covered INTEGER DEFAULT 0",
         "ALTER TABLE compliance_snapshots ADD COLUMN IF NOT EXISTS coverage_failed INTEGER DEFAULT 0",
+        # M365 external identities: scope the durable identity key to the Arkive
+        # tenant. Two Arkive tenants can back up the SAME Microsoft 365 org, so the
+        # same Entra identity legitimately appears once PER tenant; the old global
+        # UNIQUE(microsoft_tenant_id, entra_object_id) let the first tenant own the
+        # row and made the second tenant's node push fail (IntegrityError → whole
+        # push aborted → its search-index replication froze). Drop then re-add scoped.
+        "ALTER TABLE m365_external_identities DROP CONSTRAINT IF EXISTS uq_m365_ext_identity",
+        "ALTER TABLE m365_external_identities ADD CONSTRAINT uq_m365_ext_identity_tenant "
+        "UNIQUE (tenant_id, microsoft_tenant_id, entra_object_id)",
     ]
     for statement in statements:
         try:

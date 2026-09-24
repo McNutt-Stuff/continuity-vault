@@ -66,11 +66,15 @@ class ManagedCredentialRef(Base):
 
 class ExternalIdentity(Base):
     """A discovered Microsoft Entra identity. The durable key is
-    ``(microsoft_tenant_id, entra_object_id)`` — UPN/email are mutable snapshots."""
+    ``(tenant_id, microsoft_tenant_id, entra_object_id)`` — scoped to the Arkive
+    tenant because two Arkive tenants can back up the SAME Microsoft 365 org (so the
+    same Entra identity legitimately appears once per tenant). UPN/email are mutable
+    snapshots."""
 
     __tablename__ = "m365_external_identities"
-    __table_args__ = (UniqueConstraint("microsoft_tenant_id", "entra_object_id",
-                                       name="uq_m365_ext_identity"),)
+    __table_args__ = (UniqueConstraint("tenant_id", "microsoft_tenant_id",
+                                       "entra_object_id",
+                                       name="uq_m365_ext_identity_tenant"),)
     id = Column(String, primary_key=True, default=_uuid)
     tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
     integration_instance_id = Column(String, index=True, nullable=False)
