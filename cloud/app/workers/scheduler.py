@@ -1022,6 +1022,7 @@ def run_due() -> int:
             # node is ACTIVE for (node_id == self); the standby's active node runs the
             # rest — otherwise the standby double-runs backups (and spams when it lacks
             # node-created state like a managed M365 source).
+            from ..models import Node
             self_node = (db.query(Node).filter(Node.is_self.is_(True)).first()
                          or db.query(Node).filter(
                              Node.name == (settings.node_name or settings.domain)).first())
