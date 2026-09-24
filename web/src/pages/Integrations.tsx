@@ -2040,7 +2040,12 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
                     then confirm below. Consent uses <code>.default</code>, so it re-grants exactly the
                     Application permissions configured on the app.
                   </div>
-                  <div className="row" style={{ gap: 8, marginTop: 10 }}>
+                  <label className="faint" style={{ fontSize: 11.5, display: "block", marginTop: 10 }}>
+                    Your Microsoft 365 organization's <b>Directory (tenant) ID</b> — the GUID Microsoft
+                    assigned your Entra directory. It's auto-detected from your existing connection, so leave
+                    it as-is and just confirm once you've approved in the Microsoft window.
+                  </label>
+                  <div className="row" style={{ gap: 8, marginTop: 6 }}>
                     <input className="input" style={{ maxWidth: 320 }} placeholder="Directory (tenant) ID"
                            value={tenantInput} onChange={(e) => setTenantInput(e.target.value)} />
                     <button className="btn primary sm" disabled={busy === "consent" || !tenantInput.trim()} onClick={confirmConsent}>
