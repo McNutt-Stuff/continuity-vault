@@ -6,11 +6,12 @@ import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
 import { notify } from "../components/dialog";
 
-interface Evidence { capability: string; provider: string; status: string; summary: string; }
+interface Evidence { capability: string; provider: string; status: string; summary: string; evidence_level?: string; stale?: boolean; }
+interface Coverage { expected: number; covered: number; failed: number; unknown: number; evidence_levels?: string[]; }
 interface Control {
   id: string; control_id: string; title: string; family: string; state: string; score: number;
   owner?: string | null; auto: boolean; guidance: string; capabilities: string[];
-  last_evaluated_at?: string | null; evidence: Evidence[];
+  last_evaluated_at?: string | null; evidence: Evidence[]; coverage?: Coverage;
   exception?: { reason: string; approved_by?: string; expires_at?: string | null } | null;
 }
 interface Driver {
@@ -34,6 +35,27 @@ const evTone = (s: string): "ok" | "warn" | "danger" | "info" =>
 const prettyProvider = (p: string) => p === "arkive" ? "Arkive core"
   : p === "microsoft365" ? "Microsoft 365"
   : p === "integration_signals" ? "Integration signals" : p;
+
+// Evidence provenance labels (spec: configuration vs observed vs verified_test vs manual).
+const LEVEL_LABEL: Record<string, string> = {
+  observed: "Observed", verified_test: "Verified", configuration: "Configured", manual: "Attested",
+};
+
+// Scoped coverage num/den with a mini bar — the honest "how much is actually covered".
+function CoverageBar({ c }: { c?: Coverage }) {
+  if (!c || !c.expected) return <span className="faint" style={{ fontSize: 11.5 }}>—</span>;
+  const pct = Math.round((c.covered / c.expected) * 100);
+  const color = pct >= 98 ? "var(--ok,#35d0a5)" : pct >= 50 ? "var(--warn,#f5a623)" : "var(--danger,#e5484d)";
+  return (
+    <div style={{ minWidth: 96 }}>
+      <div style={{ fontSize: 12, fontWeight: 600 }}>{c.covered}/{c.expected}
+        {c.failed ? <span style={{ color: "var(--danger,#e5484d)", fontWeight: 400 }}> · {c.failed} failed</span> : null}</div>
+      <div style={{ height: 4, borderRadius: 3, background: "var(--inset)", marginTop: 3, overflow: "hidden" }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: color }} />
+      </div>
+    </div>
+  );
+}
 
 function ScoreRing({ score, size = 76 }: { score: number | null; size?: number }) {
   const v = score ?? 0;
@@ -230,7 +252,7 @@ export default function ComplianceFramework() {
             <h3 style={{ marginTop: 0 }}>Controls</h3>
             <div style={{ overflowX: "auto" }}>
               <table className="table">
-                <thead><tr><th>Control</th><th>State</th><th>Evidence</th><th></th></tr></thead>
+                <thead><tr><th>Control</th><th>State</th><th>Coverage</th><th>Evidence</th><th></th></tr></thead>
                 <tbody>
                   {detail.controls.map((c) => (
                     <Fragment key={c.id}>
@@ -247,6 +269,7 @@ export default function ComplianceFramework() {
                               </select>}
                           <span className="faint" style={{ fontSize: 10.5, marginLeft: 6 }}>{c.auto ? "auto" : "manual"}</span>
                         </td>
+                        <td><CoverageBar c={c.coverage} /></td>
                         <td>
                           <button className="btn ghost sm" onClick={() => setExpanded(expanded === c.id ? null : c.id)}>
                             {c.evidence.length} signal(s) {expanded === c.id ? "▴" : "▾"}
@@ -258,7 +281,7 @@ export default function ComplianceFramework() {
                       </tr>
                       {expanded === c.id && (
                         <tr key={c.id + "-ev"}>
-                          <td colSpan={4} style={{ background: "var(--inset)" }}>
+                          <td colSpan={5} style={{ background: "var(--inset)" }}>
                             <div className="faint" style={{ fontSize: 11.5, marginBottom: 6 }}>{c.guidance}</div>
                             {c.evidence.length === 0 ? <span className="faint" style={{ fontSize: 12 }}>No evidence collected yet — re-assess.</span> : (
                               <div className="stack" style={{ gap: 4 }}>
@@ -267,7 +290,9 @@ export default function ComplianceFramework() {
                                     <SourceIcon type={e.provider === "microsoft365" ? "microsoft365" : "shield"} fallback="shield" size={14} />
                                     <Pill tone={evTone(e.status)}>{e.status}</Pill>
                                     <span className="faint">{e.capability}</span>
-                                    <span>{e.summary}</span>
+                                    <span className="flex1">{e.summary}</span>
+                                    {e.evidence_level && <Pill tone="info">{LEVEL_LABEL[e.evidence_level] || e.evidence_level}</Pill>}
+                                    {e.stale && <Pill tone="warn">stale</Pill>}
                                   </div>
                                 ))}
                               </div>
