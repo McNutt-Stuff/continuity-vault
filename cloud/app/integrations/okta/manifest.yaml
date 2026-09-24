@@ -1,0 +1,31 @@
+apiVersion: arkive.integrations/v1
+kind: IntegrationPackage
+metadata:
+  id: okta
+  name: Okta
+  version: 0.1.0
+spec:
+  status: coming_soon
+  minimumPlatformVersion: 0.0.0
+  plans: [business, enterprise]
+  ownershipModels: [organization]
+  category: identity
+  capabilities:
+    - users
+    - factors
+    - policies
+    - admin_roles
+  runsOn: node                      # assigned customer node (no appliance)
+  auth:
+    model: oauth_admin_consent
+  compliance:
+    evidences:
+    - mfa
+    - phishing_resistant_mfa
+    - privileged_mfa
+    - privileged_access_review
+    - password_policy
+    - conditional_access
+    - access_control
+  docs:
+    slug: integration-okta

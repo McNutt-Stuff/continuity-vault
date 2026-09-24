@@ -17,6 +17,8 @@ export const SYNCED_SOURCE_ICONS: ReadonlySet<string> = new Set([
   "evernote", "linkedin", "imessage", "ubiquiti", "aws", "azure", "gcp",
   "salesforce", "crossbeam", "microsoft365", "sharepoint", "teams", "exchange",
   "copilot", "onenote",
+  // Beyond-Microsoft compliance integrations (Phase 3).
+  "google_workspace", "okta", "qualys", "tenable", "proofpoint",
   // Device/endpoint platform marks (Devices page).
   "macos", "windows", "ios", "android",
 ]);

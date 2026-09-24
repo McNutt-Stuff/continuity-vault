@@ -1,0 +1,30 @@
+apiVersion: arkive.integrations/v1
+kind: IntegrationPackage
+metadata:
+  id: azure
+  name: Microsoft Azure
+  version: 0.1.0
+spec:
+  status: coming_soon
+  minimumPlatformVersion: 0.0.0
+  plans: [business, enterprise]
+  ownershipModels: [organization]
+  category: cloud
+  capabilities:
+    - policy
+    - activity_log
+    - defender
+    - entra
+  runsOn: node                      # assigned customer node (no appliance)
+  auth:
+    model: oauth_admin_consent
+  compliance:
+    evidences:
+    - encryption_at_rest
+    - encryption_in_transit
+    - audit_logging
+    - monitoring
+    - mfa
+    - data_residency
+  docs:
+    slug: integration-azure

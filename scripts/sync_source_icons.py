@@ -86,6 +86,15 @@ SOURCE_ICONS: dict[str, dict] = {
     "copilot":    {"file": "Microsoft-copilot-2026-seeklogo.svg", "search": "Microsoft Copilot icon"},
     "onenote":    {"file": "Microsoft OneNote Icon (2025 - present).svg", "search": "Microsoft OneNote icon"},
     "gcp":        {"file": "Google Cloud icon (2026).svg", "search": "Google Cloud icon 2026"},
+    # Beyond-Microsoft compliance integrations (Phase 3) — matched by integration_type.
+    "google_workspace": {"file": "Google Workspace Logo.svg", "search": "Google Workspace logo"},
+    "okta":       {"file": "Okta logo.svg", "search": "Okta company logo"},
+    "jamf":       {"file": "Jamf logo.svg", "search": "Jamf company logo"},
+    "kandji":     {"file": "Kandji logo.svg", "search": "Kandji company logo"},
+    "qualys":     {"file": "Qualys logo.svg", "search": "Qualys company logo"},
+    "tenable":    {"file": "Tenable logo.svg", "search": "Tenable company logo"},
+    "knowbe4":    {"file": "KnowBe4 logo.svg", "search": "KnowBe4 company logo"},
+    "proofpoint": {"file": "Proofpoint logo.svg", "search": "Proofpoint company logo"},
     # Device/endpoint platform marks (Devices page). Brand logos from Commons.
     "macos":      {"file": "Apple logo black.svg", "search": "Apple logo black"},
     "windows":    {"file": "Windows logo - 2021.svg", "search": "Windows logo 2021"},

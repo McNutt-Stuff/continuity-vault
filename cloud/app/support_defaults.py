@@ -930,6 +930,35 @@ def _source_doc(slug, title, icon, nav_order, tagline, backs_up, connect, mappin
                 parent_slug=parent_slug)
 
 
+def _compliance_integration_doc(slug, title, icon, nav_order, tagline, assesses,
+                                capabilities, connect, vendors=""):
+    """Help Center page for a beyond-Microsoft compliance integration (Phase 3).
+
+    ``capabilities`` is a list of (name, how-evidenced) pairs; ``connect`` is the
+    setup step list. These integrations evidence compliance posture (they don't
+    back up data), and ship as a preview shell until their collector lands.
+    """
+    caps_md = _bullets([f"**{name}** — {how}" for name, how in capabilities])
+    body = (
+        f"# {title}\n\n{tagline}\n\n"
+        f"## What it assesses\n{assesses}\n\n"
+        + (f"## Related tools it complements\n{vendors}\n\n" if vendors else "")
+        + f"## Compliance capabilities it evidences\n{caps_md}\n\n"
+        f"## How you'll connect\n{_steps(connect)}\n\n"
+        "## Status & availability\n"
+        "::: plan business\n"
+        "This is a **compliance integration** for Business / Enterprise organizations, enforced on "
+        "the server. It contributes **evidence** to your compliance frameworks — it does not back up "
+        "data. It's currently a **preview** (catalog + compliance wiring in place); its live "
+        "collector is being finished, and until then no posture is fabricated — a capability with no "
+        "observation stays *not yet demonstrated* rather than a false pass.\n"
+        ":::\n"
+    )
+    return _doc(slug, title, "Sources & Connections", _SOURCES, nav_order, icon,
+                tagline, body, help_routes=["/compliance"], required_plan="business",
+                parent_slug="integrations")
+
+
 _SOURCE_PAGES = [
     _source_doc(
         "source-gmail", "Gmail", "mail", 50,
@@ -1472,6 +1501,164 @@ _SOURCE_PAGES = [
             "the server. Personal and Family accounts cannot access managed or organization sources.\n"
             ":::\n"),
         parent_slug="integrations"),
+    # --- Beyond-Microsoft compliance integrations (Phase 3) --------------------
+    _compliance_integration_doc(
+        "integration-google-workspace", "Google Workspace", "cloud", 94,
+        "Assess your Google Workspace identity and collaboration posture as compliance evidence — "
+        "2-Step Verification, strong-authentication enrollment, admin footprint, external Drive "
+        "sharing and data region.",
+        "Arkive reads read-only posture from the Google Admin SDK and Reports API on your assigned "
+        "node — never mailbox or Drive content — and folds it into every enabled framework "
+        "(NIST CSF, CIS, ISO 27001, SOC 2, HIPAA, GDPR) as identity and access-policy evidence.",
+        [("Strong authentication (MFA)", "2-Step Verification and security-key/passkey enrollment across the directory."),
+         ("Password policy", "password strength, length and reuse enforcement."),
+         ("Conditional access", "Context-Aware Access policies gating sign-in."),
+         ("External sharing control", "Drive external-sharing controls at the org/OU level."),
+         ("Guest access", "external / visitor account exposure vs the directory."),
+         ("Data residency", "assigned Google Workspace data region."),
+         ("Audit logging", "admin and login audit logging enabled and retained.")],
+        ["Open **Integrations → Google Workspace** (Business / Enterprise).",
+         "A Google Workspace **super administrator** authorizes read-only Admin SDK / Reports access.",
+         "Arkive assesses posture on your assigned node and evidences your identity / access controls."]),
+    _compliance_integration_doc(
+        "integration-okta", "Okta", "shield", 95,
+        "Assess your Okta identity posture as authoritative access-control evidence — authenticator "
+        "policies, phishing-resistant factors, privileged-admin footprint and password policy.",
+        "Arkive reads read-only factor, policy and admin-role data from the Okta API on your assigned "
+        "node and folds it into every enabled framework as strong-authentication and least-privilege "
+        "evidence.",
+        [("Strong authentication (MFA)", "authenticator enrollment and sign-on MFA policy coverage."),
+         ("Phishing-resistant MFA", "FIDO2/WebAuthn (Okta FastPass, security keys) coverage."),
+         ("Privileged MFA", "MFA enforced for admin / super-admin sign-on."),
+         ("Privileged access review", "standing admin-role holder footprint."),
+         ("Password policy", "password strength, lockout and reuse rules."),
+         ("Conditional access", "network-zone / device / risk-based sign-on policies."),
+         ("Access control", "group / app assignment enforcing least privilege.")],
+        ["Open **Integrations → Okta**.",
+         "Create a read-only **API token** (or OAuth app) in your Okta admin console.",
+         "Arkive assesses factor, policy and admin-role posture and evidences your access controls."],
+        vendors="Complements Microsoft 365 (Entra) and Google Workspace as your identity provider."),
+    _compliance_integration_doc(
+        "integration-jamf", "Jamf Pro", "server", 96,
+        "Assess your Apple endpoint fleet in Jamf Pro as device-security evidence — management "
+        "enrollment, FileVault disk encryption and compliance-policy health.",
+        "Arkive reads read-only inventory and compliance state from the Jamf Pro API on your assigned "
+        "node and folds endpoint posture into every enabled framework's data-at-rest and device "
+        "controls.",
+        [("Device compliance", "enrolled Macs meeting their Jamf compliance / smart-group policy."),
+         ("Device encryption", "FileVault disk encryption enabled and key-escrowed.")],
+        ["Open **Integrations → Jamf Pro**.",
+         "Create a read-only **API role + client** in Jamf Pro and paste its credentials.",
+         "Arkive assesses device compliance and encryption coverage across your Apple fleet."],
+        vendors="Complements Microsoft Intune (via the Microsoft 365 integration) for endpoint posture."),
+    _compliance_integration_doc(
+        "integration-kandji", "Kandji", "server", 97,
+        "Assess your Apple endpoint fleet in Kandji as device-security evidence — MDM enrollment, "
+        "FileVault encryption and Blueprint compliance status.",
+        "Arkive reads read-only device and compliance data from the Kandji API on your assigned node "
+        "and folds endpoint posture into every enabled framework's data-at-rest and device controls.",
+        [("Device compliance", "devices passing their assigned Kandji Blueprint / Library items."),
+         ("Device encryption", "FileVault enforced with escrowed recovery keys.")],
+        ["Open **Integrations → Kandji**.",
+         "Create a read-only **API token** in Kandji and paste it.",
+         "Arkive assesses device compliance and encryption coverage across your Apple fleet."],
+        vendors="Complements Jamf Pro and Microsoft Intune for endpoint posture."),
+    _compliance_integration_doc(
+        "integration-aws", "Amazon Web Services", "cloud", 98,
+        "Assess your AWS security configuration as cloud-posture evidence — default encryption, "
+        "CloudTrail audit logging, GuardDuty monitoring, IAM MFA and account region posture.",
+        "Arkive reads read-only configuration from AWS (Config / Security Hub / IAM) on your assigned "
+        "node — never your data — and folds cloud posture into every enabled framework's encryption, "
+        "logging and monitoring controls.",
+        [("Encryption at rest", "default at-rest encryption on S3 / EBS / RDS (KMS)."),
+         ("Encryption in transit", "TLS enforced on public endpoints and S3 policies."),
+         ("Audit logging", "CloudTrail enabled across regions with log-file validation."),
+         ("Monitoring", "GuardDuty / Security Hub monitoring enabled."),
+         ("MFA", "MFA enforced for IAM users and the root account."),
+         ("Data residency", "resources pinned to approved AWS regions.")],
+        ["Open **Integrations → Amazon Web Services**.",
+         "Create a read-only cross-account **IAM role** (SecurityAudit) for Arkive.",
+         "Arkive assesses your account's encryption, logging and monitoring posture."]),
+    _compliance_integration_doc(
+        "integration-azure", "Microsoft Azure", "cloud", 99,
+        "Assess your Azure security configuration as cloud-posture evidence — storage/disk "
+        "encryption, Activity Log auditing, Defender for Cloud monitoring, MFA and region posture.",
+        "Arkive reads read-only configuration from Azure (Policy / Activity Log / Defender for Cloud) "
+        "on your assigned node and folds cloud posture into every enabled framework's encryption, "
+        "logging and monitoring controls.",
+        [("Encryption at rest", "storage / disk encryption with customer-managed keys."),
+         ("Encryption in transit", "secure-transfer-required and TLS minimums enforced."),
+         ("Audit logging", "Activity Log and diagnostic settings exported."),
+         ("Monitoring", "Microsoft Defender for Cloud enabled on subscriptions."),
+         ("MFA", "MFA enforced via Entra ID sign-in policy."),
+         ("Data residency", "resources deployed only in approved Azure regions.")],
+        ["Open **Integrations → Microsoft Azure**.",
+         "Register a read-only app / assign the **Reader + Security Reader** roles.",
+         "Arkive assesses your subscription's encryption, logging and monitoring posture."]),
+    _compliance_integration_doc(
+        "integration-gcp", "Google Cloud", "cloud", 100,
+        "Assess your Google Cloud security configuration as cloud-posture evidence — CMEK "
+        "encryption, Cloud Audit Logs, Security Command Center monitoring, MFA and region posture.",
+        "Arkive reads read-only configuration from Google Cloud (Security Command Center / IAM / "
+        "org policy) on your assigned node and folds cloud posture into every enabled framework's "
+        "encryption, logging and monitoring controls.",
+        [("Encryption at rest", "customer-managed encryption keys (CMEK) on storage and disks."),
+         ("Encryption in transit", "TLS / Google-managed transit encryption enforced."),
+         ("Audit logging", "Cloud Audit Logs (admin + data access) enabled."),
+         ("Monitoring", "Security Command Center monitoring enabled."),
+         ("MFA", "2-Step Verification enforced for principals."),
+         ("Data residency", "resources constrained to approved locations by org policy.")],
+        ["Open **Integrations → Google Cloud**.",
+         "Grant a read-only service account the **Security Reviewer** role.",
+         "Arkive assesses your project/org encryption, logging and monitoring posture."]),
+    _compliance_integration_doc(
+        "integration-qualys", "Qualys", "shield", 101,
+        "Fold your Qualys VMDR program into Arkive compliance — scan coverage, open findings by "
+        "severity and remediation SLA adherence.",
+        "Arkive reads read-only scan and finding summaries from the Qualys API on your assigned node "
+        "and folds them into every enabled framework's vulnerability-management control — counts and "
+        "SLA adherence only, never raw scan payloads.",
+        [("Vulnerability management", "authenticated scan coverage plus open findings by severity and SLA adherence.")],
+        ["Open **Integrations → Qualys**.",
+         "Create a read-only **API user** in your Qualys subscription.",
+         "Arkive assesses scan coverage and open-finding posture across your assets."],
+        vendors="Complements Tenable and Microsoft Defender for vulnerability management."),
+    _compliance_integration_doc(
+        "integration-tenable", "Tenable", "shield", 102,
+        "Fold your Tenable (Nessus / Tenable.io) program into Arkive compliance — asset scan "
+        "coverage, exposure findings and remediation SLA adherence.",
+        "Arkive reads read-only scan and finding summaries from the Tenable API on your assigned node "
+        "and folds them into every enabled framework's vulnerability-management control — counts and "
+        "SLA adherence only, never raw scan payloads.",
+        [("Vulnerability management", "scan coverage across assets plus open vulnerabilities by severity and SLA adherence.")],
+        ["Open **Integrations → Tenable**.",
+         "Create read-only **API keys** in Tenable.io (or Tenable.sc).",
+         "Arkive assesses scan coverage and exposure posture across your assets."],
+        vendors="Complements Qualys and Microsoft Defender for vulnerability management."),
+    _compliance_integration_doc(
+        "integration-knowbe4", "KnowBe4", "user", 103,
+        "Fold your KnowBe4 security-awareness program into Arkive compliance — training completion "
+        "rates and simulated-phishing results.",
+        "Arkive reads read-only training and phishing-test summaries from the KnowBe4 API on your "
+        "assigned node and folds them into every enabled framework's security-training control — "
+        "completion rates only, never individual assessment content.",
+        [("Security training", "security-awareness training completion and phishing-test results across the workforce.")],
+        ["Open **Integrations → KnowBe4**.",
+         "Create a read-only **Reporting API key** in your KnowBe4 console.",
+         "Arkive assesses training completion and phishing-test posture for your organization."],
+        vendors="Complements Proofpoint for security-awareness evidence."),
+    _compliance_integration_doc(
+        "integration-proofpoint", "Proofpoint", "user", 104,
+        "Fold your Proofpoint Security Awareness Training into Arkive compliance — assignment "
+        "completion and phishing-simulation performance.",
+        "Arkive reads read-only training and simulation summaries from the Proofpoint API on your "
+        "assigned node and folds them into every enabled framework's security-training control — "
+        "completion rates only, never individual assessment content.",
+        [("Security training", "awareness-training assignment completion and phishing-simulation results.")],
+        ["Open **Integrations → Proofpoint**.",
+         "Create a read-only **API credential** in your Proofpoint console.",
+         "Arkive assesses training completion and phishing-simulation posture for your organization."],
+        vendors="Complements KnowBe4 for security-awareness evidence."),
 ]
 
 DEFAULT_SUPPORT_DOCS.extend(_SOURCE_PAGES)

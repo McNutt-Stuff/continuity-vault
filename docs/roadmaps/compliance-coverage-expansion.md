@@ -76,15 +76,35 @@ upload/download), shown against the attestation with a doc count on the control.
 - **Unified audit log** enabled → strengthens `audit_logging`: deferred (best surfaced
   via Secure Score recommendations for now).
 
-## Phase 3 — Beyond Microsoft (breadth)
-- **Google Workspace** driver (parallel to M365: users, 2SV, sharing, DLP, residency).
-- **Identity providers** — Okta / JumpCloud (MFA, lifecycle, access reviews).
-- **MDM/endpoint** — Jamf / Kandji / Intune (encryption, patch, screen-lock).
-- **Cloud config** — AWS / Azure / GCP (already have cost hooks): encryption defaults,
-  logging (CloudTrail/Activity), IAM MFA, public-bucket exposure.
-- **Ubiquiti** (existing appliance integration) → network segmentation + logging.
-- **Security awareness** — KnowBe4 / Proofpoint training completion → `security_training`.
-- **Vulnerability mgmt** — Qualys / Tenable / Defender → `vulnerability_management`.
+## Phase 3 — Beyond Microsoft (breadth) — **SHELLS DELIVERED**
+Each vendor ships first as a **catalog + compliance shell**: a self-contained integration
+package under `cloud/app/integrations/<type>/` (spec `status="coming_soon"`, real brand
+icon, a `compliance_driver` that declares the capabilities it evidences + registers a
+provider via `shell_compliance.register_shell_driver`, and its own Help Center page). No
+posture is fabricated until a collector lands — an un-observed capability stays *not yet
+demonstrated*. Turning a shell into a live driver = add a collector that records signals
+(they flow through the standard `integration_signals` provider automatically).
+
+- **Google Workspace** (`google_workspace`, identity) → `mfa`, `phishing_resistant_mfa`,
+  `password_policy`, `conditional_access`, `external_sharing_control`, `guest_access`,
+  `data_residency`, `audit_logging`. ✅ shell
+- **Okta** (`okta`, identity) → `mfa`, `phishing_resistant_mfa`, `privileged_mfa`,
+  `privileged_access_review`, `password_policy`, `conditional_access`, `access_control`. ✅ shell
+- **MDM/endpoint** — **Jamf Pro** (`jamf`) + **Kandji** (`kandji`) → `device_compliance`,
+  `device_encryption` (Intune already live via M365). ✅ shells
+- **Cloud config** — **AWS** (`aws`), **Azure** (`azure`), **GCP** (`gcp`) →
+  `encryption_at_rest`, `encryption_in_transit`, `audit_logging`, `monitoring`, `mfa`,
+  `data_residency`. ✅ shells
+- **Vulnerability mgmt** — **Qualys** (`qualys`) + **Tenable** (`tenable`) →
+  `vulnerability_management` (Defender via M365). ✅ shells
+- **Security awareness** — **KnowBe4** (`knowbe4`) + **Proofpoint** (`proofpoint`) →
+  `security_training`. ✅ shells
+- **Ubiquiti** (existing appliance integration) → network segmentation + logging. ⬜ next
+- **JumpCloud** (identity, secondary IdP) → follow the Okta shell. ⬜ next
+
+Icons: real Wikimedia Commons marks for google_workspace, okta, qualys, tenable, proofpoint;
+aws/azure/gcp reuse the existing brand marks. Jamf/Kandji/KnowBe4 have no free Commons SVG,
+so they use the graceful glyph fallback (never a hand-drawn logo).
 
 ## Phase 4 — Program governance & assurance
 - **Control applicability/scoping** — mark controls N/A or scope them (e.g. HIPAA only

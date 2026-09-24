@@ -16,6 +16,8 @@ BRAND_ICON_TYPES: frozenset[str] = frozenset({
     "evernote", "linkedin", "imessage", "ubiquiti", "aws", "azure", "gcp",
     "salesforce", "crossbeam", "microsoft365", "sharepoint", "teams", "exchange",
     "copilot", "onenote",
+    # Beyond-Microsoft compliance integrations (Phase 3).
+    "google_workspace", "okta", "qualys", "tenable", "proofpoint",
 })
 
 # Variant/local types that reuse another type's brand mark (mirror the frontend).

@@ -1,0 +1,24 @@
+apiVersion: arkive.integrations/v1
+kind: IntegrationPackage
+metadata:
+  id: proofpoint
+  name: Proofpoint
+  version: 0.1.0
+spec:
+  status: coming_soon
+  minimumPlatformVersion: 0.0.0
+  plans: [business, enterprise]
+  ownershipModels: [organization]
+  category: security
+  capabilities:
+    - users
+    - training
+    - phishing
+  runsOn: node                      # assigned customer node (no appliance)
+  auth:
+    model: oauth_admin_consent
+  compliance:
+    evidences:
+    - security_training
+  docs:
+    slug: integration-proofpoint

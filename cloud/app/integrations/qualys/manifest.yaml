@@ -1,0 +1,24 @@
+apiVersion: arkive.integrations/v1
+kind: IntegrationPackage
+metadata:
+  id: qualys
+  name: Qualys
+  version: 0.1.0
+spec:
+  status: coming_soon
+  minimumPlatformVersion: 0.0.0
+  plans: [business, enterprise]
+  ownershipModels: [organization]
+  category: security
+  capabilities:
+    - vmdr
+    - assets
+    - findings
+  runsOn: node                      # assigned customer node (no appliance)
+  auth:
+    model: oauth_admin_consent
+  compliance:
+    evidences:
+    - vulnerability_management
+  docs:
+    slug: integration-qualys

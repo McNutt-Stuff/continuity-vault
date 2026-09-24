@@ -1,0 +1,32 @@
+apiVersion: arkive.integrations/v1
+kind: IntegrationPackage
+metadata:
+  id: google_workspace
+  name: Google Workspace
+  version: 0.1.0
+spec:
+  status: coming_soon
+  minimumPlatformVersion: 0.0.0
+  plans: [business, enterprise]
+  ownershipModels: [organization]
+  category: identity
+  capabilities:
+    - directory
+    - authentication
+    - drive_sharing
+    - audit
+  runsOn: node                      # assigned customer node (no appliance)
+  auth:
+    model: oauth_admin_consent
+  compliance:
+    evidences:
+    - mfa
+    - phishing_resistant_mfa
+    - password_policy
+    - conditional_access
+    - external_sharing_control
+    - guest_access
+    - data_residency
+    - audit_logging
+  docs:
+    slug: integration-google-workspace
