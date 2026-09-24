@@ -29,12 +29,40 @@
   troubling accounts/systems (from evidence `detail.entities`).
 - Rules relabelled "data governance" (drives compliance; not the assessment).
 
+## Delivered — scope-aware assurance (2026-09)
+> Moved the engine from best-status-wins to **coverage-based, scope-aware** scoring
+> and fed it real M365 evidence. Commits `b1ade1d`, `bd824df`, `672b1a7`, `9c00084`,
+> `7b6aff6`, `78c1898`, `edfdd0a`.
+- **Evidence contract**: `ComplianceSignal` gained scoped columns (expected/covered/
+  failed populations, `evidence_level`, `evidence_ref`, `policy_version`, `expires_at`,
+  `entities`, `remediation`); `signals.record`/`is_expired`/`effective_status`/
+  `latest_at(per scope)`.
+- **Scope-aware engine** (`SCORING_VERSION="2.0-scope-aware"`): control state/score
+  from coverage (covered/expected populations; synthetic pop=1 for binary; `none`=
+  excluded, `unknown`/`expired`=penalized 0, population=coverage). Coverage rollup on
+  snapshots. `unknown`/`expired` never counts as met.
+- **Federation**: nodes push `compliance_signals` UP; posture runs on the owning box;
+  the CP no longer clobbers node-collected signals.
+- **New capabilities (30 total)**: `coverage_completeness`, `backup_freshness`,
+  `phishing_resistant_mfa`, `privileged_mfa`, `privileged_access_review`,
+  `guest_access`, `integrity_verified`, `restore_test` — mapped into each framework's
+  backup/recovery/access/sharing controls.
+- **M365 driver**: local coverage/freshness reconciliation (expected in-scope sources
+  vs active + recoverable; 48h freshness that expires); split MFA into registration /
+  phishing-resistant / admin coverage; guest governance; scope-aware CA + residency —
+  all with permission-named `unknown` fallbacks (no new Graph permission required).
+- **Restore/integrity from receipts**: `integrity_verified` (hybrid-signed manifests)
+  + `restore_test` (index replicas fetched, decrypted and row-count-verified).
+- **UI**: framework page shows per-control coverage num/den + bar, evidence-level
+  badges, and stale/freshness — alongside the troubling accounts/systems table.
+- **Docs**: canonical `docs/integrations/microsoft365-permissions.md` + Help Center.
+
 ## Next (roadmap)
 | Item | Notes |
 |---|---|
 | More frameworks | PCI DSS, CMMC — registry entries + control→capability maps. |
 | Scheduled auto-evaluation | A worker that re-evaluates + snapshots on a cadence (currently on-demand + on enable), so the trend fills without manual re-assess. |
-| Deeper M365 evidence | Beyond the delivered MFA/CA/sharing/residency signals: DLP policy hits (when a Graph surface lands), guest access, mailbox audit, retention/hold labels. |
+| Deeper M365 evidence | Retention labels + litigation/legal hold are **not reachable via app-only Graph v1.0** (like Purview DLP) — left to Arkive-core evidence, not faked. Mailbox audit + DLP hits pending a stable Graph surface. |
 | More integration drivers | Ubiquiti (network segmentation/logging), desktop agent (endpoint encryption/backup), appliance (offline/immutable copy) as compliance drivers. |
 | Evidence export | Downloadable auditor report (PDF/CSV) per framework: controls, states, evidence, exceptions, history. |
 | Control → source scoping | Per-control applicability + scoping (e.g. HIPAA only over vaults tagged ePHI). |
@@ -42,7 +70,7 @@
 | Remediation guidance | Actionable "how to move this control to met" links (enable a workload, add a rule, enrol passkeys). |
 | Custom frameworks | Admin-defined control sets mapping to existing capabilities. |
 | Notifications | Alert on score regression / control moving to failed / exception expiry. |
-| Federation | If a provider needs node-only runtime signals, replicate them to the CP first (evidence is computed on the CP today). |
+| Integration-embedded view | A compact "Compliance assurance" card inside the M365 integration detail (posture surfaces on the platform Compliance page today). |
 
 ## Deviations / notes
 - The earlier **M365-scoped compliance packs** (`integrations/microsoft365/compliance.py`
