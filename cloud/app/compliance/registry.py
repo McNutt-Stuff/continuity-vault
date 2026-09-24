@@ -114,6 +114,15 @@ CAPABILITIES: dict[str, dict] = {
         "title": "Air-gapped / offline copy",
         "description": "An offline, immutable on-premises copy exists on an Arkive appliance.",
         "domain": "resilience"},
+    "coverage_completeness": {
+        "title": "Protection coverage completeness",
+        "description": "Every in-scope source that should be protected is actually protected and "
+                       "recoverable — no unprotected, failed or never-provisioned gaps.",
+        "domain": "resilience"},
+    "backup_freshness": {
+        "title": "Backup freshness",
+        "description": "Protected sources have a recent successful, recoverable backup (not stale).",
+        "domain": "resilience"},
 }
 
 # --------------------------------------------------------------------------- #
@@ -142,7 +151,7 @@ FRAMEWORKS: dict[str, dict] = {
              "capabilities": ["encryption_in_transit"],
              "guidance": "Encrypt data in transit."},
             {"id": "PR.DS-11", "title": "Backups are created & protected", "family": "Protect",
-             "capabilities": ["backup_coverage", "encryption_at_rest", "offsite_copy", "versioning"],
+             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "encryption_at_rest", "offsite_copy", "versioning"],
              "guidance": "Create and protect backups of critical data, kept offsite with version history."},
             {"id": "PR.AA-05", "title": "Least-privilege access", "family": "Protect",
              "capabilities": ["access_control", "mfa", "conditional_access"],
@@ -192,7 +201,7 @@ FRAMEWORKS: dict[str, dict] = {
             {"id": "8.11", "title": "Review audit logs", "family": "Audit log management",
              "capabilities": ["monitoring"], "guidance": "Monitor/review audit logs."},
             {"id": "11.2", "title": "Perform automated backups", "family": "Data recovery",
-             "capabilities": ["backup_coverage", "versioning"], "guidance": "Automated backups with version history."},
+             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "versioning"], "guidance": "Automated backups with version history."},
             {"id": "11.1", "title": "Data recovery process", "family": "Data recovery",
              "capabilities": ["recovery"], "guidance": "Maintain a recovery process."},
             {"id": "11.3", "title": "Protect recovery data", "family": "Data recovery",
@@ -208,7 +217,7 @@ FRAMEWORKS: dict[str, dict] = {
                        "encryption, access control, audit and retention of ePHI.",
         "controls": [
             {"id": "164.308(a)(7)(ii)(A)", "title": "Data backup plan", "family": "Administrative",
-             "capabilities": ["backup_coverage", "offsite_copy"], "guidance": "Back up ePHI; keep an offsite copy."},
+             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "offsite_copy"], "guidance": "Back up ePHI; keep an offsite copy."},
             {"id": "164.308(a)(7)(ii)(B)", "title": "Disaster recovery plan", "family": "Administrative",
              "capabilities": ["recovery", "backup_coverage"], "guidance": "Restore ePHI."},
             {"id": "164.312(a)(2)(iv)", "title": "Encryption & decryption", "family": "Technical",
@@ -245,7 +254,7 @@ FRAMEWORKS: dict[str, dict] = {
              "capabilities": ["mfa", "conditional_access"],
              "guidance": "Strong authentication and conditional access for privileged use."},
             {"id": "A.8.13", "title": "Information backup", "family": "Technological",
-             "capabilities": ["backup_coverage", "recovery", "versioning", "offsite_copy"],
+             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "recovery", "versioning", "offsite_copy"],
              "guidance": "Back up information; keep offsite copies with version history and test recovery."},
             {"id": "A.8.14", "title": "Redundancy of information processing", "family": "Technological",
              "capabilities": ["offsite_copy", "air_gapped_copy"],
@@ -286,7 +295,7 @@ FRAMEWORKS: dict[str, dict] = {
              "capabilities": ["incident_response"],
              "guidance": "Evaluate and respond to security events."},
             {"id": "A1.2", "title": "Backup & recovery for availability", "family": "Availability (A1)",
-             "capabilities": ["backup_coverage", "recovery", "offsite_copy", "versioning"],
+             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "recovery", "offsite_copy", "versioning"],
              "guidance": "Back up data and maintain recoverability for availability commitments."},
             {"id": "A1.3", "title": "Recovery testing / redundancy", "family": "Availability (A1)",
              "capabilities": ["offsite_copy", "air_gapped_copy", "immutability"],
@@ -312,7 +321,7 @@ FRAMEWORKS: dict[str, dict] = {
              "capabilities": ["access_control", "mfa", "external_sharing_control"],
              "guidance": "Ensure ongoing confidentiality via access control and strong auth."},
             {"id": "Art.32(1)(c)", "title": "Restore availability after an incident", "family": "Security of processing",
-             "capabilities": ["backup_coverage", "recovery", "offsite_copy", "versioning"],
+             "capabilities": ["backup_coverage", "coverage_completeness", "backup_freshness", "recovery", "offsite_copy", "versioning"],
              "guidance": "Restore availability and access to personal data in a timely manner."},
             {"id": "Art.32(1)(d)", "title": "Monitoring & audit of processing", "family": "Security of processing",
              "capabilities": ["audit_logging", "monitoring"],
