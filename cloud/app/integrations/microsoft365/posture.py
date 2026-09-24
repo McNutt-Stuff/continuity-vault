@@ -60,6 +60,16 @@ def _rec(db, tid, cap, status, summary, **detail):
     signals.record(db, tid, _PROVIDER, cap, status=status, summary=summary, detail=detail)
 
 
+def _srec(db, inst, cap, status, summary, *, expected=0, covered=0, failed=0,
+          evidence_level="observed", detail=None, remediation="", expires_at=None):
+    """Record a scope-aware posture signal (populations drive coverage scoring)."""
+    signals.record(db, inst.tenant_id, _PROVIDER, cap, status=status, summary=summary,
+                   scope_type="integration", scope_id=inst.id, integration_instance_id=inst.id,
+                   expected=int(expected or 0), covered=int(covered or 0), failed=int(failed or 0),
+                   evidence_level=evidence_level, detail=detail or {}, remediation=remediation,
+                   expires_at=expires_at)
+
+
 def _needs(db, tid, cap, perm, err):
     """Record an 'unknown' signal that names the missing permission (403/insufficient)."""
     _rec(db, tid, cap, "unknown", f"Needs Microsoft Graph {perm} to assess", permission=perm,
@@ -191,31 +201,68 @@ def refresh(db: Session, inst, *, force: bool = False) -> int:
         db.commit()
         return n
 
-    # --- MFA registration (phishing-resistant / any strong method) --------------
+    # --- Strong authentication: registration, phishing-resistance, privileged ---
+    # All derived from ONE registration report (no extra Graph permission).
+    _PHISH_RESISTANT = ("fido2", "windowshelloforbusiness", "x509", "passkey", "certificatebased")
     try:
-        total = strong = 0
+        total = strong = phishr = admins = admins_strong = 0
         for u in graph.get_paged(token, "/reports/authenticationMethods/userRegistrationDetails",
                                  params={"$top": "500"}, cap=100000):
             total += 1
-            if u.get("isMfaRegistered") or u.get("isMfaCapable"):
+            is_mfa = bool(u.get("isMfaRegistered") or u.get("isMfaCapable"))
+            if is_mfa:
                 strong += 1
+            methods = [str(x).lower() for x in (u.get("methodsRegistered") or [])]
+            if any(any(p in mth for p in _PHISH_RESISTANT) for mth in methods):
+                phishr += 1
+            if u.get("isAdmin"):
+                admins += 1
+                if is_mfa:
+                    admins_strong += 1
         if total:
             ratio = strong / total
-            status = "met" if ratio >= 0.95 else ("partial" if ratio >= 0.5 else "unmet")
-            _rec(db, tid, "mfa", status, f"{strong}/{total} users MFA-registered", total=total, strong=strong)
-            n += 1
+            _srec(db, inst, "mfa",
+                  "met" if ratio >= 0.95 else ("partial" if ratio >= 0.5 else "unmet"),
+                  f"{strong}/{total} users MFA-registered",
+                  expected=total, covered=strong, failed=total - strong)
+            pratio = phishr / total
+            _srec(db, inst, "phishing_resistant_mfa",
+                  "met" if pratio >= 0.95 else ("partial" if pratio >= 0.5 else "unmet"),
+                  f"{phishr}/{total} users have a phishing-resistant method",
+                  expected=total, covered=phishr, failed=total - phishr,
+                  remediation="Roll out FIDO2/passkeys or Windows Hello so users have a "
+                              "phishing-resistant method.")
+            n += 2
+            if admins:
+                aratio = admins_strong / admins
+                _srec(db, inst, "privileged_mfa",
+                      "met" if aratio >= 1.0 else ("partial" if aratio >= 0.5 else "unmet"),
+                      f"{admins_strong}/{admins} admin account(s) MFA-registered",
+                      expected=admins, covered=admins_strong, failed=admins - admins_strong,
+                      remediation="Require phishing-resistant MFA for every privileged/admin account.")
+                # Privileged access review: a small, MFA-covered admin footprint.
+                adm_ratio = admins / total
+                pr_status = ("met" if (aratio >= 1.0 and adm_ratio <= 0.1)
+                             else ("partial" if aratio >= 0.5 else "unmet"))
+                _srec(db, inst, "privileged_access_review", pr_status,
+                      f"{admins} privileged account(s) of {total} ({admins_strong} MFA-covered)",
+                      expected=admins, covered=admins_strong, failed=admins - admins_strong,
+                      detail={"admins": admins, "users": total},
+                      remediation="Keep privileged accounts to a minimum and review them regularly.")
+                n += 2
     except graph.GraphError as e:
         _needs(db, tid, "mfa", "Reports.Read.All (or AuditLog.Read.All)", e)
-        n += 1
+        _needs(db, tid, "phishing_resistant_mfa", "Reports.Read.All (or AuditLog.Read.All)", e)
+        n += 2
 
     # --- Conditional access policies -------------------------------------------
     try:
         pols = list(graph.get_paged(token, "/identity/conditionalAccess/policies", cap=500))
         enabled = sum(1 for p in pols if (p.get("state") == "enabled"))
         status = "met" if enabled else ("partial" if pols else "unmet")
-        _rec(db, tid, "conditional_access", status,
-             f"{enabled} enabled conditional-access polic(ies)" if pols else "No conditional-access policies",
-             policies=len(pols), enabled=enabled)
+        _srec(db, inst, "conditional_access", status,
+              f"{enabled} enabled conditional-access polic(ies)" if pols else "No conditional-access policies",
+              detail={"policies": len(pols), "enabled": enabled})
         n += 1
     except graph.GraphError as e:
         _needs(db, tid, "conditional_access", "Policy.Read.All", e)
@@ -245,6 +292,30 @@ def refresh(db: Session, inst, *, force: bool = False) -> int:
         _needs(db, tid, "external_sharing_control", "SharePointTenantSettings.Read.All", e)
         n += 1
 
+    # --- Guest / external account governance (exposure) ------------------------
+    try:
+        members = guests = 0
+        for u in graph.get_paged(token, "/users",
+                                 params={"$select": "userType", "$top": "999"}, cap=200000):
+            if (u.get("userType") or "").lower() == "guest":
+                guests += 1
+            else:
+                members += 1
+        total = members + guests
+        if total:
+            # Guests are legitimate, but an ungoverned guest population is exposure.
+            gratio = guests / total
+            status = "met" if gratio <= 0.05 else ("partial" if gratio <= 0.25 else "unmet")
+            _srec(db, inst, "guest_access", status,
+                  f"{guests} guest of {total} account(s)",
+                  expected=total, covered=members, failed=guests,
+                  detail={"guests": guests, "members": members},
+                  remediation="Review and limit external/guest accounts and govern their access.")
+            n += 1
+    except graph.GraphError as e:
+        _needs(db, tid, "guest_access", "User.Read.All", e)
+        n += 1
+
     # --- Data residency (tenant country + preferred data location) -------------
     try:
         org = graph.get_one(token, "/organization",
@@ -253,9 +324,9 @@ def refresh(db: Session, inst, *, force: bool = False) -> int:
         country = row.get("countryLetterCode") or ""
         pdl = row.get("preferredDataLocation") or ""
         loc = pdl or country
-        _rec(db, tid, "data_residency", "met" if loc else "partial",
-             f"Tenant data location: {loc}" if loc else "Data location known to Microsoft",
-             country=country, preferred_data_location=pdl)
+        _srec(db, inst, "data_residency", "met" if loc else "partial",
+              f"Tenant data location: {loc}" if loc else "Data location known to Microsoft",
+              detail={"country": country, "preferred_data_location": pdl})
         n += 1
     except graph.GraphError as e:
         _needs(db, tid, "data_residency", "Organization.Read.All", e)
