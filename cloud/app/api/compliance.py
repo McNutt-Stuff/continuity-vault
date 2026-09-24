@@ -7,7 +7,7 @@ and recorded in the compliance change ledger (posture history).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -193,4 +193,98 @@ def add_exception(control_id: str, body: ExceptionBody,
     audit.record(db, actor=principal.user_id, action="compliance.exception",
                  category="admin", severity="warning", resource=control_id,
                  detail={"control": c.control_id, "reason": body.reason.strip()[:200]})
+    return {"ok": True}
+
+
+def _now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+@router.get("/attestations")
+def list_attestations(principal: security.Principal = Depends(require_compliance),
+                      db: Session = Depends(get_db)):
+    """The self-attestation questionnaire: every attestable capability (procedural /
+    policy control the engine can't measure) + the tenant's current answer."""
+    tenant = _tenant(db, principal)
+    from ..compliance.models import ComplianceAttestation
+    rows = {a.capability: a for a in db.query(ComplianceAttestation)
+            .filter(ComplianceAttestation.tenant_id == tenant.id).all()}
+    # Which enabled frameworks reference each attestable capability (for context).
+    fw_by_cap: dict[str, list[str]] = {}
+    enabled = {p.framework for p in db.query(m.CompliancePack)
+               .filter(m.CompliancePack.tenant_id == tenant.id, m.CompliancePack.enabled.is_(True)).all()}
+    for fw in enabled:
+        spec = registry.framework(fw)
+        if not spec:
+            continue
+        for ctrl in spec["controls"]:
+            for cap in ctrl.get("capabilities", []):
+                fw_by_cap.setdefault(cap, [])
+                if spec["label"] not in fw_by_cap[cap]:
+                    fw_by_cap[cap].append(spec["label"])
+    now = _now_naive()
+    items = []
+    for cap, spec in registry.CAPABILITIES.items():
+        if not spec.get("attestable"):
+            continue
+        a = rows.get(cap)
+        items.append({
+            "capability": cap, "title": spec["title"], "description": spec["description"],
+            "domain": spec.get("domain", ""), "frameworks": fw_by_cap.get(cap, []),
+            "status": (a.status if a else ""), "note": (a.note if a else ""),
+            "evidence_url": (a.evidence_url if a else ""),
+            "attested_by": (a.attested_by if a else ""),
+            "attested_at": (a.attested_at.isoformat() if (a and a.attested_at) else None),
+            "review_due_at": (a.review_due_at.isoformat() if (a and a.review_due_at) else None),
+            "stale": bool(a and a.review_due_at and a.review_due_at < now),
+        })
+    items.sort(key=lambda x: (x["domain"], x["title"]))
+    return {"attestations": items}
+
+
+class AttestationBody(BaseModel):
+    capability: str
+    status: str  # met | partial | unmet | not_applicable
+    note: str = ""
+    evidence_url: str = ""
+    review_months: int = 12  # 0 = no review deadline
+
+
+@router.post("/attestations")
+def submit_attestation(body: AttestationBody,
+                       principal: security.Principal = Depends(require_compliance),
+                       db: Session = Depends(get_db)):
+    """Record (upsert) a self-attestation for one attestable capability, audited, and
+    re-score so the answer reflects immediately."""
+    tenant = _tenant(db, principal)
+    from ..compliance.models import ComplianceAttestation
+    spec = registry.CAPABILITIES.get(body.capability)
+    if not spec or not spec.get("attestable"):
+        raise HTTPException(400, "not an attestable capability")
+    if body.status not in ("met", "partial", "unmet", "not_applicable"):
+        raise HTTPException(400, "invalid status")
+    user = db.get(User, principal.user_id)
+    now = _now_naive()
+    row = (db.query(ComplianceAttestation)
+           .filter(ComplianceAttestation.tenant_id == tenant.id,
+                   ComplianceAttestation.capability == body.capability).first())
+    if row is None:
+        row = ComplianceAttestation(tenant_id=tenant.id, capability=body.capability)
+        db.add(row)
+    row.status = body.status
+    row.note = (body.note or "")[:2000]
+    row.evidence_url = (body.evidence_url or "")[:500]
+    row.attested_by = ((user.email if user else None) or principal.user_id or "")
+    row.attested_at = now
+    months = max(0, min(60, int(body.review_months or 0)))
+    row.review_due_at = (now + timedelta(days=30 * months)) if months else None
+    db.commit()
+    audit.record(db, actor=row.attested_by, action="compliance.attest",
+                 tenant_id=tenant.id, resource=body.capability, category="admin",
+                 severity="info",
+                 detail={"capability": body.capability, "status": body.status})
+    try:
+        engine.evaluate(db, tenant, actor=row.attested_by)
+    except Exception:  # noqa: BLE001 — never fail the attestation on a re-score hiccup
+        pass
     return {"ok": True}

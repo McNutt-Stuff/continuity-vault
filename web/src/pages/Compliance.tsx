@@ -26,6 +26,11 @@ interface History {
   snapshots: { framework: string; score: number; met: number; total: number; at: string }[];
   events: { kind: string; framework: string; control_id: string; actor: string; summary: string; at: string }[];
 }
+interface Attestation {
+  capability: string; title: string; description: string; domain: string; frameworks: string[];
+  status: string; note: string; evidence_url: string; attested_by: string;
+  attested_at: string | null; review_due_at: string | null; stale: boolean;
+}
 
 const STATES = ["not_assessed", "planned", "partially_implemented", "implemented", "operating", "not_applicable", "failed"];
 const stateTone = (s: string): "ok" | "warn" | "danger" | "info" =>
@@ -60,16 +65,23 @@ export default function Compliance() {
   const [controls, setControls] = useState<Control[]>([]);
   const [history, setHistory] = useState<History | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [attestations, setAttestations] = useState<Attestation[]>([]);
 
   async function load() {
     try {
       const f = await api.get<{ frameworks: Framework[] }>("/compliance/frameworks");
       setFrameworks(f.frameworks || []);
       setReport(await api.get<Report>("/compliance/report"));
+      try { setAttestations((await api.get<{ attestations: Attestation[] }>("/compliance/attestations")).attestations || []); } catch { /* optional */ }
     } catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't load compliance", tone: "danger" }); }
     finally { setLoaded(true); }
   }
   useEffect(() => { void load(); }, []);
+
+  async function saveAttestation(cap: string, patch: { status: string; note: string; evidence_url: string; review_months: number }) {
+    try { await api.post("/compliance/attestations", { capability: cap, ...patch }); await load(); notify({ message: "Attestation saved.", tone: "ok" }); }
+    catch (e) { notify({ message: (e as { message?: string }).message || "Couldn't save attestation", tone: "danger" }); }
+  }
 
   async function toggle(fw: string, enabled: boolean) {
     setBusy(fw);
@@ -174,6 +186,8 @@ export default function Compliance() {
         </div>
       </Card>
 
+      {attestations.length > 0 && <Questionnaire items={attestations} onSave={saveAttestation} />}
+
       {open && openSpec && (
         <Card style={{ marginBottom: 16 }}>
           <div className="spread" style={{ alignItems: "center", marginBottom: 10 }}>
@@ -261,5 +275,86 @@ export default function Compliance() {
         </Card>
       )}
     </>
+  );
+}
+
+const ATTEST_STATUS = ["met", "partial", "unmet", "not_applicable"];
+const attStatusTone = (s: string): "ok" | "warn" | "danger" | "info" =>
+  s === "met" ? "ok" : s === "partial" ? "info" : s === "unmet" ? "danger" : "warn";
+
+function Questionnaire({ items, onSave }: {
+  items: Attestation[];
+  onSave: (cap: string, patch: { status: string; note: string; evidence_url: string; review_months: number }) => Promise<void>;
+}) {
+  const answered = items.filter((i) => i.status).length;
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div className="spread" style={{ marginBottom: 4 }}>
+        <h3 style={{ margin: 0 }}>Policy &amp; procedure questionnaire</h3>
+        <span className="faint" style={{ fontSize: 12 }}>{answered}/{items.length} attested</span>
+      </div>
+      <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>
+        These framework controls are organizational — policies, plans, training, reviews — that Arkive can't
+        measure automatically. Attest to each, link your proof, and set a review date. Unanswered items count
+        as <b>not yet demonstrated</b>.
+      </div>
+      <div className="stack" style={{ gap: 0 }}>
+        {items.map((it) => <AttestRow key={it.capability} it={it} onSave={onSave} />)}
+      </div>
+    </Card>
+  );
+}
+
+function AttestRow({ it, onSave }: {
+  it: Attestation;
+  onSave: (cap: string, patch: { status: string; note: string; evidence_url: string; review_months: number }) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState(it.status || "");
+  const [note, setNote] = useState(it.note || "");
+  const [url, setUrl] = useState(it.evidence_url || "");
+  const [months, setMonths] = useState(12);
+  const [busy, setBusy] = useState(false);
+  async function save() {
+    if (!status) return;
+    setBusy(true);
+    try { await onSave(it.capability, { status, note, evidence_url: url, review_months: months }); setOpen(false); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div style={{ borderBottom: "1px solid var(--border-soft)", padding: "8px 0" }}>
+      <div className="row" style={{ gap: 8, alignItems: "center", cursor: "pointer" }} onClick={() => setOpen(!open)}>
+        {it.status ? <Pill tone={attStatusTone(it.status)}>{it.status.replace(/_/g, " ")}</Pill> : <Pill tone="warn">not attested</Pill>}
+        {it.stale && <Pill tone="warn">review due</Pill>}
+        <span style={{ fontWeight: 600, fontSize: 12.5 }}>{it.title}</span>
+        <span className="flex1 faint" style={{ fontSize: 11.5 }}>{it.frameworks.join(", ")}</span>
+        <span className="faint" style={{ fontSize: 11 }}>{open ? "▴" : "▾"}</span>
+      </div>
+      {open && (
+        <div style={{ marginTop: 8, paddingLeft: 4 }}>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>{it.description}</div>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <select className="input sm" value={status} onChange={(e) => setStatus(e.target.value)}>
+              <option value="">— answer —</option>
+              {ATTEST_STATUS.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
+            </select>
+            <input className="input sm" style={{ minWidth: 240 }} placeholder="Proof link (policy URL / document)"
+                   value={url} onChange={(e) => setUrl(e.target.value)} />
+            <label className="faint" style={{ fontSize: 11.5 }}>Review in
+              <select className="input sm" style={{ marginLeft: 4 }} value={months} onChange={(e) => setMonths(Number(e.target.value))}>
+                {[0, 3, 6, 12, 24].map((m) => <option key={m} value={m}>{m === 0 ? "no review" : `${m} mo`}</option>)}
+              </select>
+            </label>
+          </div>
+          <textarea className="input" style={{ marginTop: 8, width: "100%", minHeight: 52, fontSize: 12.5 }}
+                    placeholder="How is this satisfied? (scope, owner, where the evidence lives)"
+                    value={note} onChange={(e) => setNote(e.target.value)} />
+          <div className="row" style={{ gap: 8, marginTop: 6, alignItems: "center" }}>
+            <button className="btn primary sm" disabled={!status || busy} onClick={save}>{busy ? "Saving…" : "Save attestation"}</button>
+            {it.attested_by && <span className="faint" style={{ fontSize: 11 }}>Last: {it.attested_by}{it.attested_at ? ` · ${new Date(it.attested_at + "Z").toLocaleDateString()}` : ""}</span>}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

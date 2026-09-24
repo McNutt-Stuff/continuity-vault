@@ -42,3 +42,18 @@ def test_control_ids_unique_within_framework():
     for fw, spec in registry.FRAMEWORKS.items():
         ids = [c["id"] for c in spec["controls"]]
         assert len(ids) == len(set(ids)), f"duplicate control id in {fw}"
+
+
+def test_attestable_capabilities_present_and_mapped():
+    attestable = [k for k, s in registry.CAPABILITIES.items() if s.get("attestable")]
+    # The Phase-1 procedural capabilities must exist and each be mapped into a control.
+    expected = {"security_policy", "risk_assessment", "security_training",
+                "incident_response_plan", "continuity_plan", "vendor_risk_management",
+                "access_review", "change_management", "vulnerability_management",
+                "penetration_testing", "physical_security", "personnel_security"}
+    assert expected <= set(attestable), expected - set(attestable)
+    for cap in attestable:
+        mapped = sum(1 for _fw, s in registry.FRAMEWORKS.items()
+                     for c in s["controls"] if cap in c["capabilities"])
+        assert mapped >= 1, f"attestable {cap} not mapped into any control"
+

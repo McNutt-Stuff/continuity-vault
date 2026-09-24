@@ -164,3 +164,24 @@ class ComplianceSignal(Base):
     expires_at = Column(DateTime, nullable=True)         # stale after this; NULL = no explicit deadline
     entities = Column(JSON, default=list)                # affected entities [{kind,label,status,note}] (non-secret)
     remediation = Column(String, default="")             # remediation link/text
+
+
+class ComplianceAttestation(Base):
+    """A self-attestation for a capability the platform can't automatically evidence
+    (a written policy / procedure / program). Admin-answered, audited, with a review
+    cadence and an optional link to proof (a policy document). One row per
+    (tenant, capability); the ``attestation`` provider turns it into manual evidence.
+    An attestation past its ``review_due_at`` is treated as stale (unknown)."""
+
+    __tablename__ = "compliance_attestations"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    capability = Column(String, nullable=False, index=True)  # -> registry.CAPABILITIES (attestable) key
+    status = Column(String, default="unmet")     # met|partial|unmet|not_applicable
+    note = Column(Text, default="")              # how it's satisfied / scope (non-secret)
+    evidence_url = Column(String, default="")    # link to the policy/proof (doc upload lands in 1b)
+    attested_by = Column(String, default="")     # user email/id who attested
+    attested_at = Column(DateTime, default=_now)
+    review_due_at = Column(DateTime, nullable=True)  # attestation goes stale (unknown) after this
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+

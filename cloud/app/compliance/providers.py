@@ -347,6 +347,49 @@ def _integration_signals(db: Session, tenant, scope: dict) -> list[CapabilityEvi
 register_provider("integration_signals", _integration_signals)
 
 
+def _attestations(db: Session, tenant, scope: dict) -> list[CapabilityEvidence]:
+    """Turn self-attestations into manual evidence for the procedural capabilities
+    the platform can't automatically measure (policies, training, plans, vendor
+    risk, …). An attestation past its review date is stale → unknown; a capability
+    that's attestable but never answered reads ``unknown`` ("needs attestation") so
+    it's tracked, never a silent pass."""
+    from datetime import datetime, timezone
+    from . import registry
+    from .models import ComplianceAttestation
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    attestable = [k for k, s in registry.CAPABILITIES.items() if s.get("attestable")]
+    if not attestable:
+        return []
+    rows = {a.capability: a for a in db.query(ComplianceAttestation)
+            .filter(ComplianceAttestation.tenant_id == tenant.id).all()}
+    out: list[CapabilityEvidence] = []
+    for cap in attestable:
+        a = rows.get(cap)
+        if a is None:
+            out.append(CapabilityEvidence(
+                capability=cap, status="unknown", provider="attestation",
+                summary="Not yet attested — answer this in the compliance questionnaire.",
+                evidence_level="manual", detail={"attestable": True, "attested": False}))
+            continue
+        stale = bool(a.review_due_at and a.review_due_at < now)
+        status = "unknown" if stale else (a.status or "unmet")
+        base = {"met": "Attested in place", "partial": "Attested partially in place",
+                "unmet": "Attested NOT in place", "not_applicable": "Attested not applicable"}
+        summary = (a.note or base.get(a.status, a.status or "attested"))[:400]
+        if stale:
+            summary = f"Attestation is due for review — {summary}"
+        out.append(CapabilityEvidence(
+            capability=cap, status=status, provider="attestation", summary=summary,
+            evidence_level="manual", expires_at=a.review_due_at,
+            detail={"attestable": True, "attested": True, "attested_by": a.attested_by,
+                    "attested_at": a.attested_at.isoformat() if a.attested_at else None,
+                    "evidence_url": a.evidence_url or "", "stale": stale}))
+    return out
+
+
+register_provider("attestation", _attestations)
+
+
 def collect_evidence(db: Session, tenant, scope: dict | None = None) -> dict[str, list[CapabilityEvidence]]:
     """Run every provider and group evidence by capability. Best status wins per
     capability, but every provider's row is retained for the control drill-down."""
