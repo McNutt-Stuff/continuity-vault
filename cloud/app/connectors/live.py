@@ -157,6 +157,33 @@ def _gmail_rate_limited(r) -> bool:
     return r.status_code == 403 and _gmail_403_reason(r) in _GMAIL_RATE_REASONS
 
 
+def _gmail_date(parsed, internal_date) -> Optional[datetime]:
+    """Best message date. Prefer Gmail's ``internalDate`` (its received/sort time),
+    but when that is implausibly in the FUTURE fall back to the RFC822 ``Date:``
+    header. Some imported/spam messages carry a far-future internalDate — a trick to
+    pin them to the top of the inbox — while the visible Date header stays sane;
+    using internalDate blindly made such a mail sort as e.g. 2036. Returns None when
+    both are absent/implausible so the caller stamps the capture time instead."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    horizon = now + timedelta(days=2)
+    internal = _parse_dt(internal_date)
+    if internal is not None and internal <= horizon:
+        return internal
+    if parsed is not None:
+        hdr = _hdr(parsed, "Date")
+        if hdr:
+            try:
+                from email.utils import parsedate_to_datetime
+                d = parsedate_to_datetime(hdr)
+                if d is not None:
+                    d = d.astimezone(timezone.utc).replace(tzinfo=None) if d.tzinfo else d
+                    if d <= horizon:
+                        return d
+            except Exception:  # noqa: BLE001 — malformed Date header
+                pass
+    return None  # both implausible/future → base stamps capture time
+
+
 def _gmail_message(c: httpx.Client, headers: dict, mid: str,
                    cap: int = _DEFAULT_CAP) -> Optional[SourceObject]:
     # format=raw returns the full RFC822 message (body + attachments) plus
@@ -211,7 +238,7 @@ def _gmail_message(c: httpx.Client, headers: dict, mid: str,
               "labelIds": label_ids, "content_backed_up": backed},
         labels=[l for l in label_ids if not l.startswith("Label_")],
         size_bytes=len(raw) or int(m.get("sizeEstimate", 0)) or None,  # type: ignore
-        modified_at=_parse_dt(m.get("internalDate")),
+        modified_at=_gmail_date(parsed, m.get("internalDate")),
     )
 
 
