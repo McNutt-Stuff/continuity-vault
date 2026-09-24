@@ -470,6 +470,13 @@ def _run_backup_streaming(db: Session, collection: Collection,
     ``account.sync_cursor``) so both tracks run concurrently without conflict."""
     batch_bytes_cap = 64 * 1024 * 1024  # flush a batch at ~64 MiB of content
     batch_count_cap = 50
+    # An appliance ingests each batch as one inline-ciphertext command it must hold
+    # in memory (and mirror to disk); keep those batches smaller so a low-RAM
+    # appliance never spikes/OOMs on a single recovery point.
+    if any(d == "appliance" or d.startswith("appliance:") or d.startswith("store:")
+           for d in (destinations or [])):
+        batch_bytes_cap = 16 * 1024 * 1024
+        batch_count_cap = 25
     batch: List = []
     batch_bytes = 0
     total = 0

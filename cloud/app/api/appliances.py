@@ -1273,6 +1273,27 @@ class HeartbeatRequest(BaseModel):
     tamper_state: str = "normal"
 
 
+# Max inline command ciphertext handed to an appliance per heartbeat. Ingest
+# commands (~up to a batch's worth of ciphertext each) are delivered in FIFO order
+# up to this budget so a small appliance never parses a giant multi-command
+# response into memory at once; the remainder ride the next heartbeat.
+_HEARTBEAT_CMD_BYTE_BUDGET = 48 * 1024 * 1024
+
+
+def _cmd_inline_bytes(envelope: dict) -> int:
+    """Rough inline-payload size of a signed command, for the per-heartbeat delivery
+    budget. Only OPEN_INGEST_WINDOW carries heavy inline ciphertext (its objects);
+    estimate from plaintext bytes (base64 envelope ≈ 1.4x) without serializing."""
+    try:
+        objs = ((envelope or {}).get("payload", {})
+                .get("parameters", {}).get("objects") or [])
+        if not objs:
+            return 0
+        return int(sum(int(o.get("plaintextBytes", 0)) for o in objs) * 1.4)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 @agent_router.post("/heartbeat")
 def heartbeat(body: HeartbeatRequest,
               request: Request,
@@ -1350,6 +1371,14 @@ def heartbeat(body: HeartbeatRequest,
             .order_by(ApplianceCommand.sequence.asc()).all())
     delivered = []
     delivered_types = []
+    # Per-heartbeat inline-payload budget. OPEN_INGEST_WINDOW commands carry the
+    # snapshot's ciphertext inline (tens of MiB each); handing out a whole backlog
+    # at once made a small appliance parse a giant multi-command response into
+    # memory + spawn a mirror-sync thread per command → OOM + disk thrash + restart
+    # (observed: 16 ingest commands in one heartbeat). Deliver in FIFO order until
+    # the budget is spent, then stop — the rest are redelivered next heartbeat.
+    budget = _HEARTBEAT_CMD_BYTE_BUDGET
+    deferred = 0
     for c in cmds:
         age = (_now() - (c.created_at.replace(tzinfo=None) if c.created_at
                          and c.created_at.tzinfo else c.created_at)).total_seconds() \
@@ -1359,13 +1388,22 @@ def heartbeat(body: HeartbeatRequest,
             c.envelope = {}       # free the (possibly huge, inline-ciphertext) payload
             continue
         if c.status == "pending" or age > redeliver_after:
+            sz = _cmd_inline_bytes(c.envelope)
+            # Always deliver at least one (a single large command must still make
+            # progress); once the budget is spent, defer the rest to keep the
+            # appliance's peak memory bounded. Break preserves strict FIFO order.
+            if delivered and sz > budget:
+                deferred = sum(1 for x in cmds if x.status == "pending")
+                break
             c.status = "delivered"
             delivered.append(c.envelope)
             delivered_types.append(c.command_type)
+            budget -= sz
     db.commit()
     if delivered:
-        logger.info("delivered %d command(s) to appliance %s: %s",
-                    len(delivered), appliance.id, delivered_types)
+        logger.info("delivered %d command(s) to appliance %s: %s%s",
+                    len(delivered), appliance.id, delivered_types,
+                    f" (deferred {deferred} for next heartbeat)" if deferred else "")
     from .. import services
     return {"commands": delivered,
             "config": _appliance_runtime_config(db, appliance),
