@@ -22,10 +22,12 @@ def test_capabilities_have_required_keys():
         assert spec.get("domain"), key
 
 
-def test_new_scope_aware_capabilities_present_and_mapped():
+def test_scope_aware_and_posture_capabilities_present_and_mapped():
     new = ["coverage_completeness", "backup_freshness", "phishing_resistant_mfa",
            "privileged_mfa", "privileged_access_review", "guest_access",
-           "integrity_verified", "restore_test"]
+           "integrity_verified", "restore_test",
+           # Phase 2 — deepened M365 automated posture.
+           "security_posture", "device_compliance", "device_encryption", "password_policy"]
     for cap in new:
         assert cap in registry.CAPABILITIES, f"{cap} missing from CAPABILITIES"
         mapped = sum(1 for _fw, s in registry.FRAMEWORKS.items()

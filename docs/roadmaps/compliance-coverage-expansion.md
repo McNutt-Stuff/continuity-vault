@@ -60,17 +60,21 @@ Turn the procedural controls into first-class, scored evidence.
 proof (encrypted in Arkive Cloud, ciphertext-only, org-admin gated + audited on
 upload/download), shown against the attestation with a doc count on the control.
 
-## Phase 2 — Deepen Microsoft 365 (highest ROI automation)
-- **Microsoft Secure Score** (`Reports.Read.All` / `SecurityEvents.Read.All`) → a
-  broad `security_posture` capability + per-recommendation entities.
-- **Entra PIM / privileged roles** (`RoleManagement.Read.Directory`) → real
-  `privileged_access_review` (standing vs eligible admins), just-in-time coverage.
-- **Purview** — retention labels + **eDiscovery/litigation hold** (`eDiscovery.Read.All`)
-  → real `retention` / `legal_hold`; sensitivity labels → `data_classification`.
+## Phase 2 — Deepen Microsoft 365 (highest ROI automation) — **DELIVERED**
+- **Microsoft Secure Score** (`SecurityEvents.Read.All`) → `security_posture`
+  (current/max ratio). ✅
+- **Entra PIM / privileged roles** (`RoleManagement.Read.Directory`) → authoritative
+  `privileged_access_review` (real standing directory-role holders; refines the
+  registration-report baseline). ✅
 - **Intune device compliance** (`DeviceManagementManagedDevices.Read.All`) → endpoint
-  `device_encryption`, `patch_management`, `endpoint_protection`.
-- **Entra password / auth-method policies** → `password_policy`.
-- **Unified audit log** enabled → strengthens `audit_logging` with a real signal.
+  `device_compliance` + `device_encryption` (covered vs total). ✅
+- **Entra password / auth-method policies** (`Policy.Read.All`, already granted) →
+  `password_policy` (strong methods enforced, weak SMS/voice off). ✅
+- **Purview** — retention labels + **legal/litigation hold**: **NOT feasible app-only
+  on Graph v1.0** (no app-only read surface). Deliberately *not* faked — Arkive relies
+  on its own immutable, receipt-verified retention instead. Deferred. ⛔
+- **Unified audit log** enabled → strengthens `audit_logging`: deferred (best surfaced
+  via Secure Score recommendations for now).
 
 ## Phase 3 — Beyond Microsoft (breadth)
 - **Google Workspace** driver (parallel to M365: users, 2SV, sharing, DLP, residency).

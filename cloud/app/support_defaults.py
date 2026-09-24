@@ -456,11 +456,15 @@ legal hold, data classification, data minimization, inventory, incident response
   example, reports how many managed workloads are protected, how much is captured,
   and any sources needing re‑consent — folding straight into your score. It also
   reports live **security posture** from Microsoft Graph: multi‑factor
-  authentication coverage, conditional‑access policies, external‑sharing settings
-  and data residency. These read‑only checks are best‑effort — if the Microsoft 365
+  authentication coverage, conditional‑access policies, external‑sharing settings,
+  data residency, Microsoft Secure Score, privileged (admin) role holders, Intune
+  device compliance and encryption, and the authentication‑method policy. These
+  read‑only checks are best‑effort — if the Microsoft 365
   app hasn't been granted a permission (for example `Policy.Read.All` for
   conditional access, `Reports.Read.All` for MFA, `SharePointTenantSettings.Read.All`
-  for external sharing, or `Organization.Read.All` for residency) the related control
+  for external sharing, `Organization.Read.All` for residency, `SecurityEvents.Read.All`
+  for Secure Score, `RoleManagement.Read.Directory` for privileged roles, or
+  `DeviceManagementManagedDevices.Read.All` for Intune devices) the related control
   simply shows as *needs attention* and names the permission to grant, rather than
   failing. DLP has no automatic check yet, so it's tracked for manual attestation.
 
@@ -1436,6 +1440,13 @@ _SOURCE_PAGES = [
             "`User.Read.All`) — conditional access, external-sharing control, and guest-account "
             "governance.\n"
             "- **Residency** (`Organization.Read.All`) — tenant data location.\n"
+            "- **Security posture** (`SecurityEvents.Read.All`) — Microsoft Secure Score.\n"
+            "- **Privileged access** (`RoleManagement.Read.Directory`) — real Entra admin-role holders "
+            "(refines the registration-report estimate).\n"
+            "- **Endpoint devices** (`DeviceManagementManagedDevices.Read.All`) — Intune device "
+            "compliance and disk encryption.\n"
+            "- **Authentication policy** (`Policy.Read.All`) — strong auth methods enforced, weak "
+            "SMS/voice disabled.\n"
             "\n"
             "Every posture permission is **optional**: if it isn't granted the related control is shown "
             "as `unknown` naming the exact permission to add — it's tracked, never a silent pass. You "

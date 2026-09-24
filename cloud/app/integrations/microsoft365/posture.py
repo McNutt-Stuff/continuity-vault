@@ -332,6 +332,107 @@ def refresh(db: Session, inst, *, force: bool = False) -> int:
         _needs(db, tid, "data_residency", "Organization.Read.All", e)
         n += 1
 
+    # --- Microsoft Secure Score (overall security posture) ----------------------
+    try:
+        scores = list(graph.get_paged(token, "/security/secureScores",
+                                      params={"$top": "1"}, cap=1))
+        if scores:
+            cur = float(scores[0].get("currentScore") or 0)
+            mx = float(scores[0].get("maxScore") or 0)
+            if mx > 0:
+                ratio = cur / mx
+                status = "met" if ratio >= 0.7 else ("partial" if ratio >= 0.4 else "unmet")
+                _srec(db, inst, "security_posture", status,
+                      f"Microsoft Secure Score {int(cur)}/{int(mx)} ({int(ratio * 100)}%)",
+                      detail={"current": cur, "max": mx})
+                n += 1
+    except graph.GraphError as e:
+        _needs(db, tid, "security_posture", "SecurityEvents.Read.All", e)
+        n += 1
+
+    # --- Entra privileged roles (authoritative privileged-access review) --------
+    # Refines the registration-report estimate with the real directory-role holders.
+    _PRIV_ROLES = ("global administrator", "privileged role administrator",
+                   "security administrator", "exchange administrator",
+                   "sharepoint administrator", "user administrator")
+    try:
+        holders: set = set()
+        priv_holders: set = set()
+        for r in graph.get_paged(token, "/directoryRoles", cap=500):
+            rid = r.get("id")
+            rname = (r.get("displayName") or "").lower()
+            if not rid:
+                continue
+            try:
+                for mbr in graph.get_paged(token, f"/directoryRoles/{rid}/members",
+                                           params={"$select": "id"}, cap=5000):
+                    mid = mbr.get("id")
+                    if mid:
+                        holders.add(mid)
+                        if rname in _PRIV_ROLES:
+                            priv_holders.add(mid)
+            except graph.GraphError:
+                continue
+        admins = len(holders)
+        if admins:
+            status = "met" if admins <= 5 else ("partial" if admins <= 15 else "unmet")
+            _srec(db, inst, "privileged_access_review", status,
+                  f"{admins} account(s) hold a directory admin role "
+                  f"({len(priv_holders)} highly privileged)",
+                  expected=admins, covered=(admins if admins <= 5 else 0),
+                  failed=(admins if admins > 15 else 0),
+                  detail={"admins": admins, "high_privilege": len(priv_holders)},
+                  remediation="Keep standing admin roles to a minimum; use just-in-time (PIM) elevation.")
+            n += 1
+    except graph.GraphError as e:
+        # RoleManagement.Read.Directory not granted — keep the registration-report estimate.
+        logger.debug("m365 posture: directory roles unavailable (instance=%s): %s", inst.id, e)
+
+    # --- Intune managed-device compliance + encryption --------------------------
+    try:
+        total = compliant = encrypted = 0
+        for d in graph.get_paged(token, "/deviceManagement/managedDevices",
+                                 params={"$select": "complianceState,isEncrypted"}, cap=50000):
+            total += 1
+            if (d.get("complianceState") or "").lower() == "compliant":
+                compliant += 1
+            if d.get("isEncrypted"):
+                encrypted += 1
+        if total:
+            cr = compliant / total
+            _srec(db, inst, "device_compliance",
+                  "met" if cr >= 0.95 else ("partial" if cr >= 0.5 else "unmet"),
+                  f"{compliant}/{total} managed device(s) compliant",
+                  expected=total, covered=compliant, failed=total - compliant)
+            er = encrypted / total
+            _srec(db, inst, "device_encryption",
+                  "met" if er >= 0.95 else ("partial" if er >= 0.5 else "unmet"),
+                  f"{encrypted}/{total} managed device(s) encrypted",
+                  expected=total, covered=encrypted, failed=total - encrypted)
+            n += 2
+    except graph.GraphError as e:
+        _needs(db, tid, "device_compliance", "DeviceManagementManagedDevices.Read.All", e)
+        _needs(db, tid, "device_encryption", "DeviceManagementManagedDevices.Read.All", e)
+        n += 2
+
+    # --- Authentication-method policy (strong methods on, weak off) -------------
+    try:
+        pol = graph.get_one(token, "/policies/authenticationMethodsPolicy")
+        cfgs = pol.get("authenticationMethodConfigurations") or []
+        on = {(c.get("id") or "").lower(): ((c.get("state") or "") == "enabled") for c in cfgs}
+        strong = any(on.get(k) for k in ("fido2", "microsoftauthenticator",
+                                         "windowshelloforbusiness", "x509certificate"))
+        weak = any(on.get(k) for k in ("sms", "voice"))
+        status = "met" if (strong and not weak) else ("partial" if strong else "unmet")
+        _srec(db, inst, "password_policy", status,
+              "Strong authentication methods enabled"
+              + ("; weak methods (SMS/voice) still on" if weak else ""),
+              detail={"strong": strong, "weak_enabled": weak})
+        n += 1
+    except graph.GraphError as e:
+        _needs(db, tid, "password_policy", "Policy.Read.All", e)
+        n += 1
+
     db.commit()
     logger.info("m365 posture refreshed (instance=%s): %d signal(s)", inst.id, n)
     return n
