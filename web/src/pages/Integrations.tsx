@@ -83,6 +83,7 @@ export default function Integrations() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [m365Open, setM365Open] = useState<string | null>(null);
+  const [gwOpen, setGwOpen] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -146,6 +147,11 @@ export default function Integrations() {
                           onBack={() => { setM365Open(null); void load(); }} />;
   }
 
+  if (gwOpen) {
+    return <GoogleWorkspaceWorkspace spec={specByType["google_workspace"]} instanceId={gwOpen}
+                          onBack={() => { setGwOpen(null); void load(); }} />;
+  }
+
   const detailInst = detailId ? list?.instances.find((i) => i.id === detailId) : null;
   if (detailId && detailInst) {
     return <IntegrationDetail inst={detailInst} spec={specByType[detailInst.integration_type]}
@@ -174,7 +180,7 @@ export default function Integrations() {
         <div className="insights-cards" style={{ marginBottom: 20 }}>
           {list.instances.map((i) => (
             <InstanceCard key={i.id} inst={i} spec={specByType[i.integration_type]}
-                          onOpen={() => { if (i.integration_type === "microsoft365") setM365Open(i.id); else setDetailId(i.id); }} onChanged={load} />
+                          onOpen={() => { if (i.integration_type === "microsoft365") setM365Open(i.id); else if (i.integration_type === "google_workspace") setGwOpen(i.id); else setDetailId(i.id); }} onChanged={load} />
           ))}
         </div>
       ) : (
@@ -200,7 +206,7 @@ export default function Integrations() {
                              hasAppliance={(list?.appliances || []).length > 0}
                              addedCounts={(list?.instances || []).reduce((acc, i) => { acc[i.integration_type] = (acc[i.integration_type] || 0) + 1; return acc; }, {} as Record<string, number>)}
                              onClose={() => setShowAdd(false)}
-                             onPick={(s) => { setShowAdd(false); if (s.integration_type === "microsoft365") setM365Open("new"); else setSetupSpec(s); }} />
+                             onPick={(s) => { setShowAdd(false); if (s.integration_type === "microsoft365") setM365Open("new"); else if (s.integration_type === "google_workspace") setGwOpen("new"); else setSetupSpec(s); }} />
       )}
 
       {setupSpec && (
@@ -2428,4 +2434,267 @@ function M365Workspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: 
     </>
   );
 }
+
+
+// --------------------------------------------------------------------------- //
+// Google Workspace managed workspace — connect (domain-wide delegation),       //
+// directory discovery, identities + provisioned sources.                       //
+// --------------------------------------------------------------------------- //
+interface GwStatus {
+  instance_id: string; label: string; connected: boolean; node_id?: string | null;
+  subject_admin: string; primary_domain: string; customer_id: string;
+  consent_state: string; service_account_email: string;
+  identities: { total: number; in_scope: number; mapped: number };
+  sources: { total: number; active: number };
+  status: string; last_error?: string;
+}
+interface GwIdentity {
+  id: string; email: string; display_name: string; suspended: boolean; is_admin: boolean;
+  org_unit: string; user_type: string; in_scope: boolean; scope_reason: string; state: string;
+  binding: { user_id: string | null; status: string; method: string } | null;
+}
+interface GwSource {
+  id: string; workload: string; ownership_type: string; owner_user_id: string | null;
+  name: string; state: string; source_key: string; last_collected_at: string | null;
+}
+
+function GoogleWorkspaceWorkspace({ spec, instanceId, onBack }: { spec?: Spec; instanceId: string; onBack: () => void }) {
+  const isNew = instanceId === "new";
+  const [status, setStatus] = useState<GwStatus | null>(null);
+  const [identities, setIdentities] = useState<GwIdentity[]>([]);
+  const [sources, setSources] = useState<GwSource[]>([]);
+  const [loading, setLoading] = useState(!isNew);
+  const [busy, setBusy] = useState<string | null>(null);
+  // Connect form.
+  const [label, setLabel] = useState("");
+  const [subjectAdmin, setSubjectAdmin] = useState("");
+  const [domain, setDomain] = useState("");
+  const [customerId, setCustomerId] = useState("my_customer");
+  const [saJson, setSaJson] = useState("");
+
+  const iid = status?.instance_id || (isNew ? "" : instanceId);
+
+  async function load(id?: string) {
+    const targetId = id ?? (isNew ? "" : instanceId);
+    if (!targetId) { setLoading(false); return; }
+    setLoading(true);
+    try {
+      const s = await api.get<{ connected: boolean; instance: GwStatus | null }>(
+        `/integrations/google_workspace?instance_id=${encodeURIComponent(targetId)}`);
+      setStatus(s.instance);
+      if (s.instance) {
+        const r = await api.get<{ identities: GwIdentity[] }>(
+          `/integrations/google_workspace/identities?instance_id=${encodeURIComponent(targetId)}`);
+        setIdentities(r.identities || []);
+        const sr = await api.get<{ sources: GwSource[] }>(
+          `/integrations/google_workspace/sources?instance_id=${encodeURIComponent(targetId)}`);
+        setSources(sr.sources || []);
+      }
+    } catch { /* not connected */ }
+    finally { setLoading(false); }
+  }
+  useEffect(() => { if (!isNew) void load(); }, []);
+
+  async function connect() {
+    if (!subjectAdmin.trim() || !saJson.trim()) {
+      notify({ message: "Enter the admin email to impersonate and paste the service-account key JSON.", tone: "warn" });
+      return;
+    }
+    setBusy("connect");
+    try {
+      const r = await api.post<GwStatus & { ok: boolean }>("/integrations/google_workspace/connect", {
+        label: label.trim(), subject_admin: subjectAdmin.trim(), primary_domain: domain.trim(),
+        customer_id: customerId.trim() || "my_customer", service_account_json: saJson,
+      });
+      notify({ message: `Connected — discovered ${r.identities?.total ?? 0} directory user(s).`, tone: "ok" });
+      setSaJson("");
+      await load(r.instance_id);
+    } catch (e: any) {
+      notify({ message: e?.message || "Could not connect Google Workspace.", tone: "danger" });
+    } finally { setBusy(null); }
+  }
+
+  async function discover() {
+    if (!iid) return;
+    setBusy("discover");
+    try {
+      const r = await api.post<{ discovered: number }>(
+        `/integrations/google_workspace/discover?instance_id=${encodeURIComponent(iid)}`, {});
+      notify({ message: `Directory re-scanned — ${r.discovered} user(s).`, tone: "ok" });
+      await load(iid);
+    } catch (e: any) {
+      notify({ message: e?.message || "Discovery failed.", tone: "danger" });
+    } finally { setBusy(null); }
+  }
+
+  async function remove() {
+    if (!iid || !confirm("Remove this Google Workspace connection? Discovered users and provisioned sources are cleared.")) return;
+    setBusy("remove");
+    try {
+      await api.post(`/integrations/google_workspace/remove?instance_id=${encodeURIComponent(iid)}`, {});
+      notify({ message: "Google Workspace removed.", tone: "ok" });
+      onBack();
+    } catch (e: any) {
+      notify({ message: e?.message || "Could not remove.", tone: "danger" });
+    } finally { setBusy(null); }
+  }
+
+  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => setSaJson(String(reader.result || ""));
+    reader.readAsText(f);
+  }
+
+  if (loading) return <Loading label="Loading Google Workspace…" />;
+
+  const showConnect = !status;
+
+  return (
+    <>
+      <button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 14 }}>
+        <Icon name="logout" size={13} /> Back to integrations
+      </button>
+
+      <Card style={{ marginBottom: 14 }}>
+        <div className="row" style={{ gap: 12, alignItems: "center" }}>
+          <div className="insight-card-ic" style={{ background: "#1A73E81e", color: "#1A73E8", width: 42, height: 42 }}>
+            <SourceIcon type="google_workspace" fallback="cloud" size={22} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3 style={{ margin: 0 }}>Google Workspace</h3>
+            <div className="faint" style={{ fontSize: 12 }}>
+              {spec?.description || "Admin-governed protection of Gmail, Drive, Calendar and Contacts via a domain-wide-delegation service account."}
+            </div>
+          </div>
+          {status && (
+            <div className="row" style={{ gap: 6 }}>
+              <Pill tone={status.connected ? "ok" : "warn"}>{status.connected ? "Connected" : status.status}</Pill>
+              <button className="btn ghost sm" disabled={busy === "remove"} onClick={remove}>Remove</button>
+            </div>
+          )}
+        </div>
+        {status?.last_error && (
+          <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 10, display: "flex", gap: 6, alignItems: "center" }}>
+            <Icon name="alert" size={13} /> {status.last_error}
+          </div>
+        )}
+      </Card>
+
+      {showConnect ? (
+        <Card>
+          <h4 style={{ marginTop: 0 }}>Connect your organization</h4>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 14, maxWidth: 640 }}>
+            Create a Google Cloud <b>service account</b> with <b>domain-wide delegation</b>, authorize its
+            client ID for read-only Admin SDK + Gmail/Drive/Calendar/Contacts scopes in the Google Admin
+            console, then paste its JSON key below. Arkive impersonates the admin you name for directory
+            reads. The key is stored encrypted and never leaves your control plane in the clear.
+          </div>
+          <div className="stack" style={{ gap: 10, maxWidth: 640 }}>
+            <label className="stack" style={{ gap: 4 }}>
+              <span className="faint" style={{ fontSize: 12 }}>Connection name (optional)</span>
+              <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Google Workspace" />
+            </label>
+            <label className="stack" style={{ gap: 4 }}>
+              <span className="faint" style={{ fontSize: 12 }}>Admin email to impersonate *</span>
+              <input className="input" value={subjectAdmin} onChange={(e) => setSubjectAdmin(e.target.value)} placeholder="admin@yourdomain.com" />
+            </label>
+            <div className="row" style={{ gap: 10 }}>
+              <label className="stack" style={{ gap: 4, flex: 1 }}>
+                <span className="faint" style={{ fontSize: 12 }}>Primary domain</span>
+                <input className="input" value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="yourdomain.com" />
+              </label>
+              <label className="stack" style={{ gap: 4, flex: 1 }}>
+                <span className="faint" style={{ fontSize: 12 }}>Customer ID</span>
+                <input className="input" value={customerId} onChange={(e) => setCustomerId(e.target.value)} placeholder="my_customer" />
+              </label>
+            </div>
+            <label className="stack" style={{ gap: 4 }}>
+              <span className="faint" style={{ fontSize: 12 }}>Service-account key (JSON) *</span>
+              <input type="file" accept="application/json,.json" onChange={onFile} style={{ fontSize: 12 }} />
+              <textarea className="input" value={saJson} onChange={(e) => setSaJson(e.target.value)}
+                        placeholder='{ "type": "service_account", "client_email": "…", "private_key": "…" }'
+                        rows={5} style={{ fontFamily: "monospace", fontSize: 11.5 }} />
+            </label>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn primary" disabled={busy === "connect"} onClick={connect}>
+                {busy === "connect" ? "Connecting…" : "Connect & discover users"}
+              </button>
+            </div>
+          </div>
+        </Card>
+      ) : (
+        <>
+          <div className="insights-cards" style={{ marginBottom: 14 }}>
+            <MiniStat icon="user" label="Directory users" value={String(status.identities.total)} tint="#1A73E8" />
+            <MiniStat icon="check" label="In scope" value={String(status.identities.in_scope)} tint="#0aa06e" />
+            <MiniStat icon="link" label="Mapped" value={String(status.identities.mapped)} tint="#7c5cff" />
+            <MiniStat icon="grid" label="Sources" value={String(status.sources.total)} tint="#c56cf0" />
+          </div>
+
+          <Card style={{ marginBottom: 14 }}>
+            <div className="spread" style={{ marginBottom: 10 }}>
+              <div className="stack" style={{ gap: 2 }}>
+                <h4 style={{ margin: 0 }}>Directory users</h4>
+                <div className="faint" style={{ fontSize: 12 }}>
+                  Impersonating {status.subject_admin || "—"}{status.primary_domain ? ` · ${status.primary_domain}` : ""}
+                </div>
+              </div>
+              <button className="btn sm" disabled={busy === "discover"} onClick={discover}>
+                <Icon name="repeat" size={13} /> {busy === "discover" ? "Scanning…" : "Re-scan directory"}
+              </button>
+            </div>
+            {identities.length === 0 ? (
+              <div className="faint" style={{ fontSize: 12.5 }}>No users discovered yet.</div>
+            ) : (
+              <div style={{ overflow: "auto", maxHeight: 360 }}>
+                <table className="table" style={{ width: "100%", fontSize: 12.5 }}>
+                  <thead><tr><th>User</th><th>Org unit</th><th>Scope</th><th>Mapping</th></tr></thead>
+                  <tbody>
+                    {identities.slice(0, 500).map((u) => (
+                      <tr key={u.id}>
+                        <td>
+                          <div style={{ fontWeight: 600 }}>{u.display_name || u.email}</div>
+                          <div className="faint" style={{ fontSize: 11 }}>
+                            {u.email}{u.is_admin ? " · admin" : ""}{u.suspended ? " · suspended" : ""}
+                          </div>
+                        </td>
+                        <td className="faint">{u.org_unit || "/"}</td>
+                        <td><Pill tone={u.in_scope ? "ok" : "info"}>{u.in_scope ? "In scope" : u.scope_reason}</Pill></td>
+                        <td>{u.binding ? <Pill tone="ok">{u.binding.status}</Pill> : <span className="faint">—</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+
+          {sources.length > 0 && (
+            <Card>
+              <h4 style={{ marginTop: 0 }}>Provisioned sources</h4>
+              <div style={{ overflow: "auto", maxHeight: 300 }}>
+                <table className="table" style={{ width: "100%", fontSize: 12.5 }}>
+                  <thead><tr><th>Source</th><th>Workload</th><th>State</th><th>Last collected</th></tr></thead>
+                  <tbody>
+                    {sources.map((s) => (
+                      <tr key={s.id}>
+                        <td>{s.name || s.source_key}</td>
+                        <td className="faint">{s.workload}</td>
+                        <td><Pill tone={s.state === "active" ? "ok" : "info"}>{s.state}</Pill></td>
+                        <td className="faint">{s.last_collected_at ? new Date(s.last_collected_at).toLocaleString() : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 

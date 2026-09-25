@@ -52,14 +52,14 @@ class GoogleWorkspaceIntegration(Integration):
             default_interval_minutes=360,
             auto_provision_key=False,
             provides=["users", "email", "files", "calendar", "contacts"],
-            version="0.1.0",
-            status="coming_soon",
+            version="0.2.0",
+            status="preview",                  # connect + directory discovery
             plans=["business", "enterprise"],
             min_plan="business",
             capabilities=CAPABILITIES,
             ownership_models=["managed_user", "organization"],
             managed=True,
-            workspace=False,
+            workspace=True,
             docs_slug="integration-google-workspace",
             credential_fields=[],
         )
