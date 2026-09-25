@@ -96,7 +96,7 @@ _MANIFEST = {
         "GET /api/debug/db/stats — find bloat (high dead_ratio) or idle-in-transaction.",
         "POST /api/debug/db/prune — bound high-churn tables, then POST /api/debug/db/maintenance {action:'vacuum'} to reclaim.",
         "POST /api/debug/db/benchmark — confirm queries are fast again.",
-        "POST /api/debug/query {sql} — read-only SELECT/WITH/EXPLAIN/SHOW to inspect data.",
+        "POST /api/debug/query {sql} — read-only SELECT/WITH/EXPLAIN/SHOW to inspect data (add {node} to run it against a fleet node's OWN database).",
         "GET /api/debug/nodes — per-node DB health across the fleet.",
     ],
     "endpoints": [
@@ -107,8 +107,8 @@ _MANIFEST = {
         {"method": "POST", "path": "/api/debug/db/benchmark", "body": {"iterations": 3},
          "desc": "Time representative queries; returns per-query ms + a 'slow' list."},
         {"method": "POST", "path": "/api/debug/query",
-         "body": {"sql": "SELECT ...", "limit": 200, "timeout_ms": 15000},
-         "desc": "Run ONE read-only query (SELECT/WITH/EXPLAIN/SHOW). Returns columns + rows + ms."},
+         "body": {"sql": "SELECT ...", "limit": 200, "timeout_ms": 15000, "node": "<id-or-name, optional>"},
+         "desc": "Run ONE read-only query (SELECT/WITH/EXPLAIN/SHOW). Returns columns + rows + ms. Pass 'node' to proxy it to that fleet node's local DB (fleet-authed)."},
         {"method": "POST", "path": "/api/debug/db/maintenance",
          "body": {"action": "analyze|vacuum|vacuum_full", "table": "optional"},
          "desc": "Reclaim bloat / refresh planner stats (autocommit)."},
@@ -264,6 +264,10 @@ class Query(BaseModel):
     sql: str
     limit: int = 200
     timeout_ms: int = 15000
+    # Optional: proxy the query to a specific fleet node (id or name) so the CP
+    # debug key can inspect a customer node's LOCAL database without enabling a
+    # separate key on that node. Empty = run against this (control-plane) DB.
+    node: str = ""
 
 
 _FORBIDDEN = ("insert", "update", "delete", "drop", "alter", "truncate", "create",
@@ -273,11 +277,11 @@ _FORBIDDEN = ("insert", "update", "delete", "drop", "alter", "truncate", "create
 _FORBIDDEN_RE = re.compile(r"\b(" + "|".join(_FORBIDDEN) + r")\b", re.IGNORECASE)
 
 
-@router.post("/query", dependencies=[Depends(require_debug_key)])
-def run_query(body: Query, db: Session = Depends(get_db)):
-    """Run a READ-ONLY SQL query (SELECT / WITH only) with a statement timeout and
-    a row cap. Anything that mutates or is multi-statement is rejected."""
-    sql = (body.sql or "").strip().rstrip(";")
+def _execute_readonly_query(sql: str, limit: int = 200, timeout_ms: int = 15000) -> dict:
+    """Validate + run a single read-only statement against THIS process's DB.
+    Shared by the CP ``/query`` endpoint and the fleet-authed node query proxy so
+    both enforce identical guardrails."""
+    sql = (sql or "").strip().rstrip(";")
     low = sql.lower()
     if not (low.startswith("select") or low.startswith("with") or low.startswith("explain")
             or low.startswith("show")):
@@ -286,12 +290,12 @@ def run_query(body: Query, db: Session = Depends(get_db)):
         raise HTTPException(400, "only a single statement is allowed")
     if _FORBIDDEN_RE.search(sql):
         raise HTTPException(400, "query contains a forbidden keyword")
-    limit = max(1, min(1000, body.limit))
+    limit = max(1, min(1000, limit))
     t0 = time.perf_counter()
     try:
         with engine.connect() as conn:
             if _is_pg():
-                conn.exec_driver_sql(f"SET statement_timeout = {max(1000, min(60000, body.timeout_ms))}")
+                conn.exec_driver_sql(f"SET statement_timeout = {max(1000, min(60000, timeout_ms))}")
             res = conn.execute(text(sql))
             cols = list(res.keys()) if res.returns_rows else []
             rows = [[_jsonable(v) for v in row] for row in res.fetchmany(limit)] if res.returns_rows else []
@@ -299,6 +303,16 @@ def run_query(body: Query, db: Session = Depends(get_db)):
         raise HTTPException(400, f"query failed: {str(exc)[:300]}")
     return {"columns": cols, "rows": rows, "row_count": len(rows),
             "ms": round((time.perf_counter() - t0) * 1000, 2), "truncated": len(rows) >= limit}
+
+
+@router.post("/query", dependencies=[Depends(require_debug_key)])
+def run_query(body: Query, db: Session = Depends(get_db)):
+    """Run a READ-ONLY SQL query (SELECT / WITH only) with a statement timeout and
+    a row cap. Anything that mutates or is multi-statement is rejected. Pass
+    ``node`` to proxy the query to a fleet node's own database (fleet-authed)."""
+    if (body.node or "").strip():
+        return _proxy_query_to_node(db, body)
+    return _execute_readonly_query(body.sql, body.limit, body.timeout_ms)
 
 
 class Maint(BaseModel):
@@ -705,6 +719,42 @@ def _node_call(node, path: str) -> dict:
     r = httpx.get(f"{base}{path}", headers={"Authorization": f"Bearer {secret}"}, timeout=15.0)
     r.raise_for_status()
     return r.json()
+
+
+def _node_post(node, path: str, payload: dict) -> dict:
+    """POST to a node's fleet endpoint with the shared fleet secret."""
+    import httpx
+    from . import site as _site
+    base = (node.endpoint or "").rstrip("/")
+    secret = _site._fleet_secret()
+    r = httpx.post(f"{base}{path}", json=payload,
+                   headers={"Authorization": f"Bearer {secret}"}, timeout=25.0)
+    r.raise_for_status()
+    return r.json()
+
+
+def _proxy_query_to_node(db: Session, body: "Query") -> dict:
+    """Proxy a read-only query to a fleet node's OWN database (fleet-authed), so the
+    CP debug key can inspect a customer node's local state without enabling a
+    separate key there. Resolves the node by id or name; runs locally if it's self."""
+    from ..models import Node
+    sel = (body.node or "").strip()
+    node = (db.query(Node).filter(Node.id == sel).first()
+            or db.query(Node).filter(Node.name == sel).first())
+    if node is None:
+        raise HTTPException(404, f"node not found: {sel}")
+    if node.is_self:
+        return _execute_readonly_query(body.sql, body.limit, body.timeout_ms)
+    if not node.endpoint:
+        raise HTTPException(400, f"node {node.name} has no endpoint to proxy to")
+    try:
+        data = _node_post(node, "/nodes/sync/debug-query",
+                          {"sql": body.sql, "limit": body.limit, "timeout_ms": body.timeout_ms})
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"node query proxy failed ({node.name}): {str(exc)[:200]}")
+    return {**data, "node": node.name}
 
 
 # --------------------------------------------------------------------------- #

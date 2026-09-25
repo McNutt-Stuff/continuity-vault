@@ -64,6 +64,7 @@ def main() -> int:
     sub.add_parser("prune-commands")
     b = sub.add_parser("benchmark"); b.add_argument("iterations", nargs="?", type=int, default=3)
     q = sub.add_parser("query"); q.add_argument("sql"); q.add_argument("--limit", type=int, default=200)
+    q.add_argument("--node", default="", help="proxy the query to a fleet node's own DB (id or name)")
     v = sub.add_parser("vacuum"); v.add_argument("table", nargs="?", default=None)
     a = sub.add_parser("analyze"); a.add_argument("table", nargs="?", default=None)
     bl = sub.add_parser("billing"); bl.add_argument("tenant", nargs="?", default="")
@@ -90,7 +91,7 @@ def main() -> int:
     elif args.cmd == "benchmark":
         method, path, body = "POST", "/db/benchmark", {"iterations": args.iterations}
     elif args.cmd == "query":
-        method, path, body = "POST", "/query", {"sql": args.sql, "limit": args.limit}
+        method, path, body = "POST", "/query", {"sql": args.sql, "limit": args.limit, "node": args.node}
     elif args.cmd == "vacuum":
         method, path, body = "POST", "/db/maintenance", {"action": "vacuum", "table": args.table}
     elif args.cmd == "analyze":

@@ -982,6 +982,19 @@ def node_debug(authorization: str = Header(default=""), db: Session = Depends(ge
     return _brief_stats(db)
 
 
+@router.post("/debug-query")
+def node_debug_query(body: dict, authorization: str = Header(default="")):
+    """Fleet-authenticated READ-ONLY query against THIS node's local database, so
+    the control plane's debug API can inspect node-local state (e.g. a promoted
+    standby's Tenant.node_id / Node.is_self) without enabling a separate debug key
+    on the node. Same read-only guardrails as the CP /debug/query."""
+    _require_fleet(authorization)
+    from .debug import _execute_readonly_query
+    return _execute_readonly_query(str(body.get("sql", "")),
+                                   int(body.get("limit", 200) or 200),
+                                   int(body.get("timeout_ms", 15000) or 15000))
+
+
 @router.get("/config")
 def node_config_state(authorization: str = Header(default=""), db: Session = Depends(get_db)):
     """The settings this node currently has in effect (config profiles applied via
