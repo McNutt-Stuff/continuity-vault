@@ -1349,7 +1349,8 @@ _SOURCE_PAGES = [
         ["Open **Integrations → Microsoft 365** (Business / Enterprise) and choose **Connect "
          "organization**.",
          "Have a Microsoft **Global Administrator** grant admin consent — a Microsoft window opens "
-         "and returns you here automatically.",
+         "and returns you here automatically. Arkive's Microsoft application already carries every "
+         "permission it needs, so there's nothing to configure — approving consent is all it takes.",
          "Choose **Discover users** to pull your Entra directory. Use **Scope** to limit it by "
          "domain, include / exclude lists or guests, then re-discover.",
          "**Map** each Microsoft identity to an Arkive member — Arkive auto-suggests matches by "
@@ -1379,6 +1380,10 @@ _SOURCE_PAGES = [
          "Uses Microsoft admin-consent OAuth (**app-only**) — no per-employee sign-in and no stored "
          "password.",
          "Read-only — Arkive never sends, deletes or changes Microsoft data.",
+         "**Permissions are handled for you** — Arkive's Microsoft app ships with exactly the read-only "
+         "Graph permissions each workload needs. You never add or edit app permissions; Arkive checks "
+         "its access continuously and, if Microsoft ever needs something re-approved, surfaces a "
+         "one-click **Re-authorize** naming exactly what to approve.",
          "Managed sources are first-class: they show in Search, the Dashboard, Reports and Activity "
          "with their real brand icons, and can be governed by the rules engine and compliance packs."],
         required_plan="business",
@@ -1390,7 +1395,16 @@ _SOURCE_PAGES = [
             "Online** mailbox and **OneDrive**, plus organization **SharePoint** site libraries and "
             "**Teams** channels/chats, using your organization's admin access. Backups run on the "
             "shared scheduler like any other source and appear in the **Activity** log.\n"
+            "\n## Permissions — handled for you\n"
+            "You never configure Microsoft permissions. The Arkive Microsoft 365 application comes "
+            "pre-registered with exactly the **read-only** Microsoft Graph permissions each workload "
+            "needs — your Global Administrator just grants consent once, and Arkive takes care of the "
+            "rest. Arkive continuously checks its Microsoft access; if a permission is ever missing, "
+            "revoked, or needs re-approval, the integration shows a clear status and a one-click "
+            "**Re-authorize** that names the exact permission to approve — you never hand-edit an app "
+            "registration. Everything is read-only: Arkive can never send, delete or change your data.\n"
             "\n## Set it up (platform administrator)\n"
+            "*(This section is for Arkive operators only — customers never do this.)* "
             "A platform administrator registers the Arkive Microsoft 365 (Entra) application once and "
             "links its credentials in **Admin → Sources → Managed integrations**: create a "
             "Configuration Object holding the app's `client_id` and `client_secret`, then select it "
