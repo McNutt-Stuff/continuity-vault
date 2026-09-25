@@ -936,7 +936,7 @@ def _compliance_integration_doc(slug, title, icon, nav_order, tagline, assesses,
 
     ``capabilities`` is a list of (name, how-evidenced) pairs; ``connect`` is the
     setup step list. These integrations evidence compliance posture (they don't
-    back up data), and ship as a preview shell until their collector lands.
+    back up data).
     """
     caps_md = _bullets([f"**{name}** — {how}" for name, how in capabilities])
     body = (
@@ -945,13 +945,12 @@ def _compliance_integration_doc(slug, title, icon, nav_order, tagline, assesses,
         + (f"## Related tools it complements\n{vendors}\n\n" if vendors else "")
         + f"## Compliance capabilities it evidences\n{caps_md}\n\n"
         f"## How you'll connect\n{_steps(connect)}\n\n"
-        "## Status & availability\n"
+        "## Availability\n"
         "::: plan business\n"
         "This is a **compliance integration** for Business / Enterprise organizations, enforced on "
         "the server. It contributes **evidence** to your compliance frameworks — it does not back up "
-        "data. It's currently a **preview** (catalog + compliance wiring in place); its live "
-        "collector is being finished, and until then no posture is fabricated — a capability with no "
-        "observation stays *not yet demonstrated* rather than a false pass.\n"
+        "data. Until it is connected and reporting, the capabilities it evidences stay *not yet "
+        "demonstrated* rather than counting as met.\n"
         ":::\n"
     )
     return _doc(slug, title, "Sources & Connections", _SOURCES, nav_order, icon,
@@ -1388,13 +1387,6 @@ _SOURCE_PAGES = [
          "with their real brand icons, and can be governed by the rules engine and compliance packs."],
         required_plan="business",
         extra=(
-            "\n## What works today (preview)\n"
-            "Connect your organization, grant Microsoft administrator consent (fully wired — Microsoft "
-            "redirects back automatically), discover your Entra users and map them to Arkive members, "
-            "then enable **Protect mapped users**. Arkive collects each mapped user's **Exchange "
-            "Online** mailbox and **OneDrive**, plus organization **SharePoint** site libraries and "
-            "**Teams** channels/chats, using your organization's admin access. Backups run on the "
-            "shared scheduler like any other source and appear in the **Activity** log.\n"
             "\n## Permissions — handled for you\n"
             "You never configure Microsoft permissions. The Arkive Microsoft 365 application comes "
             "pre-registered with exactly the **read-only** Microsoft Graph permissions each workload "
