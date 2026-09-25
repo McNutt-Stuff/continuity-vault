@@ -41,6 +41,15 @@ interface Mapping {
   is_picker?: boolean; reminder_days?: number;
   config?: FileConfig;
   backfill?: { enabled: boolean; done: boolean; count: number; started_at?: string | null; completed_at?: string | null } | null;
+  // Managed-integration grouped entry (Microsoft 365 / Google Workspace). When
+  // set, this row governs EVERY managed source under the integration as one unit;
+  // per-source logic is handled by Rules, not the Data Map.
+  integration?: boolean;
+  integration_type?: string;
+  integration_label?: string;
+  instance_id?: string;
+  workloads?: { id: string; label: string }[];
+  child_count?: number;
 }
 interface ActivityEvent {
   kind: string; collection_id?: string; source: string; source_type?: string;
@@ -77,8 +86,12 @@ export default function Mappings() {
   const [editId, setEditId] = useState<string | null>(null);
   const [editDests, setEditDests] = useState<string[]>([]);
   const [editFields, setEditFields] = useState<string[]>([]);
-  // -1 = use the global default, 0 = manual only, >0 = every N minutes.
   const [editInterval, setEditInterval] = useState<number>(-1);
+  // Managed-integration entry editor (org-admin only): destinations + schedule
+  // that cascade to every managed source under the integration.
+  const [intEditId, setIntEditId] = useState<string | null>(null);
+  const [intEditDests, setIntEditDests] = useState<string[]>([]);
+  const [intEditInterval, setIntEditInterval] = useState<number>(-1);
   // Gmail: which folders to skip + whether to include Spam/Trash.
   const [editGmailExclude, setEditGmailExclude] = useState<string[]>([]);
   const [editGmailSpamTrash, setEditGmailSpamTrash] = useState<boolean>(false);
@@ -281,6 +294,31 @@ export default function Mappings() {
     }
   }
 
+  function startIntEdit(m: Mapping) {
+    setIntEditId(m.id);
+    setIntEditDests(m.destinations || ["cv-cloud"]);
+    setIntEditInterval(m.backup_interval_minutes == null ? -1 : m.backup_interval_minutes);
+  }
+
+  function toggleIntDest(id: string) {
+    setIntEditDests((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]);
+  }
+
+  async function saveIntMapping(m: Mapping) {
+    if (intEditDests.length === 0) return flash("Pick at least one destination");
+    try {
+      await api.put(`/collections/integration/${m.instance_id}`, {
+        destinations: intEditDests,
+        backup_interval_minutes: intEditInterval,
+      });
+      setIntEditId(null);
+      flash("Integration mapping updated");
+      await load();
+    } catch (e) {
+      await notify({ title: "Couldn't update integration mapping", message: (e as ApiError).message, tone: "danger" });
+    }
+  }
+
   async function prune(m: Mapping) {
     const ok = await confirmDialog({
       title: "Prune off-policy recovery points",
@@ -409,8 +447,116 @@ export default function Mappings() {
 
       <Card>
         <h3 style={{ marginBottom: 12 }}>Mappings</h3>
-        {mappings.length === 0 && <div className="muted">No mappings yet. Add one above.</div>}
-        {mappings.map((m) => {
+        {(() => {
+          const integrations = mappings.filter((m) => m.integration);
+          if (integrations.length === 0) return null;
+          return (
+            <div className="stack" style={{ gap: 10, marginBottom: 14 }}>
+              <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }}>
+                Managed integrations
+              </div>
+              {integrations.map((m) => {
+                const brand = brandForSource(m.integration_type || "");
+                const editing = intEditId === m.id;
+                return (
+                  <div key={m.id} className="result-row integration-map-row" style={{ alignItems: "flex-start" }}>
+                    <div className="result-icon" style={{ background: "var(--inset)" }}>
+                      {brand ? <BrandIcon name={brand} size={18} /> : <Icon name="puzzle" size={17} />}
+                    </div>
+                    <div className="flex1">
+                      <div style={{ fontWeight: 600 }}>
+                        {m.name} <Pill tone="info">Managed integration</Pill>
+                      </div>
+                      <div className="faint" style={{ fontSize: 11.5, marginTop: 2 }}>
+                        {m.integration_label} · governs {m.child_count ?? 0} protected source{(m.child_count ?? 0) === 1 ? "" : "s"} as one
+                        {m.last_backup_at
+                          ? ` · last sync ${fmtTime(m.last_backup_at)} · ${m.last_object_count} objects`
+                          : " · never synced"}
+                      </div>
+                      {(m.workloads || []).length > 0 && (
+                        <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                          {(m.workloads || []).map((w) => (
+                            <span key={w.id} className="chip" style={{ padding: "1px 8px", fontSize: 10.5 }}>{w.label}</span>
+                          ))}
+                        </div>
+                      )}
+                      {!editing && (
+                        <div className="stack" style={{ gap: 8, marginTop: 8 }}>
+                          <div className="map-dests">
+                            <span className="map-dests-label">Stored to</span>
+                            {(m.destinations || []).length === 0 && (
+                              <span className="faint" style={{ fontSize: 11.5 }}>No destination set</span>
+                            )}
+                            {(m.destinations || []).map((d) => (
+                              <span key={d} className="dest-chip">
+                                <DestIcon dest={d} provider={targets.find((t) => t.id === d)?.provider} size={13} />
+                                {destLabel(d)}
+                              </span>
+                            ))}
+                          </div>
+                          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                            <Pill tone={m.backup_interval_minutes === 0 ? "warn" : "info"}>
+                              <Icon name="clock" size={11} /> {scheduleLabel(m)}
+                            </Pill>
+                            <span className="faint" style={{ fontSize: 11.5, alignSelf: "center" }}>
+                              Applies to every source under this integration. Per-source logic is handled by <Link to="/rules">Rules</Link>.
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                      {editing && (
+                        <div className="stack" style={{ gap: 10, marginTop: 8 }}>
+                          <div className="stack" style={{ gap: 6 }}>
+                            <span className="faint" style={{ fontSize: 11.5 }}>Route the whole integration to</span>
+                            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                              {targets.map((t) => (
+                                <span key={t.id}
+                                  className={`chip ${intEditDests.includes(t.id) ? "active" : ""}`}
+                                  onClick={() => toggleIntDest(t.id)} title={t.detail}>
+                                  <DestIcon dest={t.id} provider={t.provider} size={13} />
+                                  {t.label}
+                                  {t.kind === "appliance" && t.online === false && (
+                                    <span className="faint" style={{ marginLeft: 4 }}>· offline</span>
+                                  )}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="stack" style={{ gap: 6 }}>
+                            <span className="faint" style={{ fontSize: 11.5 }}>Back up automatically</span>
+                            <select className="input" style={{ maxWidth: 220 }} value={intEditInterval}
+                                    onChange={(e) => setIntEditInterval(Number(e.target.value))}>
+                              {INTERVAL_OPTIONS.map((o) => (
+                                <option key={o.value} value={o.value}>{o.label}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="faint" style={{ fontSize: 11.5 }}>
+                            This routing and schedule cascade to all {m.child_count ?? 0} managed source{(m.child_count ?? 0) === 1 ? "" : "s"}.
+                          </div>
+                          <div className="row" style={{ gap: 8 }}>
+                            <button className="btn sm primary" onClick={() => saveIntMapping(m)}>Save</button>
+                            <button className="btn sm ghost" onClick={() => setIntEditId(null)}>Cancel</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    {!editing && me?.can_admin && (
+                      <button className="btn sm" onClick={() => startIntEdit(m)}>Edit</button>
+                    )}
+                    {!editing && (
+                      <Link className="btn sm ghost" to={`/integrations`} title="Manage this integration">
+                        <Icon name="puzzle" size={13} /> Manage
+                      </Link>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
+        {mappings.filter((m) => !m.integration).length === 0 && <div className="muted">No mappings yet. Add one above.</div>}
+        {mappings.filter((m) => !m.integration).map((m) => {
           const brand = brandForSource(m.source_type);
           const editing = editId === m.id;
           return (

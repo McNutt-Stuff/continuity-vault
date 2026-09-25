@@ -353,6 +353,17 @@ is attempted independently, so one being offline never blocks the others.
 
 Changes here take effect on the next scheduled run; you can also trigger an
 immediate backup.
+
+## Managed integrations are one entry
+Sources protected through a **managed integration** — Microsoft 365 or Google
+Workspace — are **not** listed one row per user or site. Instead the whole
+integration appears as a **single, admin‑governed Data Map entry**. The
+destination and schedule you set on that entry apply to **every** source the
+integration protects. Only organization administrators can see or edit it; a
+standard member never sees the mapping for managed sources, even for their own
+account's data. To vary handling for specific managed sources (label, restrict,
+obfuscate, don't‑index, discard), use the **[Rules engine](/support/rules)** —
+the Data Map entry stays one simple, uniform setting for the integration.
 """,
         help_routes=["/mappings"]),
 

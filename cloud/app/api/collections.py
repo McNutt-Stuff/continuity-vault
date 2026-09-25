@@ -17,6 +17,7 @@ from ..models import (
     Collection,
     ConnectorAccount,
     DesktopAgent,
+    IntegrationInstance,
     SearchDocument,
     SnapshotReceipt,
     Tenant,
@@ -26,6 +27,36 @@ from ..workers.jobs import start_backup_job
 
 router = APIRouter(prefix="/collections", tags=["collections"])
 logger = logging.getLogger("cv.collections")
+
+# Integrations whose per-source collections are governed as ONE Data Map entry
+# (admin-only): the individual managed sources are never shown as standalone rows.
+_MANAGED_INTEGRATIONS = {
+    "microsoft365": "Microsoft 365",
+    "google_workspace": "Google Workspace",
+}
+
+# Friendly labels for the managed workloads folded under an integration entry.
+_WORKLOAD_LABEL = {
+    "exchange": "Exchange", "onedrive": "OneDrive", "sharepoint": "SharePoint",
+    "teams": "Teams", "teams_chat": "Teams chats", "calendar": "Calendar",
+    "contacts": "Contacts", "onenote": "OneNote", "copilot": "Copilot",
+    "gmail": "Gmail", "google_drive": "Drive", "google_calendar": "Calendar",
+    "google_contacts": "Contacts",
+}
+
+
+def _managed_instance_id(c: Collection) -> str | None:
+    """The integration instance a managed collection belongs to (M365 or Google
+    Workspace), or None for a normal source."""
+    cfg = c.config or {}
+    if not cfg.get("managed"):
+        return None
+    return cfg.get("m365_instance_id") or cfg.get("gw_instance_id")
+
+
+def _managed_workload(c: Collection) -> str | None:
+    cfg = c.config or {}
+    return cfg.get("m365_workload") or cfg.get("gw_workload")
 
 
 class CreateCollectionRequest(BaseModel):
@@ -270,7 +301,166 @@ def list_collections(principal: security.Principal = Depends(security.get_princi
              .filter(Collection.tenant_id == tenant.id,
                      Collection.vault_id.in_(allowed))
              .order_by(Collection.created_at.asc(), Collection.id.asc()).all()) if allowed else []
-    return [_collection_view(db, c) for c in colls]
+    # Managed integration sources (Microsoft 365 / Google Workspace) are governed by
+    # the integration, not shown as individual Data Map rows — and never shown to
+    # standard members, even for their own account's data. An org admin sees ONE
+    # grouped entry per integration instead (added below).
+    views = [_collection_view(db, c) for c in colls if not (c.config or {}).get("managed")]
+    if security.is_org_admin(principal.role):
+        views.extend(_integration_mapping_views(db, tenant))
+    return views
+
+
+def _integration_mapping_views(db: Session, tenant: Tenant) -> list[dict]:
+    """One grouped Data Map entry per managed integration instance (all of its
+    per-user/per-site managed collections collapsed into a single row)."""
+    managed = [c for c in db.query(Collection)
+               .filter(Collection.tenant_id == tenant.id).all()
+               if (c.config or {}).get("managed")]
+    by_inst: dict[str, list[Collection]] = {}
+    for c in managed:
+        iid = _managed_instance_id(c)
+        if iid:
+            by_inst.setdefault(iid, []).append(c)
+    out: list[dict] = []
+    for iid, children in by_inst.items():
+        inst = db.get(IntegrationInstance, iid)
+        if inst is None or inst.integration_type not in _MANAGED_INTEGRATIONS:
+            continue
+        out.append(_integration_mapping_view(db, inst, children))
+    # Stable order by integration label.
+    out.sort(key=lambda v: v.get("name") or "")
+    return out
+
+
+def _integration_mapping_view(db: Session, inst: IntegrationInstance,
+                              children: list[Collection]) -> dict:
+    cfg = inst.config or {}
+    prof = cfg.get("managed_profile") or {}
+    child_ids = [c.id for c in children]
+    objects = (db.query(SearchDocument.object_id)
+               .filter(SearchDocument.collection_id.in_(child_ids))
+               .distinct().count()) if child_ids else 0
+    last = (db.query(SnapshotReceipt)
+            .filter(SnapshotReceipt.collection_id.in_(child_ids))
+            .order_by(SnapshotReceipt.created_at.desc()).first()) if child_ids else None
+    # Distinct workloads present under this integration (Exchange, OneDrive, …).
+    workloads: list[dict] = []
+    seen: set[str] = set()
+    for c in children:
+        w = _managed_workload(c)
+        if w and w not in seen:
+            seen.add(w)
+            workloads.append({"id": w, "label": _WORKLOAD_LABEL.get(w, w)})
+    workloads.sort(key=lambda x: x["label"])
+    # Routing/schedule come from the integration's authoritative managed profile;
+    # editing the entry writes back to it and cascades to every child.
+    union: list[str] = []
+    for c in children:
+        for d in (c.destinations or []):
+            if d not in union:
+                union.append(d)
+    dests = list(prof.get("destinations") or union or ["cv-cloud"])
+    label = _MANAGED_INTEGRATIONS.get(inst.integration_type, inst.integration_type)
+    name = inst.label or label
+    return {
+        "id": f"integration:{inst.id}",
+        "integration": True,
+        "integration_type": inst.integration_type,
+        "integration_label": label,
+        "instance_id": inst.id,
+        "name": name,
+        "source_type": inst.integration_type,
+        "source_display": label,
+        "workloads": workloads,
+        "child_count": len(children),
+        "destinations": dests,
+        "backup_interval_minutes": prof.get("backup_interval_minutes"),
+        "default_interval_minutes": get_settings().sync_interval_minutes,
+        "last_backup_at": last.created_at.isoformat() if last else None,
+        "last_object_count": objects,
+        "last_recoverable": bool(last.recoverable) if last else False,
+    }
+
+
+class UpdateIntegrationMappingRequest(BaseModel):
+    destinations: list[str] | None = None
+    backup_interval_minutes: int | None = None  # NULL/<0 = default, 0 = manual, >0 = every N min
+
+
+@router.put("/integration/{instance_id}")
+def update_integration_mapping(instance_id: str, body: UpdateIntegrationMappingRequest,
+                               principal: security.Principal = Depends(security.get_principal),
+                               tenant: Tenant = Depends(security.get_tenant),
+                               db: Session = Depends(get_db)):
+    """Edit the single Data Map entry for a managed integration (Microsoft 365 /
+    Google Workspace). Org-admin only. The routing + schedule set here are written
+    to the integration's managed profile and cascade to EVERY managed source it
+    protects (per-source logic is handled by Rules, not the Data Map)."""
+    if not security.is_org_admin(principal.role):
+        raise HTTPException(403, "Only an organization admin can edit a managed integration mapping.")
+    inst = db.get(IntegrationInstance, instance_id)
+    if not inst or inst.tenant_id != tenant.id \
+            or inst.integration_type not in _MANAGED_INTEGRATIONS:
+        raise HTTPException(404, "integration not found")
+    cfg = dict(inst.config or {})
+    prof = dict(cfg.get("managed_profile") or {})
+    if body.destinations is not None:
+        dests = [str(d) for d in body.destinations if d] or ["cv-cloud"]
+        _require_protection(db, principal, tenant, dests)
+        prof["destinations"] = dests
+    if body.backup_interval_minutes is not None:
+        prof["backup_interval_minutes"] = (None if body.backup_interval_minutes < 0
+                                           else int(body.backup_interval_minutes))
+    cfg["managed_profile"] = prof
+    inst.config = cfg
+    # Cascade to every managed child collection so the change is immediate here;
+    # the integration's provisioner re-syncs children from the profile too (which is
+    # what makes it durable on node-hosted tenants that reconcile from the CP).
+    children = [c for c in db.query(Collection)
+                .filter(Collection.tenant_id == tenant.id).all()
+                if _managed_instance_id(c) == inst.id]
+    for c in children:
+        if body.destinations is not None:
+            c.destinations = list(prof.get("destinations") or ["cv-cloud"])
+        if body.backup_interval_minutes is not None:
+            c.backup_interval_minutes = prof.get("backup_interval_minutes")
+    db.commit()
+    _reprovision_integration(db, inst)
+    audit.record(db, actor=principal.user_id, action="integration.mapping_updated",
+                 category="admin", tenant_id=tenant.id, resource=inst.id,
+                 detail={"integration": inst.integration_type,
+                         "destinations": prof.get("destinations"),
+                         "backup_interval_minutes": prof.get("backup_interval_minutes"),
+                         "children": len(children)})
+    logger.info("integration mapping updated (instance=%s type=%s): destinations=%s interval=%s children=%d",
+                inst.id, inst.integration_type, prof.get("destinations"),
+                prof.get("backup_interval_minutes"), len(children))
+    return _integration_mapping_view(db, inst, children)
+
+
+def _reprovision_integration(db: Session, inst: IntegrationInstance) -> None:
+    """Apply a managed-profile change to the integration's sources now. On a
+    node-hosted tenant the node reconciles from the replicated profile (bump its
+    desired state); on the control plane, re-provision inline. Best-effort — the
+    child cascade above already applied the routing/schedule locally."""
+    t = db.get(Tenant, inst.tenant_id)
+    node_hosted = bool(t and t.node_id)
+    try:
+        if inst.integration_type == "microsoft365":
+            from ..integrations.microsoft365 import api as m365api, collect as m365collect
+            if node_hosted:
+                m365api._bump_desired(db, inst)
+                db.commit()
+            else:
+                m365collect.provision_sources(db, inst)
+        elif inst.integration_type == "google_workspace":
+            from ..integrations.google_workspace import collect as gwcollect
+            if not node_hosted:
+                gwcollect.provision_sources(db, inst)
+    except Exception:  # noqa: BLE001 — routing already cascaded; provisioning is a follow-up
+        logger.exception("reprovision after integration mapping update failed (instance=%s)", inst.id)
+
 
 
 @router.delete("/{collection_id}")

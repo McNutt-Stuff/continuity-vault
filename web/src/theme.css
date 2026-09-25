@@ -171,7 +171,9 @@ h3 { font-size: 15px; }
 
 /* Storage destinations on a Data Map card — set apart from settings pills. */
 .map-dests { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.map-dests-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+.integration-map-row { border-left: 3px solid var(--brand, #4f7cff);
+  background: color-mix(in srgb, var(--brand, #4f7cff) 5%, transparent);
+  border-radius: 10px; padding-left: 10px; }.map-dests-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
   color: var(--faint); font-weight: 600; }
 .dest-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
   font-size: 12px; font-weight: 600; border-radius: 8px;
