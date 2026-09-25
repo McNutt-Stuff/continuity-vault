@@ -453,7 +453,7 @@ export default function Mappings() {
           return (
             <div className="stack" style={{ gap: 10, marginBottom: 14 }}>
               <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }}>
-                Managed integrations
+                Managed Sources
               </div>
               {integrations.map((m) => {
                 const brand = brandForSource(m.integration_type || "");
@@ -556,6 +556,11 @@ export default function Mappings() {
           );
         })()}
         {mappings.filter((m) => !m.integration).length === 0 && <div className="muted">No mappings yet. Add one above.</div>}
+        {mappings.some((m) => !m.integration) && mappings.some((m) => m.integration) && (
+          <div className="faint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 10 }}>
+            Personal Sources
+          </div>
+        )}
         {mappings.filter((m) => !m.integration).map((m) => {
           const brand = brandForSource(m.source_type);
           const editing = editId === m.id;
