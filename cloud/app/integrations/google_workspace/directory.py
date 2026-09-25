@@ -90,6 +90,25 @@ def build_directory_service(sa_info: dict, subject: str):
     return build("admin", "directory_v1", credentials=creds, cache_discovery=False)
 
 
+def impersonated_token(sa_info: dict, subject: str, scopes: list[str]) -> str:
+    """Mint a short-lived OAuth access token for ``subject`` via domain-wide
+    delegation (the service account impersonates the user). This is what lets the
+    standard Google connectors (gmail/drive/calendar/contacts) pull a managed user's
+    data with an ADMIN-provided credential instead of a personal sign-in."""
+    try:
+        from google.oauth2 import service_account  # type: ignore
+        import google.auth.transport.requests as greq  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        raise DirectoryError(f"google client libraries unavailable: {exc}") from exc
+    creds = service_account.Credentials.from_service_account_info(
+        sa_info, scopes=list(scopes), subject=subject)
+    try:
+        creds.refresh(greq.Request())
+    except Exception as exc:  # noqa: BLE001 — surface as actionable
+        raise DirectoryError(f"could not mint a delegated token for {subject}: {exc}") from exc
+    return creds.token or ""
+
+
 def _in_scope(ident: "m.GwExternalIdentity", rules: dict) -> tuple[bool, str]:
     """Deterministic scope decision. Precedence: explicit exclude > guest gate >
     explicit include list > OU allow-list > domain allow-list > default (active

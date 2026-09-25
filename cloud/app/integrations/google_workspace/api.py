@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from ... import audit, credstore, security
 from ...db import get_db
 from ...models import IntegrationInstance, Tenant, User
+from . import collect
 from . import directory
 from . import models as m
 
@@ -75,6 +76,8 @@ def _status_view(db: Session, inst: IntegrationInstance) -> dict:
         m.GwManagedSource.integration_instance_id == inst.id)
     src_total = sq.count()
     src_active = sq.filter(m.GwManagedSource.state == "active").count()
+    cfg = inst.config or {}
+    prof = cfg.get("managed_profile") or {}
     return {
         "instance_id": inst.id,
         "label": inst.label,
@@ -87,6 +90,9 @@ def _status_view(db: Session, inst: IntegrationInstance) -> dict:
         "service_account_email": cred.service_account_email if cred else "",
         "identities": {"total": total, "in_scope": in_scope, "mapped": mapped},
         "sources": {"total": src_total, "active": src_active},
+        "collect_enabled": bool(cfg.get("collect_enabled")),
+        "workloads": [w for w in (prof.get("workloads") or []) if w in collect._WORKLOADS]
+                      or list(collect._DEFAULT_WORKLOADS),
         "status": inst.status,
         "last_error": inst.last_error or "",
     }
@@ -108,6 +114,7 @@ def overview(instance_id: str = "",
         "connected": inst is not None,
         "instances": [{"id": i.id, "label": i.label, "status": i.status} for i in instances],
         "instance": _status_view(db, inst) if inst else None,
+        "workload_catalog": [{"id": w, "label": v["label"]} for w, v in collect._WORKLOADS.items()],
     }
 
 
@@ -256,6 +263,81 @@ def _run_discovery_safe(db: Session, inst: IntegrationInstance) -> int:
         db.commit()
         logger.warning("gw discovery error (instance=%s): %s", inst.id, exc)
         raise HTTPException(502, f"Directory discovery failed: {exc}")
+
+
+class CollectionBody(BaseModel):
+    enabled: bool = True
+    workloads: list[str] | None = None
+
+
+def _auto_map(db: Session, inst: IntegrationInstance) -> int:
+    """Bind in-scope directory identities to Arkive members by verified email — the
+    frictionless path so protection can start without a manual mapping pass. Manual
+    mapping/overrides land in a later slice; this never binds an unmatched user."""
+    bound = 0
+    users = {(u.email or "").lower(): u.id for u in db.query(User).filter(
+        User.tenant_id == inst.tenant_id).all()}
+    for ident in (db.query(m.GwExternalIdentity)
+                  .filter(m.GwExternalIdentity.integration_instance_id == inst.id,
+                          m.GwExternalIdentity.in_scope.is_(True)).all()):
+        uid = users.get((ident.primary_email or "").lower())
+        if not uid:
+            continue
+        b = (db.query(m.GwIdentityBinding)
+             .filter(m.GwIdentityBinding.integration_instance_id == inst.id,
+                     m.GwIdentityBinding.external_identity_id == ident.id).first())
+        if b is None:
+            b = m.GwIdentityBinding(
+                tenant_id=inst.tenant_id, integration_instance_id=inst.id,
+                external_identity_id=ident.id)
+            db.add(b)
+        b.user_id = uid
+        b.status = "mapped"
+        b.mapping_method = "verified_email"
+        if ident.state == "discovered":
+            ident.state = "mapped"
+        bound += 1
+    db.commit()
+    return bound
+
+
+@router.post("/collection")
+def set_collection(body: CollectionBody, instance_id: str = "",
+                   principal: security.Principal = Depends(require_gw),
+                   db: Session = Depends(get_db)):
+    """Enable/disable managed protection for this instance. Enabling auto-maps
+    in-scope users to Arkive members by email and provisions a managed source +
+    protecting Collection per user per selected workload (Gmail/Drive/Calendar/
+    Contacts), collected via domain-wide delegation on the shared scheduler."""
+    inst = _resolve(db, principal.tenant_id, instance_id)
+    if inst is None:
+        raise HTTPException(404, "not connected")
+    cfg = dict(inst.config or {})
+    prof = dict(cfg.get("managed_profile") or {})
+    if body.workloads is not None:
+        prof["workloads"] = [w for w in body.workloads if w in collect._WORKLOADS]
+    cfg["managed_profile"] = prof
+    cfg["collect_enabled"] = bool(body.enabled)
+    inst.config = cfg
+    db.commit()
+    provisioned = 0
+    if body.enabled:
+        mapped = _auto_map(db, inst)
+        provisioned = collect.provision_sources(db, inst)
+        audit.record(db, actor=principal.user_id, action="google_workspace.collection_enabled",
+                     category="admin", resource=inst.id,
+                     detail={"mapped": mapped, "sources": provisioned,
+                             "workloads": prof.get("workloads") or list(collect._DEFAULT_WORKLOADS)})
+    else:
+        for s in db.query(m.GwManagedSource).filter(
+                m.GwManagedSource.integration_instance_id == inst.id,
+                m.GwManagedSource.state != "decommissioned").all():
+            s.state = "paused_by_admin"
+        db.commit()
+        audit.record(db, actor=principal.user_id, action="google_workspace.collection_disabled",
+                     category="admin", resource=inst.id)
+    return {"ok": True, "collect_enabled": bool(body.enabled),
+            "sources_provisioned": provisioned, **_status_view(db, inst)}
 
 
 @router.post("/disconnect")

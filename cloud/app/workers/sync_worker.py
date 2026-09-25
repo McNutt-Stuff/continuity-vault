@@ -374,6 +374,12 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
         from ..integrations.microsoft365 import collect as _m365_collect
         return _m365_collect.run_managed_collection(db, collection, destinations=destinations,
                                                     progress=progress)
+    # Managed Google Workspace sources reuse the STANDARD Google connectors but
+    # authenticate with a per-user domain-wide-delegation token minted per run.
+    gw_token = None
+    if cfg0.get("managed") and cfg0.get("gw_workload"):
+        from ..integrations.google_workspace import collect as _gw_collect
+        gw_token = _gw_collect.mint_token_for_collection(db, collection)
     account = (
         db.get(ConnectorAccount, collection.connector_account_id)
         if collection.connector_account_id
@@ -399,6 +405,10 @@ def run_backup(db: Session, collection: Collection, destinations: Optional[List[
         # connector config alongside the credentials.
         if collection.config:
             config = {**config, **collection.config}
+        # A managed Google source authenticates with the freshly-minted delegated
+        # token, not a personal OAuth account.
+        if gw_token:
+            config["access_token"] = gw_token
         # Backfill a missing account identity (e.g. Evernote email) so existing
         # sources gain their label without needing a re-authorization.
         if account is not None and not account.account_username and config.get("access_token"):

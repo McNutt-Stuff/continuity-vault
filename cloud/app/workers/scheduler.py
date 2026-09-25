@@ -897,7 +897,7 @@ def _process_collection(db, c: Collection, now: datetime, default_minutes: int) 
     # SyncJob + run_backup path (run_backup delegates the app-only fetch), so they
     # poll, log activity and show in the worker view exactly like any other source.
     mcfg = c.config or {}
-    if mcfg.get("managed") and mcfg.get("m365_workload"):
+    if mcfg.get("managed") and (mcfg.get("m365_workload") or mcfg.get("gw_workload")):
         return _process_managed_collection(db, c, now, default_minutes)
     conn = get_connector(c.source_type)
     if conn is None:

@@ -2446,6 +2446,7 @@ interface GwStatus {
   consent_state: string; service_account_email: string;
   identities: { total: number; in_scope: number; mapped: number };
   sources: { total: number; active: number };
+  collect_enabled?: boolean; workloads?: string[];
   status: string; last_error?: string;
 }
 interface GwIdentity {
@@ -2471,6 +2472,8 @@ function GoogleWorkspaceWorkspace({ spec, instanceId, onBack }: { spec?: Spec; i
   const [domain, setDomain] = useState("");
   const [customerId, setCustomerId] = useState("my_customer");
   const [saJson, setSaJson] = useState("");
+  const [catalog, setCatalog] = useState<{ id: string; label: string }[]>([]);
+  const [selWorkloads, setSelWorkloads] = useState<string[]>([]);
 
   const iid = status?.instance_id || (isNew ? "" : instanceId);
 
@@ -2479,10 +2482,12 @@ function GoogleWorkspaceWorkspace({ spec, instanceId, onBack }: { spec?: Spec; i
     if (!targetId) { setLoading(false); return; }
     setLoading(true);
     try {
-      const s = await api.get<{ connected: boolean; instance: GwStatus | null }>(
+      const s = await api.get<{ connected: boolean; instance: GwStatus | null; workload_catalog?: { id: string; label: string }[] }>(
         `/integrations/google_workspace?instance_id=${encodeURIComponent(targetId)}`);
       setStatus(s.instance);
+      setCatalog(s.workload_catalog || []);
       if (s.instance) {
+        setSelWorkloads(s.instance.workloads || []);
         const r = await api.get<{ identities: GwIdentity[] }>(
           `/integrations/google_workspace/identities?instance_id=${encodeURIComponent(targetId)}`);
         setIdentities(r.identities || []);
@@ -2524,6 +2529,20 @@ function GoogleWorkspaceWorkspace({ spec, instanceId, onBack }: { spec?: Spec; i
       await load(iid);
     } catch (e: any) {
       notify({ message: e?.message || "Discovery failed.", tone: "danger" });
+    } finally { setBusy(null); }
+  }
+
+  async function setProtection(enabled: boolean) {
+    if (!iid) return;
+    setBusy("collection");
+    try {
+      const r = await api.post<{ sources_provisioned: number }>(
+        `/integrations/google_workspace/collection?instance_id=${encodeURIComponent(iid)}`,
+        { enabled, workloads: selWorkloads.length ? selWorkloads : undefined });
+      notify({ message: enabled ? `Protection on — ${r.sources_provisioned} source(s) provisioned.` : "Protection paused.", tone: "ok" });
+      await load(iid);
+    } catch (e: any) {
+      notify({ message: e?.message || "Could not update protection.", tone: "danger" });
     } finally { setBusy(null); }
   }
 
@@ -2632,6 +2651,43 @@ function GoogleWorkspaceWorkspace({ spec, instanceId, onBack }: { spec?: Spec; i
             <MiniStat icon="link" label="Mapped" value={String(status.identities.mapped)} tint="#7c5cff" />
             <MiniStat icon="grid" label="Sources" value={String(status.sources.total)} tint="#c56cf0" />
           </div>
+
+          <Card style={{ marginBottom: 14 }}>
+            <div className="spread" style={{ marginBottom: 10, alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+              <div className="stack" style={{ gap: 2 }}>
+                <h4 style={{ margin: 0 }}>Managed protection</h4>
+                <div className="faint" style={{ fontSize: 12, maxWidth: 460 }}>
+                  Back up each in-scope user's selected Google data via admin delegation — no
+                  per-employee sign-in. Sources appear like any other source across the portal.
+                </div>
+              </div>
+              <Pill tone={status.collect_enabled ? "ok" : "info"}>
+                {status.collect_enabled ? "Protection on" : "Protection off"}
+              </Pill>
+            </div>
+            <div className="row" style={{ gap: 14, flexWrap: "wrap", marginBottom: 12 }}>
+              {catalog.map((w) => {
+                const on = selWorkloads.includes(w.id);
+                return (
+                  <label key={w.id} className="row" style={{ gap: 6, alignItems: "center", fontSize: 12.5, cursor: "pointer" }}>
+                    <input type="checkbox" checked={on}
+                           onChange={() => setSelWorkloads((prev) => on ? prev.filter((x) => x !== w.id) : [...prev, w.id])} />
+                    {w.label}
+                  </label>
+                );
+              })}
+            </div>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn primary sm" disabled={busy === "collection"} onClick={() => setProtection(true)}>
+                {busy === "collection" ? "Applying…" : (status.collect_enabled ? "Update protection" : "Enable protection")}
+              </button>
+              {status.collect_enabled && (
+                <button className="btn ghost sm" disabled={busy === "collection"} onClick={() => setProtection(false)}>
+                  Pause protection
+                </button>
+              )}
+            </div>
+          </Card>
 
           <Card style={{ marginBottom: 14 }}>
             <div className="spread" style={{ marginBottom: 10 }}>
