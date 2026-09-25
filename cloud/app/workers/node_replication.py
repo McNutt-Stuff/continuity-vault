@@ -92,7 +92,10 @@ _PULL_EXCLUDE = {
     # tenant reference the OTHER node via node_id/standby_node_id, cascades into the
     # tenant → vault → collection chain failing to apply. Customer nodes don't use
     # cluster_id, so strip it and let node rows insert cleanly.
-    "nodes": {"cluster_id"},
+    # is_self is LOCAL to each box (the CP's is_self=True must NOT overwrite a node's
+    # own row, or the node resolves "self" to the control plane and its scheduler
+    # skips its own tenants). Re-asserted after every pull by _reassert_self_node.
+    "nodes": {"cluster_id", "is_self"},
     "connector_accounts": {"sync_cursor", "last_sync_at", "last_object_count",
                            "last_error", "last_error_at", "auth_status"},
     # The node's scheduler owns each mapping's run stamp; pulling the control
@@ -344,6 +347,36 @@ def _reconcile_user_email_conflicts(db, users_bundle) -> int:
     return parked
 
 
+def _reassert_self_node(db) -> None:
+    """Ensure ``Node.is_self`` points at THIS node's OWN row, not a row replicated
+    from the control plane. The CP's row carries ``is_self=True`` and flows down in
+    the nodes bundle; if that lands here (and the node's own row stays False),
+    everything that resolves "self" by ``is_self`` — the scheduler's active-tenant
+    filter, log attribution, routing — mis-identifies the control plane as self and
+    the node SKIPS its own tenants' scheduled backups. Idempotent; matches our own
+    row by node name, then endpoint. No-op on the control plane."""
+    s = get_settings()
+    if (s.node_role or "control-plane") == "control-plane":
+        return
+    name = (s.node_name or s.domain or "").strip()
+    endpoint = (s.api_base_url or "").rstrip("/")
+    rows = db.query(Node).all()
+    me = next((r for r in rows if name and r.name == name), None)
+    if me is None and endpoint:
+        me = next((r for r in rows if (r.endpoint or "").rstrip("/") == endpoint), None)
+    if me is None:
+        return
+    changed = False
+    for r in rows:
+        want = (r.id == me.id)
+        if bool(r.is_self) != want:
+            r.is_self = want
+            changed = True
+    if changed:
+        db.commit()
+        logger.info("replication: corrected is_self -> %s (%s)", me.id, me.name)
+
+
 def _pull(s) -> int:
     _st0 = _read_state()
     # Align this node's fleet secrets (CV_KEK_SECRET + session) with the control
@@ -442,6 +475,11 @@ def _pull(s) -> int:
                     skip_by_tenant[tid] = skip_by_tenant.get(tid, 0) + 1
         if deferred:
             db.commit()
+        # is_self is local: correct it now (the CP's is_self=True is excluded from
+        # the pull, but a previously-replicated bad value must still be healed).
+        # Without a correct is_self, the scheduler's active-tenant filter resolves
+        # "self" to the control plane and skips every tenant this node owns.
+        _reassert_self_node(db)
     # New Config Objects / source links just landed — drop the platform-config
     # cache so OAuth client creds (needed to refresh tokens) resolve immediately.
     try:
