@@ -137,6 +137,16 @@ def prune_all(db) -> dict:
         CloudCostSample.created_at < now - timedelta(days=R_CLOUD_COSTS)).delete(
             synchronize_session=False))
 
+    # M365 managed sources: reconcile any natural-key duplicates (a warm-standby
+    # echo / re-parented instance provisioning the same source under a second id).
+    # Not a retention prune — an idempotent cleanup so the portal never shows a
+    # source twice. node_sync now merges on ingest so this only mops up stragglers.
+    try:
+        from ..integrations.microsoft365 import maintenance as _m365maint
+        _do("m365_managed_sources_deduped", lambda: _m365maint.dedupe_managed_sources(db))
+    except Exception:  # noqa: BLE001 — package optional; never break the prune
+        logger.exception("m365 managed-source dedupe failed")
+
     if is_pg:
         try:
             db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _PRUNE_LOCK_KEY})

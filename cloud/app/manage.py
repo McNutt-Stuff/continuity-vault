@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import secrets
-from datetime import datetime
 
 from .db import SessionLocal
 from .models import Collection, ConnectorAccount, Node, SyncJob, Tenant, User
@@ -252,56 +251,24 @@ def update_nodes(role: str = "all") -> None:
               f"and restart on their next heartbeat.")
 
 
-# M365 managed-source state ranking: higher = more progressed (mirrors node_sync).
-_MS_STATE_RANK = {
-    "decommissioned": 0, "planned": 1, "provisioning": 2, "paused_by_admin": 3,
-    "disconnected": 3, "baseline_pending": 4, "permission_required": 4,
-    "credential_error": 4, "source_unavailable": 4, "retention_hold": 5,
-    "empty": 6, "delayed": 6, "partial": 7, "active": 8,
-}
-
-
 def dedupe_m365_sources(dry_run: bool = False) -> None:
     """Remove duplicate M365 managed-source rows sharing a natural key
-    (tenant, integration_instance, workload, source_key). Such duplicates are an
-    artifact of a warm-standby / re-parented instance provisioning the same source
-    under a second primary id (one row collects → 'active'/'empty', the orphan stays
-    'planned'). Keeps the most-progressed row (collected first, then highest state
-    rank, then newest) and deletes the rest. Idempotent; run on the control plane."""
-    from .integrations.microsoft365 import models as m
+    (tenant, integration_instance, workload, source_key). Delegates to the shared,
+    idempotent cleanup that also runs automatically in the daily prune job; this CLI
+    is for an immediate, verbose run. Run on the control plane."""
+    from .integrations.microsoft365 import maintenance
 
-    def _score(s):
-        return (1 if s.last_collected_at else 0,
-                s.last_collected_at or datetime.min,
-                _MS_STATE_RANK.get(s.state, 0),
-                s.created_at or datetime.min)
+    def _log(loser, keeper):
+        print(f"  drop {loser.id} state={loser.state!r} "
+              f"(keep {keeper.id} state={keeper.state!r}) "
+              f"[{loser.workload}/{loser.source_key}]")
 
     with SessionLocal() as db:
-        groups: dict = {}
-        for s in db.query(m.ManagedSource).all():
-            groups.setdefault(
-                (s.tenant_id, s.integration_instance_id, s.workload, s.source_key), []).append(s)
-        kept = removed = 0
-        for grp in groups.values():
-            if len(grp) < 2:
-                kept += len(grp)
-                continue
-            grp.sort(key=_score, reverse=True)
-            keeper = grp[0]
-            kept += 1
-            for loser in grp[1:]:
-                print(f"  drop {loser.id} state={loser.state!r} "
-                      f"(keep {keeper.id} state={keeper.state!r}) "
-                      f"[{loser.workload}/{loser.source_key}]")
-                if not dry_run:
-                    db.query(m.SourceAssignment).filter(
-                        m.SourceAssignment.managed_source_id == loser.id).delete()
-                    db.delete(loser)
-                removed += 1
+        removed = maintenance.dedupe_managed_sources(db, dry_run=dry_run, on_drop=_log)
         if not dry_run:
             db.commit()
         verb = "would be removed" if dry_run else "removed"
-        print(f"dedupe-m365-sources: {kept} unique kept, {removed} duplicate(s) {verb}")
+        print(f"dedupe-m365-sources: {removed} duplicate(s) {verb}")
 
 
 def main(argv=None) -> None:
