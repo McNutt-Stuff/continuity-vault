@@ -1335,7 +1335,7 @@ _SOURCE_PAGES = [
             ":::\n"),
         parent_slug="integrations"),
     _source_doc(
-        "integration-microsoft365", "Microsoft 365 (Managed Integration)", "cloud", 93,
+        "integration-microsoft365", "Microsoft 365", "cloud", 93,
         "Administrator-governed protection of Microsoft 365 — Entra users, Exchange, OneDrive, "
         "SharePoint and Teams — for Business and Enterprise organizations.",
         "The Microsoft 365 integration turns Microsoft Entra ID into the source for your Arkive "
