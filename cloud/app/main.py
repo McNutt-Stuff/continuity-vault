@@ -153,6 +153,12 @@ try:
 except Exception:  # noqa: BLE001
     import logging as _logging
     _logging.getLogger("cv.integrations").exception("microsoft365 router failed to load")
+try:
+    from .integrations.google_workspace import api as gw_api  # noqa: E402
+    app.include_router(gw_api.router, prefix=API)
+except Exception:  # noqa: BLE001
+    import logging as _logging
+    _logging.getLogger("cv.integrations").exception("google_workspace router failed to load")
 app.include_router(billing.router, prefix=API)
 app.include_router(billing.admin_router, prefix=API)
 app.include_router(connectors.router, prefix=API)
