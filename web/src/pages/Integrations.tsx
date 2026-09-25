@@ -257,15 +257,20 @@ function AddIntegrationModal({ available, hasAppliance, addedCounts, onClose, on
               // in preview once entitled — the workspace itself gates each step.
               const openable = !!s.workspace && !notEntitled && !applianceLocked;
               const locked = applianceLocked || notEntitled || (!!comingSoon && !openable);
-              const lockMsg = notEntitled ? (s.locked_reason || "Not available on your plan")
-                : comingSoon ? (s.status === "preview" ? "Preview — coming soon" : "Coming soon")
+              // Only two labels matter: it's already in use, or it's coming soon.
+              const statusPill = connectedCount > 0
+                ? <Pill tone="ok">In use</Pill>
+                : (comingSoon && !openable) ? <Pill tone="info">Coming soon</Pill> : null;
+              // A plan/appliance lock is the only reason worth spelling out inline.
+              const gateMsg = notEntitled ? (s.locked_reason || "Not available on your plan")
                 : applianceLocked ? "Needs an appliance on your network" : "";
               return (
               <div key={s.integration_type}
                    className="dest-card"
                    style={{ display: "flex", flexDirection: "column", height: "100%",
-                            ...(locked ? { opacity: 0.62, cursor: "not-allowed" } : {}) }}
-                   title={lockMsg || undefined}
+                            cursor: locked ? "not-allowed" : "pointer",
+                            ...(locked ? { opacity: 0.62 } : {}) }}
+                   title={gateMsg || undefined}
                    onClick={() => { if (!locked) onPick(s); }}>
                 <div className="spread" style={{ marginBottom: 10, gap: 8, alignItems: "flex-start" }}>
                   <div className="row" style={{ gap: 10, alignItems: "center", minWidth: 0, flex: 1 }}>
@@ -273,25 +278,17 @@ function AddIntegrationModal({ available, hasAppliance, addedCounts, onClose, on
                       <SourceIcon type={s.integration_type} fallback={asIcon(s.icon)} size={19} />
                     </div>
                     <div style={{ minWidth: 0 }}>
-                      <div className="row" style={{ gap: 6, alignItems: "center", minWidth: 0 }}>
-                        <div style={{ fontWeight: 650, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.display_name}</div>
-                        {s.managed && <Pill tone="info">Managed</Pill>}
-                        {connectedCount > 0 && <Pill tone="ok">{connectedCount} connected</Pill>}
-                      </div>
-                      <div className="faint" style={{ fontSize: 11.5 }}>{s.category}</div>
+                      <div style={{ fontWeight: 650, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.display_name}</div>
+                      <div className="faint" style={{ fontSize: 11.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.category}</div>
                     </div>
                   </div>
-                  <div className="row" style={{ gap: 6, alignItems: "center", flexShrink: 0, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                    {s.min_plan && <Pill tone="warn">{s.min_plan[0].toUpperCase() + s.min_plan.slice(1)}</Pill>}
-                    {comingSoon && openable && <Pill tone="info">Preview</Pill>}
-                    <Pill tone="info">{s.runs_on === "appliance" ? "Appliance" : "Cloud"}</Pill>
-                  </div>
+                  {statusPill && <div style={{ flexShrink: 0 }}>{statusPill}</div>}
                 </div>
                 <div className="faint" style={{ fontSize: 12, lineHeight: 1.45, flex: 1,
                      display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{s.description}</div>
-                {locked && (
+                {!!gateMsg && (
                   <div style={{ fontSize: 11.5, color: "var(--warn)", marginTop: 8, display: "flex", gap: 6, alignItems: "center" }}>
-                    <Icon name={comingSoon ? "clock" : "alert"} size={12} /> {lockMsg}
+                    <Icon name="alert" size={12} /> {gateMsg}
                   </div>
                 )}
               </div>
