@@ -189,6 +189,52 @@ def _upsert_by_unique(db: Session, model, data: dict, unique_cols: list[str]):
     return obj
 
 
+# State ranking for M365 managed sources: higher = more progressed. Used so a
+# warm-STANDBY echo (which never collected) can't regress a collected row.
+_MS_STATE_RANK = {
+    "decommissioned": 0, "planned": 1, "provisioning": 2, "paused_by_admin": 3,
+    "disconnected": 3, "baseline_pending": 4, "permission_required": 4,
+    "credential_error": 4, "source_unavailable": 4, "retention_hold": 5,
+    "empty": 6, "delayed": 6, "partial": 7, "active": 8,
+}
+
+
+def _upsert_managed_source(db: Session, model, data: dict):
+    """Upsert an M365 managed source reconciling on its NATURAL key
+    ``(tenant_id, integration_instance_id, workload, source_key)`` when the primary
+    key doesn't match. A node can generate its own primary id for a source that
+    already exists on the CP under a different id — e.g. after an instance was
+    re-parented (see ``_reparent``) or a warm standby provisioned the same source —
+    and a blind ``_upsert`` then creates a DUPLICATE row (one 'active', one
+    'planned'). Reconciling on the natural key merges them instead.
+
+    Guard: never let a lower-ranked push (a standby echo) regress a row that has
+    actually collected — don't wipe a real ``last_collected_at`` and don't move a
+    collected row backwards (e.g. active → planned)."""
+    kw = _deser(model, data)
+    pk = list(model.__table__.primary_key.columns)[0].name
+    obj = db.get(model, kw.get(pk))
+    if obj is None:
+        obj = db.query(model).filter(
+            model.tenant_id == kw.get("tenant_id"),
+            model.integration_instance_id == kw.get("integration_instance_id"),
+            model.workload == kw.get("workload"),
+            model.source_key == kw.get("source_key")).first()
+    if obj is None:
+        db.add(model(**kw))
+        return
+    collected = getattr(obj, "last_collected_at", None) is not None
+    for k, v in kw.items():
+        if k == pk:  # keep the CP's canonical id
+            continue
+        if collected and k == "last_collected_at" and v is None:
+            continue  # don't wipe a real collection timestamp with a standby echo
+        if (collected and k == "state"
+                and _MS_STATE_RANK.get(v, 5) < _MS_STATE_RANK.get(getattr(obj, "state", ""), 0)):
+            continue  # don't regress a collected row's state (e.g. active → planned)
+        setattr(obj, k, v)
+
+
 class NodeIdent(BaseModel):
     name: str
     role: str = "customer-tenant"
@@ -849,7 +895,7 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict,
                     owner = row.get("owner_user_id")
                     if not _ok(row) or (owner and owner not in valid_users):
                         continue
-                    _upsert(db, _m365.ManagedSource, _reparent(row))
+                    _upsert_managed_source(db, _m365.ManagedSource, _reparent(row))
                     counts["integrations"] += 1
         except Exception:  # noqa: BLE001 — package optional; never fail the push
             logger.exception("m365 push ingest failed")
