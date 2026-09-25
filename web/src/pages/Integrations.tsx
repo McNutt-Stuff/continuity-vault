@@ -238,7 +238,8 @@ function AddIntegrationModal({ available, hasAppliance, addedCounts, onClose, on
           <input className="input sm" placeholder="Search integrations…" value={query}
                  onChange={(e) => setQuery(e.target.value)}
                  style={{ marginBottom: 14, width: "100%" }} />
-          <div className="grid grid-3">
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(238px, 1fr))",
+               gap: 12, gridAutoRows: "1fr", alignItems: "stretch" }}>
             {shown.map((s) => {
               const comingSoon = s.status && s.status !== "ga";
               const notEntitled = s.entitled === false;
@@ -256,25 +257,25 @@ function AddIntegrationModal({ available, hasAppliance, addedCounts, onClose, on
               return (
               <div key={s.integration_type}
                    className="dest-card"
-                   style={{ display: "flex", flexDirection: "column", minHeight: 150,
+                   style={{ display: "flex", flexDirection: "column", height: "100%",
                             ...(locked ? { opacity: 0.62, cursor: "not-allowed" } : {}) }}
                    title={lockMsg || undefined}
                    onClick={() => { if (!locked) onPick(s); }}>
-                <div className="spread" style={{ marginBottom: 10 }}>
-                  <div className="row" style={{ gap: 10, alignItems: "center" }}>
-                    <div className="insight-card-ic" style={{ background: `${s.color}1e`, color: s.color, width: 34, height: 34 }}>
+                <div className="spread" style={{ marginBottom: 10, gap: 8, alignItems: "flex-start" }}>
+                  <div className="row" style={{ gap: 10, alignItems: "center", minWidth: 0, flex: 1 }}>
+                    <div className="insight-card-ic" style={{ background: `${s.color}1e`, color: s.color, width: 34, height: 34, flexShrink: 0 }}>
                       <SourceIcon type={s.integration_type} fallback={asIcon(s.icon)} size={19} />
                     </div>
-                    <div>
-                      <div className="row" style={{ gap: 6, alignItems: "center" }}>
-                        <div style={{ fontWeight: 650 }}>{s.display_name}</div>
+                    <div style={{ minWidth: 0 }}>
+                      <div className="row" style={{ gap: 6, alignItems: "center", minWidth: 0 }}>
+                        <div style={{ fontWeight: 650, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.display_name}</div>
                         {s.managed && <Pill tone="info">Managed</Pill>}
                         {connectedCount > 0 && <Pill tone="ok">{connectedCount} connected</Pill>}
                       </div>
                       <div className="faint" style={{ fontSize: 11.5 }}>{s.category}</div>
                     </div>
                   </div>
-                  <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                  <div className="row" style={{ gap: 6, alignItems: "center", flexShrink: 0, flexWrap: "wrap", justifyContent: "flex-end" }}>
                     {s.min_plan && <Pill tone="warn">{s.min_plan[0].toUpperCase() + s.min_plan.slice(1)}</Pill>}
                     {comingSoon && openable && <Pill tone="info">Preview</Pill>}
                     <Pill tone="info">{s.runs_on === "appliance" ? "Appliance" : "Cloud"}</Pill>
