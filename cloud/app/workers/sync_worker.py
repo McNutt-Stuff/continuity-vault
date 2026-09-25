@@ -21,7 +21,7 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, List, Optional
 
 from sqlalchemy.orm import Session
@@ -602,6 +602,25 @@ def _strip_nul(v):
     return v
 
 
+# Message-like items never legitimately carry a future date — a far-future date is
+# a spam/import trick to pin the item to the top of an inbox. Calendar/events DO
+# carry future dates (upcoming meetings), so they are exempt. Any connector whose
+# date parser trusts the source (Outlook receivedDateTime, Evernote, …) can leak
+# one through, so clamp it at the index layer as a backstop to the Gmail-specific
+# guard in connectors.live._gmail_date.
+_FUTURE_DATED_DOC_TYPES = {"email", "message", "sms", "chat"}
+
+
+def _sane_index_date(doc_type: str, dt: Optional[datetime]) -> Optional[datetime]:
+    """Drop an implausibly-future date on a message-like doc so the row falls back to
+    its capture time (created_at) instead of sorting as e.g. 2036."""
+    if dt is None or (doc_type or "") not in _FUTURE_DATED_DOC_TYPES:
+        return dt
+    naive = dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
+    horizon = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=2)
+    return None if naive > horizon else dt
+
+
 def ingest_objects(db: Session, collection: Collection, source_objects,
                    destinations: Optional[List[str]] = None,
                    searchable_fields: Optional[List[str]] = None,
@@ -793,7 +812,7 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                 labels=_strip_nul(row_labels),
                 search_blob=_strip_nul(search_blob),
                 size_bytes=src.size_bytes,
-                modified_at=src.modified_at,
+                modified_at=_sane_index_date(src.doc_type, src.modified_at),
                 content_hash=content_hash,
                 version=version,
                 restricted=restricted,

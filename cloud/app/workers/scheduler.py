@@ -615,6 +615,31 @@ def _backfill_search_current() -> None:
         logger.info("search is_current backfill complete (v%s)", _BACKFILL_VERSION)
 
 
+def _backfill_future_email_dates() -> None:
+    """Heal already-indexed message rows stamped with an implausibly-future date
+    (e.g. a spam/import mail whose 2036 internalDate leaked in before the Gmail
+    date-guard shipped, or an unclamped connector date). Resets modified_at to the
+    row's capture time (created_at). Calendar/events are exempt — future dates there
+    are legitimate. Background + one-shot, guarded by a persisted version flag."""
+    from ..db import worker_engine
+    from ..models import SystemSetting
+    if worker_engine.dialect.name != "postgresql":
+        return
+    _BACKFILL_VERSION = "1"
+    with SessionLocal() as db:
+        flag = db.get(SystemSetting, "search_future_email_dates_backfilled")
+        if flag and flag.value == _BACKFILL_VERSION:
+            return
+        res = db.execute(text(
+            "UPDATE search_documents SET modified_at = created_at "
+            "WHERE doc_type IN ('email','message','sms','chat') "
+            "AND modified_at > (now() + interval '2 days')"))
+        db.merge(SystemSetting(key="search_future_email_dates_backfilled", value=_BACKFILL_VERSION))
+        db.commit()
+        logger.info("future-dated message backfill complete (v%s): %d row(s) healed",
+                    _BACKFILL_VERSION, res.rowcount or 0)
+
+
 def _prune_db() -> None:
     """Keep high-churn tables bounded (appliance_commands, sync_jobs, integration_runs,
     backup_runs, pending_actions, network_usage, node_metrics). At most once a day.
@@ -634,6 +659,10 @@ def _prune_db() -> None:
             _backfill_search_current()
         except Exception:  # noqa: BLE001
             logger.exception("search is_current backfill failed")
+        try:
+            _backfill_future_email_dates()
+        except Exception:  # noqa: BLE001
+            logger.exception("future-dated message backfill failed")
         _ensure_perf_indexes()
 
 
