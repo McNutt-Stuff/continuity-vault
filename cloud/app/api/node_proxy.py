@@ -99,29 +99,32 @@ def _node_for(request: Request) -> str | None:
         return None
 
 
-def _target_for(request: Request) -> tuple[str | None, bool]:
-    """(assigned-node URL, is-switching) for the request's tenant. is-switching is
-    True during the brief HA switchover window so file ops show a maintenance
-    message instead of routing to a node mid-migration."""
+def _target_for(request: Request) -> tuple[str | None, bool, str | None]:
+    """(assigned-node URL, is-switching, node-name) for the request's tenant.
+    is-switching is True during the brief HA switchover window so file ops show a
+    maintenance message instead of routing to a node mid-migration; node-name is the
+    friendly name for the debug request-chain breadcrumb."""
     auth = request.headers.get("authorization", "")
     if not auth.lower().startswith("bearer "):
-        return None, False
+        return None, False, None
     try:
         principal = security._decode(auth.split(" ", 1)[1])
     except Exception:
-        return None, False
+        return None, False, None
     try:
-        from ..models import Tenant
+        from ..models import Node, Tenant
         from .. import placement
         with SessionLocal() as db:
             t = db.get(Tenant, principal.tenant_id)
             if t is None:
-                return None, False
-            return services.tenant_node_url(db, t.id), placement.is_switching(t)
+                return None, False, None
+            n = db.get(Node, t.node_id) if t.node_id else None
+            return (services.tenant_node_url(db, t.id), placement.is_switching(t),
+                    (n.name if n else None))
     except Exception as exc:  # noqa: BLE001
         logger.warning("node lookup failed (%s) — handling %s locally",
                        exc, request.url.path)
-        return None, False
+        return None, False, None
 
 
 async def middleware(request: Request, call_next):
@@ -133,7 +136,7 @@ async def middleware(request: Request, call_next):
         return await call_next(request)
     # Run the (synchronous) DB lookup off the event loop so it never blocks other
     # requests while waiting on the connection pool.
-    node_url, switching = await run_in_threadpool(_target_for, request)
+    node_url, switching, node_name = await run_in_threadpool(_target_for, request)
     if switching:
         # Brief HA switchover — the tenant is moving to a healthier node. Return a
         # friendly maintenance signal the portal shows as a dialog (retry shortly).
@@ -160,7 +163,7 @@ async def middleware(request: Request, call_next):
         logger.warning("file op proxy to %s failed: %s", url, exc)
         return JSONResponse({"detail": "assigned node unavailable"}, status_code=503,
                             headers={"X-Arkive-Route": "cp->node",
-                                     "X-Arkive-Node": urlparse(node_url).netloc or node_url})
+                                     "X-Arkive-Node": node_name or urlparse(node_url).netloc or node_url})
     _upstream_ms = round((time.perf_counter() - _t0) * 1000, 1)
 
     relay = {}
@@ -170,7 +173,7 @@ async def middleware(request: Request, call_next):
     # Request-chain breadcrumbs for the debug overlay: this response was served
     # CP → the tenant's node, with the node's own round-trip time.
     relay["X-Arkive-Route"] = "cp->node"
-    relay["X-Arkive-Node"] = urlparse(node_url).netloc or node_url
+    relay["X-Arkive-Node"] = node_name or urlparse(node_url).netloc or node_url
     relay["X-Arkive-Upstream-Ms"] = str(_upstream_ms)
 
     # The CP already authenticated this session to route it here, so a 401 from the
