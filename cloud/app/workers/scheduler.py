@@ -251,17 +251,36 @@ def _alert_admins_storage_failed(db, cs, err: str) -> None:
 
 
 _last_appliance_health: datetime | None = None
-# Appliance ids we've alerted as having a health problem this episode (cleared +
-# a "recovered" alert sent when their problems clear).
-_appliance_problem_alerted: set = set()
 
 
-def _recent_audit_exists(db, tenant_id: str, action: str, resource: str, hours: int) -> bool:
+def _recent_audit_exists(db, tenant_id, action: str, resource: str, hours: int) -> bool:
     from ..models import AuditEvent
     since = datetime.utcnow() - timedelta(hours=hours)
     return db.query(AuditEvent.id).filter(
         AuditEvent.tenant_id == tenant_id, AuditEvent.action == action,
         AuditEvent.resource == resource, AuditEvent.created_at >= since).first() is not None
+
+
+def _latest_audit_at(db, tenant_id, action: str, resource: str):
+    from ..models import AuditEvent
+    q = db.query(AuditEvent.created_at).filter(
+        AuditEvent.action == action, AuditEvent.resource == resource,
+        AuditEvent.tenant_id == tenant_id)
+    row = q.order_by(AuditEvent.created_at.desc()).first()
+    return row[0] if row else None
+
+
+def _health_episode_open(db, tenant_id, resource: str, *,
+                         problem_action: str, recovered_action: str) -> bool:
+    """True when the most recent health audit for this resource is an UNRECOVERED
+    problem — a problem was logged and no recovery has been logged since. DB‑backed
+    so it survives a service restart (the old in‑memory alerted‑sets did not, which
+    let a 'recovered' alert fire with no preceding 'problem')."""
+    p = _latest_audit_at(db, tenant_id, problem_action, resource)
+    if p is None:
+        return False
+    r = _latest_audit_at(db, tenant_id, recovered_action, resource)
+    return r is None or p > r
 
 
 def _check_appliance_health() -> None:
@@ -277,34 +296,48 @@ def _check_appliance_health() -> None:
     from .. import audit, notifications as notif
     from ..models import Appliance
     repeat_h = 6  # re-log the same appliance's problem at most every 6 hours
+    checked = 0
+    problem_count = 0
     with SessionLocal() as db:
         for a in db.query(Appliance).all():
             try:
+                checked += 1
                 probs, sev = notif.appliance_problem_list(db, a)
+                episode_open = _health_episode_open(
+                    db, a.tenant_id, a.id,
+                    problem_action="appliance.health_problem",
+                    recovered_action="appliance.health_recovered")
                 if not probs:
-                    # Recovered: if we previously alerted on this appliance, tell
-                    # admins + the owner it's healthy again (mirrors node-online).
-                    if a.id in _appliance_problem_alerted:
-                        _appliance_problem_alerted.discard(a.id)
+                    # Recovery fires ONLY when a problem was actually recorded and
+                    # not yet marked recovered — so no "healthy again" without a
+                    # preceding "problem" (the in-memory set used to cause that on
+                    # a flap or after a deploy restart).
+                    if episode_open:
                         audit.record(db, actor="system", action="appliance.health_recovered",
                                      tenant_id=a.tenant_id, resource=a.id, category="appliance",
                                      severity="info", detail={"name": a.name})
+                        logger.info("appliance health recovered: %s (%s)", a.name or "?", a.id)
                         _alert_admins_appliance_recovered(db, a)
                         _notify_owner_appliance_recovered(db, notif, a)
+                        _maybe_flag_appliance_flapping(db, a)
                     continue
-                # Track the problem episode BEFORE the dedupe check so a recovery
-                # still fires even when the repeat-audit is suppressed.
-                _appliance_problem_alerted.add(a.id)
-                if _recent_audit_exists(db, a.tenant_id, "appliance.health_problem", a.id, repeat_h):
-                    continue
+                problem_count += 1
+                # ALWAYS log the problem (even when the alert/audit is deduped) so
+                # it is visible in Platform Logs — silent failures were the complaint.
+                logger.warning("appliance health problem: %s (%s) severity=%s — %s",
+                                a.name or "?", a.id, sev, "; ".join(str(p) for p in probs[:6]))
+                if episode_open and _recent_audit_exists(db, a.tenant_id, "appliance.health_problem", a.id, repeat_h):
+                    continue  # same ongoing episode, already alerted within the repeat window
                 audit.record(db, actor="system", action="appliance.health_problem",
                              tenant_id=a.tenant_id, resource=a.id, category="appliance",
                              severity="critical" if sev == "critical" else "warning",
-                             detail={"name": a.name, "problems": probs[:6]})
+                             detail={"name": a.name, "problems": probs[:6], "severity": sev})
                 _alert_admins_appliance_problem(db, a, probs, sev)
             except Exception:  # noqa: BLE001
                 db.rollback()
                 logger.exception("appliance health check failed for %s", a.id)
+    if problem_count:
+        logger.info("appliance health sweep: %d appliance(s) checked, %d with problems", checked, problem_count)
 
 
 def _alert_admins_appliance_problem(db, appliance, probs: list, sev: str) -> None:
@@ -364,9 +397,48 @@ def _notify_owner_appliance_recovered(db, notif, appliance) -> None:
         logger.exception("owner appliance-recovered notify failed for %s", getattr(appliance, "id", "?"))
 
 
+def _maybe_flag_appliance_flapping(db, appliance) -> None:
+    """If an appliance has had several problem→recovery cycles in a short window it
+    is UNSTABLE (flapping) — surface that as its own signal so a chronically
+    borderline unit (marginal drive/link) is visible, instead of just a stream of
+    'healthy again' notices. Deduped to once per day per appliance."""
+    from ..models import AuditEvent
+    since = datetime.utcnow() - timedelta(hours=24)
+    episodes = db.query(AuditEvent.id).filter(
+        AuditEvent.action == "appliance.health_problem",
+        AuditEvent.resource == appliance.id,
+        AuditEvent.tenant_id == appliance.tenant_id,
+        AuditEvent.created_at >= since).count()
+    if episodes < 3:
+        return
+    logger.warning("appliance unstable (flapping): %s (%s) — %d problem episodes in 24h",
+                   appliance.name or "?", appliance.id, episodes)
+    if _recent_audit_exists(db, appliance.tenant_id, "appliance.unstable", appliance.id, 24):
+        return
+    from .. import audit
+    audit.record(db, actor="system", action="appliance.unstable",
+                 tenant_id=appliance.tenant_id, resource=appliance.id, category="appliance",
+                 severity="warning", detail={"name": appliance.name, "episodes_24h": episodes})
+    try:
+        from .. import admin_notifications
+        from ..models import Tenant
+        tenant = db.get(Tenant, appliance.tenant_id)
+        cust = (tenant.name if tenant else None) or appliance.tenant_id
+        admin_notifications.raise_alert(
+            db, "platform_health",
+            subject=f"[Arkive] Appliance unstable — {appliance.name or appliance.id}",
+            title="Appliance repeatedly failing & recovering",
+            intro=f"{appliance.name or 'An appliance'} ({cust}) has had {episodes} health "
+                  f"problem episodes in 24 hours — it keeps failing and recovering.",
+            rows=[{"icon": "appliance", "name": appliance.name or "Appliance", "detail": cust},
+                  {"icon": "alert", "name": f"{episodes} problem episodes in 24h", "detail": "flapping"}],
+            severity="warning", tenant_id=appliance.tenant_id,
+            dedupe_key=f"appliance_flap:{appliance.id}", dedupe_within_hours=24)
+    except Exception:  # noqa: BLE001
+        logger.exception("appliance flap alert failed for %s", getattr(appliance, "id", "?"))
+
+
 _last_node_health: datetime | None = None
-# Node ids we've already alerted as offline this episode (cleared when they recover).
-_node_offline_alerted: set = set()
 _NODE_OFFLINE_SECONDS = 180  # heartbeat gap before we consider a node offline
 
 
@@ -431,27 +503,44 @@ def _check_node_health() -> None:
     if _last_node_health and (now - _last_node_health) < timedelta(minutes=2):
         return
     _last_node_health = now
-    from .. import admin_notifications, placement
+    from .. import admin_notifications, audit, placement
     from ..models import Node
+    checked = 0
+    offline_count = 0
     with SessionLocal() as db:
         for n in db.query(Node).filter(Node.is_self.is_(False)).all():
             try:
+                checked += 1
                 hb = n.last_heartbeat_at
                 offline = bool(hb) and (now - hb).total_seconds() >= _NODE_OFFLINE_SECONDS
+                # DB-backed episode (survives a control-plane restart, unlike the
+                # old in-memory alerted-set which dropped recovery notices).
+                episode_open = _health_episode_open(db, None, n.id,
+                    problem_action="node.offline", recovered_action="node.online")
                 # A node that never checked in yet isn't alerted (still provisioning).
-                if offline and n.id not in _node_offline_alerted:
+                if offline:
+                    offline_count += 1
                     mins = int((now - hb).total_seconds() // 60)
-                    admin_notifications.emit(
-                        db, "node_alert",
-                        subject=f"[Arkive] Node offline — {n.name or n.id}",
-                        title="Node offline",
-                        intro=f"Node \"{n.name or n.id}\" ({n.role}) stopped sending heartbeats.",
-                        rows=[{"icon": "server", "name": n.name or n.id, "detail": f"offline ~{mins}m"},
-                              {"icon": "activity", "name": "Role / region", "detail": f"{n.role} · {n.region or '—'}"}],
-                        severity="critical", dedupe_key=f"node_offline:{n.id}", dedupe_within_hours=6)
-                    _node_offline_alerted.add(n.id)
-                elif not offline and n.id in _node_offline_alerted:
-                    _node_offline_alerted.discard(n.id)
+                    logger.warning("node offline: %s (%s) — ~%dm since last heartbeat",
+                                   n.name or n.id, n.role, mins)
+                    if not (episode_open and _recent_audit_exists(db, None, "node.offline", n.id, 6)):
+                        audit.record(db, actor="system", action="node.offline", tenant_id=None,
+                                     resource=n.id, category="system", severity="critical",
+                                     detail={"name": n.name or n.id, "role": n.role,
+                                             "region": n.region, "offline_minutes": mins})
+                        admin_notifications.emit(
+                            db, "node_alert",
+                            subject=f"[Arkive] Node offline — {n.name or n.id}",
+                            title="Node offline",
+                            intro=f"Node \"{n.name or n.id}\" ({n.role}) stopped sending heartbeats.",
+                            rows=[{"icon": "server", "name": n.name or n.id, "detail": f"offline ~{mins}m"},
+                                  {"icon": "activity", "name": "Role / region", "detail": f"{n.role} · {n.region or '—'}"}],
+                            severity="critical", dedupe_key=f"node_offline:{n.id}", dedupe_within_hours=6)
+                elif episode_open:
+                    audit.record(db, actor="system", action="node.online", tenant_id=None,
+                                 resource=n.id, category="system", severity="info",
+                                 detail={"name": n.name or n.id, "role": n.role})
+                    logger.info("node back online: %s (%s)", n.name or n.id, n.role)
                     admin_notifications.emit(
                         db, "node_alert",
                         subject=f"[Arkive] Node back online — {n.name or n.id}",
@@ -465,6 +554,8 @@ def _check_node_health() -> None:
                     _auto_failover_node(db, n, now)
             except Exception:  # noqa: BLE001
                 logger.exception("node health check failed for %s", getattr(n, "id", "?"))
+        if offline_count:
+            logger.info("node health sweep: %d node(s) checked, %d offline", checked, offline_count)
         # Clear switchover "maintenance" state once the brief grace window elapsed.
         try:
             placement.clear_stale_switching(db)
