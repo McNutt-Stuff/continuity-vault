@@ -15,6 +15,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .. import audit, geo, routing, security
+from .. import placement as _placement
 from ..db import get_db
 from ..models import Cluster, Node, Region, Tenant
 
@@ -124,6 +125,13 @@ def _cluster_view(db: Session, c: Cluster) -> dict:
                 "standby_synced_at": (t.standby_synced_at.isoformat()
                                       if t.standby_synced_at else None),
                 "placement_state": t.placement_state or "",
+                # ACTIVE-node serving-index completeness (what the customer sees).
+                "active_index_count": int(t.active_index_count or 0),
+                "cp_index_count": int(t.cp_index_count or 0),
+                "active_index_pct": _placement.active_index_pct(t),
+                "active_index_complete": _placement.is_active_index_complete(t),
+                "active_counts_at": (t.active_counts_at.isoformat()
+                                     if t.active_counts_at else None),
             })
 
     return {

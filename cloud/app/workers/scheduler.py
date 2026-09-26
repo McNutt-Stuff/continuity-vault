@@ -118,6 +118,10 @@ def start_scheduler() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("node health check failed")
             try:
+                _check_index_parity()
+            except Exception:  # noqa: BLE001
+                logger.exception("index parity check failed")
+            try:
                 _run_notifications()
             except Exception:  # noqa: BLE001
                 logger.exception("notification sweep failed")
@@ -465,6 +469,7 @@ def _maybe_flag_appliance_flapping(db, appliance) -> None:
 
 _last_node_health: datetime | None = None
 _NODE_OFFLINE_SECONDS = 180  # heartbeat gap before we consider a node offline
+_last_index_parity: datetime | None = None
 
 
 def _node_online(node, now) -> bool:
@@ -586,6 +591,67 @@ def _check_node_health() -> None:
             placement.clear_stale_switching(db)
         except Exception:  # noqa: BLE001
             logger.exception("clear_stale_switching failed")
+
+
+def _check_index_parity() -> None:
+    """Control-plane only: continuously validate that each node-hosted tenant's
+    ACTIVE serving index has caught up to the authoritative total, and warn to
+    Platform Logs while it hasn't. The per-tenant counts are refreshed on every
+    node pull (node_sync.pull); this sweep just surfaces sustained drift so an
+    incomplete active index (e.g. a just-migrated tenant still seeding history) is
+    never silently shown as 'in sync'. Recovery is logged once when it catches up."""
+    role = (get_settings().node_role or "control-plane")
+    if role != "control-plane":
+        return
+    global _last_index_parity
+    now = datetime.utcnow()
+    if _last_index_parity and (now - _last_index_parity) < timedelta(minutes=5):
+        return
+    _last_index_parity = now
+    from .. import audit, placement
+    behind = 0
+    with SessionLocal() as db:
+        for t in db.query(Tenant).filter(Tenant.node_id.isnot(None)).all():
+            try:
+                # Only trust the signal once the node has reported counts at least
+                # once (active_counts_at set), else a not-yet-updated node reads 0%.
+                if t.active_counts_at is None:
+                    continue
+                complete = placement.is_active_index_complete(t)
+                episode_open = _health_episode_open(
+                    db, t.id, t.node_id,
+                    problem_action="tenant.index_incomplete",
+                    recovered_action="tenant.index_complete")
+                if not complete:
+                    behind += 1
+                    pct = placement.active_index_pct(t)
+                    have = int(t.active_index_count or 0)
+                    exp = int(t.cp_index_count or 0)
+                    logger.warning("index parity: tenant %s (%s) active node %s serving "
+                                   "%d/%d docs (%d%%) — seeding history",
+                                   t.name, t.id, t.node_id, have, exp, pct)
+                    if not (episode_open and _recent_audit_exists(
+                            db, t.id, "tenant.index_incomplete", t.node_id, 6)):
+                        audit.record(db, actor="system", action="tenant.index_incomplete",
+                                     tenant_id=t.id, resource=t.node_id, category="system",
+                                     severity="warning",
+                                     detail={"tenant": t.name, "active_index": have,
+                                             "expected_index": exp, "pct": pct,
+                                             "node_id": t.node_id})
+                elif episode_open:
+                    audit.record(db, actor="system", action="tenant.index_complete",
+                                 tenant_id=t.id, resource=t.node_id, category="system",
+                                 severity="info",
+                                 detail={"tenant": t.name,
+                                         "active_index": int(t.active_index_count or 0)})
+                    logger.info("index parity: tenant %s (%s) active index caught up",
+                                t.name, t.id)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("index parity check failed for tenant %s",
+                                 getattr(t, "id", "?"))
+    if behind:
+        logger.info("index parity sweep: %d node-hosted tenant(s) still seeding", behind)
 
 
 

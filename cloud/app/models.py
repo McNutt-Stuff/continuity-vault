@@ -78,6 +78,16 @@ class Tenant(Base):
     # success, not just that a pull happened, so the UI never shows a false "in sync".
     standby_synced_at = Column(DateTime, nullable=True)
     standby_pending = Column(Integer, default=0)
+    # ACTIVE-node index completeness (measured every pull): the node reports its
+    # local counts and the CP knows the authoritative (expected) totals, so the
+    # admin UI can show TRUTHFUL "serving index N / M (X%)" progress + drift — the
+    # standby readiness above only reflected the passive replica, so a migrated
+    # ACTIVE node missing pre-migration history could still show "in sync".
+    active_index_count = Column(BigInteger, default=0)     # node-reported SearchDocument rows
+    active_receipt_count = Column(BigInteger, default=0)   # node-reported SnapshotReceipt rows
+    cp_index_count = Column(BigInteger, default=0)         # authoritative expected index rows
+    cp_receipt_count = Column(BigInteger, default=0)       # authoritative expected receipt rows
+    active_counts_at = Column(DateTime, nullable=True)     # when the above were last measured
     # The geographic region this tenant was routed to at signup (e.g. "nam-east"),
     # derived from the address they provided. Drives node placement + data locality.
     region_code = Column(String, default="", index=True)

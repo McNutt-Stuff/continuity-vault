@@ -323,6 +323,12 @@ def _apply_additive_migrations() -> None:
         # Warm-standby readiness reported by the standby node (real apply health).
         "ALTER TABLE tenants ADD COLUMN standby_synced_at TIMESTAMP",
         "ALTER TABLE tenants ADD COLUMN standby_pending INTEGER DEFAULT 0",
+        # Active-node index completeness (truthful "serving index N/M" progress).
+        "ALTER TABLE tenants ADD COLUMN active_index_count BIGINT DEFAULT 0",
+        "ALTER TABLE tenants ADD COLUMN active_receipt_count BIGINT DEFAULT 0",
+        "ALTER TABLE tenants ADD COLUMN cp_index_count BIGINT DEFAULT 0",
+        "ALTER TABLE tenants ADD COLUMN cp_receipt_count BIGINT DEFAULT 0",
+        "ALTER TABLE tenants ADD COLUMN active_counts_at TIMESTAMP",
         # Free-trial support: a billing profile can be trialing (auto-bills at trial end).
         "ALTER TABLE billing_profiles ADD COLUMN trial_ends_at TIMESTAMP",
         "ALTER TABLE appliances ADD COLUMN version_updated_at TIMESTAMP",

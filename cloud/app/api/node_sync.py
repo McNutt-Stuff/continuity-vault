@@ -409,6 +409,19 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
             node_d = int(lc.get("documents") or 0)
             if cp_rcpt_counts.get(tid, 0) > node_r or cp_doc_counts.get(tid, 0) > node_d:
                 active_backfill_tids.append(tid)
+        # Persist per-tenant index completeness so the admin UI shows TRUTHFUL
+        # "serving index N / M (X%)" progress + continuously validates parity (this
+        # runs every pull, ~30s). node-reported = what the ACTIVE node can actually
+        # serve; cp_* = the authoritative expected totals.
+        _now_naive = datetime.utcnow()
+        for t in active_tenants:
+            lc = local_counts.get(t.id) or {}
+            t.active_index_count = int(lc.get("documents") or 0)
+            t.active_receipt_count = int(lc.get("receipts") or 0)
+            t.cp_index_count = int(cp_doc_counts.get(t.id, 0))
+            t.cp_receipt_count = int(cp_rcpt_counts.get(t.id, 0))
+            t.active_counts_at = _now_naive
+        db.commit()
         if active_backfill_tids:
             _LIMIT = 3000
             arcpt_since = _parse_iso(body.active_rcpt_cursor)

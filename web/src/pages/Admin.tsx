@@ -397,6 +397,17 @@ function TopologyAdmin() {
                           : p.standby_ready
                             ? <span className="row" style={{ gap: 4 }}><Pill tone="ok" dot>in sync</Pill><span className="faint">{p.standby_synced_at ? timeAgo(p.standby_synced_at) : ""}</span></span>
                             : <Pill tone="warn" dot>{p.standby_pending > 0 ? `syncing · ${p.standby_pending} pending` : "syncing…"}</Pill>}
+                        {/* ACTIVE serving-index completeness — what the customer sees.
+                            An incomplete active index (e.g. a just-migrated tenant
+                            still seeding history) must never look "in sync". */}
+                        {p.cp_index_count > 0 && (
+                          p.active_index_complete
+                            ? <Pill tone="ok" dot title={`Active index ${Number(p.active_index_count).toLocaleString()} / ${Number(p.cp_index_count).toLocaleString()}`}>index 100%</Pill>
+                            : <span className="row" style={{ gap: 4 }} title={`Active node is serving ${Number(p.active_index_count).toLocaleString()} of ${Number(p.cp_index_count).toLocaleString()} indexed objects`}>
+                                <Pill tone="warn" dot>index {p.active_index_pct}%</Pill>
+                                <span className="faint">{Number(p.active_index_count).toLocaleString()} / {Number(p.cp_index_count).toLocaleString()} · seeding</span>
+                              </span>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1971,6 +1982,25 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
                 </div>
               </div>
               <Row2 label="Active node" value={<span className="row" style={{ gap: 6 }}><Pill tone="ok" dot>active</Pill>{t.node?.name || "Control plane"}</span>} />
+              {t.node && t.cp_index_count > 0 && (
+                <Row2 label="Serving index" value={
+                  <span className="stack" style={{ gap: 4, width: "100%", maxWidth: 320 }}>
+                    <span className="row" style={{ gap: 6, alignItems: "center" }}>
+                      {t.active_index_complete
+                        ? <Pill tone="ok" dot>in sync · 100%</Pill>
+                        : <Pill tone="warn" dot>seeding · {t.active_index_pct}%</Pill>}
+                      <span className="faint" style={{ fontSize: 12 }}>
+                        {Number(t.active_index_count).toLocaleString()} / {Number(t.cp_index_count).toLocaleString()} objects
+                      </span>
+                    </span>
+                    <div style={{ height: 5, borderRadius: 3, background: "var(--border-soft)", overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${t.active_index_pct}%`,
+                        background: t.active_index_complete ? "var(--ok)" : "var(--warn)", transition: "width .4s" }} />
+                    </div>
+                    {t.active_counts_at && <span className="faint" style={{ fontSize: 11 }}>checked {timeAgo(t.active_counts_at)}</span>}
+                  </span>
+                } />
+              )}
               <Row2 label="Standby node" value={t.standby_node
                 ? <span className="row" style={{ gap: 6 }}>
                     <Pill tone={t.standby_node.online ? "ok" : "warn"} dot>{t.standby_node.online ? "online" : "offline"}</Pill>{t.standby_node.name}

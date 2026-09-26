@@ -72,6 +72,28 @@ def is_standby_ready(tenant: Tenant) -> bool:
                 and not (tenant.standby_pending or 0))
 
 
+def active_index_pct(tenant: Tenant) -> int:
+    """How much of the tenant's authoritative index the ACTIVE node can actually
+    serve, 0–100. CP-hosted tenants (no node) serve directly = 100%."""
+    if not tenant.node_id:
+        return 100
+    exp = int(tenant.cp_index_count or 0)
+    if exp <= 0:
+        return 100
+    have = int(tenant.active_index_count or 0)
+    return max(0, min(100, round(have * 100 / exp)))
+
+
+def is_active_index_complete(tenant: Tenant) -> bool:
+    """True when the ACTIVE node's serving index has caught up to (or exceeds) the
+    authoritative total. A node creates docs locally then pushes them to the CP, so
+    a healthy active node is always >= the CP; the CP only exceeds it when the node
+    is MISSING history (e.g. a just-migrated tenant seeding pre-migration rows)."""
+    if not tenant.node_id:
+        return True  # served directly by the control plane
+    return int(tenant.active_index_count or 0) >= int(tenant.cp_index_count or 0)
+
+
 def set_standby(db: Session, tenant: Tenant, standby_node_id: str | None, *,
                 actor: str = "system") -> dict:
     """Assign / change / clear a tenant's warm standby node. Replication starts

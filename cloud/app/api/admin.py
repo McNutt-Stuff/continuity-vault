@@ -1318,6 +1318,16 @@ def _tenant_view(db: Session, t: Tenant, detail: bool = False) -> dict:
                           "online": bool(sn.last_heartbeat_at and
                                          (_now() - sn.last_heartbeat_at).total_seconds() < 180)}
                          if sn else None)
+    # ACTIVE-node serving-index completeness (what the customer actually sees).
+    # Measured every pull; makes the "in sync" signal truthful for the active node,
+    # not just the standby, and drives a seeding-progress bar in the admin UI.
+    v["active_index_count"] = int(t.active_index_count or 0)
+    v["active_receipt_count"] = int(t.active_receipt_count or 0)
+    v["cp_index_count"] = int(t.cp_index_count or 0)
+    v["cp_receipt_count"] = int(t.cp_receipt_count or 0)
+    v["active_index_pct"] = _placement.active_index_pct(t)
+    v["active_index_complete"] = _placement.is_active_index_complete(t)
+    v["active_counts_at"] = t.active_counts_at.isoformat() if t.active_counts_at else None
     if detail:
         from .billing import _compute_plan, get_pricing
         pricing = get_pricing(db)
