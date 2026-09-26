@@ -283,6 +283,25 @@ def _health_episode_open(db, tenant_id, resource: str, *,
     return r is None or p > r
 
 
+def _owned_tenant_ids(db) -> set:
+    """Tenant ids this box is the ACTIVE owner of — the CP owns tenants with no
+    node_id; a customer node owns tenants whose node_id is itself (NOT ones it's a
+    warm standby for). Per-tenant health probes + their notifications MUST run only
+    here: otherwise the CP AND the owning node both sweep a node-hosted appliance,
+    each with its own state + a different view of (stale-replicated vs fresh) health,
+    producing the flapping 'healthy again' notices with no matching 'problem'."""
+    from ..models import Node, Tenant
+    settings = get_settings()
+    if (settings.node_role or "control-plane") == "control-plane":
+        return {tid for (tid,) in db.query(Tenant.id).filter(Tenant.node_id.is_(None)).all()}
+    self_node = (db.query(Node).filter(Node.is_self.is_(True)).first()
+                 or db.query(Node).filter(
+                     Node.name == (settings.node_name or settings.domain)).first())
+    if not self_node:
+        return set()
+    return {tid for (tid,) in db.query(Tenant.id).filter(Tenant.node_id == self_node.id).all()}
+
+
 def _check_appliance_health() -> None:
     """Sweep appliances for health problems (offline too long, drive/RAID/SMART
     failure, capacity limits, slow link, LAN intrusion attempts) and write a
@@ -299,7 +318,13 @@ def _check_appliance_health() -> None:
     checked = 0
     problem_count = 0
     with SessionLocal() as db:
+        # Only sweep appliances THIS box owns (CP: unassigned tenants; node: its own)
+        # so a node-hosted appliance is health-checked by exactly one box — never the
+        # CP and its node both, which double-alerted and flapped 'healthy again'.
+        owned = _owned_tenant_ids(db)
         for a in db.query(Appliance).all():
+            if a.tenant_id not in owned:
+                continue
             try:
                 checked += 1
                 probs, sev = notif.appliance_problem_list(db, a)

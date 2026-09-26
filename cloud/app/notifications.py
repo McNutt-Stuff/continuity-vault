@@ -514,6 +514,24 @@ def _appliance_issues(db, user: User) -> list[dict]:
     return out
 
 
+def _sustained(since_iso, minutes: int) -> bool:
+    """True if a naive-UTC ISO timestamp is older than ``minutes`` — used to debounce
+    transient storage flaps (a mirror mid-resync right after a backup, a portable
+    drive that briefly blipped) so a short-lived state isn't emailed as a problem.
+    Missing timestamp = just started = within grace (not yet a problem); an
+    unparseable one fails safe to 'sustained' (alert)."""
+    if not since_iso:
+        return False
+    try:
+        t = datetime.fromisoformat(str(since_iso).replace("Z", ""))
+        if t.tzinfo:
+            t = t.astimezone(timezone.utc).replace(tzinfo=None)
+    except Exception:  # noqa: BLE001
+        return True
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return (now - t) >= timedelta(minutes=minutes)
+
+
 def _appliance_recipients(db, appliance) -> list[User]:
     """Active users in the appliance's tenant — the same audience that receives
     appliance_problem notifications for it (used for the 'healthy again' alert)."""
@@ -560,7 +578,11 @@ def appliance_problem_list(db, appliance) -> tuple[list[str], str]:
             problems.append(f"{vol}: storage error")
             critical = True
         elif (s.state or "") == "disconnected":
-            problems.append(f"{vol}: device disconnected")
+            # Grace: a portable/USB drive that just dropped often reconnects on the
+            # next heartbeat — only flag it once it's been gone a sustained period,
+            # so a brief blip doesn't churn problem/recovered emails.
+            if s.last_seen_at is None or (now - s.last_seen_at) > timedelta(minutes=20):
+                problems.append(f"{vol}: device disconnected")
         h = s.health or {}
         drive = str(h.get("drive_health") or h.get("smart") or "").lower()
         raid_v = h.get("raid")
@@ -570,10 +592,14 @@ def appliance_problem_list(db, appliance) -> tuple[list[str], str]:
             critical = True
         elif drive in ("degraded", "disconnected"):
             problems.append(f"{vol}: drive health {drive}")
-        # A mirror volume that's connected but no longer a verified 1:1 copy.
+        # A mirror volume that's connected but no longer a verified 1:1 copy. A
+        # mirror re-syncs after every backup, so it is briefly out of sync as part
+        # of normal operation — only a SUSTAINED out-of-sync (grace via the
+        # out_of_sync_since stamp set on telemetry ingest) is a real problem.
         mi = h.get("mirror_integrity") if isinstance(h.get("mirror_integrity"), dict) else None
         if (s.kind or "") == "mirror" and (s.state or "") != "disconnected" \
-                and mi and mi.get("in_sync") is False:
+                and mi and mi.get("in_sync") is False \
+                and _sustained(h.get("out_of_sync_since"), 30):
             problems.append(f"{vol}: mirror out of sync")
         if raid in ("degraded", "failed", "rebuilding"):
             problems.append(f"{vol}: RAID {raid}")

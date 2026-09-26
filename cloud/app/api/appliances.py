@@ -606,7 +606,16 @@ def _sync_storage_telemetry(db: Session, a: Appliance, telemetry: dict) -> None:
             connected = bool(rep.get("connected", True))
             s.capacity_bytes = int(rep.get("capacity_bytes") or 0)
             s.used_bytes = int(rep.get("used_bytes") or 0)
-            s.health = rep.get("health") or {}
+            # Preserve the out-of-sync grace stamp across heartbeats (health is
+            # replaced wholesale): a mirror re-syncs after every backup, so we only
+            # treat a SUSTAINED out-of-sync as a problem (see appliance_problem_list).
+            prior_oos = (s.health or {}).get("out_of_sync_since")
+            new_health = rep.get("health") or {}
+            mi = new_health.get("mirror_integrity") if isinstance(
+                new_health.get("mirror_integrity"), dict) else None
+            if kind == "mirror" and mi and mi.get("in_sync") is False:
+                new_health["out_of_sync_since"] = prior_oos or now.isoformat()
+            s.health = new_health
             if rep.get("device_serial"):
                 s.device_serial = rep.get("device_serial")
             if rep.get("mirror_of_id") is not None:
