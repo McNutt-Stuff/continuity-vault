@@ -271,7 +271,31 @@ def _collection_view(db: Session, c: Collection) -> dict:
         # Deep-history backfill status (dual-track sources opted in by an admin):
         # its own paced background crawl, separate from the recent/scheduled sync.
         "backfill": _backfill_view(c, conn, account),
+        # Compliance-rule coverage for this source (count + aggregate hit telemetry)
+        # so the Data Map can prominently show governed sources.
+        "rules": _rules_coverage(db, c),
     }
+
+
+def _rules_coverage(db: Session, c: Collection) -> dict:
+    """Enabled rules covering this source (unscoped, or scoped to this collection /
+    source type) + their aggregate hit telemetry — for the Data Map coverage badge."""
+    from ..models import Rule
+    rows = (db.query(Rule)
+            .filter(Rule.tenant_id == c.tenant_id, Rule.enabled.is_(True)).all())
+    applies = []
+    for r in rows:
+        cids = r.collection_ids or []
+        stypes = r.source_types or []
+        if cids and c.id not in cids:
+            continue
+        if stypes and c.source_type not in stypes:
+            continue
+        applies.append(r)
+    hits = sum(int(r.hit_count or 0) for r in applies)
+    last = max((r.last_match_at for r in applies if r.last_match_at), default=None)
+    return {"count": len(applies), "hits": hits,
+            "last_match_at": last.isoformat() if last else None}
 
 
 def _backfill_view(c: Collection, conn, account) -> dict | None:

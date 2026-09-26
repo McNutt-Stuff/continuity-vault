@@ -88,6 +88,8 @@ def _view(r: Rule) -> dict:
         "match": r.match or "all", "conditions": r.conditions or [],
         "actions": r.actions or [], "collection_ids": r.collection_ids or [],
         "source_types": r.source_types or [], "min_plan": r.min_plan or "personal",
+        "hit_count": int(r.hit_count or 0),
+        "last_match_at": r.last_match_at.isoformat() if r.last_match_at else None,
         "updated_at": r.updated_at.isoformat() if r.updated_at else None,
     }
 

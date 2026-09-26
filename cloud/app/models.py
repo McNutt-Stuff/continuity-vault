@@ -262,6 +262,11 @@ class Rule(Base):
     source_types = Column(JSON, default=list)
     # Lowest plan entitled to this rule: personal | family | business.
     min_plan = Column(String, default="personal")
+    # Match telemetry (like a firewall hit counter): how many objects this rule has
+    # matched, and when it last matched. Incremented at ingest; shown on the Rules
+    # page + the Data Map coverage badge.
+    hit_count = Column(BigInteger, default=0)
+    last_match_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 

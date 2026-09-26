@@ -639,6 +639,10 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     # add labels. Loaded once, scoped to this collection + source type.
     rules, rule_plan = _load_rules_for(db, collection, vault)
     rule_stats = {"discarded": 0, "restricted": 0, "no_index": 0, "obfuscated": 0, "labeled": 0}
+    # Per-rule match telemetry for this run (firewall-style hit counter): rule id ->
+    # {count, actions, samples}. Applied to the Rule rows + audited after the loop.
+    rule_hits: dict = {}
+    rule_by_id = {r.id: r for r in rules}
     # Only the discrete metadata fields the connector declares are indexed or
     # shown in search — never the object's body/content. A per-source override
     # (collection.index_fields, set in the Data Map) wins when present; otherwise
@@ -739,6 +743,20 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
                     title=str(src.title) if src.title is not None else "",
                     source_type=collection.source_type, labels=src.labels, meta=src.meta),
                 plan=rule_plan)
+            # Tally each rule that matched this object (incl. a discard), with a few
+            # sample titles for the audit detail.
+            for m in outcome.matched:
+                rid = m.get("id")
+                if not rid:
+                    continue
+                h = rule_hits.setdefault(rid, {"count": 0, "actions": set(), "samples": [],
+                                               "name": m.get("name") or ""})
+                h["count"] += 1
+                h["actions"].update(m.get("actions") or [])
+                if len(h["samples"]) < 5:
+                    h["samples"].append({
+                        "object_id": src.object_id,
+                        "title": (str(src.title)[:120] if src.title is not None else "")})
             if outcome.discard:
                 rule_stats["discarded"] += 1
                 logger.info("rules: discarded object=%s collection=%s rule(s)=%s",
@@ -823,6 +841,23 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     if rules and any(rule_stats.values()):
         logger.info("rules applied on collection=%s (%s): %s",
                     collection.id, collection.source_type, rule_stats)
+    # Update each matched rule's hit counter + last-match time and write ONE audit
+    # event per rule for this run (bounded volume; expandable match detail). Done
+    # here so it covers both the has-changes and the discard-everything paths.
+    if rule_hits:
+        _now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        for rid, h in rule_hits.items():
+            r = rule_by_id.get(rid)
+            if r is not None:
+                r.hit_count = int(r.hit_count or 0) + h["count"]
+                r.last_match_at = _now_naive
+            audit.record(
+                db, actor="system", action="rule.matched",
+                tenant_id=collection.tenant_id, resource=rid,
+                category="activity", severity="info",
+                detail={"rule": h["name"], "collection": collection.name,
+                        "source_type": collection.source_type, "matches": h["count"],
+                        "actions": sorted(h["actions"]), "samples": h["samples"]})
     # Nothing changed since the last run — no new recovery point to create.
     if not storage_units:
         logger.info("ingest snapshot skipped: %d object(s) unchanged (deduped) for collection %s",

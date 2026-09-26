@@ -294,6 +294,9 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE index_replicas ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMP",
         # Compliance rules engine: an object a rule marked restricted/sensitive.
         "ALTER TABLE search_documents ADD COLUMN IF NOT EXISTS restricted BOOLEAN DEFAULT false",
+        # Rule match telemetry (firewall-style hit counter + last-match time).
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS hit_count BIGINT DEFAULT 0",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS last_match_at TIMESTAMP",
         "ALTER TABLE purge_requests ADD COLUMN IF NOT EXISTS keep_source BOOLEAN DEFAULT false",
         "ALTER TABLE purge_requests ADD COLUMN IF NOT EXISTS collection_id VARCHAR",
         "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS last_log_push_at TIMESTAMP",
