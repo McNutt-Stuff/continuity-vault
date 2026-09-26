@@ -63,7 +63,8 @@ app.add_middleware(
     allow_headers=["*"],
     # Let the browser read the request-chain breadcrumbs the debug overlay uses.
     expose_headers=["X-Arkive-Route", "X-Arkive-Node", "X-Arkive-Served-By",
-                    "X-Arkive-Server-Ms", "X-Arkive-Upstream-Ms"],
+                    "X-Arkive-Server-Ms", "X-Arkive-Upstream-Ms",
+                    "X-Arkive-Hop", "X-Arkive-Chain"],
 )
 
 # Federated file-op proxy: on the control plane, forward retrieval / recovery /
@@ -78,12 +79,14 @@ from . import activity_logger  # noqa: E402
 app.middleware("http")(activity_logger.middleware)
 
 # Request-chain breadcrumbs for the live debug overlay: stamp every response with
-# where it was served (this box) + server processing time. node_proxy already
-# stamps the CP→node hop; we only fill defaults so a proxied response keeps its
-# richer route. Registered LAST so it wraps the others (outermost).
+# where it was served (this box) + server processing time. Every box emits its own
+# hop as JSON (X-Arkive-Hop) and seeds a single-hop chain (X-Arkive-Chain, a JSON
+# array); node_proxy assembles the full CP->node chain from the downstream hop.
+import json as _json  # noqa: E402
 import time as _time  # noqa: E402
 _ROUTE_IS_CP = (settings.node_role or "control-plane") == "control-plane"
 _ROUTE_LABEL = settings.node_name or settings.domain or ("control-plane" if _ROUTE_IS_CP else "node")
+_ROUTE_ROLE = "control-plane" if _ROUTE_IS_CP else "node"
 
 
 @app.middleware("http")
@@ -91,7 +94,12 @@ async def _route_stamp(request, call_next):
     _t0 = _time.perf_counter()
     response = await call_next(request)
     try:
-        response.headers["X-Arkive-Server-Ms"] = str(round((_time.perf_counter() - _t0) * 1000, 1))
+        ms = round((_time.perf_counter() - _t0) * 1000, 1)
+        hop = _json.dumps({"role": _ROUTE_ROLE, "name": _ROUTE_LABEL, "ms": ms})
+        response.headers["X-Arkive-Server-Ms"] = str(ms)
+        response.headers["X-Arkive-Hop"] = hop
+        # Non-proxied responses are a single hop; node_proxy sets a richer chain.
+        response.headers.setdefault("X-Arkive-Chain", "[" + hop + "]")
         response.headers.setdefault("X-Arkive-Route", "cp" if _ROUTE_IS_CP else "node")
         response.headers.setdefault("X-Arkive-Served-By", _ROUTE_LABEL)
     except Exception:  # noqa: BLE001 — never let stamping break a response

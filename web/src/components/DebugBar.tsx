@@ -6,7 +6,7 @@
 // (heartbeats, replication freshness, recent tenant errors).
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon";
-import { api, DebugCall, getDebugCalls, subscribeDebugCalls, clearDebugCalls } from "../api";
+import { api, DebugCall, RouteHop, getDebugCalls, subscribeDebugCalls, clearDebugCalls } from "../api";
 
 interface LiveDiag {
   server_time: string;
@@ -47,12 +47,26 @@ function statusTone(status: number, ok: boolean): string {
   return "var(--warn)";
 }
 
-// Human-readable end-to-end request chain from the server's route breadcrumbs.
+// Short label for a hop (control-plane → "CP", else the node name).
+function hopLabel(h: RouteHop): string {
+  return h.role === "control-plane" ? "CP" : (h.name || "node");
+}
+
+// Compact end-to-end request chain from the server's per-hop breadcrumbs.
 function chainLabel(c: DebugCall): string {
   if (c.status === 0) return "browser ✗ network";
+  if (c.chain && c.chain.length) return "browser → " + c.chain.map(hopLabel).join(" → ");
   if (c.route === "cp->node") return `browser → CP → ${c.node || "node"}`;
   if (c.route === "node") return `browser → ${c.node || "node"}`;
   return "browser → CP";
+}
+
+// The compact route shown in the Requests row (hops joined by →).
+function chainShort(c: DebugCall): string {
+  if (c.chain && c.chain.length) return c.chain.map(hopLabel).join(" → ");
+  if (c.route === "cp->node") return `CP → ${c.node || "node"}`;
+  if (c.route === "node") return c.node || "node";
+  return "CP";
 }
 
 type Tab = "requests" | "server" | "errors";
@@ -121,8 +135,8 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
                           title={`round-trip ${c.ms}ms${c.serverMs != null ? ` · server ${c.serverMs}ms` : ""}${c.upstreamMs != null ? ` · node hop ${c.upstreamMs}ms` : ""}`}>
                         {c.ms}ms{c.upstreamMs != null ? <span style={{ color: "var(--text-faint)" }}> ({c.upstreamMs})</span> : null}
                       </td>
-                      <td style={{ padding: "3px 6px", whiteSpace: "nowrap", color: c.route === "cp->node" ? "var(--warn)" : "var(--text-faint)" }} title={chainLabel(c)}>
-                        {c.route === "cp->node" ? `CP → ${c.node || "node"}` : c.route === "node" ? (c.node || "node") : "CP"}
+                      <td style={{ padding: "3px 6px", whiteSpace: "nowrap", color: (c.chain && c.chain.length > 1) || c.route === "cp->node" ? "var(--warn)" : "var(--text-faint)" }} title={chainLabel(c)}>
+                        {chainShort(c)}
                       </td>
                       <td style={{ padding: "3px 6px", wordBreak: "break-all" }}>{c.path}{c.error ? <span style={{ color: "var(--danger-c)" }}> — {c.error}</span> : null}</td>
                     </tr>
@@ -222,6 +236,22 @@ function CallModal({ call, onClose }: { call: DebugCall; onClose: () => void }) 
             {call.upstreamMs != null && <span><b>Node hop:</b> {call.upstreamMs}ms</span>}
             <span><b>At:</b> {new Date(call.ts).toLocaleString()}</span>
           </div>
+          {call.chain && call.chain.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 4 }}>Proxy path</div>
+              <div className="stack" style={{ gap: 2, fontFamily: mono, fontSize: 12 }}>
+                <div className="row" style={{ gap: 8 }}><span style={{ minWidth: 130, color: "var(--text-faint)" }}>browser</span><span /></div>
+                {call.chain.map((h, i) => (
+                  <div key={i} className="row" style={{ gap: 8 }}>
+                    <span style={{ minWidth: 130 }}>{"→ ".repeat(1)}{h.role === "control-plane" ? "control plane" : "node"} · {h.name}</span>
+                    <span style={{ color: h.error ? "var(--danger-c)" : "var(--text-dim)" }}>
+                      {h.error ? h.error : `${h.ms != null ? `${h.ms}ms` : "—"}${h.upstream_ms != null ? ` · CP↔node ${h.upstream_ms}ms` : ""}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {call.error && <div style={{ color: "var(--danger-c)", marginBottom: 12 }}>{call.error}</div>}
           <Section title={`Request${call.method === "GET" ? " (query only)" : ""}`} body={call.reqBody} mono={mono} onCopy={() => copy(call.reqBody)} empty="No request body (GET / no payload)." />
           <Section title="Response" body={call.respBody} mono={mono} onCopy={() => copy(call.respBody)} empty="No response body captured (binary, 204, or network failure)." />

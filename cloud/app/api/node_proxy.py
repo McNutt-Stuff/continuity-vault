@@ -14,6 +14,7 @@ replication).
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import time
 from urllib.parse import urlparse
@@ -29,6 +30,7 @@ from ..db import SessionLocal
 
 logger = logging.getLogger("cv.nodeproxy")
 settings = get_settings()
+_CP_LABEL = settings.node_name or settings.domain or "control-plane"
 
 _client: httpx.AsyncClient | None = None
 
@@ -134,6 +136,7 @@ async def middleware(request: Request, call_next):
         return await call_next(request)
     if not _should_proxy(request.method, request.url.path):
         return await call_next(request)
+    _proxy_t0 = time.perf_counter()
     # Run the (synchronous) DB lookup off the event loop so it never blocks other
     # requests while waiting on the connection pool.
     node_url, switching, node_name = await run_in_threadpool(_target_for, request)
@@ -161,19 +164,36 @@ async def middleware(request: Request, call_next):
         resp = await _cl().send(req, stream=True)
     except Exception as exc:  # noqa: BLE001 - node offline / unreachable
         logger.warning("file op proxy to %s failed: %s", url, exc)
+        _label = node_name or urlparse(node_url).netloc or node_url
         return JSONResponse({"detail": "assigned node unavailable"}, status_code=503,
-                            headers={"X-Arkive-Route": "cp->node",
-                                     "X-Arkive-Node": node_name or urlparse(node_url).netloc or node_url})
+                            headers={"X-Arkive-Route": "cp->node", "X-Arkive-Node": _label,
+                                     "X-Arkive-Chain": _json.dumps([
+                                         {"role": "control-plane", "name": _CP_LABEL, "ms": None},
+                                         {"role": "node", "name": _label, "ms": None, "error": "unreachable"}])})
     _upstream_ms = round((time.perf_counter() - _t0) * 1000, 1)
 
     relay = {}
     for h in ("content-type", "content-disposition", "cache-control"):
         if h in resp.headers:
             relay[h] = resp.headers[h]
-    # Request-chain breadcrumbs for the debug overlay: this response was served
-    # CP → the tenant's node, with the node's own round-trip time.
+    # Request-chain breadcrumbs for the debug overlay: assemble the FULL path as a
+    # JSON array — this box (control plane) + the downstream node's own hop (read
+    # from the node's X-Arkive-Hop), so the whole CP→node round trip is exposed.
+    _label = node_name or urlparse(node_url).netloc or node_url
+    node_hop = None
+    try:
+        node_hop = _json.loads(resp.headers.get("X-Arkive-Hop") or "null")
+    except Exception:  # noqa: BLE001
+        node_hop = None
+    if not isinstance(node_hop, dict):
+        node_hop = {"role": "node", "name": _label, "ms": _upstream_ms}
+    node_hop.setdefault("name", _label)
+    node_hop["upstream_ms"] = _upstream_ms  # CP-observed round trip to the node
+    cp_hop = {"role": "control-plane", "name": _CP_LABEL,
+              "ms": round((time.perf_counter() - _proxy_t0) * 1000, 1) - _upstream_ms}
+    relay["X-Arkive-Chain"] = _json.dumps([cp_hop, node_hop])
     relay["X-Arkive-Route"] = "cp->node"
-    relay["X-Arkive-Node"] = node_name or urlparse(node_url).netloc or node_url
+    relay["X-Arkive-Node"] = _label
     relay["X-Arkive-Upstream-Ms"] = str(_upstream_ms)
 
     # The CP already authenticated this session to route it here, so a 401 from the

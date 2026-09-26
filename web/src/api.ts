@@ -44,8 +44,16 @@ export interface DebugCall {
   node?: string;         // serving node host when proxied CP->node
   serverMs?: number;     // server processing time (X-Arkive-Server-Ms)
   upstreamMs?: number;   // CP->node hop time (X-Arkive-Upstream-Ms)
+  chain?: RouteHop[];    // full per-hop path (X-Arkive-Chain JSON)
   reqBody?: string;      // request payload (truncated) for drill-down
   respBody?: string;     // response payload (truncated) for drill-down
+}
+export interface RouteHop {
+  role: string;          // "control-plane" | "node"
+  name: string;
+  ms: number | null;     // this hop's own processing time
+  upstream_ms?: number;  // CP-observed round trip to this downstream hop
+  error?: string;
 }
 const DEBUG_MAX = 200;
 const DEBUG_BODY_MAX = 200000;   // cap each captured payload (~200KB) so history stays light
@@ -75,13 +83,19 @@ export function clearDebugCalls() {
 }
 
 // Pull the request-chain breadcrumbs the server stamps on every response.
-function debugMeta(res: Response): Pick<DebugCall, "route" | "node" | "serverMs" | "upstreamMs"> {
+function debugMeta(res: Response): Pick<DebugCall, "route" | "node" | "serverMs" | "upstreamMs" | "chain"> {
   const num = (v: string | null) => (v == null || v === "" ? undefined : Number(v));
+  let chain: RouteHop[] | undefined;
+  try {
+    const raw = res.headers.get("X-Arkive-Chain");
+    if (raw) { const p = JSON.parse(raw); if (Array.isArray(p)) chain = p; }
+  } catch { /* ignore malformed chain */ }
   return {
     route: res.headers.get("X-Arkive-Route") || undefined,
     node: res.headers.get("X-Arkive-Node") || undefined,
     serverMs: num(res.headers.get("X-Arkive-Server-Ms")),
     upstreamMs: num(res.headers.get("X-Arkive-Upstream-Ms")),
+    chain,
   };
 }
 
