@@ -28,15 +28,62 @@ export function setOnMaintenance(cb: ((detail: string, retryAfter: number) => vo
   onMaintenance = cb;
 }
 
+// --- Live debug overlay: a rolling ring-buffer of recent API calls (method, path,
+// status, timing, error detail). Always captured (cheap, capped) so the debug
+// footer bar can show a behind-the-scenes history the moment it's enabled. ---
+export interface DebugCall {
+  id: number;
+  ts: number;            // epoch ms when the call started
+  method: string;
+  path: string;
+  status: number;        // 0 = network/abort error
+  ms: number;            // round-trip time
+  ok: boolean;
+  error?: string;        // detail message on failure
+}
+const DEBUG_MAX = 200;
+const debugCalls: DebugCall[] = [];
+let debugSeq = 0;
+const debugSubs = new Set<(calls: DebugCall[]) => void>();
+
+function recordDebugCall(c: Omit<DebugCall, "id">) {
+  const entry: DebugCall = { id: ++debugSeq, ...c };
+  debugCalls.push(entry);
+  if (debugCalls.length > DEBUG_MAX) debugCalls.splice(0, debugCalls.length - DEBUG_MAX);
+  debugSubs.forEach((fn) => { try { fn(debugCalls); } catch { /* ignore */ } });
+}
+
+export function getDebugCalls(): DebugCall[] {
+  return debugCalls.slice();
+}
+export function subscribeDebugCalls(fn: (calls: DebugCall[]) => void): () => void {
+  debugSubs.add(fn);
+  return () => debugSubs.delete(fn);
+}
+export function clearDebugCalls() {
+  debugCalls.length = 0;
+  debugSubs.forEach((fn) => { try { fn(debugCalls); } catch { /* ignore */ } });
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(BASE + path, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  const started = performance.now();
+  const startedAt = Date.now();
+  let res: Response;
+  try {
+    res = await fetch(BASE + path, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (netErr: any) {
+    recordDebugCall({ ts: startedAt, method, path, status: 0,
+      ms: Math.round(performance.now() - started), ok: false,
+      error: netErr?.message || "network error" });
+    throw netErr;
+  }
   if (!res.ok) {
     let detail = res.statusText;
     let payload: any = null;
@@ -46,6 +93,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     } catch {
       /* ignore */
     }
+    recordDebugCall({ ts: startedAt, method, path, status: res.status,
+      ms: Math.round(performance.now() - started), ok: false, error: detail });
     // A 401 on an authenticated (non-auth) request means the session expired —
     // fire the global sign-out so the app redirects to Login with a notice.
     if (res.status === 401 && token && !path.startsWith("/auth/")) {
@@ -58,6 +107,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     }
     throw new ApiError(res.status, detail);
   }
+  recordDebugCall({ ts: startedAt, method, path, status: res.status,
+    ms: Math.round(performance.now() - started), ok: true });
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }

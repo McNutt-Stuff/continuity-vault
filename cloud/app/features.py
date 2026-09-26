@@ -52,6 +52,12 @@ FLAGS: dict[str, bool] = {
     # the active node goes offline (a standby must be assigned). OFF by default —
     # manual switchover always works; this only enables UNATTENDED failover.
     "ha_auto_failover": False,
+    # Live debug overlay: a per-account footer bar exposing behind-the-scenes
+    # diagnostics (active node, serving-index size, response timing, heartbeats,
+    # recent errors + a rolling request/response history) for live troubleshooting.
+    # OFF by default; a user may self-toggle their OWN overlay (it only ever shows
+    # diagnostics scoped to their own tenant).
+    "debug_overlay_enabled": False,
 }
 
 # Human labels for the admin UI.
@@ -68,6 +74,7 @@ LABELS = {
     "cross_member_recovery_approval": "Require approval for cross-member recovery",
     "entitlements_enforced": "Enforce entitlement/seat limits (rollout)",
     "ha_auto_failover": "Automatic failover to standby node (HA)",
+    "debug_overlay_enabled": "Live debug overlay (behind-the-scenes diagnostics)",
 }
 
 

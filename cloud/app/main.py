@@ -21,6 +21,7 @@ from .api import (
     costs,
     dashboard,
     debug,
+    debug_panel,
     index_status,
     insights,
     integrations,
@@ -180,6 +181,7 @@ app.include_router(costs.router, prefix=API)
 app.include_router(terminal.admin_terminal_router, prefix=API)
 app.include_router(terminal.agent_terminal_router, prefix=API)
 app.include_router(debug.router, prefix=API)
+app.include_router(debug_panel.router, prefix=API)
 app.include_router(activity.router, prefix=API)
 app.include_router(compliance.router, prefix=API)
 app.include_router(recovery.router, prefix=API)

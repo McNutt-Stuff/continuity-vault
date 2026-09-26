@@ -5,6 +5,7 @@ import { Icon, IconName } from "./components/Icon";
 import { getTheme, applyTheme, Theme } from "./theme";
 import { Pill } from "./components/ui";
 import { DialogHost, notify } from "./components/dialog";
+import { DebugBar } from "./components/DebugBar";
 import { api } from "./api";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
@@ -61,7 +62,7 @@ function LoggedOut() {
 }
 
 export default function App() {
-  const { me, loading } = useAuth();
+  const { me, loading, refresh } = useAuth();
   const loc = useLocation();
 
   // Browser tab title: "Arkive - Platform Admin" in the admin console, otherwise
@@ -122,6 +123,12 @@ export default function App() {
           </Routes>
         </div>
       </div>
+      {me.features?.debug_overlay_enabled === true && (
+        <DebugBar onDisable={async () => {
+          try { await api.post("/debug-panel/toggle", { enabled: false }); await refresh(); }
+          catch (e: any) { notify({ message: e?.message || "Could not disable the debug overlay", tone: "danger" }); }
+        }} />
+      )}
     </div>
   );
 }
@@ -246,10 +253,16 @@ function TopBar() {
 }
 
 function AccountMenu() {
-  const { me, logout } = useAuth();
+  const { me, logout, refresh } = useAuth();
   const nav = useNavigate();
   const [open, setOpen] = useState(false);
   const go = (to: string) => { setOpen(false); nav(to); };
+  const debugOn = me?.features?.debug_overlay_enabled === true;
+  const toggleDebug = async () => {
+    setOpen(false);
+    try { await api.post("/debug-panel/toggle", { enabled: !debugOn }); await refresh(); }
+    catch (e: any) { notify({ message: e?.message || "Could not toggle the debug overlay", tone: "danger" }); }
+  };
   return (
     <div style={{ position: "relative" }}>
       <button className="account-trigger" onClick={() => setOpen((o) => !o)}>
@@ -280,6 +293,10 @@ function AccountMenu() {
                 <Icon name="user" size={15} /> Organization Admin
               </button>
             )}
+            <div className="account-menu-sep" />
+            <button className="account-menu-item" onClick={toggleDebug}>
+              <Icon name="activity" size={15} /> {debugOn ? "Disable debug overlay" : "Enable debug overlay"}
+            </button>
             <div className="account-menu-sep" />
             <button className="account-menu-item danger" onClick={() => { setOpen(false); logout(); }}>
               <Icon name="logout" size={15} /> Sign out
