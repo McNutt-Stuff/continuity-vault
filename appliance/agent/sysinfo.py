@@ -106,6 +106,60 @@ def system_stats() -> dict:
     }
 
 
+def proc_mem() -> dict:
+    """This process's own memory from /proc/self/status (Linux). All in bytes:
+    rss (resident), peak_rss (VmHWM high-water mark) and vsize (address space)."""
+    rss = peak = vsize = 0
+    for line in _read("/proc/self/status").splitlines():
+        if line.startswith("VmRSS:"):
+            rss = int(line.split()[1]) * 1024
+        elif line.startswith("VmHWM:"):
+            peak = int(line.split()[1]) * 1024
+        elif line.startswith("VmSize:"):
+            vsize = int(line.split()[1]) * 1024
+    return {"rss_bytes": rss, "peak_rss_bytes": peak, "vsize_bytes": vsize}
+
+
+def oom_postmortem(unit: str = "cv-appliance-agent.service") -> dict:
+    """Best-effort: did the PREVIOUS run of this unit die from an out-of-memory
+    kill? A kernel OOM kill is a SIGKILL, so nothing in-process can log it at the
+    time — but systemd records ``Result=oom-kill`` and the kernel ring buffer names
+    the victim. Returns {oom, result, restarts, exec_main_status, kernel?}."""
+    out: dict = {"oom": False, "result": "", "restarts": 0, "exec_main_status": ""}
+    try:
+        import subprocess
+        res = subprocess.run(
+            ["systemctl", "show", unit, "-p", "Result", "-p", "NRestarts",
+             "-p", "ExecMainStatus"],
+            capture_output=True, text=True, timeout=5)
+        vals: dict = {}
+        for line in res.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                vals[k] = v.strip()
+        out["result"] = vals.get("Result", "")
+        out["restarts"] = int(vals.get("NRestarts") or 0)
+        out["exec_main_status"] = vals.get("ExecMainStatus", "")
+        if vals.get("Result") == "oom-kill":
+            out["oom"] = True
+    except Exception:
+        pass
+    try:
+        import subprocess
+        km = subprocess.run(["journalctl", "-k", "--since", "-15 min", "--no-pager"],
+                            capture_output=True, text=True, timeout=5).stdout
+        for line in km.splitlines():
+            low = line.lower()
+            if "out of memory" in low or ("killed process" in low
+                                          and ("python" in low or "uvicorn" in low)):
+                out["oom"] = True
+                out["kernel"] = line.strip()[-300:]
+                break
+    except Exception:
+        pass
+    return out
+
+
 def disk_stats(path: str) -> dict:
     try:
         total, used, free = shutil.disk_usage(path)

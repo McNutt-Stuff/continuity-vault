@@ -1294,6 +1294,42 @@ def _cmd_inline_bytes(envelope: dict) -> int:
         return 0
 
 
+def _record_oom_report(db, appliance, report: dict) -> None:
+    """Record a prior OOM kill the appliance agent reported (systemd result +
+    kernel line + the pre-kill memory snapshot from the agent's watchdog). Deduped
+    per episode (by the agent's restart count) so it's logged once, not every
+    heartbeat, and is queryable/alertable from the control plane."""
+    if not report or not report.get("oom"):
+        return
+    restarts = int(report.get("restarts") or 0)
+    from ..models import AuditEvent
+    since = _now() - timedelta(hours=6)
+    prior = (db.query(AuditEvent)
+             .filter(AuditEvent.action == "appliance.oom_restart",
+                     AuditEvent.resource == appliance.id,
+                     AuditEvent.tenant_id == appliance.tenant_id,
+                     AuditEvent.created_at >= since)
+             .order_by(AuditEvent.created_at.desc()).first())
+    if prior is not None and int((prior.detail or {}).get("restarts") or -1) == restarts:
+        return  # same episode already recorded
+    diag = report.get("last_diagnostic") or {}
+    detail = {
+        "name": appliance.name, "result": report.get("result"),
+        "restarts": restarts, "kernel": report.get("kernel"),
+        "rss_mib": (diag.get("rss_bytes") or 0) >> 20,
+        "rss_pct": diag.get("rss_pct"), "used_pct": diag.get("used_pct"),
+        "threads": diag.get("thread_count"), "threads_by_kind": diag.get("threads_by_kind"),
+        "top_allocations": (diag.get("top_allocations") or [])[:5],
+        "diag_at": diag.get("at"),
+    }
+    audit.record(db, actor="system", action="appliance.oom_restart",
+                 tenant_id=appliance.tenant_id, resource=appliance.id,
+                 category="appliance", severity="critical", detail=detail)
+    logger.error("appliance OOM-killed & restarted: %s (%s) result=%s restarts=%s rss=%sMiB threads=%s %s",
+                 appliance.name or "?", appliance.id, report.get("result"), restarts,
+                 detail["rss_mib"], detail.get("threads"), detail.get("threads_by_kind"))
+
+
 @agent_router.post("/heartbeat")
 def heartbeat(body: HeartbeatRequest,
               request: Request,
@@ -1357,6 +1393,14 @@ def heartbeat(body: HeartbeatRequest,
             device_name=appliance.name or appliance.serial or "")
     except Exception:  # noqa: BLE001
         db.rollback()
+
+    # Durably record a prior OOM kill the agent reported, so appliance instability
+    # is queryable/alertable from the control plane (not just buried in log lines).
+    try:
+        _record_oom_report(db, appliance, (body.telemetry or {}).get("oom_report") or {})
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.exception("oom-report ingest failed for appliance %s", appliance.id)
 
     # Deliver pending signed commands (management plane only). Delivery is
     # at-least-once: a command that was handed out but never acked (appliance

@@ -247,6 +247,10 @@ class Agent:
         self._heavy_cache: dict = {}
         self._heavy_at: float = 0.0
         self._heavy_refreshing = False
+        # OOM / memory-pressure diagnostics: the last post-mortem (systemd + kernel
+        # + pre-kill snapshot), surfaced in telemetry so the CP records restarts.
+        self._oom_report: dict = {}
+        self._watchdog_started = False
         # Zero-touch pairing: when installed WITHOUT a linking code the appliance
         # registers with the control plane as an un-claimed unit and shows a
         # pairing code on its local web UI until a customer claims it.
@@ -1148,6 +1152,152 @@ class Agent:
         finally:
             self._heavy_refreshing = False
 
+    def _mem_snapshot(self, level: str, prev: str, tracing: bool) -> dict:
+        """A detailed memory picture for the OOM diagnostic — process + system
+        memory, thread inventory (reveals a thread explosion, the usual appliance
+        OOM cause), GC counts and, when tracing, the top allocations by size."""
+        import gc
+        sysd = sysinfo.system_stats()
+        pm = sysinfo.proc_mem()
+        total = sysd.get("mem_total_bytes") or 0
+        avail = sysd.get("mem_available_bytes") or 0
+        rss = pm.get("rss_bytes") or 0
+        threads = threading.enumerate()
+        tnames: dict = {}
+        for t in threads:
+            base = (t.name or "thread").rstrip("0123456789-_") or t.name or "thread"
+            tnames[base] = tnames.get(base, 0) + 1
+        snap = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "level": level, "prev_level": prev,
+            "rss_bytes": rss, "peak_rss_bytes": pm.get("peak_rss_bytes"),
+            "vsize_bytes": pm.get("vsize_bytes"),
+            "mem_total_bytes": total, "mem_available_bytes": avail,
+            "used_pct": round((1 - avail / total) * 100, 1) if total else 0.0,
+            "rss_pct": round(rss / total * 100, 1) if total else 0.0,
+            "thread_count": len(threads),
+            "threads_by_kind": tnames,
+            "gc_counts": list(gc.get_count()),
+            "state": getattr(self.sm, "state", None) and str(self.sm.state),
+            "software_version": settings.software_version,
+        }
+        if tracing:
+            try:
+                import tracemalloc
+                top = tracemalloc.take_snapshot().statistics("lineno")[:15]
+                snap["top_allocations"] = [
+                    {"where": str(s.traceback), "size_bytes": int(s.size), "count": int(s.count)}
+                    for s in top]
+            except Exception:  # noqa: BLE001
+                pass
+        return snap
+
+    def _memory_watchdog(self) -> None:
+        """Capture WHY memory is climbing BEFORE the kernel OOM-kills us — a kill is
+        a SIGKILL with no traceback, so we sample process + system memory every ~15s
+        and escalate the log detail as pressure rises. At CRITICAL pressure the full
+        diagnostic (incl. tracemalloc top allocations + thread inventory) is written
+        to ``mem-diagnostic.json`` so it survives the kill and is forwarded on the
+        next start. tracemalloc is only enabled once pressure is high (it has
+        overhead), giving allocation-site attribution for the final snapshots."""
+        level = "ok"          # ok | elevated | high | critical
+        tracing = False
+        diag_path = DATA / "mem-diagnostic.json"
+        while True:
+            try:
+                sysd = sysinfo.system_stats()
+                pm = sysinfo.proc_mem()
+                total = sysd.get("mem_total_bytes") or 0
+                avail = sysd.get("mem_available_bytes") or 0
+                rss = pm.get("rss_bytes") or 0
+                worst = max((1 - avail / total) if total else 0.0,
+                            (rss / total) if total else 0.0)
+                new = ("critical" if worst >= 0.88 else "high" if worst >= 0.78
+                       else "elevated" if worst >= 0.65 else "ok")
+                if new in ("high", "critical") and not tracing:
+                    try:
+                        import tracemalloc
+                        tracemalloc.start(15)
+                        tracing = True
+                        self.log.warning("memory watchdog: tracemalloc enabled (%s pressure)", new)
+                    except Exception:  # noqa: BLE001
+                        pass
+                if new != level or new == "critical":
+                    snap = self._mem_snapshot(new, level, tracing)
+                    msg = (f"memory watchdog: {level} -> {new} "
+                           f"(rss {rss >> 20}MiB / {snap['rss_pct']}% · "
+                           f"sys used {snap['used_pct']}% · avail {avail >> 20}MiB · "
+                           f"{snap['thread_count']} threads {snap['threads_by_kind']})")
+                    if new == "critical":
+                        self.log.error(msg)
+                        try:
+                            diag_path.write_text(json.dumps(snap, indent=2))
+                        except Exception:  # noqa: BLE001
+                            pass
+                    elif new == "high":
+                        self.log.warning(msg)
+                    elif new != level:
+                        self.log.info(msg)
+                    level = new
+                    if new == "ok" and tracing:
+                        try:
+                            import tracemalloc
+                            tracemalloc.stop()
+                            tracing = False
+                        except Exception:  # noqa: BLE001
+                            pass
+            except Exception:  # noqa: BLE001 — the watchdog must never crash the agent
+                self.log.exception("memory watchdog error")
+            time.sleep(15)
+
+    def _report_oom_postmortem(self) -> None:
+        """On startup, surface a prior OOM: systemd Result=oom-kill / kernel log,
+        plus the last critical memory diagnostic we wrote before the kill. Logs an
+        ERROR (so it reaches Platform Logs via recent_logs) and stashes it on the
+        agent for telemetry."""
+        try:
+            pm = sysinfo.oom_postmortem()
+            self._oom_report = pm
+            diag_path = DATA / "mem-diagnostic.json"
+            diag = None
+            if diag_path.exists():
+                try:
+                    diag = json.loads(diag_path.read_text())
+                except Exception:  # noqa: BLE001
+                    diag = None
+                self._oom_report["last_diagnostic"] = diag
+            if pm.get("oom"):
+                self.log.error("appliance previously OOM-KILLED (systemd result=%s, restarts=%s)%s",
+                               pm.get("result"), pm.get("restarts"),
+                               f" — kernel: {pm.get('kernel')}" if pm.get("kernel") else "")
+                if diag:
+                    self.log.error("pre-OOM memory diagnostic: rss=%sMiB (%s%%) sys-used=%s%% "
+                                   "threads=%s %s at %s",
+                                   (diag.get("rss_bytes") or 0) >> 20, diag.get("rss_pct"),
+                                   diag.get("used_pct"), diag.get("thread_count"),
+                                   diag.get("threads_by_kind"), diag.get("at"))
+                    for a in (diag.get("top_allocations") or [])[:5]:
+                        self.log.error("pre-OOM top alloc: %s bytes (x%s) @ %s",
+                                       a.get("size_bytes"), a.get("count"), a.get("where"))
+                # Consume the file so we don't re-report the same episode forever.
+                try:
+                    diag_path.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+            elif diag:
+                # A critical-pressure snapshot exists but the exit wasn't an OOM —
+                # still worth surfacing (the agent got close), then clear it.
+                self.log.warning("prior memory-pressure diagnostic present (no OOM): "
+                                 "rss=%sMiB (%s%%) threads=%s at %s",
+                                 (diag.get("rss_bytes") or 0) >> 20, diag.get("rss_pct"),
+                                 diag.get("thread_count"), diag.get("at"))
+                try:
+                    diag_path.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            self.log.exception("OOM post-mortem failed")
+
     def _telemetry(self) -> dict:
         # Heavy fields (capacity walk + drive health) come from the background cache;
         # cheap live stats (cpu/mem/load/net) are computed inline so they stay fresh.
@@ -1167,6 +1317,12 @@ class Agent:
             "mem_total_bytes": sysd["mem_total_bytes"],
             "mem_available_bytes": sysd["mem_available_bytes"],
             "uptime_seconds": sysd["uptime_seconds"],
+            # This process's own memory + a prior-OOM report so the CP can see the
+            # agent's footprint and WHY it last restarted (systemd oom-kill + the
+            # pre-kill snapshot captured by the memory watchdog).
+            "process_rss_bytes": sysinfo.proc_mem().get("rss_bytes", 0),
+            "process_peak_rss_bytes": sysinfo.proc_mem().get("peak_rss_bytes", 0),
+            "oom_report": self._oom_report or None,
             # Platform / model
             "model": settings.model,
             "model_kind": plat["kind"],          # hardware | vm
@@ -1566,6 +1722,12 @@ _INTEG_WORKER = None
 async def startup() -> None:
     agent.log.info("appliance agent starting (v%s, model=%s)",
                    settings.software_version, settings.model)
+    # Surface any prior out-of-memory kill (systemd/kernel + the pre-kill snapshot)
+    # and start the memory watchdog so the NEXT episode is captured before the kill.
+    agent._report_oom_postmortem()
+    if not agent._watchdog_started:
+        agent._watchdog_started = True
+        threading.Thread(target=agent._memory_watchdog, name="cv-memwatch", daemon=True).start()
     # SIGHUP → reload external storage in place (cvtool signals us after it sets
     # up a drive, so it becomes usable without restarting the agent).
     try:
