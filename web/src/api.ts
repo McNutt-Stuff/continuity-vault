@@ -54,6 +54,8 @@ let debugSeq = 0;
 const debugSubs = new Set<(calls: DebugCall[]) => void>();
 
 function recordDebugCall(c: Omit<DebugCall, "id">) {
+  // The overlay's own polling (/debug-panel/*) must never clutter the request log.
+  if (c.path.startsWith("/debug-panel")) return;
   const entry: DebugCall = { id: ++debugSeq, ...c };
   debugCalls.push(entry);
   if (debugCalls.length > DEBUG_MAX) debugCalls.splice(0, debugCalls.length - DEBUG_MAX);
