@@ -61,6 +61,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Let the browser read the request-chain breadcrumbs the debug overlay uses.
+    expose_headers=["X-Arkive-Route", "X-Arkive-Node", "X-Arkive-Served-By",
+                    "X-Arkive-Server-Ms", "X-Arkive-Upstream-Ms"],
 )
 
 # Federated file-op proxy: on the control plane, forward retrieval / recovery /

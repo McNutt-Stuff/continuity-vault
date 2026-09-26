@@ -48,7 +48,7 @@ export interface DebugCall {
   respBody?: string;     // response payload (truncated) for drill-down
 }
 const DEBUG_MAX = 200;
-const DEBUG_BODY_MAX = 8000;   // cap each captured payload so history stays light
+const DEBUG_BODY_MAX = 200000;   // cap each captured payload (~200KB) so history stays light
 const debugCalls: DebugCall[] = [];
 let debugSeq = 0;
 const debugSubs = new Set<(calls: DebugCall[]) => void>();
@@ -144,12 +144,14 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       ms: Math.round(performance.now() - started), ok: true, reqBody, ...debugMeta(res) });
     return undefined as T;
   }
-  // Read the body once (so we can both capture it for drill-down and return it).
-  const data = await res.json();
+  // Read the body once as text so we can capture the EXACT response for drill-down
+  // and still parse it (handles empty 200 bodies and non-JSON without throwing).
+  const text = await res.text();
   recordDebugCall({ ts: startedAt, method, path, status: res.status,
     ms: Math.round(performance.now() - started), ok: true,
-    reqBody, respBody: _clip(safeStringify(data)), ...debugMeta(res) });
-  return data as T;
+    reqBody, respBody: _clip(text), ...debugMeta(res) });
+  if (!text) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 export class ApiError extends Error {

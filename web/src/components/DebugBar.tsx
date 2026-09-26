@@ -232,18 +232,23 @@ function CallModal({ call, onClose }: { call: DebugCall; onClose: () => void }) 
 }
 
 function Section({ title, body, mono, onCopy, empty }: { title: string; body?: string; mono: string; onCopy: () => void; empty: string }) {
+  const shown = body ? prettyJson(body) : undefined;
   return (
     <div style={{ marginBottom: 14 }}>
       <div className="row" style={{ gap: 8, marginBottom: 4 }}>
         <div style={{ fontWeight: 700, fontSize: 12.5 }}>{title}</div>
         {body && <button className="btn ghost sm" onClick={onCopy} title="Copy"><Icon name="file" size={12} /> Copy</button>}
       </div>
-      {body
+      {shown
         ? <pre style={{ margin: 0, padding: 10, background: "var(--code-bg)", borderRadius: "var(--radius-sm)",
-            fontFamily: mono, fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "34vh", overflow: "auto" }}>{body}</pre>
+            fontFamily: mono, fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "34vh", overflow: "auto" }}>{shown}</pre>
         : <div className="muted" style={{ fontSize: 12 }}>{empty}</div>}
     </div>
   );
+}
+
+function prettyJson(s: string): string {
+  try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
 }
 
 function DRow({ k, v, tone }: { k: string; v: string; tone?: "warn" | "danger" }) {
