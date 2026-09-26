@@ -28,6 +28,7 @@ interface Overview {
   };
   protection: { key_ownership_model: string; encrypted: boolean };
   connector_health?: { issues: number; needs_reauth: number };
+  integration_health?: { issues: number; critical: number };
   cloud_deletion?: { pending: boolean; delete_at: string; days_left: number; object_count: number; bytes: number } | null;
   scope?: "me" | "org";
   can_switch_scope?: boolean;
@@ -213,6 +214,24 @@ export default function Dashboard() {
               </div>
             </div>
             <Icon name="link" size={16} />
+          </div>
+        </Card>
+      )}
+
+      {ov?.integration_health && ov.integration_health.issues > 0 && (
+        <Card style={{ marginBottom: 16, borderColor: ov.integration_health.critical > 0 ? "var(--danger)" : "var(--warn)", cursor: "pointer" }} onClick={() => nav("/integrations")}>
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            <div className="result-icon" style={{ background: "var(--inset)", color: ov.integration_health.critical > 0 ? "var(--danger)" : "var(--warn)" }}>
+              <Icon name="alert" size={18} />
+            </div>
+            <div className="flex1">
+              <div style={{ fontWeight: 600 }}>Some of your integrations are having issues</div>
+              <div className="faint" style={{ fontSize: 12.5 }}>
+                {ov.integration_health.issues} integration{ov.integration_health.issues === 1 ? "" : "s"} need attention
+                {ov.integration_health.critical > 0 ? ` · ${ov.integration_health.critical} failing` : ""} — click to investigate
+              </div>
+            </div>
+            <Icon name="puzzle" size={16} />
           </div>
         </Card>
       )}

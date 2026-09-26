@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from .. import security
@@ -23,6 +23,7 @@ from ..models import (
     Collection,
     ConnectorAccount,
     DesktopAgent,
+    IntegrationInstance,
     SearchDocument,
     SnapshotReceipt,
     Tenant,
@@ -118,6 +119,29 @@ def _storage_meta(dest: str, stores: dict, byos: dict | None = None) -> dict:
     if dest == "appliance":
         return {"id": dest, "label": "Offline appliance", "kind": "appliance", "icon": "server"}
     return {"id": dest, "label": dest, "kind": "other", "icon": "database"}
+
+
+def _integration_health(db: Session, tenant: Tenant, principal, eff_scope: str) -> dict:
+    """Overview health summary for the tenant's integrations (M365, UniFi, …),
+    scoped like the rest of the overview: org scope covers every integration; a
+    member sees their own + org-shared ones. Uses the SAME per-instance detection
+    as the health sweep + owner email so the three never disagree."""
+    from .. import notifications as notif
+    q = db.query(IntegrationInstance).filter(
+        IntegrationInstance.tenant_id == tenant.id,
+        IntegrationInstance.enabled.is_(True))
+    if eff_scope != "org":
+        q = q.filter(or_(IntegrationInstance.owner_user_id == principal.user_id,
+                         IntegrationInstance.owner_user_id.is_(None)))
+    issues = 0
+    critical = 0
+    for inst in q.all():
+        probs, sev = notif.integration_problem_list(db, inst)
+        if probs:
+            issues += 1
+            if sev == "critical":
+                critical += 1
+    return {"issues": issues, "critical": critical}
 
 
 @router.get("")
@@ -396,6 +420,7 @@ def overview(scope: str = "me",
             "issues": sum(1 for a in accounts if a.last_error or a.auth_status == "needs-reauth"),
             "needs_reauth": sum(1 for a in accounts if a.auth_status == "needs-reauth"),
         },
+        "integration_health": _integration_health(db, tenant, principal, eff_scope),
         "scope": eff_scope,
         "can_switch_scope": can_switch,
         "cloud_deletion": cloud_deletion,

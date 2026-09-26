@@ -341,6 +341,60 @@ def _effective_source_type(c) -> str:
     return c.source_type or "source"
 
 
+def integration_problem_list(db, inst) -> tuple[list[str], str]:
+    """Health problems for ONE integration instance (M365, UniFi, …), mirroring the
+    per-instance detection in _source_issues so the continuous health sweep, the
+    overview badge and the owner email all agree. Returns (problems, severity):
+    an EXPLICIT error / stuck setup is 'critical'; a silent stall or empty-but-ok
+    run is 'warning'. An enabled integration that simply stopped reporting (its
+    appliance went offline) freezes last_run_at with no error — the stale check is
+    what makes that visible, so a dead integration never fails silently."""
+    if not getattr(inst, "enabled", False):
+        return [], "info"
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    prov = inst.provision_state or "idle"
+    errored = bool(inst.status == "error" or inst.last_error or prov == "error")
+    ref = inst.last_success_at or inst.last_run_at
+    # Microsoft 365 re-runs identity DISCOVERY only every ~6h (content backup runs
+    # on the shared scheduler), so give it a discovery-aware stale window.
+    if inst.integration_type == "microsoft365":
+        stale_after_min = 13 * 60
+    else:
+        stale_after_min = max(180, int(inst.poll_interval_minutes or 30) * 4)
+    stale = bool(prov in ("idle", "done") and inst.last_run_at is not None
+                 and ref is not None
+                 and (now - ref).total_seconds() > stale_after_min * 60)
+    setup_ref = inst.updated_at or inst.last_run_at
+    setup_stuck = bool(inst.integration_type != "microsoft365"
+                       and prov in ("starting", "verifying", "awaiting_otp")
+                       and setup_ref is not None
+                       and (now - setup_ref).total_seconds() > 2 * 3600)
+    stats = inst.last_stats or {}
+    established = bool(inst.created_at
+                      and (now - inst.created_at).total_seconds() > 6 * 3600)
+    empty = bool(prov in ("idle", "done") and established
+                 and inst.last_run_at is not None and not errored
+                 and "clients" in stats and int(stats.get("clients", 0) or 0) == 0)
+    problems: list[str] = []
+    severity = "warning"
+    if errored:
+        msg = (inst.last_error or inst.provision_message
+               or "Integration requires attention — please reconnect or retry setup.")
+        problems.append(msg.splitlines()[0][:200])
+        severity = "critical"
+    if setup_stuck:
+        need = ("waiting for your verification code"
+                if prov == "awaiting_otp" else "sign-in didn't complete")
+        problems.append(f"Setup hasn't finished — {need}; collection is paused.")
+        severity = "critical"
+    if stale:
+        problems.append("No successful run recently — data collection has stalled.")
+    if empty:
+        problems.append("Last run collected 0 devices — the controller, site or "
+                        "credentials may have broken.")
+    return problems, severity
+
+
 def _source_issues(db, user: User) -> list[dict]:
     """Connector and integration issues requiring user attention.
 

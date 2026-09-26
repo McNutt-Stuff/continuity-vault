@@ -114,6 +114,10 @@ def start_scheduler() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("appliance health check failed")
             try:
+                _check_integration_health()
+            except Exception:  # noqa: BLE001
+                logger.exception("integration health check failed")
+            try:
                 _check_node_health()
             except Exception:  # noqa: BLE001
                 logger.exception("node health check failed")
@@ -255,6 +259,7 @@ def _alert_admins_storage_failed(db, cs, err: str) -> None:
 
 
 _last_appliance_health: datetime | None = None
+_last_integration_health: datetime | None = None
 
 
 def _recent_audit_exists(db, tenant_id, action: str, resource: str, hours: int) -> bool:
@@ -465,6 +470,116 @@ def _maybe_flag_appliance_flapping(db, appliance) -> None:
             dedupe_key=f"appliance_flap:{appliance.id}", dedupe_within_hours=24)
     except Exception:  # noqa: BLE001
         logger.exception("appliance flap alert failed for %s", getattr(appliance, "id", "?"))
+
+
+def _check_integration_health() -> None:
+    """Sweep integrations (M365, UniFi, …) for health problems — explicit errors,
+    stuck setup, silent stalls (an enabled integration that stopped reporting) and
+    empty-but-ok runs — and write a deduped audit episode per instance so they show
+    in the audit log / Platform Logs and alert platform admins, exactly like
+    appliances and nodes. The OWNER email is sent by the notification sweep
+    (source_problem covers integration issues). Runs at most every ~10 minutes and
+    only for integrations THIS box owns (CP: unassigned tenants; node: its own)."""
+    global _last_integration_health
+    now = datetime.utcnow()
+    if _last_integration_health and (now - _last_integration_health) < timedelta(minutes=10):
+        return
+    _last_integration_health = now
+    from .. import audit, notifications as notif
+    from ..models import IntegrationInstance
+    repeat_h = 6  # re-log the same integration's problem at most every 6 hours
+    checked = 0
+    problem_count = 0
+    with SessionLocal() as db:
+        owned = _owned_tenant_ids(db)
+        for inst in db.query(IntegrationInstance).filter(
+                IntegrationInstance.enabled.is_(True)).all():
+            if inst.tenant_id not in owned:
+                continue
+            try:
+                checked += 1
+                probs, sev = notif.integration_problem_list(db, inst)
+                episode_open = _health_episode_open(
+                    db, inst.tenant_id, inst.id,
+                    problem_action="integration.health_problem",
+                    recovered_action="integration.health_recovered")
+                label = inst.label or inst.integration_type
+                if not probs:
+                    # Recovery only fires when a problem was recorded and not yet
+                    # marked recovered (no "healthy again" without a prior problem).
+                    if episode_open:
+                        audit.record(db, actor="system", action="integration.health_recovered",
+                                     tenant_id=inst.tenant_id, resource=inst.id,
+                                     category="integration", severity="info",
+                                     detail={"name": label, "type": inst.integration_type})
+                        logger.info("integration health recovered: %s (%s)", label, inst.id)
+                        _alert_admins_integration_recovered(db, inst)
+                    continue
+                problem_count += 1
+                logger.warning("integration health problem: %s (%s) type=%s severity=%s — %s",
+                               label, inst.id, inst.integration_type, sev,
+                               "; ".join(str(p) for p in probs[:4]))
+                if episode_open and _recent_audit_exists(
+                        db, inst.tenant_id, "integration.health_problem", inst.id, repeat_h):
+                    continue  # same ongoing episode, already alerted within the window
+                audit.record(db, actor="system", action="integration.health_problem",
+                             tenant_id=inst.tenant_id, resource=inst.id,
+                             category="integration",
+                             severity="critical" if sev == "critical" else "warning",
+                             detail={"name": label, "type": inst.integration_type,
+                                     "problems": probs[:4], "severity": sev,
+                                     "last_error": (inst.last_error or "")[:300]})
+                _alert_admins_integration_problem(db, inst, probs, sev)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("integration health check failed for %s", getattr(inst, "id", "?"))
+    if problem_count:
+        logger.info("integration health sweep: %d integration(s) checked, %d with problems",
+                    checked, problem_count)
+
+
+def _alert_admins_integration_problem(db, inst, probs: list, sev: str) -> None:
+    """Notify platform admins of a newly-detected integration health problem."""
+    try:
+        from .. import admin_notifications
+        from ..models import Tenant
+        tenant = db.get(Tenant, inst.tenant_id)
+        cust = (tenant.name if tenant else None) or inst.tenant_id
+        label = inst.label or inst.integration_type
+        rows = [{"icon": "puzzle", "name": label, "detail": f"{inst.integration_type} · {cust}"}]
+        rows += [{"icon": "alert", "name": str(p), "detail": ""} for p in probs[:4]]
+        admin_notifications.raise_alert(
+            db, "platform_health",
+            subject=f"[Arkive] Integration problem — {label}",
+            title="Integration health problem",
+            intro=f"The {label} integration ({cust}) reported a health problem.",
+            rows=rows, severity="critical" if sev == "critical" else "warning",
+            tenant_id=inst.tenant_id,
+            dedupe_key=f"integration:{inst.id}", dedupe_within_hours=6)
+    except Exception:  # noqa: BLE001
+        logger.exception("admin integration-problem alert failed for %s", getattr(inst, "id", "?"))
+
+
+def _alert_admins_integration_recovered(db, inst) -> None:
+    """Notify platform admins that an integration's problems have cleared."""
+    try:
+        from .. import admin_notifications
+        from ..models import Tenant
+        tenant = db.get(Tenant, inst.tenant_id)
+        cust = (tenant.name if tenant else None) or inst.tenant_id
+        label = inst.label or inst.integration_type
+        admin_notifications.raise_alert(
+            db, "platform_health",
+            subject=f"[Arkive] Integration healthy again — {label}",
+            title="Integration health recovered",
+            intro=f"The {label} integration ({cust}) is healthy again — the previously "
+                  f"reported problems have cleared.",
+            rows=[{"icon": "puzzle", "name": label, "detail": f"{inst.integration_type} · {cust}"},
+                  {"icon": "shield", "name": "Collection running normally", "detail": ""}],
+            severity="info", tenant_id=inst.tenant_id,
+            dedupe_key=f"integration_ok:{inst.id}", dedupe_within_hours=1)
+    except Exception:  # noqa: BLE001
+        logger.exception("admin integration-recovered alert failed for %s", getattr(inst, "id", "?"))
 
 
 _last_node_health: datetime | None = None
