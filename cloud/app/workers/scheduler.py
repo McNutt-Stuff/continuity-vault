@@ -846,14 +846,14 @@ def _run_notifications() -> None:
     settings = get_settings()
     is_cp = (settings.node_role or "control-plane") == "control-plane"
     with SessionLocal() as db:
-        # The control plane skips tenants assigned to a node (that node emails them);
-        # a customer node's local DB only holds its own tenants, so it runs them all.
-        assigned: set[str] = set()
-        if is_cp:
-            assigned = {tid for (tid,) in
-                        db.query(Tenant.id).filter(Tenant.node_id.isnot(None)).all()}
+        # Notify ONLY for tenants THIS box is the ACTIVE owner of (CP: unassigned;
+        # node: node_id == self). A node that is merely a tenant's warm STANDBY also
+        # holds its users (replicated), so without this scoping the standby node ALSO
+        # emailed the tenant's digests — a duplicate daily summary (with a different,
+        # standby-replica object count). _owned_tenant_ids excludes standby tenants.
+        owned = _owned_tenant_ids(db)
         users = [u for u in db.query(User).filter(User.status == "active").all()
-                 if u.tenant_id not in assigned]
+                 if u.tenant_id in owned]
         # The daily digest fires at notif.daily_hour in the NODE's timezone, once
         # per LOCAL day (dedupe key = local date).
         local = node_config.local_now(db)
@@ -894,7 +894,7 @@ def _run_notifications() -> None:
         # Weekly org roll-up (Mondays in the node's timezone), to org admins.
         if local.weekday() == 0:
             try:
-                _run_weekly_org(db, notif, assigned, now)
+                _run_weekly_org(db, notif, owned, now)
             except Exception:  # noqa: BLE001
                 db.rollback()
                 logger.exception("weekly org summary failed")
@@ -941,12 +941,12 @@ def _notify_recovery_key(db, notif, user, now: datetime) -> None:
                             dedupe_key=f"reckey:{week}")
 
 
-def _run_weekly_org(db, notif, assigned: set[str], now: datetime) -> None:
+def _run_weekly_org(db, notif, owned: set[str], now: datetime) -> None:
     from ..models import User
     week = now.strftime("%Y-W%W")
     org_tenants = [t for t in db.query(Tenant)
                    .filter(Tenant.tenant_type != "shared").all()
-                   if t.id not in assigned]
+                   if t.id in owned]
     for t in org_tenants:
         admins = (db.query(User)
                   .filter(User.tenant_id == t.id, User.status == "active",
