@@ -46,7 +46,6 @@ const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
   { to: "/activity", label: "Activity", icon: "activity", group: "Protection" },
   { to: "/cloud-storage", label: "Cloud Storage", icon: "cloud", group: "Storage" },
   { to: "/appliances", label: "Appliances", icon: "server", group: "Storage" },
-  { to: "/restore", label: "Restore", icon: "restore", group: "Storage" },
   { to: "/audit", label: "Audit Log", icon: "shield", group: "Account" },
 ];
 
