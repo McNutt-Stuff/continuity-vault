@@ -15,6 +15,8 @@ replication).
 from __future__ import annotations
 
 import logging
+import time
+from urllib.parse import urlparse
 
 import httpx
 from starlette.concurrency import run_in_threadpool
@@ -150,17 +152,26 @@ async def middleware(request: Request, call_next):
     body = await request.body()
     fwd = {k: v for k, v in request.headers.items()
            if k.lower() in ("authorization", "content-type", "accept")}
+    _t0 = time.perf_counter()
     try:
         req = _cl().build_request(request.method, url, content=body, headers=fwd)
         resp = await _cl().send(req, stream=True)
     except Exception as exc:  # noqa: BLE001 - node offline / unreachable
         logger.warning("file op proxy to %s failed: %s", url, exc)
-        return JSONResponse({"detail": "assigned node unavailable"}, status_code=503)
+        return JSONResponse({"detail": "assigned node unavailable"}, status_code=503,
+                            headers={"X-Arkive-Route": "cp->node",
+                                     "X-Arkive-Node": urlparse(node_url).netloc or node_url})
+    _upstream_ms = round((time.perf_counter() - _t0) * 1000, 1)
 
     relay = {}
     for h in ("content-type", "content-disposition", "cache-control"):
         if h in resp.headers:
             relay[h] = resp.headers[h]
+    # Request-chain breadcrumbs for the debug overlay: this response was served
+    # CP → the tenant's node, with the node's own round-trip time.
+    relay["X-Arkive-Route"] = "cp->node"
+    relay["X-Arkive-Node"] = urlparse(node_url).netloc or node_url
+    relay["X-Arkive-Upstream-Ms"] = str(_upstream_ms)
 
     # The CP already authenticated this session to route it here, so a 401 from the
     # node means the node can't yet authenticate it — almost always because the

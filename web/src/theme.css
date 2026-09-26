@@ -113,7 +113,7 @@ h3 { font-size: 15px; }
   padding: 16px 28px; border-bottom: 1px solid var(--border-soft);
   position: sticky; top: 0; background: var(--topbar-bg); backdrop-filter: blur(10px); z-index: 5;
 }
-.content { padding: 26px 28px 60px; max-width: 1180px; }
+.content { padding: 26px 28px calc(60px + var(--debug-bar-h, 0px)); max-width: 1180px; }
 
 /* Cards */
 .card {

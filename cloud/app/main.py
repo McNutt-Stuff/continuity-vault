@@ -74,6 +74,27 @@ app.middleware("http")(node_proxy.middleware)
 from . import activity_logger  # noqa: E402
 app.middleware("http")(activity_logger.middleware)
 
+# Request-chain breadcrumbs for the live debug overlay: stamp every response with
+# where it was served (this box) + server processing time. node_proxy already
+# stamps the CP→node hop; we only fill defaults so a proxied response keeps its
+# richer route. Registered LAST so it wraps the others (outermost).
+import time as _time  # noqa: E402
+_ROUTE_IS_CP = (settings.node_role or "control-plane") == "control-plane"
+_ROUTE_LABEL = settings.node_name or settings.domain or ("control-plane" if _ROUTE_IS_CP else "node")
+
+
+@app.middleware("http")
+async def _route_stamp(request, call_next):
+    _t0 = _time.perf_counter()
+    response = await call_next(request)
+    try:
+        response.headers["X-Arkive-Server-Ms"] = str(round((_time.perf_counter() - _t0) * 1000, 1))
+        response.headers.setdefault("X-Arkive-Route", "cp" if _ROUTE_IS_CP else "node")
+        response.headers.setdefault("X-Arkive-Served-By", _ROUTE_LABEL)
+    except Exception:  # noqa: BLE001 — never let stamping break a response
+        pass
+    return response
+
 # Any UNHANDLED exception in an API route is logged to the unified log store
 # (Platform Logs, via the cv.* logger) with a short reference + traceback, and the
 # reference is returned to the client — so a 500 is never a silent "something went

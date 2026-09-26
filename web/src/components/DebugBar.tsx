@@ -47,6 +47,14 @@ function statusTone(status: number, ok: boolean): string {
   return "var(--warn)";
 }
 
+// Human-readable end-to-end request chain from the server's route breadcrumbs.
+function chainLabel(c: DebugCall): string {
+  if (c.status === 0) return "browser ✗ network";
+  if (c.route === "cp->node") return `browser → CP → ${c.node || "node"}`;
+  if (c.route === "node") return `browser → ${c.node || "node"}`;
+  return "browser → CP";
+}
+
 type Tab = "requests" | "server" | "errors";
 
 export function DebugBar({ onDisable }: { onDisable?: () => void }) {
@@ -56,8 +64,25 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
   const [live, setLive] = useState<LiveDiag | null>(null);
   const [liveErr, setLiveErr] = useState<string>("");
   const timer = useRef<number | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => subscribeDebugCalls((c) => setCalls(c.slice())), []);
+
+  // Reserve real layout space equal to the bar's height so it PUSHES the page up
+  // instead of overlaying/hiding content. The var is consumed by .content's
+  // padding-bottom; it tracks the collapsed strip and the expanded panel alike.
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const apply = () => document.documentElement.style.setProperty("--debug-bar-h", `${el.offsetHeight}px`);
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      document.documentElement.style.removeProperty("--debug-bar-h");
+    };
+  }, []);
 
   const loadLive = async () => {
     try {
@@ -82,7 +107,7 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
   const indexComplete = idx ? idx.complete : true;
 
   return (
-    <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 4000, pointerEvents: "none" }}>
+    <div ref={rootRef} style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 4000, pointerEvents: "none" }}>
       {open && (
         <div style={{ pointerEvents: "auto", maxHeight: "46vh", overflow: "hidden",
           background: "var(--surface)", borderTop: "1px solid var(--border)",
@@ -107,7 +132,13 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
                       <td style={{ padding: "3px 6px", color: "var(--faint)", whiteSpace: "nowrap" }}>{new Date(c.ts).toLocaleTimeString()}</td>
                       <td style={{ padding: "3px 6px", fontWeight: 700, whiteSpace: "nowrap" }}>{c.method}</td>
                       <td style={{ padding: "3px 6px", color: statusTone(c.status, c.ok), fontWeight: 700, whiteSpace: "nowrap" }}>{c.status || "ERR"}</td>
-                      <td style={{ padding: "3px 6px", textAlign: "right", whiteSpace: "nowrap", color: c.ms > 800 ? "var(--warn)" : "var(--muted)" }}>{c.ms}ms</td>
+                      <td style={{ padding: "3px 6px", textAlign: "right", whiteSpace: "nowrap", color: c.ms > 800 ? "var(--warn)" : "var(--muted)" }}
+                          title={`round-trip ${c.ms}ms${c.serverMs != null ? ` · server ${c.serverMs}ms` : ""}${c.upstreamMs != null ? ` · node hop ${c.upstreamMs}ms` : ""}`}>
+                        {c.ms}ms{c.upstreamMs != null ? <span className="faint"> ({c.upstreamMs})</span> : null}
+                      </td>
+                      <td style={{ padding: "3px 6px", whiteSpace: "nowrap", color: c.route === "cp->node" ? "var(--warn)" : "var(--faint)" }} title={chainLabel(c)}>
+                        {c.route === "cp->node" ? `CP → ${c.node || "node"}` : c.route === "node" ? (c.node || "node") : "CP"}
+                      </td>
                       <td style={{ padding: "3px 6px", wordBreak: "break-all" }}>{c.path}{c.error ? <span style={{ color: "var(--danger)" }}> — {c.error}</span> : null}</td>
                     </tr>
                   ))}

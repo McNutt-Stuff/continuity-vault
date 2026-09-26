@@ -37,9 +37,13 @@ export interface DebugCall {
   method: string;
   path: string;
   status: number;        // 0 = network/abort error
-  ms: number;            // round-trip time
+  ms: number;            // round-trip time (browser → CP → back)
   ok: boolean;
   error?: string;        // detail message on failure
+  route?: string;        // "cp" | "cp->node" | "node"
+  node?: string;         // serving node host when proxied CP->node
+  serverMs?: number;     // server processing time (X-Arkive-Server-Ms)
+  upstreamMs?: number;   // CP->node hop time (X-Arkive-Upstream-Ms)
 }
 const DEBUG_MAX = 200;
 const debugCalls: DebugCall[] = [];
@@ -63,6 +67,17 @@ export function subscribeDebugCalls(fn: (calls: DebugCall[]) => void): () => voi
 export function clearDebugCalls() {
   debugCalls.length = 0;
   debugSubs.forEach((fn) => { try { fn(debugCalls); } catch { /* ignore */ } });
+}
+
+// Pull the request-chain breadcrumbs the server stamps on every response.
+function debugMeta(res: Response): Pick<DebugCall, "route" | "node" | "serverMs" | "upstreamMs"> {
+  const num = (v: string | null) => (v == null || v === "" ? undefined : Number(v));
+  return {
+    route: res.headers.get("X-Arkive-Route") || undefined,
+    node: res.headers.get("X-Arkive-Node") || undefined,
+    serverMs: num(res.headers.get("X-Arkive-Server-Ms")),
+    upstreamMs: num(res.headers.get("X-Arkive-Upstream-Ms")),
+  };
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -94,7 +109,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       /* ignore */
     }
     recordDebugCall({ ts: startedAt, method, path, status: res.status,
-      ms: Math.round(performance.now() - started), ok: false, error: detail });
+      ms: Math.round(performance.now() - started), ok: false, error: detail,
+      ...debugMeta(res) });
     // A 401 on an authenticated (non-auth) request means the session expired —
     // fire the global sign-out so the app redirects to Login with a notice.
     if (res.status === 401 && token && !path.startsWith("/auth/")) {
@@ -108,7 +124,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     throw new ApiError(res.status, detail);
   }
   recordDebugCall({ ts: startedAt, method, path, status: res.status,
-    ms: Math.round(performance.now() - started), ok: true });
+    ms: Math.round(performance.now() - started), ok: true, ...debugMeta(res) });
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
