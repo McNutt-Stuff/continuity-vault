@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
-import { Card, Pill, Loading } from "../components/ui";
+import { Card, Pill, Loading, serverDate } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
 import { confirmDialog, notify } from "../components/dialog";
@@ -12,6 +12,7 @@ interface Rule {
   id: string; name: string; description: string; enabled: boolean; priority: number;
   match: "all" | "any"; conditions: Condition[]; actions: Action[];
   collection_ids: string[]; source_types: string[]; min_plan: string;
+  hit_count?: number; last_match_at?: string | null;
   updated_at?: string | null;
 }
 interface Options {
@@ -221,11 +222,87 @@ function blankRule(): Rule {
   };
 }
 
+// --- Firewall-style summary cells --------------------------------------------
+const ACTION_TONE: Record<string, "ok" | "info" | "warn" | "danger"> = {
+  discard: "danger", restrict: "warn", obfuscate: "warn", no_index: "info",
+  index: "info", label: "ok", tag: "ok",
+};
+function actionLabel(a: Action, opts: Options | null): string {
+  const meta = opts?.action_types.find((t) => t.id === a.type);
+  const base = meta?.label || a.type;
+  return a.value ? `${base}: ${a.value}` : base;
+}
+function condText(c: Condition, opts: Options | null): string {
+  const op = opts?.operators.find((o) => o.id === c.op)?.label || c.op;
+  const noVal = ["exists", "not_exists"].includes(c.op);
+  return `${c.field || "field"} ${op}${noVal ? "" : ` “${c.value || ""}”`}`;
+}
+function fmtHits(n?: number): string {
+  const v = n || 0;
+  return v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k` : String(v);
+}
+function timeAgoShort(iso?: string | null): string {
+  if (!iso) return "—";
+  const d = (Date.now() - serverDate(iso).getTime()) / 1000;
+  if (d < 60) return "just now";
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+}
+
+function ScopeCell({ rule, opts }: { rule: Rule; opts: Options | null }) {
+  if (!rule.source_types.length && !rule.collection_ids.length)
+    return <span className="faint" style={{ fontSize: 12 }}>Every source</span>;
+  const byId = new Map((opts?.collections || []).map((c) => [c.id, c]));
+  return (
+    <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+      {rule.source_types.map((st) => (
+        <span key={`t-${st}`} className="chip" style={{ padding: "1px 7px", fontSize: 10.5 }}>
+          <SourceIcon type={st} size={11} /> All {stLabel(st)}
+        </span>
+      ))}
+      {rule.collection_ids.slice(0, 3).map((id) => {
+        const c = byId.get(id);
+        return (
+          <span key={`c-${id}`} className="chip" style={{ padding: "1px 7px", fontSize: 10.5 }}>
+            {c ? <SourceIcon type={collIcon(c)} size={11} /> : null} {c ? c.name : id}
+          </span>
+        );
+      })}
+      {rule.collection_ids.length > 3 && (
+        <span className="faint" style={{ fontSize: 11 }}>+{rule.collection_ids.length - 3}</span>
+      )}
+    </div>
+  );
+}
+
+function LogicCell({ rule, opts }: { rule: Rule; opts: Options | null }) {
+  const conds = rule.conditions || [];
+  const join = rule.match === "any" ? " OR " : " AND ";
+  const condStr = conds.slice(0, 2).map((c) => condText(c, opts)).join(join)
+    + (conds.length > 2 ? ` ${join.trim()} +${conds.length - 2} more` : "");
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <div style={{ fontSize: 11.5 }}>
+        <span className="rule-kw" style={{ fontSize: 9.5, padding: "0 5px", marginRight: 6 }}>IF</span>
+        <span className="faint">{condStr || "—"}</span>
+      </div>
+      <div className="row" style={{ gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+        <span className="rule-kw then" style={{ fontSize: 9.5, padding: "0 5px", marginRight: 2 }}>THEN</span>
+        {(rule.actions || []).map((a, i) => (
+          <Pill key={i} tone={ACTION_TONE[a.type] || "info"}>{actionLabel(a, opts)}</Pill>
+        ))}
+        {(rule.actions || []).length === 0 && <span className="faint" style={{ fontSize: 11 }}>no actions</span>}
+      </div>
+    </div>
+  );
+}
+
 export default function Rules() {
   const [params, setParams] = useSearchParams();
   const [opts, setOpts] = useState<Options | null>(null);
   const [rules, setRules] = useState<Rule[]>([]);
-  const [sel, setSel] = useState<Rule | null>(null);
+  const [editing, setEditing] = useState<Rule | null>(null);  // rule open in the edit modal
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -241,7 +318,6 @@ export default function Rules() {
       ]);
       setOpts(o);
       setRules(r.rules);
-      if (!sel && r.rules.length) selectRule(r.rules[0]);
     } catch {
       setOpts(null);
     } finally {
@@ -255,19 +331,20 @@ export default function Rules() {
     () => (collFilter ? rules.filter((r) => !r.collection_ids.length || r.collection_ids.includes(collFilter)) : rules),
     [rules, collFilter]);
 
-  function selectRule(r: Rule) { setSel(JSON.parse(JSON.stringify(r))); setDirty(false); }
-  function edit<K extends keyof Rule>(k: K, v: Rule[K]) { setSel((s) => (s ? { ...s, [k]: v } : s)); setDirty(true); }
+  function openEdit(r: Rule) { setEditing(JSON.parse(JSON.stringify(r))); setDirty(false); }
+  function openNew() { setEditing(blankRule()); setDirty(true); }
+  function editField<K extends keyof Rule>(k: K, v: Rule[K]) { setEditing((s) => (s ? { ...s, [k]: v } : s)); setDirty(true); }
 
   async function save() {
-    if (!sel) return;
+    if (!editing) return;
     setSaving(true);
     try {
-      const body = { ...sel };
-      const saved = sel.id
-        ? await api.put<Rule>(`/rules/${sel.id}`, body)
+      const body = { ...editing };
+      const saved = editing.id
+        ? await api.put<Rule>(`/rules/${editing.id}`, body)
         : await api.post<Rule>("/rules", body);
+      setEditing(null); setDirty(false);
       await load();
-      setSel(saved); setDirty(false);
       await notify({ title: "Saved", message: `Rule “${saved.name}” saved.`, tone: "ok" });
     } catch (e) {
       await notify({ title: "Couldn't save", message: (e as Error).message, tone: "danger" });
@@ -275,14 +352,14 @@ export default function Rules() {
   }
 
   async function remove(r: Rule) {
-    if (!r.id) { setSel(null); return; }
+    if (!r.id) { setEditing(null); return; }
     if (!(await confirmDialog({ title: "Delete rule", message: `Delete “${r.name}”? This can't be undone.`, confirmLabel: "Delete", tone: "danger" }))) return;
-    try { await api.del(`/rules/${r.id}`); if (sel?.id === r.id) setSel(null); await load(); }
+    try { await api.del(`/rules/${r.id}`); setEditing(null); await load(); }
     catch (e) { await notify({ title: "Couldn't delete", message: (e as Error).message, tone: "danger" }); }
   }
 
   async function toggle(r: Rule) {
-    try { await api.post(`/rules/${r.id}/toggle`, {}); await load(); if (sel?.id === r.id) setSel({ ...sel, enabled: !sel.enabled }); }
+    try { await api.post(`/rules/${r.id}/toggle`, {}); await load(); }
     catch (e) { await notify({ title: "Couldn't update", message: (e as Error).message, tone: "danger" }); }
   }
 
@@ -296,10 +373,10 @@ export default function Rules() {
           <h2 style={{ margin: 0 }}>Rules</h2>
           <div className="faint" style={{ fontSize: 12.5, maxWidth: 640 }}>
             Declarative logic evaluated the moment data is ingested — match on any source attribute,
-            then label, restrict, obfuscate, or discard. Rules take precedence over the basic Data Map settings.
+            then label, restrict, obfuscate, or discard. Evaluated top‑to‑bottom by priority; a discard stops the rest.
           </div>
         </div>
-        <button className="btn primary" onClick={() => { setSel(blankRule()); setDirty(true); }}>
+        <button className="btn primary" onClick={openNew}>
           <Icon name="plus" size={14} /> New rule
         </button>
       </div>
@@ -311,42 +388,72 @@ export default function Rules() {
         </div>
       )}
 
-      <div className="rules-2pane">
-        {/* Left: rule list */}
-        <div className="rules-list">
-          {shown.length === 0 && <div className="muted" style={{ padding: 14 }}>No rules yet. Create one to get started.</div>}
-          {shown.map((r) => (
-            <button key={r.id} className={`rule-row ${sel?.id === r.id ? "active" : ""}`} onClick={() => selectRule(r)}>
-              <span className={`rule-dot ${r.enabled ? "on" : ""}`} />
-              <span className="flex1" style={{ minWidth: 0 }}>
-                <div className="rule-name">{r.name || "Untitled rule"}</div>
-                <div className="faint rule-sub">
-                  {r.conditions.length} condition{r.conditions.length === 1 ? "" : "s"} · {r.actions.length} action{r.actions.length === 1 ? "" : "s"}
-                </div>
-              </span>
-              {r.min_plan !== "personal" && <Pill tone="info">{r.min_plan}</Pill>}
-              <span className="rule-toggle" onClick={(e) => { e.stopPropagation(); void toggle(r); }}
-                    title={r.enabled ? "Enabled" : "Disabled"}>
-                <span className={`switch ${r.enabled ? "on" : ""}`}><span className="knob" /></span>
-              </span>
-            </button>
-          ))}
-        </div>
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        {shown.length === 0 ? (
+          <div className="muted" style={{ padding: 18 }}>No rules yet. Create one to get started.</div>
+        ) : (
+          <table className="rules-table">
+            <thead>
+              <tr>
+                <th style={{ width: 44, textAlign: "center" }}>#</th>
+                <th style={{ width: 60 }}>On</th>
+                <th>Rule</th>
+                <th>Applies to</th>
+                <th>Logic</th>
+                <th style={{ width: 70, textAlign: "right" }}>Hits</th>
+                <th style={{ width: 90 }}>Last match</th>
+                <th style={{ width: 90 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((r) => (
+                <tr key={r.id} className="rules-trow" onClick={() => openEdit(r)}>
+                  <td style={{ textAlign: "center", fontVariantNumeric: "tabular-nums" }} className="faint">{r.priority}</td>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <span className="rule-toggle" onClick={() => void toggle(r)} title={r.enabled ? "Enabled" : "Disabled"}>
+                      <span className={`switch ${r.enabled ? "on" : ""}`}><span className="knob" /></span>
+                    </span>
+                  </td>
+                  <td>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{r.name || "Untitled rule"}</div>
+                    {r.description && <div className="faint" style={{ fontSize: 11.5 }}>{r.description}</div>}
+                    {r.min_plan !== "personal" && <Pill tone="info">{r.min_plan}</Pill>}
+                  </td>
+                  <td><ScopeCell rule={r} opts={opts} /></td>
+                  <td><LogicCell rule={r} opts={opts} /></td>
+                  <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}
+                      title={`${r.hit_count || 0} matches`}>{fmtHits(r.hit_count)}</td>
+                  <td className="faint" style={{ fontSize: 11.5 }} title={r.last_match_at || ""}>{timeAgoShort(r.last_match_at)}</td>
+                  <td onClick={(e) => e.stopPropagation()} style={{ textAlign: "right" }}>
+                    <button className="btn ghost sm" onClick={() => openEdit(r)} title="Edit"><Icon name="edit" size={13} /></button>
+                    <button className="btn ghost sm danger" onClick={() => void remove(r)} title="Delete"><Icon name="trash" size={13} /></button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
 
-        {/* Right: editor */}
-        <div className="rules-editor">
-          {!sel ? (
-            <div className="muted" style={{ padding: 20 }}>Select a rule, or create a new one.</div>
-          ) : (
-            <RuleEditor
-              key={sel.id || "new"}
-              rule={sel} opts={opts} planRank={planRank}
-              onChange={edit} onSave={save} onDelete={() => remove(sel)}
-              saving={saving} dirty={dirty}
-            />
-          )}
+      {editing && (
+        <div className="modal-backdrop" onClick={() => (!dirty || confirm("Discard unsaved changes?")) && setEditing(null)}>
+          <div className="modal-panel rules-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="spread" style={{ alignItems: "center", marginBottom: 12 }}>
+              <h3 style={{ margin: 0 }}>{editing.id ? "Edit rule" : "New rule"}</h3>
+              <button className="btn ghost sm" onClick={() => (!dirty || confirm("Discard unsaved changes?")) && setEditing(null)}>
+                <Icon name="x" size={15} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <RuleEditor
+                rule={editing} opts={opts} planRank={planRank}
+                onChange={editField} onSave={save} onDelete={() => remove(editing)}
+                saving={saving} dirty={dirty}
+              />
+            </div>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

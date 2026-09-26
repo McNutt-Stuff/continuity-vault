@@ -26,6 +26,7 @@ const ACTION_LABELS: Record<string, string> = {
   "appliance.command": "Sent an appliance command",
   "appliance.quarantined": "Appliance quarantined",
   "appliance.attestation_failed": "Appliance attestation failed",
+  "rule.matched": "Rule matched",
 };
 
 export function humanizeAction(action: string): string {
@@ -40,6 +41,8 @@ const KEY_LABELS: Record<string, string> = {
   index_fields: "Indexed fields", agents: "Agents", kind: "Kind",
   objects: "Objects", bytes: "Bytes", snapshotId: "Snapshot",
   location: "Location", appliance: "Appliance", failed: "Failed targets",
+  rule: "Rule", matches: "Matches", actions: "Actions", samples: "Sample matches",
+  collection: "Source", source_type: "Source type",
 };
 
 export function prettyKey(key: string): string {

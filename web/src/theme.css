@@ -148,6 +148,7 @@ h3 { font-size: 15px; }
 .btn.accent { background: linear-gradient(135deg, var(--accent), #22b98c); border-color: transparent; color: #062018; }
 .btn.ghost { background: transparent; }
 .btn.danger { background: transparent; border-color: var(--danger-c); color: var(--danger-c); }
+.btn.success { background: transparent; border-color: var(--ok, #35c07f); color: var(--ok, #35c07f); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn.sm { padding: 6px 11px; font-size: 12.5px; }
 
@@ -523,6 +524,17 @@ h3 { font-size: 15px; }
 /* Rules engine (compliance) — two-pane list + editor. */
 .rules-2pane { display: grid; grid-template-columns: 300px 1fr; gap: 14px; align-items: start; }
 @media (max-width: 900px) { .rules-2pane { grid-template-columns: 1fr; } }
+/* Firewall-style rules table */
+.rules-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.rules-table thead th { text-align: left; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--faint); font-weight: 700; padding: 10px 12px;
+  border-bottom: 1px solid var(--border); background: var(--inset); }
+.rules-table td { padding: 10px 12px; border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle; }
+.rules-trow { cursor: pointer; }
+.rules-trow:hover td { background: var(--hover); }
+.rules-trow:last-child td { border-bottom: none; }
+.rules-modal { width: min(760px, 100%); }
 .rules-list { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
   overflow: hidden; display: flex; flex-direction: column; }
 .rule-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;

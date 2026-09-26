@@ -41,6 +41,8 @@ interface Mapping {
   is_picker?: boolean; reminder_days?: number;
   config?: FileConfig;
   backfill?: { enabled: boolean; done: boolean; count: number; started_at?: string | null; completed_at?: string | null } | null;
+  // Compliance-rule coverage for this source (count of rules + aggregate hits).
+  rules?: { count: number; hits: number; last_match_at?: string | null } | null;
   // Managed-integration grouped entry (Microsoft 365 / Google Workspace). When
   // set, this row governs EVERY managed source under the integration as one unit;
   // per-source logic is handled by Rules, not the Data Map.
@@ -599,6 +601,11 @@ export default function Mappings() {
                       <Pill tone={m.backup_interval_minutes === 0 ? "warn" : "info"}>
                         <Icon name="clock" size={11} /> {scheduleLabel(m)}
                       </Pill>
+                      {(m.rules?.count || 0) > 0 && (
+                        <Pill tone="ok" dot>
+                          <Icon name="shield" size={11} /> Governed · {m.rules?.count} rule{(m.rules?.count || 0) === 1 ? "" : "s"}
+                        </Pill>
+                      )}
                       {m.source_type === "endpoint_files" && (
                         <Pill tone={(m.config?.roots?.length || 0) > 0 ? "info" : "warn"}>
                           <Icon name="database" size={11} /> {m.config?.roots?.length || 0} folders
@@ -945,9 +952,17 @@ export default function Mappings() {
                   )}
                   <button className="btn sm ghost" onClick={() => remove(m)}>Remove</button>
                   {me?.features?.rules_enabled === true && (
-                    <Link className="btn sm ghost" to={`/rules?collection=${m.id}`} title="Compliance rules applied to this source">
-                      <Icon name="shield" size={13} /> Rules
-                    </Link>
+                    (m.rules?.count || 0) > 0 ? (
+                      <Link className="btn sm success" to={`/rules?collection=${m.id}`}
+                            title={`${m.rules?.count} rule(s) govern this source · ${m.rules?.hits || 0} match(es)`}>
+                        <Icon name="shield" size={13} /> {m.rules?.count} rule{(m.rules?.count || 0) === 1 ? "" : "s"}
+                        {(m.rules?.hits || 0) > 0 ? ` · ${m.rules?.hits} hit${(m.rules?.hits || 0) === 1 ? "" : "s"}` : ""}
+                      </Link>
+                    ) : (
+                      <Link className="btn sm ghost" to={`/rules?collection=${m.id}`} title="Add compliance rules for this source">
+                        <Icon name="shield" size={13} /> Rules
+                      </Link>
+                    )
                   )}
                 </>
               )}
