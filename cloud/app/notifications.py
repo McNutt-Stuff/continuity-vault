@@ -493,33 +493,22 @@ def _source_issues(db, user: User) -> list[dict]:
 
 
 def _appliance_issues(db, user: User) -> list[dict]:
-    """Secure appliances (this user's tenant) that need attention: offline
-    (stale heartbeat), tamper-detected, failed attestation, or in an error state."""
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    offline_after = timedelta(minutes=20)
+    """Secure appliances (this user's tenant) that need attention — the SAME problem
+    set the scheduler's health sweep uses (offline, tamper, attestation AND drive /
+    RAID / SMART / mirror-out-of-sync / capacity / temperature), so the owner's
+    'problem' notification is symmetric with the 'healthy again' recovery notice.
+    Previously this only checked state/offline/attestation, so a storage/drive/
+    mirror problem sent a recovery email with no preceding problem email."""
     out: list[dict] = []
     for a in (db.query(Appliance)
               .filter(Appliance.tenant_id == user.tenant_id).all()):
-        state = (a.state or "").upper()
-        if state in ("PROVISIONING", "DECOMMISSIONED", "RETIRED"):
-            continue  # not yet in service / intentionally removed
-        problems: list[str] = []
-        if (a.tamper_state or "normal") != "normal":
-            problems.append(f"Tamper alert ({a.tamper_state})")
-        if state in ("ERROR", "FAULT", "OFFLINE"):
-            problems.append(f"Appliance state: {state.title()}")
-        stale = a.last_heartbeat_at and (now - a.last_heartbeat_at) > offline_after
-        if a.last_heartbeat_at is None or stale:
-            problems.append("Offline — no recent check-in")
-        if a.last_attestation_at is not None and not a.attestation_ok:
-            problems.append("Attestation failed")
+        problems, sev = appliance_problem_list(db, a)
         if not problems:
             continue
         out.append({"id": a.id, "kind": "appliance",
                     "name": a.name or a.model or a.serial,
                     "model": a.model, "serial": a.serial,
-                    "error": problems[0],
-                    "problems": problems,
+                    "error": problems[0], "problems": problems, "severity": sev,
                     "at": a.last_heartbeat_at or a.version_updated_at})
     out.sort(key=lambda i: i.get("at") or datetime.min.replace(tzinfo=None), reverse=True)
     return out
