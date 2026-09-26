@@ -428,10 +428,15 @@ restrict/obfuscate and index/discard controls unlock on higher tiers. A rule (or
 an individual action) above your plan is simply skipped.
 
 ## Seeing what applied
-Every match is recorded. Search results show the labels a rule added, a
-**Restricted** marker, and a **rules applied** badge; the **Test** panel in the
-rule editor lets you check exactly which rules match a sample item before you
-rely on them. Rule matches are also written to the audit log.
+Every match is recorded. The **Rules** page is a table (like a firewall rule
+list) showing each rule's scope, its IF/THEN logic, a **hit counter** (how many
+objects it has matched) and the **last time it matched** — click a row to edit it
+in a pop‑up. A Data Map source that rules govern shows a green **Governed · N
+rules** badge so coverage is obvious at a glance. Search results show the labels a
+rule added, a **Restricted** marker, and a **rules applied** badge; the **Test**
+panel in the rule editor lets you check exactly which rules match a sample item
+before you rely on them. Rule matches are also written to the **Audit Log** (one
+entry per rule per backup, with a match count and sample items on expansion).
 """,
         help_routes=["/rules"], required_plan="business"),
 
