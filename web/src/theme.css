@@ -76,7 +76,14 @@ h3 { font-size: 15px; }
 
 /* Layout */
 .app-shell { display: grid; grid-template-columns: 244px 1fr; height: 100vh; }
-.sidebar {
+/* When the live debug overlay is on, add a bottom row for it so it PUSHES the
+   page up (occupies real layout space) instead of overlaying/hiding content. */
+.app-shell.with-debug { grid-template-rows: 1fr auto; }
+.app-shell.with-debug .sidebar { grid-row: 1 / 3; grid-column: 1; }
+.app-shell.with-debug .main { grid-row: 1; grid-column: 2; }
+.debug-dock { grid-row: 2; grid-column: 2; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; background: var(--panel);
+  border-top: 1px solid var(--border); }.sidebar {
   background: linear-gradient(180deg, var(--sidebar-a), var(--sidebar-b));
   border-right: 1px solid var(--border-soft);
   padding: 20px 14px; display: flex; flex-direction: column; gap: 6px;
@@ -113,7 +120,7 @@ h3 { font-size: 15px; }
   padding: 16px 28px; border-bottom: 1px solid var(--border-soft);
   position: sticky; top: 0; background: var(--topbar-bg); backdrop-filter: blur(10px); z-index: 5;
 }
-.content { padding: 26px 28px calc(60px + var(--debug-bar-h, 0px)); max-width: 1180px; }
+.content { padding: 26px 28px 60px; max-width: 1180px; }
 
 /* Cards */
 .card {

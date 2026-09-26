@@ -44,8 +44,11 @@ export interface DebugCall {
   node?: string;         // serving node host when proxied CP->node
   serverMs?: number;     // server processing time (X-Arkive-Server-Ms)
   upstreamMs?: number;   // CP->node hop time (X-Arkive-Upstream-Ms)
+  reqBody?: string;      // request payload (truncated) for drill-down
+  respBody?: string;     // response payload (truncated) for drill-down
 }
 const DEBUG_MAX = 200;
+const DEBUG_BODY_MAX = 8000;   // cap each captured payload so history stays light
 const debugCalls: DebugCall[] = [];
 let debugSeq = 0;
 const debugSubs = new Set<(calls: DebugCall[]) => void>();
@@ -80,9 +83,20 @@ function debugMeta(res: Response): Pick<DebugCall, "route" | "node" | "serverMs"
   };
 }
 
+function safeStringify(v: unknown): string {
+  if (v == null) return "";
+  try { return typeof v === "string" ? v : JSON.stringify(v, null, 2); }
+  catch { return String(v); }
+}
+function _clip(s: string | undefined): string | undefined {
+  if (s == null) return undefined;
+  return s.length > DEBUG_BODY_MAX ? s.slice(0, DEBUG_BODY_MAX) + `\n… (${s.length - DEBUG_BODY_MAX} more chars)` : s;
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const started = performance.now();
   const startedAt = Date.now();
+  const reqBody = body !== undefined ? _clip(safeStringify(body)) : undefined;
   let res: Response;
   try {
     res = await fetch(BASE + path, {
@@ -96,7 +110,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   } catch (netErr: any) {
     recordDebugCall({ ts: startedAt, method, path, status: 0,
       ms: Math.round(performance.now() - started), ok: false,
-      error: netErr?.message || "network error" });
+      error: netErr?.message || "network error", reqBody });
     throw netErr;
   }
   if (!res.ok) {
@@ -110,7 +124,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     }
     recordDebugCall({ ts: startedAt, method, path, status: res.status,
       ms: Math.round(performance.now() - started), ok: false, error: detail,
-      ...debugMeta(res) });
+      reqBody, respBody: _clip(safeStringify(payload)), ...debugMeta(res) });
     // A 401 on an authenticated (non-auth) request means the session expired —
     // fire the global sign-out so the app redirects to Login with a notice.
     if (res.status === 401 && token && !path.startsWith("/auth/")) {
@@ -123,10 +137,17 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     }
     throw new ApiError(res.status, detail);
   }
+  if (res.status === 204) {
+    recordDebugCall({ ts: startedAt, method, path, status: res.status,
+      ms: Math.round(performance.now() - started), ok: true, reqBody, ...debugMeta(res) });
+    return undefined as T;
+  }
+  // Read the body once (so we can both capture it for drill-down and return it).
+  const data = await res.json();
   recordDebugCall({ ts: startedAt, method, path, status: res.status,
-    ms: Math.round(performance.now() - started), ok: true, ...debugMeta(res) });
-  if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+    ms: Math.round(performance.now() - started), ok: true,
+    reqBody, respBody: _clip(safeStringify(data)), ...debugMeta(res) });
+  return data as T;
 }
 
 export class ApiError extends Error {

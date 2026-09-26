@@ -63,26 +63,10 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
   const [calls, setCalls] = useState<DebugCall[]>(getDebugCalls());
   const [live, setLive] = useState<LiveDiag | null>(null);
   const [liveErr, setLiveErr] = useState<string>("");
+  const [selected, setSelected] = useState<DebugCall | null>(null);
   const timer = useRef<number | null>(null);
-  const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => subscribeDebugCalls((c) => setCalls(c.slice())), []);
-
-  // Reserve real layout space equal to the bar's height so it PUSHES the page up
-  // instead of overlaying/hiding content. The var is consumed by .content's
-  // padding-bottom; it tracks the collapsed strip and the expanded panel alike.
-  useEffect(() => {
-    const el = rootRef.current;
-    if (!el) return;
-    const apply = () => document.documentElement.style.setProperty("--debug-bar-h", `${el.offsetHeight}px`);
-    apply();
-    const ro = new ResizeObserver(apply);
-    ro.observe(el);
-    return () => {
-      ro.disconnect();
-      document.documentElement.style.removeProperty("--debug-bar-h");
-    };
-  }, []);
 
   const loadLive = async () => {
     try {
@@ -105,14 +89,15 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
   const errorCount = useMemo(() => calls.filter((c) => !c.ok).length, [calls]);
   const idx = live?.serving_index;
   const indexComplete = idx ? idx.complete : true;
+  const mono = "var(--mono, ui-monospace, monospace)";
 
   return (
-    <div ref={rootRef} style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 4000, pointerEvents: "none" }}>
+    <div className="debug-dock">
       {open && (
-        <div style={{ pointerEvents: "auto", maxHeight: "46vh", overflow: "hidden",
-          background: "var(--surface)", borderTop: "1px solid var(--border)",
-          boxShadow: "0 -8px 24px rgba(0,0,0,.28)", display: "flex", flexDirection: "column" }}>
-          <div className="row" style={{ gap: 6, padding: "6px 10px", borderBottom: "1px solid var(--border-soft)" }}>
+        <div style={{ maxHeight: "42vh", minHeight: 0, overflow: "hidden",
+          display: "flex", flexDirection: "column", background: "var(--panel)",
+          borderBottom: "1px solid var(--border-soft)" }}>
+          <div className="row" style={{ gap: 6, padding: "6px 10px", borderBottom: "1px solid var(--border-soft)", background: "var(--bg-elev)" }}>
             {(["requests", "server", "errors"] as Tab[]).map((t) => (
               <button key={t} className={"btn sm " + (tab === t ? "primary" : "ghost")}
                 onClick={() => setTab(t)} style={{ textTransform: "capitalize" }}>
@@ -123,23 +108,23 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
             <button className="btn ghost sm" onClick={() => clearDebugCalls()} title="Clear request history"><Icon name="trash" size={12} /> Clear</button>
             <button className="btn ghost sm" onClick={() => void loadLive()} title="Refresh diagnostics"><Icon name="repeat" size={12} /></button>
           </div>
-          <div style={{ overflow: "auto", padding: "8px 10px", fontSize: 12, fontFamily: "var(--mono, ui-monospace, monospace)" }}>
+          <div style={{ overflow: "auto", padding: "8px 10px", fontSize: 12, fontFamily: mono, background: "var(--panel)" }}>
             {tab === "requests" && (
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <tbody>
                   {calls.slice().reverse().map((c) => (
-                    <tr key={c.id} style={{ borderBottom: "1px solid var(--border-soft)" }}>
-                      <td style={{ padding: "3px 6px", color: "var(--faint)", whiteSpace: "nowrap" }}>{new Date(c.ts).toLocaleTimeString()}</td>
+                    <tr key={c.id} onClick={() => setSelected(c)} style={{ borderBottom: "1px solid var(--border-soft)", cursor: "pointer" }} title="Click to inspect request & response">
+                      <td style={{ padding: "3px 6px", color: "var(--text-faint)", whiteSpace: "nowrap" }}>{new Date(c.ts).toLocaleTimeString()}</td>
                       <td style={{ padding: "3px 6px", fontWeight: 700, whiteSpace: "nowrap" }}>{c.method}</td>
                       <td style={{ padding: "3px 6px", color: statusTone(c.status, c.ok), fontWeight: 700, whiteSpace: "nowrap" }}>{c.status || "ERR"}</td>
-                      <td style={{ padding: "3px 6px", textAlign: "right", whiteSpace: "nowrap", color: c.ms > 800 ? "var(--warn)" : "var(--muted)" }}
+                      <td style={{ padding: "3px 6px", textAlign: "right", whiteSpace: "nowrap", color: c.ms > 800 ? "var(--warn)" : "var(--text-dim)" }}
                           title={`round-trip ${c.ms}ms${c.serverMs != null ? ` · server ${c.serverMs}ms` : ""}${c.upstreamMs != null ? ` · node hop ${c.upstreamMs}ms` : ""}`}>
-                        {c.ms}ms{c.upstreamMs != null ? <span className="faint"> ({c.upstreamMs})</span> : null}
+                        {c.ms}ms{c.upstreamMs != null ? <span style={{ color: "var(--text-faint)" }}> ({c.upstreamMs})</span> : null}
                       </td>
-                      <td style={{ padding: "3px 6px", whiteSpace: "nowrap", color: c.route === "cp->node" ? "var(--warn)" : "var(--faint)" }} title={chainLabel(c)}>
+                      <td style={{ padding: "3px 6px", whiteSpace: "nowrap", color: c.route === "cp->node" ? "var(--warn)" : "var(--text-faint)" }} title={chainLabel(c)}>
                         {c.route === "cp->node" ? `CP → ${c.node || "node"}` : c.route === "node" ? (c.node || "node") : "CP"}
                       </td>
-                      <td style={{ padding: "3px 6px", wordBreak: "break-all" }}>{c.path}{c.error ? <span style={{ color: "var(--danger)" }}> — {c.error}</span> : null}</td>
+                      <td style={{ padding: "3px 6px", wordBreak: "break-all" }}>{c.path}{c.error ? <span style={{ color: "var(--danger-c)" }}> — {c.error}</span> : null}</td>
                     </tr>
                   ))}
                   {calls.length === 0 && <tr><td className="muted" style={{ padding: 8 }}>No requests captured yet.</td></tr>}
@@ -148,7 +133,7 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
             )}
             {tab === "server" && (
               <div className="stack" style={{ gap: 8 }}>
-                {liveErr && <div style={{ color: "var(--danger)" }}>{liveErr}</div>}
+                {liveErr && <div style={{ color: "var(--danger-c)" }}>{liveErr}</div>}
                 {live && (
                   <>
                     <DRow k="Tenant" v={`${live.tenant.name} · ${live.tenant.id}`} />
@@ -172,12 +157,12 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
             )}
             {tab === "errors" && (
               <div className="stack" style={{ gap: 4 }}>
-                {liveErr && <div style={{ color: "var(--danger)" }}>{liveErr}</div>}
+                {liveErr && <div style={{ color: "var(--danger-c)" }}>{liveErr}</div>}
                 {live?.recent_errors.length === 0 && <div className="muted">No recent warnings or errors for this tenant.</div>}
                 {live?.recent_errors.map((e, i) => (
                   <div key={i} style={{ borderBottom: "1px solid var(--border-soft)", padding: "3px 0" }}>
-                    <span style={{ color: e.level === "critical" || e.level === "error" ? "var(--danger)" : "var(--warn)", fontWeight: 700 }}>{e.level.toUpperCase()}</span>
-                    <span className="faint"> {e.ts ? new Date(e.ts + "Z").toLocaleTimeString() : ""} · {e.source}{e.logger ? ` · ${e.logger}` : ""}</span>
+                    <span style={{ color: e.level === "critical" || e.level === "error" ? "var(--danger-c)" : "var(--warn)", fontWeight: 700 }}>{e.level.toUpperCase()}</span>
+                    <span style={{ color: "var(--text-faint)" }}> {e.ts ? new Date(e.ts + "Z").toLocaleTimeString() : ""} · {e.source}{e.logger ? ` · ${e.logger}` : ""}</span>
                     <div style={{ wordBreak: "break-word" }}>{e.message}</div>
                   </div>
                 ))}
@@ -187,28 +172,76 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
         </div>
       )}
       {/* Collapsed status strip — always visible when the overlay is enabled. */}
-      <div className="row" onClick={() => setOpen((o) => !o)} style={{ pointerEvents: "auto", cursor: "pointer",
-        gap: 12, padding: "4px 12px", fontSize: 11.5, alignItems: "center",
-        background: "var(--surface)", borderTop: "1px solid var(--border)",
-        fontFamily: "var(--mono, ui-monospace, monospace)" }}>
+      <div className="row" onClick={() => setOpen((o) => !o)} style={{ cursor: "pointer",
+        gap: 12, padding: "5px 12px", fontSize: 11.5, alignItems: "center",
+        background: "var(--bg-elev)", fontFamily: mono }}>
         <span className="row" style={{ gap: 5, fontWeight: 700 }}><Icon name="activity" size={12} /> DEBUG</span>
         <span title="Node currently serving this tenant">
           <Icon name="server" size={11} /> {live?.active.node_name || "…"}
-          {live && !live.active.online && <span style={{ color: "var(--danger)" }}> offline</span>}
+          {live && !live.active.online && <span style={{ color: "var(--danger-c)" }}> offline</span>}
         </span>
-        <span title="Active serving-index completeness" style={{ color: indexComplete ? "var(--muted)" : "var(--warn)" }}>
+        <span title="Active serving-index completeness" style={{ color: indexComplete ? "var(--text-dim)" : "var(--warn)" }}>
           <Icon name="database" size={11} /> {idx ? `${idx.pct}%` : "…"} {idx && !idx.complete ? "seeding" : ""}
         </span>
-        <span title="Last API response time" style={{ color: (lastMs ?? 0) > 800 ? "var(--warn)" : "var(--muted)" }}>
+        <span title="Last API response time" style={{ color: (lastMs ?? 0) > 800 ? "var(--warn)" : "var(--text-dim)" }}>
           <Icon name="clock" size={11} /> {lastMs == null ? "—" : `${lastMs}ms`}
         </span>
-        {errorCount > 0 && <span style={{ color: "var(--danger)" }} title="Failed requests this session"><Icon name="alert" size={11} /> {errorCount}</span>}
-        {live?.db_ping_ms != null && <span className="faint" title="DB round-trip">db {live.db_ping_ms}ms</span>}
+        {errorCount > 0 && <span style={{ color: "var(--danger-c)" }} title="Failed requests this session"><Icon name="alert" size={11} /> {errorCount}</span>}
+        {live?.db_ping_ms != null && <span style={{ color: "var(--text-faint)" }} title="DB round-trip">db {live.db_ping_ms}ms</span>}
         <div style={{ flex: 1 }} />
-        <span className="faint">{open ? "click to collapse" : "click for history"}</span>
+        <span style={{ color: "var(--text-faint)" }}>{open ? "click to collapse" : "click for history"}</span>
         {onDisable && <button className="btn ghost sm" title="Turn off the debug overlay" onClick={(e) => { e.stopPropagation(); onDisable(); }}><Icon name="x" size={11} /></button>}
         <span style={{ fontSize: 10 }}>{open ? "▾" : "▴"}</span>
       </div>
+      {selected && <CallModal call={selected} onClose={() => setSelected(null)} />}
+    </div>
+  );
+}
+
+function CallModal({ call, onClose }: { call: DebugCall; onClose: () => void }) {
+  const mono = "var(--mono, ui-monospace, monospace)";
+  const copy = (s?: string) => { if (s) void navigator.clipboard?.writeText(s); };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 5000,
+      background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "min(880px, 96vw)", maxHeight: "86vh",
+        display: "flex", flexDirection: "column", background: "var(--panel)",
+        border: "1px solid var(--border)", borderRadius: "var(--radius)", boxShadow: "var(--shadow)" }}>
+        <div className="row" style={{ gap: 8, padding: "12px 16px", borderBottom: "1px solid var(--border-soft)", alignItems: "center" }}>
+          <span style={{ fontWeight: 800, color: statusTone(call.status, call.ok) }}>{call.status || "ERR"}</span>
+          <span style={{ fontWeight: 700 }}>{call.method}</span>
+          <span style={{ fontFamily: mono, fontSize: 12.5, wordBreak: "break-all" }}>{call.path}</span>
+          <div style={{ flex: 1 }} />
+          <button className="btn ghost sm" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        <div style={{ overflow: "auto", padding: 16 }}>
+          <div className="row" style={{ gap: 16, flexWrap: "wrap", marginBottom: 12, fontSize: 12.5 }}>
+            <span><b>Chain:</b> {chainLabel(call)}</span>
+            <span><b>Round-trip:</b> {call.ms}ms</span>
+            {call.serverMs != null && <span><b>Server:</b> {call.serverMs}ms</span>}
+            {call.upstreamMs != null && <span><b>Node hop:</b> {call.upstreamMs}ms</span>}
+            <span><b>At:</b> {new Date(call.ts).toLocaleString()}</span>
+          </div>
+          {call.error && <div style={{ color: "var(--danger-c)", marginBottom: 12 }}>{call.error}</div>}
+          <Section title={`Request${call.method === "GET" ? " (query only)" : ""}`} body={call.reqBody} mono={mono} onCopy={() => copy(call.reqBody)} empty="No request body (GET / no payload)." />
+          <Section title="Response" body={call.respBody} mono={mono} onCopy={() => copy(call.respBody)} empty="No response body captured (binary, 204, or network failure)." />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, body, mono, onCopy, empty }: { title: string; body?: string; mono: string; onCopy: () => void; empty: string }) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div className="row" style={{ gap: 8, marginBottom: 4 }}>
+        <div style={{ fontWeight: 700, fontSize: 12.5 }}>{title}</div>
+        {body && <button className="btn ghost sm" onClick={onCopy} title="Copy"><Icon name="file" size={12} /> Copy</button>}
+      </div>
+      {body
+        ? <pre style={{ margin: 0, padding: 10, background: "var(--code-bg)", borderRadius: "var(--radius-sm)",
+            fontFamily: mono, fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "34vh", overflow: "auto" }}>{body}</pre>
+        : <div className="muted" style={{ fontSize: 12 }}>{empty}</div>}
     </div>
   );
 }
@@ -216,8 +249,8 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
 function DRow({ k, v, tone }: { k: string; v: string; tone?: "warn" | "danger" }) {
   return (
     <div className="row" style={{ gap: 8 }}>
-      <span className="faint" style={{ minWidth: 130 }}>{k}</span>
-      <span style={{ color: tone === "danger" ? "var(--danger)" : tone === "warn" ? "var(--warn)" : "inherit", wordBreak: "break-all" }}>{v}</span>
+      <span style={{ color: "var(--text-faint)", minWidth: 130 }}>{k}</span>
+      <span style={{ color: tone === "danger" ? "var(--danger-c)" : tone === "warn" ? "var(--warn)" : "inherit", wordBreak: "break-all" }}>{v}</span>
     </div>
   );
 }

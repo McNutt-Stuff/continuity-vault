@@ -86,7 +86,7 @@ export default function App() {
   if (!me) return (<><LoggedOut /><DialogHost /></>);
 
   return (
-    <div className="app-shell">
+    <div className={"app-shell" + (me.features?.debug_overlay_enabled === true ? " with-debug" : "")}>
       <DialogHost />
       {me.needs_setup && <SetupWizard onDone={() => { /* refresh() hides it via me */ }} />}
       <Sidebar />
