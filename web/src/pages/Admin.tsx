@@ -402,7 +402,7 @@ function TopologyAdmin() {
                             still seeding history) must never look "in sync". */}
                         {p.cp_index_count > 0 && (
                           p.active_index_complete
-                            ? <Pill tone="ok" dot title={`Active index ${Number(p.active_index_count).toLocaleString()} / ${Number(p.cp_index_count).toLocaleString()}`}>index 100%</Pill>
+                            ? <span title={`Active index ${Number(p.active_index_count).toLocaleString()} / ${Number(p.cp_index_count).toLocaleString()}`}><Pill tone="ok" dot>index 100%</Pill></span>
                             : <span className="row" style={{ gap: 4 }} title={`Active node is serving ${Number(p.active_index_count).toLocaleString()} of ${Number(p.cp_index_count).toLocaleString()} indexed objects`}>
                                 <Pill tone="warn" dot>index {p.active_index_pct}%</Pill>
                                 <span className="faint">{Number(p.active_index_count).toLocaleString()} / {Number(p.cp_index_count).toLocaleString()} · seeding</span>
