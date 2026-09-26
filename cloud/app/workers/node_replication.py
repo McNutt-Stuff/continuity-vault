@@ -23,6 +23,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import func
+
 from .. import keybroker
 from ..config import get_settings
 from ..db import WorkerSessionLocal as SessionLocal
@@ -386,6 +388,34 @@ def _pull(s) -> int:
     global _secrets_synced
     if not _secrets_synced:
         _sync_fleet_secrets(s)
+    # Report our local per-active-tenant receipt+index counts so the CP can seed any
+    # pre-migration history this ACTIVE node is missing (a migrated tenant only had
+    # its STANDBY seeded). The CP ships only while it holds materially more than us,
+    # so a healthy node never re-downloads its own index.
+    local_counts: dict = {}
+    try:
+        with SessionLocal() as _cdb:
+            self_node = (_cdb.query(Node).filter(
+                            Node.name == (s.node_name or s.domain),
+                            Node.role == (s.node_role or "customer-tenant")).first()
+                         or _cdb.query(Node).filter(Node.is_self.is_(True)).first())
+            if self_node is not None:
+                active_tids = [tid for (tid,) in _cdb.query(Tenant.id)
+                               .filter(Tenant.node_id == self_node.id).all()]
+                if active_tids:
+                    rc = dict(_cdb.query(SnapshotReceipt.tenant_id,
+                                         func.count(SnapshotReceipt.id))
+                              .filter(SnapshotReceipt.tenant_id.in_(active_tids))
+                              .group_by(SnapshotReceipt.tenant_id).all())
+                    dc = dict(_cdb.query(SearchDocument.tenant_id,
+                                         func.count(SearchDocument.id))
+                              .filter(SearchDocument.tenant_id.in_(active_tids))
+                              .group_by(SearchDocument.tenant_id).all())
+                    for tid in active_tids:
+                        local_counts[tid] = {"receipts": int(rc.get(tid, 0)),
+                                             "documents": int(dc.get(tid, 0))}
+    except Exception:  # noqa: BLE001 — count is best-effort; never break the pull
+        logger.debug("active-backfill local count failed", exc_info=True)
     bundle = _post("/nodes/sync/pull", {
         "name": s.node_name or s.domain, "role": s.node_role or "customer-tenant",
         # Warm-standby data cursors (receipts + search index for tenants we're the
@@ -396,6 +426,10 @@ def _pull(s) -> int:
         # failed to apply + whether the data stream was caught up), so the CP can
         # show a truthful "in sync" and refuse a switchover to an incomplete replica.
         "standby_report": _st0.get("standby_report") or None,
+        # ACTIVE-node history backfill cursors + our local counts (see above).
+        "active_rcpt_cursor": _st0.get("active_rcpt_cursor"),
+        "active_doc_cursor": _st0.get("active_doc_cursor"),
+        "local_counts": local_counts or None,
     })
     if not bundle:
         return 0
@@ -528,6 +562,45 @@ def _pull(s) -> int:
             logger.info("replication standby: warm-replicated %d receipt(s) + %d doc(s)%s",
                         len(s_recs), len(s_docs),
                         " (more pending)" if bundle.get("standby_more") else "")
+    # ACTIVE-node history backfill: apply the pre-migration receipts + search index
+    # the CP is seeding for tenants THIS node is ACTIVE for but was missing history
+    # of (a migrated tenant only had its standby seeded). Idempotent upsert by pk;
+    # cursors advance only after a successful apply so an undelivered page is retried
+    # whole. Disjoint from the standby stream (active/standby nodes always differ),
+    # so a node can be catching up its own history while warming another's replica.
+    a_recs = bundle.get("active_receipts") or []
+    a_docs = bundle.get("active_documents") or []
+    if a_recs or a_docs:
+        applied = 0
+        a_skipped = 0
+        with SessionLocal() as db:
+            db.autoflush = False
+            for model, rows in ((SnapshotReceipt, a_recs), (SearchDocument, a_docs)):
+                for row in rows:
+                    try:
+                        with db.begin_nested():
+                            _upsert(db, model, row)
+                            db.flush()
+                        applied += 1
+                    except Exception as exc:  # noqa: BLE001
+                        a_skipped += 1
+                        logger.debug("active-backfill: skipped a %s row: %s",
+                                     getattr(model, "__tablename__", model), str(exc)[:120])
+            db.commit()
+        st = _read_state()
+        if bundle.get("active_rcpt_cursor"):
+            st["active_rcpt_cursor"] = bundle["active_rcpt_cursor"]
+        if bundle.get("active_doc_cursor"):
+            st["active_doc_cursor"] = bundle["active_doc_cursor"]
+        _write_state(st)
+        if a_skipped:
+            logger.warning("replication active-backfill: seeded %d row(s) but %d FAILED "
+                           "to apply (tenants=%s) — will retry", applied, a_skipped,
+                           ",".join(bundle.get("active_backfill_tenant_ids") or []) or "?")
+        else:
+            logger.info("replication active-backfill: seeded %d receipt(s) + %d doc(s)%s",
+                        len(a_recs), len(a_docs),
+                        " (more pending)" if bundle.get("active_more") else "")
     # Forwarded agent commands (portal "Sync now" for node-routed agents): append
     # to the local agent queue so the node delivers them on the agent's next
     # heartbeat. enqueue_command dedupes, so a re-forward is harmless.

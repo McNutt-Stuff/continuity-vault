@@ -24,7 +24,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import DateTime
+from sqlalchemy import DateTime, func
 from sqlalchemy.orm import Session
 
 from .. import keybroker
@@ -247,6 +247,15 @@ class NodeIdent(BaseModel):
     # had rows fail to apply (pending>0 = incomplete replica) + whether the data
     # stream was caught up. Lets the CP show a truthful readiness + gate switchover.
     standby_report: dict | None = None
+    # ACTIVE-node history backfill: when a tenant is migrated CP→node, only the
+    # STANDBY node is seeded with pre-migration receipts+index; the ACTIVE node
+    # accrues only post-migration data, so the portal (which proxies to the active
+    # node) shows an incomplete history. The node reports its local per-active-tenant
+    # counts so the CP can seed the gap, with its own ISO cursors. Disjoint from the
+    # standby stream (a tenant's active and standby nodes always differ).
+    active_rcpt_cursor: str | None = None
+    active_doc_cursor: str | None = None
+    local_counts: dict | None = None  # {tenant_id: {"receipts": int, "documents": int}}
 
 
 def _record_standby_report(db: Session, node: Node, report: dict) -> None:
@@ -297,6 +306,7 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
     tenants = active_tenants + standby_tenants
     tids = [t.id for t in tenants]
     standby_tids = [t.id for t in standby_tenants]
+    active_tids = [t.id for t in active_tenants]
     if not tids:
         return {"node_id": node.id, "tenants": [], "assigned": 0}
 
@@ -370,6 +380,61 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         if docs and docs[-1].created_at:
             doc_next = docs[-1].created_at.isoformat()
         standby_more = len(recs) >= _LIMIT or len(docs) >= _LIMIT
+
+    # ACTIVE-node history backfill: seed the ACTIVE node with any pre-migration
+    # receipts + search index it is MISSING. A tenant migrated CP→node only had its
+    # STANDBY seeded, so the active node (which the portal proxies search/retrieve
+    # to) shows an incomplete history. We only ship to an active tenant that is
+    # genuinely BEHIND — the node reports its local counts, and we seed only while
+    # the CP holds materially more rows than the node — so a healthy active node
+    # (whose data it created locally and pushed up) never re-downloads its index.
+    active_receipts, active_documents = [], []
+    active_rcpt_next = body.active_rcpt_cursor
+    active_doc_next = body.active_doc_cursor
+    active_more = False
+    active_backfill_tids: list[str] = []
+    if active_tids:
+        local_counts = body.local_counts or {}
+        cp_rcpt_counts = dict(
+            db.query(SnapshotReceipt.tenant_id, func.count(SnapshotReceipt.id))
+            .filter(SnapshotReceipt.tenant_id.in_(active_tids))
+            .group_by(SnapshotReceipt.tenant_id).all())
+        cp_doc_counts = dict(
+            db.query(SearchDocument.tenant_id, func.count(SearchDocument.id))
+            .filter(SearchDocument.tenant_id.in_(active_tids))
+            .group_by(SearchDocument.tenant_id).all())
+        for tid in active_tids:
+            lc = local_counts.get(tid) or {}
+            node_r = int(lc.get("receipts") or 0)
+            node_d = int(lc.get("documents") or 0)
+            if cp_rcpt_counts.get(tid, 0) > node_r or cp_doc_counts.get(tid, 0) > node_d:
+                active_backfill_tids.append(tid)
+        if active_backfill_tids:
+            _LIMIT = 3000
+            arcpt_since = _parse_iso(body.active_rcpt_cursor)
+            adoc_since = _parse_iso(body.active_doc_cursor)
+            arq = db.query(SnapshotReceipt).filter(
+                SnapshotReceipt.tenant_id.in_(active_backfill_tids))
+            if arcpt_since is not None:
+                arq = arq.filter(SnapshotReceipt.created_at > arcpt_since)
+            arecs = arq.order_by(SnapshotReceipt.created_at.asc()).limit(_LIMIT).all()
+            adq = db.query(SearchDocument).filter(
+                SearchDocument.tenant_id.in_(active_backfill_tids))
+            if adoc_since is not None:
+                adq = adq.filter(SearchDocument.created_at > adoc_since)
+            adocs = adq.order_by(SearchDocument.created_at.asc()).limit(_LIMIT).all()
+            active_receipts = [_ser(r) for r in arecs]
+            active_documents = [_ser(d) for d in adocs]
+            if arecs and arecs[-1].created_at:
+                active_rcpt_next = arecs[-1].created_at.isoformat()
+            if adocs and adocs[-1].created_at:
+                active_doc_next = adocs[-1].created_at.isoformat()
+            active_more = len(arecs) >= _LIMIT or len(adocs) >= _LIMIT
+            if arecs or adocs:
+                logger.info("active-node backfill: node=%s seeding %d receipt(s) + "
+                            "%d doc(s) for %d behind tenant(s)%s", node.id, len(arecs),
+                            len(adocs), len(active_backfill_tids),
+                            " (more pending)" if active_more else "")
 
     # Stamp replication freshness so the admin can see how current each node is
     # (drives the HA "in sync" indicator for a standby node in the topology view).
@@ -445,6 +510,14 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "standby_rcpt_cursor": rcpt_next,
         "standby_doc_cursor": doc_next,
         "standby_more": standby_more,
+        # ACTIVE-node history backfill: pre-migration receipts+index this active node
+        # was missing (seeded only while it is genuinely behind — see above).
+        "active_backfill_tenant_ids": active_backfill_tids,
+        "active_receipts": active_receipts,
+        "active_documents": active_documents,
+        "active_rcpt_cursor": active_rcpt_next,
+        "active_doc_cursor": active_doc_next,
+        "active_more": active_more,
     }
 
 
