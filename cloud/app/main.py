@@ -312,6 +312,27 @@ def startup() -> None:
     else:
         start_scheduler()
 
+    # Loud, non-silent guard for a common federation misconfiguration: a control
+    # plane that HAS node-assigned tenants but node_sync_scope (CV_NODE_SYNC_SCOPE)
+    # is OFF never proxies file ops to those nodes (node_proxy is a no-op), so every
+    # search/retrieve is silently served from the CP's replica instead of the tenant's
+    # node — and the request chain never shows a node hop. Surface it in Platform Logs.
+    if role == "control-plane" and not settings.node_sync_scope:
+        try:
+            from .db import SessionLocal
+            from .models import Tenant
+            with SessionLocal() as _db:
+                _n = _db.query(Tenant).filter(Tenant.node_id.isnot(None)).count()
+            if _n:
+                _logging.getLogger("cv.startup").error(
+                    "FEDERATION PROXY DISABLED: %d tenant(s) are assigned to a node but "
+                    "CV_NODE_SYNC_SCOPE is not set on this control plane — file ops are "
+                    "served locally, NOT proxied to the owning node. Set "
+                    "CV_NODE_SYNC_SCOPE=true in /etc/continuity-vault.env and restart "
+                    "cv-cloud to enable CP→node proxying.", _n)
+        except Exception:  # noqa: BLE001 — a diagnostic must never break startup
+            pass
+
     # Log forwarding is DECOUPLED from federation: every non-control-plane node
     # must push its unified logs to the CP so all logs are viewable in one place
     # (golden rule) — even a node with no assigned tenants or with node_sync_scope
