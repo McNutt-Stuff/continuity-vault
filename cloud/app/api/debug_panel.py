@@ -11,6 +11,7 @@ client-side (api.ts) — this endpoint provides the server-side picture.
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timezone
 
@@ -127,6 +128,7 @@ def live(principal: security.Principal = Depends(security.get_principal),
     return {
         "server_time": _now().isoformat(),
         "db_ping_ms": db_ping_ms,
+        "is_admin": bool(principal.is_platform_admin),
         "tenant": {"id": tenant.id, "name": tenant.name,
                    "type": tenant.tenant_type or "dedicated"},
         "user": {"id": principal.user_id, "email": user.email if user else ""},
@@ -135,3 +137,60 @@ def live(principal: security.Principal = Depends(security.get_principal),
         "placement": placement_info,
         "recent_errors": recent_errors,
     }
+
+
+@router.get("/fleet-path")
+def fleet_path(principal: security.Principal = Depends(security.get_principal),
+               db: Session = Depends(get_db)):
+    """Platform-admin only: probe the CP→node path to EVERY customer-tenant node
+    with a real fleet-authed round trip, so an admin (whose own tenant is CP-hosted
+    and never proxies) can still SEE the end-to-end inter-node path + timing. Each
+    entry returns the assembled chain [control-plane, node] using the node's own
+    X-Arkive-Hop breadcrumb."""
+    import httpx
+    from ..config import get_settings
+    from ..models import Node
+    from . import site as _site
+
+    if not principal.is_platform_admin:
+        raise HTTPException(403, "Platform admin only.")
+    s = get_settings()
+    cp_label = s.node_name or s.domain or "control-plane"
+    if (s.node_role or "control-plane") != "control-plane":
+        return {"cp": cp_label, "nodes": [], "note": "not the control plane"}
+    try:
+        secret = _site._fleet_secret()
+    except Exception:  # noqa: BLE001
+        secret = None
+    out = []
+    for n in db.query(Node).filter(Node.role == "customer-tenant").all():
+        if not n.endpoint:
+            continue
+        base = n.endpoint.rstrip("/")
+        cp_hop = {"role": "control-plane", "name": cp_label, "ms": None}
+        row = {"node_id": n.id, "name": n.name, "endpoint": n.endpoint,
+               "reachable": None, "ms": None, "chain": [cp_hop], "error": None}
+        t0 = time.perf_counter()
+        try:
+            r = httpx.get(f"{base}/nodes/sync/debug",
+                          headers={"Authorization": f"Bearer {secret}"} if secret else {},
+                          timeout=12.0)
+            ms = round((time.perf_counter() - t0) * 1000, 1)
+            row["ms"] = ms
+            row["reachable"] = r.status_code < 500
+            node_hop = None
+            try:
+                node_hop = json.loads(r.headers.get("X-Arkive-Hop") or "null")
+            except Exception:  # noqa: BLE001
+                node_hop = None
+            if not isinstance(node_hop, dict):
+                node_hop = {"role": "node", "name": n.name, "ms": None}
+            node_hop["upstream_ms"] = ms
+            row["chain"] = [cp_hop, node_hop]
+        except Exception as exc:  # noqa: BLE001
+            row["reachable"] = False
+            row["error"] = str(exc)[:200]
+            row["chain"] = [cp_hop, {"role": "node", "name": n.name,
+                                     "error": "unreachable"}]
+        out.append(row)
+    return {"cp": cp_label, "nodes": out}
