@@ -39,6 +39,7 @@ def run_tenant(db: Session, tenant) -> dict:
         _protection_gap_findings(db, tenant)
         _asset_reconciliation(db, tenant)
         _provider_health_findings(db, tenant)
+        _network_posture_findings(db, tenant)
         engine.refresh_freshness(db, tid)
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -66,6 +67,75 @@ def _provider_health_findings(db: Session, tenant) -> None:
             remediation={"label": "View providers", "route": "/signals"})
         active_fps.add(f.fingerprint)
     engine.resolve_findings_not_in(db, tid, "provider_stale", active_fps)
+
+
+def _network_posture_findings(db: Session, tenant) -> None:
+    """Turn captured network-infrastructure signals into actionable findings:
+    an offline gateway (the whole site is down), a device with a firmware update
+    available (patch gap), and disabled IDS/guest-isolation (segmentation gap).
+    Each dedups + auto-resolves when the underlying signal clears."""
+    from ..models import Signal
+    tid = tenant.id
+
+    # Offline network devices — a down gateway is high, other infra is medium.
+    off_fps: set[str] = set()
+    for s in (db.query(Signal)
+              .filter(Signal.tenant_id == tid, Signal.status == "active",
+                      Signal.signal_type.in_(["network.gateway.online",
+                                              "network.device.online"]),
+                      Signal.normalized_value == "false").all()):
+        val = s.value or {}
+        is_gw = s.signal_type == "network.gateway.online"
+        f = engine.upsert_finding(
+            db, tid, "network_device_offline",
+            title=f"Network {'gateway' if is_gw else 'device'} offline: {val.get('name') or s.subject_id}",
+            description=(f"{val.get('model') or 'Device'} at {val.get('ip') or 'unknown IP'} "
+                        "is not reporting to the controller."),
+            severity="high" if is_gw else "medium", category="NETWORK",
+            subject_type="network_device", subject_id=s.subject_id,
+            signal_ids=[s.id],
+            remediation={"label": "View network signals", "route": "/signals"})
+        off_fps.add(f.fingerprint)
+    engine.resolve_findings_not_in(db, tid, "network_device_offline", off_fps)
+
+    # Firmware/update available — a patch gap on network infrastructure.
+    fw_fps: set[str] = set()
+    for s in (db.query(Signal)
+              .filter(Signal.tenant_id == tid, Signal.status == "active",
+                      Signal.signal_type == "network.device.update_available",
+                      Signal.normalized_value == "true").all()):
+        val = s.value or {}
+        f = engine.upsert_finding(
+            db, tid, "network_firmware_outdated",
+            title=f"Firmware update available: {val.get('name') or s.subject_id}",
+            description=(f"{val.get('model') or 'Device'} is running {val.get('firmware') or 'an older firmware'} "
+                        "and an update is available from the controller."),
+            severity="low", category="PATCH",
+            subject_type="network_device", subject_id=s.subject_id,
+            signal_ids=[s.id],
+            remediation={"label": "Update in the UniFi controller", "route": "/signals"})
+        fw_fps.add(f.fingerprint)
+    engine.resolve_findings_not_in(db, tid, "network_firmware_outdated", fw_fps)
+
+    # Segmentation / security posture gaps — IDS off, guest isolation off.
+    seg_fps: set[str] = set()
+    for stype, label, sev in (
+            ("network.ids.enabled", "Intrusion detection (IDS/IPS) is disabled", "medium"),
+            ("network.guest_isolation.enabled", "Guest network isolation is disabled", "low")):
+        for s in (db.query(Signal)
+                  .filter(Signal.tenant_id == tid, Signal.status == "active",
+                          Signal.signal_type == stype,
+                          Signal.normalized_value == "false").all()):
+            f = engine.upsert_finding(
+                db, tid, "network_segmentation_gap",
+                title=label,
+                description="Enable this in the UniFi controller to reduce lateral-movement risk.",
+                severity=sev, category="SECURITY",
+                subject_type="org", subject_id=tid,
+                signal_ids=[s.id], fingerprint_extra=stype,
+                remediation={"label": "Configure in the UniFi controller", "route": "/signals"})
+            seg_fps.add(f.fingerprint)
+    engine.resolve_findings_not_in(db, tid, "network_segmentation_gap", seg_fps)
 
 
 def _protection_gap_findings(db: Session, tenant) -> None:
