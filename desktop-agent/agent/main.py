@@ -37,6 +37,7 @@ from .collectors import onepassword
 from .collectors import files as files_collector
 from .collectors import imessage
 from .collectors import outlook_local
+from .collectors import posture as posture_collector
 from . import agent_log
 from .crypto import encrypt_content, load_or_create_key, wrap_for_recovery
 
@@ -286,6 +287,9 @@ class Agent:
             },
             "recent_logs": agent_log.tail(self.cfg.log_file, 50),
             "reported_at": _now_iso(),
+            # Metadata-only device posture for the Signal Platform (present-only;
+            # never file/message content). Cached ~1h inside the collector.
+            **posture_collector.collect(),
             "fs_index": {
                 "built_at": (self._fs_index or {}).get("built_at"),
                 "folders": (self._fs_index or {}).get("nodes", 0),
