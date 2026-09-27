@@ -12,8 +12,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
-from . import engine
-from .provider_base import SignalProvider, register
+from .. import engine
+from ..provider_base import SignalProvider, register
 
 
 def _now():
@@ -30,7 +30,7 @@ class ArkiveSignalProvider(SignalProvider):
     )
 
     def collect(self, db: Session, tenant) -> dict:
-        from ..models import (Appliance, ApplianceStorage, Collection,
+        from ...models import (Appliance, ApplianceStorage, Collection,
                               ConnectorAccount, DesktopAgent, Node, Vault)
         tid = tenant.id
         now = _now()

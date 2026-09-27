@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from . import engine
-from .provider_base import SignalProvider, register
+from .. import engine
+from ..provider_base import SignalProvider, register
 
 
 def _iso(dt):
@@ -31,7 +31,7 @@ class UbiquitiSignalProvider(SignalProvider):
     )
 
     def collect(self, db: Session, tenant) -> dict:
-        from ..models import IntegrationInstance, NetworkApp, NetworkClient, NetworkDevice
+        from ...models import IntegrationInstance, NetworkApp, NetworkClient, NetworkDevice
         tid = tenant.id
         # Only run when the tenant actually has a network integration (else there's
         # no telemetry to normalize and provider health should read "not configured").

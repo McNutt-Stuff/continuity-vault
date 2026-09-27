@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from . import engine
-from .provider_base import SignalProvider, register
+from .. import engine
+from ..provider_base import SignalProvider, register
 
 # telemetry key -> (signal_type, normalized-as-bool). Present-only.
 _POSTURE_BOOL = {
@@ -37,7 +37,7 @@ class EndpointSignalProvider(SignalProvider):
     )
 
     def collect(self, db: Session, tenant) -> dict:
-        from ..models import DesktopAgent
+        from ...models import DesktopAgent
         tid = tenant.id
         n_sig = 0
         n_obj = 0

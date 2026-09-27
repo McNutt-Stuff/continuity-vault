@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from . import engine
-from .provider_base import SignalProvider, register
+from .. import engine
+from ..provider_base import SignalProvider, register
 
 
 def _iso(dt):
@@ -28,7 +28,7 @@ class M365SignalProvider(SignalProvider):
                      "identity.mfa", "identity.privileged")
 
     def collect(self, db: Session, tenant) -> dict:
-        from ..models import IntegrationInstance
+        from ...models import IntegrationInstance
         tid = tenant.id
         insts = (db.query(IntegrationInstance)
                  .filter(IntegrationInstance.tenant_id == tid,
@@ -44,7 +44,7 @@ class M365SignalProvider(SignalProvider):
         n_obj = 0
         caps = list(self._capabilities)
         try:
-            from ..integrations.microsoft365 import models as m365
+            from ...integrations.microsoft365 import models as m365
         except Exception:  # noqa: BLE001 — package optional
             m365 = None
         if m365 is not None:
