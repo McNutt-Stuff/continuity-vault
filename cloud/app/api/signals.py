@@ -261,13 +261,18 @@ def _coverage(db: Session, tid: str) -> dict:
                     and (now - a.last_heartbeat_at.replace(tzinfo=None)).total_seconds() < 86400)
     endpoint_pct = round(reporting * 100 / len(agents)) if agents else 100
 
-    # Identity: not just "configured" but how many active users are actually
-    # assessed for MFA — a directory with no MFA visibility is low coverage.
+    # Identity: identities ARE monitored once we're emitting user signals (base
+    # credit); MFA assessment depth fills the remainder — a directory with no MFA
+    # visibility reads as partial, not zero (which would hide that identities are
+    # actually being tracked).
     identity_pct = 0
     if _configured("m365"):
-        active_users = _count("identity.user.active")
-        assessed = _count("identity.mfa.enabled", "identity.mfa.missing")
-        identity_pct = round(assessed * 100 / active_users) if active_users else 100
+        users = _count("identity.user.active", "identity.user.disabled")
+        if users:
+            assessed = _count("identity.mfa.enabled", "identity.mfa.missing")
+            identity_pct = 70 + round(30 * min(assessed, users) / users)
+        else:
+            identity_pct = 40  # connected, discovery hasn't surfaced users yet
 
     # Network: configured + at least one infrastructure device inventoried.
     network_pct = 0
