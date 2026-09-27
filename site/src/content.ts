@@ -78,6 +78,15 @@ export const features = {
         { ico: "🏠", h: "Offline appliance", p: "Add Arkive Secure Hardware for an air-gapped, on-premise copy you physically control." },
       ],
     },
+    {
+      title: "Know your environment",
+      items: [
+        { ico: "📡", h: "The Signal Platform", p: "Arkive turns what it already collects — no new agent, no second call to your providers — into one live picture of your assets, protection gaps and blind spots." },
+        { ico: "🖧", h: "Network & assets", p: "Discover your gateways, switches and access points with firmware and update status, plus the clients and cloud apps in use on your network." },
+        { ico: "🪪", h: "Identity posture", p: "See which Microsoft 365 accounts lack MFA — flagged critical for privileged users — alongside stale and external identities." },
+        { ico: "🚦", h: "Findings that self-resolve", p: "Deduplicated, prioritized issues link straight to the fix and clear themselves the moment the underlying condition is resolved." },
+      ],
+    },
   ],
 };
 
