@@ -137,6 +137,35 @@ def _source_object_counts(db: Session, inst: IntegrationInstance) -> dict[str, d
     return out
 
 
+def _workload_object_counts(db: Session, inst: IntegrationInstance) -> dict[str, dict]:
+    """Protected objects/bytes per WORKLOAD, counted straight from the managed
+    collections' SearchDocuments — resilient to managed-source id churn. When a
+    source is re-provisioned (re-discovery/re-scope) it gets a NEW id, orphaning
+    the existing collection's ``m365_source_id``; a per-source lookup then hides
+    that collection's data from the footprint. Counting by the collection's stable
+    ``m365_workload`` never loses it. Returns {workload: {"objects": n, "bytes": b}}."""
+    from ...models import Collection, SearchDocument
+    from sqlalchemy import func
+    wl_by_coll: dict[str, str] = {}
+    for c in db.query(Collection).filter(Collection.tenant_id == inst.tenant_id).all():
+        cfg = c.config or {}
+        if cfg.get("m365_instance_id") == inst.id and cfg.get("managed") and cfg.get("m365_source_id"):
+            wl_by_coll[c.id] = cfg.get("m365_workload") or ""
+    if not wl_by_coll:
+        return {}
+    out: dict[str, dict] = {}
+    rows = (db.query(SearchDocument.collection_id, func.count(SearchDocument.id),
+                     func.coalesce(func.sum(SearchDocument.size_bytes), 0))
+            .filter(SearchDocument.collection_id.in_(list(wl_by_coll.keys())))
+            .group_by(SearchDocument.collection_id).all())
+    for coll_id, n, b in rows:
+        wl = wl_by_coll.get(coll_id) or ""
+        agg = out.setdefault(wl, {"objects": 0, "bytes": 0})
+        agg["objects"] += int(n or 0)
+        agg["bytes"] += int(b or 0)
+    return out
+
+
 def _status_view(db: Session, inst: IntegrationInstance | None) -> dict:
     if inst is None:
         return {"connected": False, "state": "not_connected"}
@@ -928,6 +957,7 @@ def list_managed_sources(instance_id: str = "",
             .filter(m.ManagedSource.integration_instance_id == inst.id)
             .order_by(m.ManagedSource.workload.asc(), m.ManagedSource.name.asc()).all())
     obj_counts = _source_object_counts(db, inst)  # actual protected objects/bytes per source
+    wl_counts = _workload_object_counts(db, inst)  # per-workload, resilient to source-id churn
     _WL_LABEL = {"exchange": "Exchange Online", "onedrive": "OneDrive",
                  "sharepoint": "SharePoint", "teams": "Teams channels",
                  "teams_chat": "Teams chats", "copilot": "Microsoft 365 Copilot",
@@ -957,12 +987,19 @@ def list_managed_sources(instance_id: str = "",
             "workload": s.workload, "label": _WL_LABEL.get(s.workload, s.workload),
             "sources": 0, "active": 0, "objects": 0, "bytes": 0, "errors": 0})
         r["sources"] += 1
-        r["objects"] += objects
-        r["bytes"] += vbytes
         if eff_state == "active":
             r["active"] += 1
         if eff_state in ("permission_required", "credential_error", "delayed"):
             r["errors"] += 1
+    # Objects/bytes per workload come from the collections directly (churn-proof) so
+    # re-provisioned sources never zero out the footprint. Overlay onto the rollup,
+    # adding a tile for any workload that has protected data but no current source row.
+    for wl, agg in wl_counts.items():
+        r = rollup.setdefault(wl, {
+            "workload": wl, "label": _WL_LABEL.get(wl, wl),
+            "sources": 0, "active": 0, "objects": 0, "bytes": 0, "errors": 0})
+        r["objects"] = agg["objects"]
+        r["bytes"] = agg["bytes"]
     return {"collect_enabled": bool((inst.config or {}).get("collect_enabled")),
             "total_objects": sum(x["objects"] for x in rollup.values()),
             "total_bytes": sum(x["bytes"] for x in rollup.values()),
