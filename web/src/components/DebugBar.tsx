@@ -71,13 +71,7 @@ function chainShort(c: DebugCall): string {
   return "CP";
 }
 
-type Tab = "requests" | "server" | "errors" | "fleet";
-
-interface FleetNode {
-  node_id: string; name: string; endpoint: string; kind?: string;
-  reachable: boolean | null; ms: number | null; error: string | null;
-  chain: RouteHop[];
-}
+type Tab = "requests" | "server" | "errors";
 
 export function DebugBar({ onDisable }: { onDisable?: () => void }) {
   const [open, setOpen] = useState(false);
@@ -86,23 +80,9 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
   const [live, setLive] = useState<LiveDiag | null>(null);
   const [liveErr, setLiveErr] = useState<string>("");
   const [selected, setSelected] = useState<DebugCall | null>(null);
-  const [fleet, setFleet] = useState<FleetNode[] | null>(null);
-  const [fleetNote, setFleetNote] = useState<string>("");
-  const [fleetErr, setFleetErr] = useState<string>("");
-  const [fleetLoading, setFleetLoading] = useState(false);
   const timer = useRef<number | null>(null);
 
   useEffect(() => subscribeDebugCalls((c) => setCalls(c.slice())), []);
-
-  const loadFleet = async () => {
-    setFleetLoading(true); setFleetErr("");
-    try {
-      const r = await api.get<{ nodes: FleetNode[]; note?: string }>("/debug-panel/fleet-path");
-      setFleet(r.nodes); setFleetNote(r.note || "");
-    } catch (e: any) { setFleetErr(e?.message || "failed to probe the fleet"); }
-    finally { setFleetLoading(false); }
-  };
-  useEffect(() => { if (tab === "fleet" && fleet === null && !fleetLoading) void loadFleet(); }, [tab]);
 
   const loadLive = async () => {
     try {
@@ -137,11 +117,10 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
             {(["requests", "server", "errors", "fleet"] as Tab[]).map((t) => (
               <button key={t} className={"btn sm " + (tab === t ? "primary" : "ghost")}
                 onClick={() => setTab(t)} style={{ textTransform: "capitalize" }}>
-                {t}{t === "requests" ? ` · ${calls.length}` : ""}{t === "errors" && live ? ` · ${live.recent_errors.length}` : ""}{t === "fleet" && fleet ? ` · ${fleet.length}` : ""}
+                {t}{t === "requests" ? ` · ${calls.length}` : ""}{t === "errors" && live ? ` · ${live.recent_errors.length}` : ""}
               </button>
             ))}
             <div style={{ flex: 1 }} />
-            {tab === "fleet" && <button className="btn ghost sm" onClick={() => void loadFleet()} title="Re-probe the fleet"><Icon name="repeat" size={12} /> Probe</button>}
             <button className="btn ghost sm" onClick={() => clearDebugCalls()} title="Clear request history"><Icon name="trash" size={12} /> Clear</button>
             <button className="btn ghost sm" onClick={() => void loadLive()} title="Refresh diagnostics"><Icon name="repeat" size={12} /></button>
           </div>
@@ -201,32 +180,6 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
                     <span style={{ color: e.level === "critical" || e.level === "error" ? "var(--danger-c)" : "var(--warn)", fontWeight: 700 }}>{e.level.toUpperCase()}</span>
                     <span style={{ color: "var(--text-faint)" }}> {e.ts ? new Date(e.ts + "Z").toLocaleTimeString() : ""} · {e.source}{e.logger ? ` · ${e.logger}` : ""}</span>
                     <div style={{ wordBreak: "break-word" }}>{e.message}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {tab === "fleet" && (
-              <div className="stack" style={{ gap: 6 }}>
-                <div style={{ color: "var(--text-faint)", marginBottom: 2 }}>
-                  Live CP→node round trip{live?.is_admin ? " to every customer node" : " for your tenant"} (fleet-authed).
-                  Your own requests only proxy when your tenant is node-hosted; this probes the path regardless.
-                </div>
-                {fleetLoading && <div className="muted">Probing…</div>}
-                {fleetErr && <div style={{ color: "var(--danger-c)" }}>{fleetErr}</div>}
-                {fleet && fleet.length === 0 && <div className="muted">{fleetNote || "No nodes to probe."}</div>}
-                {fleet?.map((f) => (
-                  <div key={f.node_id} className="row" style={{ gap: 10, alignItems: "center", borderBottom: "1px solid var(--border-soft)", padding: "4px 0" }}>
-                    <span style={{ color: f.reachable ? "var(--ok)" : "var(--danger-c)", fontWeight: 700, minWidth: 60 }}>
-                      {f.reachable ? "OK" : "DOWN"}
-                    </span>
-                    <span style={{ flex: 1, wordBreak: "break-all" }}>
-                      {f.chain.map(hopLabel).join(" → ")}
-                      {f.kind === "standby" ? <span style={{ color: "var(--text-faint)" }}> · standby</span> : null}
-                      {f.error ? <span style={{ color: "var(--danger-c)" }}> — {f.error}</span> : null}
-                    </span>
-                    <span style={{ color: (f.ms ?? 0) > 500 ? "var(--warn)" : "var(--text-dim)", whiteSpace: "nowrap" }}>
-                      {f.ms == null ? "—" : `${f.ms}ms`}
-                    </span>
                   </div>
                 ))}
               </div>
