@@ -133,7 +133,22 @@ def _instance_view(inst: IntegrationInstance) -> dict:
         "last_success_at": inst.last_success_at.isoformat() if inst.last_success_at else None,
         "last_error": inst.last_error,
         "last_stats": inst.last_stats or {},
+        # Signal Platform capabilities this integration feeds (collect-once reuse).
+        "signal_capabilities": _signal_capabilities(inst.integration_type),
     }
+
+
+# integration_type -> Signal Platform provider name.
+_SIGNAL_PROVIDER_FOR = {"ubiquiti": "ubiquiti", "microsoft365": "m365"}
+
+
+def _signal_capabilities(integration_type: str) -> list:
+    try:
+        from ..signals import get as _sig_get
+        p = _sig_get(_SIGNAL_PROVIDER_FOR.get(integration_type, integration_type))
+        return p.capabilities() if p else []
+    except Exception:  # noqa: BLE001 — never break the integrations list on this
+        return []
 
 
 def _instance_health(inst: IntegrationInstance) -> str:

@@ -28,6 +28,7 @@ interface Instance {
   provision_state?: string; provision_message?: string | null;
   last_stats: { clients?: number; apps?: number; bytes_seen?: number; note?: string;
     diag?: { site?: string; auth_mode?: string; devices_http?: number | string | null; traffic_http?: number | string | null } };
+  signal_capabilities?: string[];
   m365?: { consent_state?: string; needs_consent?: boolean; identities_discovered?: number;
     identities_mapped?: number; managed_sources?: number; protected_objects?: number; collect_enabled?: boolean };
 }
@@ -587,6 +588,15 @@ function InstanceCard({ inst, spec, onOpen, onChanged }: {
       )}
       {inst.last_error && !provisioning && (
         <div style={{ color: "var(--danger-c,#f2545b)", fontSize: 12, marginBottom: 6 }}>{inst.last_error}</div>
+      )}
+      {(inst.signal_capabilities?.length ?? 0) > 0 && (
+        <div className="row" style={{ gap: 4, flexWrap: "wrap", marginBottom: 6, alignItems: "center" }}>
+          <Icon name="activity" size={11} />
+          <span className="faint" style={{ fontSize: 11 }}>Feeds signals:</span>
+          {inst.signal_capabilities!.slice(0, 4).map((c) => (
+            <span key={c} className="pill info" style={{ fontSize: 10.5 }}>{c}</span>
+          ))}
+        </div>
       )}
       {inst.integration_type === "microsoft365" ? (
         <>
