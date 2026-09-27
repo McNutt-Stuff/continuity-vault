@@ -130,9 +130,13 @@ def _target_for(request: Request) -> tuple[str | None, bool, str | None]:
 
 
 async def middleware(request: Request, call_next):
-    # Only the control plane proxies; a node executes these locally.
-    if not (settings.node_sync_scope
-            and (settings.node_role or "control-plane") == "control-plane"):
+    # Only the control plane proxies; a node executes these locally. Proxying is
+    # driven by ACTUAL tenant→node assignment (tenant_node_url below), NOT the
+    # CV_NODE_SYNC_SCOPE env flag — a control plane that has node-assigned tenants
+    # but forgot to set that flag was silently serving every file op from its own
+    # replica instead of the owning node (no CP→node hop ever happened). A CP with
+    # no nodes resolves to "no node → local" cheaply, so this is safe either way.
+    if (settings.node_role or "control-plane") != "control-plane":
         return await call_next(request)
     if not _should_proxy(request.method, request.url.path):
         return await call_next(request)

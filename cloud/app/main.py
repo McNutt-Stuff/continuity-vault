@@ -313,10 +313,10 @@ def startup() -> None:
         start_scheduler()
 
     # Loud, non-silent guard for a common federation misconfiguration: a control
-    # plane that HAS node-assigned tenants but node_sync_scope (CV_NODE_SYNC_SCOPE)
-    # is OFF never proxies file ops to those nodes (node_proxy is a no-op), so every
-    # search/retrieve is silently served from the CP's replica instead of the tenant's
-    # node — and the request chain never shows a node hop. Surface it in Platform Logs.
+    # plane with node-assigned tenants but node_sync_scope (CV_NODE_SYNC_SCOPE) OFF.
+    # CP→node file-op proxying now works regardless (node_proxy keys off actual
+    # tenant assignment), but connector forwarding to nodes + index replication
+    # federation still gate on this flag — so surface it in Platform Logs.
     if role == "control-plane" and not settings.node_sync_scope:
         try:
             from .db import SessionLocal
@@ -325,11 +325,12 @@ def startup() -> None:
                 _n = _db.query(Tenant).filter(Tenant.node_id.isnot(None)).count()
             if _n:
                 _logging.getLogger("cv.startup").error(
-                    "FEDERATION PROXY DISABLED: %d tenant(s) are assigned to a node but "
-                    "CV_NODE_SYNC_SCOPE is not set on this control plane — file ops are "
-                    "served locally, NOT proxied to the owning node. Set "
-                    "CV_NODE_SYNC_SCOPE=true in /etc/continuity-vault.env and restart "
-                    "cv-cloud to enable CP→node proxying.", _n)
+                    "FEDERATION FLAG OFF: %d tenant(s) are assigned to a node but "
+                    "CV_NODE_SYNC_SCOPE is not set on this control plane. File-op "
+                    "proxying now works regardless, but connector-forwarding + index "
+                    "replication to nodes stay DISABLED. Set CV_NODE_SYNC_SCOPE=true "
+                    "in /etc/continuity-vault.env and restart cv-cloud for full "
+                    "federation.", _n)
         except Exception:  # noqa: BLE001 — a diagnostic must never break startup
             pass
 
