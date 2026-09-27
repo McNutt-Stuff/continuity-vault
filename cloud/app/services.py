@@ -35,6 +35,25 @@ def tenant_node_url(db, tenant_id: str) -> Optional[str]:
     return None
 
 
+def tenant_home_node_url(db, tenant_id: str) -> Optional[str]:
+    """The PUBLIC endpoint of the tenant's active node, advertised to its
+    appliances/agents as their HOME so they home to ONE endpoint regardless of
+    whether the heartbeat hit the control plane OR the node itself. Unlike
+    ``tenant_node_url`` this does NOT exclude the current server (is_self): a node
+    must still tell an appliance "your home is me", else the appliance reads
+    node_url=None, flip-flops back to the control plane, and POSTs a command's
+    result to the wrong box → 404 "command not found". None only when unassigned
+    (the appliance then homes to the control plane)."""
+    from .models import Node, Tenant
+    t = db.get(Tenant, tenant_id)
+    if not t or not t.node_id:
+        return None
+    n = db.get(Node, t.node_id)
+    if n and n.endpoint and (n.status or "active") == "active":
+        return n.endpoint.rstrip("/")
+    return None
+
+
 def _self_services() -> dict:
     global _cache, _at
     if _cache and time.time() - _at < _TTL:

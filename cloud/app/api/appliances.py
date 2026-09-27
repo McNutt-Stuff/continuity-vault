@@ -1481,7 +1481,11 @@ def heartbeat(body: HeartbeatRequest,
             "config": _appliance_runtime_config(db, appliance),
             "latest_version": _appliance_bundle_version(),
             "control_plane_key_id": fleet.cloud_public_bundle().get("keyId"),
-            "node_url": appliance_node_url,
+            # HOME the appliance to its active node's PUBLIC endpoint, advertised
+            # identically by the CP and the node itself — so it never flip-flops back
+            # to the CP and POSTs a command's result to the wrong box (404). Delivery
+            # still happens only on the owning box (appliance_node_url above).
+            "node_url": services.tenant_home_node_url(db, appliance.tenant_id),
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
 
 

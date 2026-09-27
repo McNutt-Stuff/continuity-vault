@@ -578,10 +578,13 @@ def _agent_mappings(db: Session, agent: DesktopAgent) -> list[dict]:
 
 
 def _agent_ingest_url(db: Session, agent: DesktopAgent) -> str | None:
-    """The API base URL of the tenant's assigned node (federated mode), so the
-    agent signals + ingests there instead of the control plane."""
+    """The API base URL of the tenant's active node (federated mode), so the agent
+    signals + ingests there instead of the control plane. Uses the HOME-node helper
+    (not tenant_node_url) so the node advertises ITSELF — otherwise the agent reads
+    node_url=None on the node and flip-flops back to the control plane, posting
+    command results to the wrong box (404)."""
     from .. import services
-    return services.tenant_node_url(db, agent.tenant_id)
+    return services.tenant_home_node_url(db, agent.tenant_id)
 
 
 @agent_router.post("/heartbeat")
