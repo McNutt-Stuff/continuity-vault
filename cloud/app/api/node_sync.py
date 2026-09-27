@@ -487,6 +487,45 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
                         .filter(_m365.ManagedSource.tenant_id.in_(tids)).all()]
     except Exception:  # noqa: BLE001 — package optional; never break a pull
         pass
+
+    # Commercial / entitlement state (CP-authoritative). Ship it DOWN so the node
+    # can resolve plan + ADD-ON feature flags and entitlements locally. Without
+    # these the node only sees MANUAL tenant flag overrides — an add-on-granted
+    # flag (e.g. signal_platform_enabled via the Compliance add-on) never resolves
+    # and its gated surfaces 403. The node's _PULL_ORDER already applies these keys.
+    catalog_plans: list = []
+    catalog_plan_versions: list = []
+    addon_defs: list = []
+    tenant_addons: list = []
+    entitlement_overrides: list = []
+    subscriptions: list = []
+    subscription_items: list = []
+    entitlement_snapshots: list = []
+    try:
+        from ..catalog.models import Plan as _Plan, PlanVersion as _PV
+        catalog_plans = [_ser(p) for p in db.query(_Plan).all()]
+        catalog_plan_versions = [_ser(v) for v in db.query(_PV).all()]
+    except Exception:  # noqa: BLE001 — package optional; never break a pull
+        logger.debug("pull: catalog serialize failed", exc_info=True)
+    try:
+        from ..entitlements.models import (AddOn as _AddOn, TenantAddOn as _TA,
+                                           EntitlementOverride as _EO)
+        addon_defs = [_ser(a) for a in db.query(_AddOn).all()]
+        tenant_addons = [_ser(x) for x in db.query(_TA).filter(_TA.tenant_id.in_(tids)).all()]
+        entitlement_overrides = [_ser(x) for x in db.query(_EO).filter(_EO.tenant_id.in_(tids)).all()]
+    except Exception:  # noqa: BLE001
+        logger.debug("pull: entitlements serialize failed", exc_info=True)
+    try:
+        from ..subscriptions import Subscription as _Sub, SubscriptionItem as _SI
+        subscriptions = [_ser(s) for s in db.query(_Sub).filter(_Sub.tenant_id.in_(tids)).all()]
+        subscription_items = [_ser(i) for i in db.query(_SI).filter(_SI.tenant_id.in_(tids)).all()]
+    except Exception:  # noqa: BLE001
+        logger.debug("pull: subscriptions serialize failed", exc_info=True)
+    try:
+        from ..models import EntitlementSnapshot as _ES
+        entitlement_snapshots = [_ser(x) for x in db.query(_ES).filter(_ES.tenant_id.in_(tids)).all()]
+    except Exception:  # noqa: BLE001
+        logger.debug("pull: entitlement snapshots serialize failed", exc_info=True)
     return {
         "node_id": node.id,
         "assigned": len(tids),
@@ -512,6 +551,16 @@ def pull(body: NodeIdent, authorization: str = Header(default=""),
         "m365_managed_sources": m365_sources,
         "nodes": [_ser(n) for n in db.query(Node).all()],
         "pricing": _ser(pricing) if pricing else None,
+        # Commercial/entitlement state (see above) — keyed exactly as the node's
+        # _PULL_ORDER expects so add-on / plan feature flags resolve on the node.
+        "catalog_plans": catalog_plans,
+        "catalog_plan_versions": catalog_plan_versions,
+        "addons": addon_defs,
+        "tenant_addons": tenant_addons,
+        "entitlement_overrides": entitlement_overrides,
+        "subscriptions": subscriptions,
+        "subscription_items": subscription_items,
+        "entitlement_snapshots": entitlement_snapshots,
         "pending_jobs": [_ser(j) for j in pending_jobs],
         "pending_insights": pending_insights,
         "agent_commands": agent_commands,
