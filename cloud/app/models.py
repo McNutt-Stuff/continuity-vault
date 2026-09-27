@@ -1784,3 +1784,126 @@ class NetworkSample(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+# ---------------------------------------------------------------------------
+# Arkive Signal Platform (shared infrastructure — see
+# docs/adr/0001-signals-are-shared-infrastructure.md). Signals are normalized,
+# de-duplicated observations produced by providers that REUSE the data existing
+# collectors already retrieve (never a second vendor call). They are generated on
+# the box that processes the tenant (customer node in federated mode, else the CP)
+# and replicate node→CP like other tenant data. Consumed by Arkive Core/Insights,
+# the Compliance add-on, and the Phase-2 AI Compliance add-on.
+# ---------------------------------------------------------------------------
+class Signal(Base):
+    """A single normalized observation about the customer's environment.
+
+    STATE signals (e.g. endpoint.disk_encryption.enabled) are de-duplicated by
+    ``fingerprint`` — a repeat updates last_seen/occurrence_count/value in place
+    rather than inserting a new row. EVENT signals keep history. Freshness comes
+    from the signal type's definition (signals.taxonomy) so a stale observation is
+    never treated as current."""
+
+    __tablename__ = "signals"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    # Taxonomy
+    signal_type = Column(String, nullable=False, index=True)   # e.g. endpoint.disk_encryption.enabled
+    category = Column(String, default="", index=True)          # signals.taxonomy category
+    observation_kind = Column(String, default="state")         # state | event | measurement
+    # Provenance
+    provider = Column(String, default="", index=True)          # arkive|endpoint|m365|ubiquiti|appliance|node
+    source_integration_id = Column(String, default="", index=True)
+    collection_method = Column(String, default="")
+    collector_version = Column(String, default="")
+    # Correlated entities
+    subject_type = Column(String, default="", index=True)      # user|endpoint|device|network_client|source|node|appliance|org
+    subject_id = Column(String, default="", index=True)
+    resource_type = Column(String, default="")
+    resource_id = Column(String, default="")
+    actor_type = Column(String, default="")
+    actor_id = Column(String, default="")
+    # Value
+    value = Column(JSON, default=dict)                          # normalized payload
+    normalized_value = Column(String, default="")              # canonical scalar (true|false|enum|number)
+    # Quality
+    severity = Column(String, default="info")                  # info|low|medium|high|critical
+    confidence = Column(String, default="high")                # low|moderate|high|very_high
+    confidence_reason = Column(String, default="")
+    # Lifecycle
+    observed_at = Column(DateTime, default=_now, index=True)
+    first_seen = Column(DateTime, default=_now)
+    last_seen = Column(DateTime, default=_now, index=True)
+    ingested_at = Column(DateTime, default=_now)
+    occurrence_count = Column(BigInteger, default=1)
+    fingerprint = Column(String, index=True)                   # dedup key for STATE signals
+    freshness_state = Column(String, default="fresh")          # fresh|stale|expired|unknown
+    expires_at = Column(DateTime, nullable=True)               # observed_at + definition TTL
+    status = Column(String, default="active")                  # active|superseded|cleared
+    # Links
+    evidence_id = Column(String, default="")
+    raw_reference = Column(String, default="")
+    meta = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class SignalProviderHealth(Base):
+    """Per-tenant, per-provider collection health so a stale/failing provider is
+    never mistaken for a clean environment. One row per (tenant, provider)."""
+
+    __tablename__ = "signal_provider_health"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    provider = Column(String, index=True)
+    connection_status = Column(String, default="unknown")      # ok|degraded|offline|not_configured
+    last_attempt_at = Column(DateTime, nullable=True)
+    last_success_at = Column(DateTime, nullable=True)
+    objects_processed = Column(BigInteger, default=0)
+    signals_produced = Column(BigInteger, default=0)
+    errors = Column(Integer, default=0)
+    last_error = Column(Text, default="")
+    permissions_state = Column(String, default="")             # ok|missing_scope|reauth
+    rate_limit_state = Column(String, default="")
+    capabilities = Column(JSON, default=list)
+    collector_version = Column(String, default="")
+    coverage = Column(JSON, default=dict)                       # {dimension: pct}
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class Finding(Base):
+    """A generalized, deduplicated finding driven by one or more Signals. Shared by
+    Arkive core (protection gaps, unmanaged assets), the Compliance add-on, and the
+    Phase-2 AI add-on — a repeat detection updates the finding rather than inserting
+    a duplicate. ``owner_user_id`` allows per-member scoping like vaults."""
+
+    __tablename__ = "findings"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    finding_type = Column(String, nullable=False, index=True)  # protection_gap|unmanaged_asset|provider_stale|...
+    category = Column(String, default="", index=True)
+    severity = Column(String, default="medium", index=True)    # info|low|medium|high|critical
+    status = Column(String, default="open", index=True)        # open|acknowledged|in_progress|risk_accepted|exception|resolved|reopened
+    title = Column(String, default="")
+    description = Column(Text, default="")
+    subject_type = Column(String, default="")
+    subject_id = Column(String, default="", index=True)
+    resource_type = Column(String, default="")
+    resource_id = Column(String, default="")
+    signal_ids = Column(JSON, default=list)
+    evidence_ids = Column(JSON, default=list)
+    fingerprint = Column(String, index=True)                   # dedup key
+    occurrence_count = Column(BigInteger, default=1)
+    first_seen = Column(DateTime, default=_now)
+    last_seen = Column(DateTime, default=_now, index=True)
+    assigned_to = Column(String, default="")
+    due_date = Column(DateTime, nullable=True)
+    remediation = Column(JSON, default=dict)                   # {label, route, params}
+    exception_reason = Column(Text, default="")
+    exception_expires_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    resolution_evidence = Column(String, default="")
+    owner_user_id = Column(String, default="", index=True)     # member scoping (like Vault.owner_user_id)
+    meta = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+

@@ -58,6 +58,12 @@ FLAGS: dict[str, bool] = {
     # OFF by default; a user may self-toggle their OWN overlay (it only ever shows
     # diagnostics scoped to their own tenant).
     "debug_overlay_enabled": False,
+    # Arkive Signal Platform: shared infrastructure that normalizes observations
+    # from existing collectors (Arkive protection, endpoint, appliances/nodes, M365,
+    # Ubiquiti) into a unified signal store powering asset awareness, protection-gap
+    # detection and coverage — and (Phase 2) the AI Compliance add-on. Gates the
+    # Signals surfaces; the collection substrate is always on where a provider runs.
+    "signal_platform_enabled": False,
 }
 
 # Human labels for the admin UI.
@@ -75,6 +81,7 @@ LABELS = {
     "entitlements_enforced": "Enforce entitlement/seat limits (rollout)",
     "ha_auto_failover": "Automatic failover to standby node (HA)",
     "debug_overlay_enabled": "Live debug overlay (behind-the-scenes diagnostics)",
+    "signal_platform_enabled": "Signal Platform (asset awareness & protection-gap detection)",
 }
 
 
