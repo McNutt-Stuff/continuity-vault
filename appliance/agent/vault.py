@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -177,6 +178,29 @@ class VaultStore:
         snap_dirs = [d for d in self._protected.iterdir() if d.is_dir()]
         primary_snaps = {d.name for d in snap_dirs}
         for mroot in self._mirror_roots:
+            # Guard an absent/unwritable mirror BEFORE the per-file loop. Previously a
+            # disconnected/read-only/full mirror made every file copy fail — 14k+
+            # errors per pass — while each attempt still did read_bytes() of the whole
+            # snapshot file into RAM, so a broken mirror pinned CPU and OOM-killed the
+            # agent every minute. Skipping here means a broken mirror costs one clear
+            # error, not thousands of full-file reads. We also never recreate an absent
+            # mirror root (that would silently fill the OS disk of a stale mount).
+            if not mroot.exists():
+                result["errors"] += 1
+                result.setdefault("error_sample", f"mirror volume not present: {mroot}")
+                result["unwritable"] = str(mroot)
+                continue
+            try:
+                _probe = mroot / ".cv-mirror-writable"
+                _probe.write_bytes(b"ok")
+                _probe.unlink()
+            except Exception as exc:  # noqa: BLE001 — surface the REAL reason
+                result["errors"] += 1
+                result.setdefault(
+                    "error_sample",
+                    f"mirror not writable ({type(exc).__name__}: {str(exc)[:160]}): {mroot}")
+                result["unwritable"] = str(mroot)
+                continue
             for snap in snap_dirs:
                 touched = False
                 for src in snap.rglob("*"):
@@ -188,10 +212,17 @@ class VaultStore:
                         continue  # already mirrored intact
                     try:
                         dst.parent.mkdir(parents=True, exist_ok=True)
-                        data = src.read_bytes()
+                        # Stream the copy in chunks — NEVER load a whole snapshot file
+                        # into memory (a multi-GB object would OOM the agent).
+                        size = src.stat().st_size
                         tmp = dst.with_suffix(dst.suffix + ".tmp")
-                        tmp.write_bytes(data)
-                        if tmp.stat().st_size != len(data):
+                        with src.open("rb") as fsrc, tmp.open("wb") as fdst:
+                            shutil.copyfileobj(fsrc, fdst, 4 * 1024 * 1024)
+                        if tmp.stat().st_size != size:
+                            try:
+                                tmp.unlink()
+                            except OSError:
+                                pass
                             raise OSError("short mirror write")
                         tmp.replace(dst)
                         try:
@@ -200,8 +231,11 @@ class VaultStore:
                             pass
                         result["files_copied"] += 1
                         touched = True
-                    except Exception:  # noqa: BLE001 — reconcile is best-effort per file
+                    except Exception as exc:  # noqa: BLE001 — per-file, non-fatal
                         result["errors"] += 1
+                        if "error_sample" not in result:
+                            result["error_sample"] = (
+                                f"{type(exc).__name__}: {str(exc)[:160]} ({rel})")
                 if touched:
                     result["snapshots_synced"] += 1
             # Deletion pass: make the mirror a true reflection — remove any snapshot
@@ -226,8 +260,10 @@ class VaultStore:
                         if mf.suffix == ".tmp" or not (self._protected / rel).exists():
                             _force_unlink(mf)
                             result["files_pruned"] += 1
-                except Exception:  # noqa: BLE001 — prune is best-effort per item
+                except Exception as exc:  # noqa: BLE001 — prune is best-effort per item
                     result["errors"] += 1
+                    if "error_sample" not in result:
+                        result["error_sample"] = f"prune {type(exc).__name__}: {str(exc)[:160]}"
         return result
 
     def verify_mirrors(self) -> dict:
