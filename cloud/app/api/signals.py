@@ -240,7 +240,7 @@ def _provider_health(db: Session, tid: str) -> list[dict]:
 
 def _coverage(db: Session, tid: str) -> dict:
     """Simple coverage per dimension derived from provider health + entity reporting."""
-    from ..models import DesktopAgent
+    from ..models import DesktopAgent, Signal
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     health = {h.provider: h for h in db.query(SignalProviderHealth)
               .filter(SignalProviderHealth.tenant_id == tid).all()}
@@ -249,16 +249,35 @@ def _coverage(db: Session, tid: str) -> dict:
         h = health.get(prov)
         return bool(h and h.connection_status == "ok")
 
+    def _count(*types: str) -> int:
+        return (db.query(Signal)
+                .filter(Signal.tenant_id == tid, Signal.status == "active",
+                        Signal.signal_type.in_(types)).count())
+
     # Endpoint: reporting agents / total agents.
     agents = db.query(DesktopAgent).filter(DesktopAgent.tenant_id == tid,
                                            DesktopAgent.state != "retired").all()
     reporting = sum(1 for a in agents if a.last_heartbeat_at
                     and (now - a.last_heartbeat_at.replace(tzinfo=None)).total_seconds() < 86400)
     endpoint_pct = round(reporting * 100 / len(agents)) if agents else 100
+
+    # Identity: not just "configured" but how many active users are actually
+    # assessed for MFA — a directory with no MFA visibility is low coverage.
+    identity_pct = 0
+    if _configured("m365"):
+        active_users = _count("identity.user.active")
+        assessed = _count("identity.mfa.enabled", "identity.mfa.missing")
+        identity_pct = round(assessed * 100 / active_users) if active_users else 100
+
+    # Network: configured + at least one infrastructure device inventoried.
+    network_pct = 0
+    if _configured("ubiquiti"):
+        network_pct = 100 if _count("network.gateway.online", "network.device.online") else 60
+
     return {
-        "Identity": 100 if _configured("m365") else 0,
+        "Identity": identity_pct,
         "Endpoint": endpoint_pct,
-        "Network": 100 if _configured("ubiquiti") else 0,
+        "Network": network_pct,
         "Applications": 100 if (_configured("ubiquiti") or _configured("endpoint")) else 0,
         "Protection": 100 if _configured("arkive") else 0,
         "Recovery": 100 if _configured("arkive") else 0,
