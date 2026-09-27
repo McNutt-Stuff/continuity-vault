@@ -609,12 +609,21 @@ def _sync_storage_telemetry(db: Session, a: Appliance, telemetry: dict) -> None:
             # Preserve the out-of-sync grace stamp across heartbeats (health is
             # replaced wholesale): a mirror re-syncs after every backup, so we only
             # treat a SUSTAINED out-of-sync as a problem (see appliance_problem_list).
+            # STICKY: clear the stamp ONLY on an AFFIRMATIVE in_sync=True. A cycle
+            # that reports in_sync=False keeps/sets it; a cycle MISSING mirror
+            # integrity (verify didn't run) must NOT clear it — clearing on missing
+            # data reset the 30-min window every cycle and made the health check flap.
             prior_oos = (s.health or {}).get("out_of_sync_since")
             new_health = rep.get("health") or {}
             mi = new_health.get("mirror_integrity") if isinstance(
                 new_health.get("mirror_integrity"), dict) else None
-            if kind == "mirror" and mi and mi.get("in_sync") is False:
-                new_health["out_of_sync_since"] = prior_oos or now.isoformat()
+            if kind == "mirror":
+                if mi and mi.get("in_sync") is True:
+                    new_health.pop("out_of_sync_since", None)
+                elif mi and mi.get("in_sync") is False:
+                    new_health["out_of_sync_since"] = prior_oos or now.isoformat()
+                elif prior_oos:
+                    new_health["out_of_sync_since"] = prior_oos
             s.health = new_health
             if rep.get("device_serial"):
                 s.device_serial = rep.get("device_serial")
