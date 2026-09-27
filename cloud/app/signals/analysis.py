@@ -40,6 +40,7 @@ def run_tenant(db: Session, tenant) -> dict:
         _asset_reconciliation(db, tenant)
         _provider_health_findings(db, tenant)
         _network_posture_findings(db, tenant)
+        _identity_posture_findings(db, tenant)
         engine.refresh_freshness(db, tid)
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -136,6 +137,34 @@ def _network_posture_findings(db: Session, tenant) -> None:
                 remediation={"label": "Configure in the UniFi controller", "route": "/signals"})
             seg_fps.add(f.fingerprint)
     engine.resolve_findings_not_in(db, tid, "network_segmentation_gap", seg_fps)
+
+
+def _identity_posture_findings(db: Session, tenant) -> None:
+    """Turn per-user identity signals into findings: an active user without MFA is a
+    high risk (a privileged account without MFA is critical). Dedups + auto-resolves
+    when MFA is registered. Only fires where MFA state is actually known (present-only
+    signals), so it never asserts a gap for unassessed users."""
+    from ..models import Signal
+    tid = tenant.id
+    mfa_fps: set[str] = set()
+    for s in (db.query(Signal)
+              .filter(Signal.tenant_id == tid, Signal.status == "active",
+                      Signal.signal_type == "identity.mfa.missing",
+                      Signal.normalized_value == "false").all()):
+        val = s.value or {}
+        is_admin = bool(val.get("is_admin"))
+        f = engine.upsert_finding(
+            db, tid, "identity_mfa_gap",
+            title=f"{'Privileged account' if is_admin else 'User'} without MFA: "
+                  f"{val.get('upn') or val.get('email') or s.subject_id}",
+            description=("This account can sign in but has no MFA method registered — "
+                         "a phishing/credential-theft risk."),
+            severity="critical" if is_admin else "high", category="AUTHENTICATION",
+            subject_type="user", subject_id=s.subject_id,
+            signal_ids=[s.id],
+            remediation={"label": "Require MFA in Entra ID", "route": "/signals"})
+        mfa_fps.add(f.fingerprint)
+    engine.resolve_findings_not_in(db, tid, "identity_mfa_gap", mfa_fps)
 
 
 def _protection_gap_findings(db: Session, tenant) -> None:

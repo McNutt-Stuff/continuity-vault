@@ -917,7 +917,9 @@ what Arkive already has.
   confidence, and a **freshness** state so stale telemetry is never mistaken for
   current.
 - **Findings** — deduplicated issues driven by signals: protection gaps, offline
-  devices, and network assets with no matching managed endpoint. Findings link
+  devices, network assets with no matching managed endpoint, out‑of‑date
+  infrastructure firmware, segmentation gaps (IDS/IPS or guest isolation off),
+  and active accounts (especially privileged ones) without MFA. Findings link
   straight to the workflow that fixes them and auto‑resolve when the condition
   clears.
 - **Coverage** — how much of each dimension (Identity, Endpoint, Network,

@@ -24,7 +24,8 @@ def _iso(dt):
 class M365SignalProvider(SignalProvider):
     provider = "m365"
     collector_version = "1"
-    _capabilities = ("identity.users", "identity.external", "identity.stale")
+    _capabilities = ("identity.users", "identity.external", "identity.stale",
+                     "identity.mfa", "identity.privileged")
 
     def collect(self, db: Session, tenant) -> dict:
         from ..models import IntegrationInstance
@@ -76,6 +77,30 @@ class M365SignalProvider(SignalProvider):
                                 normalized_value="true", severity="medium",
                                 value={"upn": idn.upn, "last_seen": _iso(idn.last_seen)})
                     n_sig += 1
+                # Per-user MFA / privileged posture — present-only from the posture
+                # collector's stamp (NO second Graph call). Absent meta => no signal,
+                # which lowers coverage rather than asserting a clean state.
+                meta = idn.meta or {}
+                if enabled and "mfa_registered" in meta:
+                    mfa_ok = bool(meta.get("mfa_registered"))
+                    engine.emit(db, tid,
+                                "identity.mfa.enabled" if mfa_ok else "identity.mfa.missing",
+                                provider=self.provider, subject_type="user",
+                                subject_id=(idn.entra_object_id or idn.id),
+                                normalized_value="true" if mfa_ok else "false",
+                                severity="info" if mfa_ok else "high",
+                                value={"upn": idn.upn, "email": idn.email,
+                                       "phishing_resistant": bool(meta.get("mfa_phishing_resistant")),
+                                       "is_admin": bool(meta.get("is_admin"))})
+                    n_sig += 1
+                    if meta.get("is_admin"):
+                        engine.emit(db, tid, "identity.privileged.account", provider=self.provider,
+                                    subject_type="user", subject_id=(idn.entra_object_id or idn.id),
+                                    normalized_value="true",
+                                    severity="info" if mfa_ok else "critical",
+                                    value={"upn": idn.upn, "mfa_registered": mfa_ok,
+                                           "phishing_resistant": bool(meta.get("mfa_phishing_resistant"))})
+                        n_sig += 1
 
         engine.record_provider_health(db, tid, self.provider, connection_status="ok",
                                       success=True, objects_processed=n_obj,

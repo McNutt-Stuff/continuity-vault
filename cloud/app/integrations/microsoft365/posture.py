@@ -76,6 +76,27 @@ def _needs(db, tid, cap, perm, err):
          error=str(err)[:160])
 
 
+def _stamp_identity_mfa(db: Session, tid: str, reg_by_oid: dict) -> None:
+    """Fold per-user MFA registration (from the ONE userRegistrationDetails report)
+    onto each ExternalIdentity.meta, so the Signal Platform emits per-user MFA
+    signals with no second Graph call. Best-effort; never breaks posture."""
+    try:
+        stamped = _now().isoformat()
+        for idn in db.query(m.ExternalIdentity).filter(
+                m.ExternalIdentity.tenant_id == tid).all():
+            rec = reg_by_oid.get((idn.entra_object_id or "").strip())
+            if not rec:
+                continue
+            meta = dict(idn.meta or {})
+            meta["mfa_registered"] = bool(rec.get("mfa_registered"))
+            meta["mfa_phishing_resistant"] = bool(rec.get("phishing_resistant"))
+            meta["is_admin"] = bool(rec.get("is_admin"))
+            meta["mfa_synced_at"] = stamped
+            idn.meta = meta
+    except Exception:  # noqa: BLE001 — posture must not fail on a stamping error
+        logger.debug("m365 posture: identity MFA stamping failed", exc_info=True)
+
+
 def _age(now: datetime, dt: datetime) -> str:
     secs = max(0, int((now - (dt.replace(tzinfo=None) if dt.tzinfo else dt)).total_seconds()))
     if secs < 3600:
@@ -206,6 +227,7 @@ def refresh(db: Session, inst, *, force: bool = False) -> int:
     _PHISH_RESISTANT = ("fido2", "windowshelloforbusiness", "x509", "passkey", "certificatebased")
     try:
         total = strong = phishr = admins = admins_strong = 0
+        reg_by_oid: dict[str, dict] = {}   # per-user MFA state → stamped onto identities
         for u in graph.get_paged(token, "/reports/authenticationMethods/userRegistrationDetails",
                                  params={"$top": "500"}, cap=100000):
             total += 1
@@ -219,6 +241,18 @@ def refresh(db: Session, inst, *, force: bool = False) -> int:
                 admins += 1
                 if is_mfa:
                     admins_strong += 1
+            oid = (u.get("id") or "").strip()
+            if oid:
+                reg_by_oid[oid] = {
+                    "mfa_registered": is_mfa,
+                    "phishing_resistant": any(any(p in mth for p in _PHISH_RESISTANT) for mth in methods),
+                    "is_admin": bool(u.get("isAdmin")),
+                    "methods": methods,
+                }
+        # Stamp per-user MFA state onto the discovered identities so the Signal
+        # Platform can emit per-user MFA signals with NO second Graph call.
+        if reg_by_oid:
+            _stamp_identity_mfa(db, tid, reg_by_oid)
         if total:
             ratio = strong / total
             _srec(db, inst, "mfa",
