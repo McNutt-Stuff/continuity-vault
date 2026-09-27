@@ -894,6 +894,52 @@ quantum computers can't retroactively decrypt your archive.
 Still stuck? **[Contact support](/support/contact-support)**.
 """,
         help_routes=[]),
+    _doc(
+        "signals-overview", "The Signal Platform", "Your Data", _YOUR_DATA, 80, "activity",
+        "How Arkive turns what it already collects into a live picture of your environment — assets, protection gaps and coverage.",
+        """
+# The Signal Platform
+
+The **Signal Platform** turns the information Arkive already gathers — your
+protection state, your endpoints, your appliances and nodes, Microsoft 365 and
+your network — into one normalized picture of your environment. It answers
+questions like *what devices exist?*, *what's actually protected?*, *what
+stopped working?* and *where are our blind spots?*
+
+It reuses data the existing collectors already retrieve. **No new agent, no new
+credentials, and no second call to your providers** — signals are normalized from
+what Arkive already has.
+
+## What it produces
+
+- **Signals** — normalized observations (e.g. *disk encryption enabled*, *backup
+  current*, *network device seen*), each with a provider, a subject, a
+  confidence, and a **freshness** state so stale telemetry is never mistaken for
+  current.
+- **Findings** — deduplicated issues driven by signals: protection gaps, offline
+  devices, and network assets with no matching managed endpoint. Findings link
+  straight to the workflow that fixes them and auto‑resolve when the condition
+  clears.
+- **Coverage** — how much of each dimension (Identity, Endpoint, Network,
+  Applications, Protection, Recovery) is actually being monitored, and *why* it
+  isn't higher.
+- **Provider health** — whether each provider is reporting, so a silent
+  integration lowers coverage instead of looking clean.
+
+## Privacy
+
+The Signal Platform is an assurance capability, not surveillance. Endpoint
+signals are **metadata only** (e.g. an encryption/firewall on‑off state and an
+application inventory) — never your files, messages, browsing history or content.
+
+## Enabling it
+
+The Signal Platform is available to organization administrators when the
+**Signal Platform** feature is enabled for your organization. Open **Signals**
+in the sidebar to see the overview, explore signals, work findings, and check
+provider health.
+""",
+        help_routes=["/signals"]),
 ]
 
 
