@@ -27,10 +27,11 @@ class UbiquitiSignalProvider(SignalProvider):
     _capabilities = (
         "asset.discovery", "network.devices", "network.clients",
         "network.applications", "network.destinations",
+        "network.infrastructure", "network.firmware", "network.segmentation",
     )
 
     def collect(self, db: Session, tenant) -> dict:
-        from ..models import IntegrationInstance, NetworkApp, NetworkClient
+        from ..models import IntegrationInstance, NetworkApp, NetworkClient, NetworkDevice
         tid = tenant.id
         # Only run when the tenant actually has a network integration (else there's
         # no telemetry to normalize and provider health should read "not configured").
@@ -46,6 +47,50 @@ class UbiquitiSignalProvider(SignalProvider):
 
         n_sig = 0
         n_obj = 0
+
+        # --- Infrastructure devices (gateway / switch / AP) ---------------------
+        for d in db.query(NetworkDevice).filter(NetworkDevice.tenant_id == tid).all():
+            n_obj += 1
+            stype = ("network.gateway.online" if d.device_type == "gateway"
+                     else "network.device.online")
+            engine.emit(db, tid, stype, provider=self.provider,
+                        subject_type="network_device", subject_id=(d.device_key or d.id),
+                        source_integration_id=d.integration_id or "",
+                        normalized_value="true" if d.online else "false",
+                        severity="info" if d.online else ("high" if d.device_type == "gateway" else "medium"),
+                        value={"name": d.name, "model": d.model, "type": d.device_type,
+                               "ip": d.ip, "firmware": d.firmware, "clients": int(d.client_count or 0)},
+                        observed_at=d.last_seen)
+            n_sig += 1
+            if d.update_available:
+                engine.emit(db, tid, "network.device.update_available", provider=self.provider,
+                            subject_type="network_device", subject_id=(d.device_key or d.id),
+                            normalized_value="true", severity="low",
+                            value={"name": d.name, "model": d.model, "firmware": d.firmware})
+                n_sig += 1
+
+        # --- Segmentation / security posture (site config) ----------------------
+        cfg = {}
+        for inst in insts:
+            netcfg = (inst.config or {}).get("network") or {}
+            if isinstance(netcfg, dict):
+                cfg = {**cfg, **netcfg}
+        if cfg:
+            if "ids_enabled" in cfg:
+                engine.emit(db, tid, "network.ids.enabled", provider=self.provider,
+                            subject_type="org", subject_id=tid,
+                            normalized_value="true" if cfg.get("ids_enabled") else "false",
+                            severity="info" if cfg.get("ids_enabled") else "medium",
+                            value={"ips_enabled": cfg.get("ips_enabled")})
+                n_sig += 1
+            if "guest_isolation" in cfg:
+                engine.emit(db, tid, "network.guest_isolation.enabled", provider=self.provider,
+                            subject_type="org", subject_id=tid,
+                            normalized_value="true" if cfg.get("guest_isolation") else "false",
+                            severity="info" if cfg.get("guest_isolation") else "low",
+                            value={"guest_networks": cfg.get("guest_networks")})
+                n_sig += 1
+
         for c in db.query(NetworkClient).filter(NetworkClient.tenant_id == tid,
                                                 NetworkClient.monitor_state != "ignored").all():
             n_obj += 1

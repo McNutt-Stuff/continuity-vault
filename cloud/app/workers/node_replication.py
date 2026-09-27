@@ -44,6 +44,7 @@ from ..models import (
     LogEntry,
     NetworkApp,
     NetworkClient,
+    NetworkDevice,
     NetworkUsage,
     Node,
     PricingConfig,
@@ -736,6 +737,7 @@ def _push(s) -> int:
             integ_since = None
     integ_high = integ_since
     integ_instances, net_clients, net_apps, net_usage, integ_runs = [], [], [], [], []
+    net_devices: list = []
     communications = []
     comm_cursor = _read_state().get("communications_cursor")
     comm_since = None
@@ -855,7 +857,7 @@ def _push(s) -> int:
         for i in db.query(IntegrationInstance).all():
             integ_instances.append(_row(i))
         for model, sink in ((NetworkClient, net_clients), (NetworkApp, net_apps),
-                            (NetworkUsage, net_usage)):
+                            (NetworkUsage, net_usage), (NetworkDevice, net_devices)):
             q = db.query(model)
             if integ_since is not None:
                 q = q.filter(model.updated_at > integ_since)
@@ -913,7 +915,7 @@ def _push(s) -> int:
                 managed_collections.append(_row(c))
     if not (receipts or documents or accounts or jobs or agents or appliances
             or appliance_storages or customer_storage_health or compliance_signals or insights
-            or integ_instances or net_clients or net_apps or net_usage or integ_runs
+            or integ_instances or net_clients or net_apps or net_usage or net_devices or integ_runs
             or communications or alerts
             or m365_identities or m365_sources):
         # Nothing to replicate, but this node's own logs still must reach the CP.
@@ -928,7 +930,7 @@ def _push(s) -> int:
     has_data = (receipts or documents or accounts or jobs or agents or appliances
                 or appliance_storages or customer_storage_health or compliance_signals or insights
                 or integ_instances or net_clients
-                or net_apps or net_usage or integ_runs or communications or alerts
+                or net_apps or net_usage or net_devices or integ_runs or communications or alerts
                 or m365_identities or m365_sources)
     if has_data:
         res = _post("/nodes/sync/push", {
@@ -939,7 +941,8 @@ def _push(s) -> int:
             "customer_storage_health": customer_storage_health,
             "compliance_signals": compliance_signals,
             "integration_instances": integ_instances, "network_clients": net_clients,
-            "network_apps": net_apps, "network_usage": net_usage, "integration_runs": integ_runs,
+            "network_apps": net_apps, "network_usage": net_usage,
+            "network_devices": net_devices, "integration_runs": integ_runs,
             "communications": communications, "admin_alerts": alerts,
             "m365_external_identities": m365_identities, "m365_managed_sources": m365_sources,
             "managed_collections": managed_collections,
@@ -962,7 +965,7 @@ def _push(s) -> int:
                         len(receipts), len(documents), len(jobs), len(agents),
                         len(appliances), len(appliance_storages), len(insights),
                         len(integ_instances),
-                        len(net_clients) + len(net_apps) + len(net_usage),
+                        len(net_clients) + len(net_apps) + len(net_usage) + len(net_devices),
                         len(m365_identities) + len(m365_sources))
     # Forward this node's logs (own cursor, independent of the data push above).
     _push_logs(s)

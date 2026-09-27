@@ -44,6 +44,7 @@ from ..models import (
     IntegrationRun,
     NetworkApp,
     NetworkClient,
+    NetworkDevice,
     NetworkUsage,
     Node,
     PricingConfig,
@@ -554,6 +555,7 @@ class PushPayload(BaseModel):
     network_clients: list[dict] = []
     network_apps: list[dict] = []
     network_usage: list[dict] = []
+    network_devices: list[dict] = []
     integration_runs: list[dict] = []
     communications: list[dict] = []
     admin_alerts: list[dict] = []
@@ -843,6 +845,9 @@ _CLIENT_TELEMETRY = ("name", "hostname", "ip", "mac", "is_wired", "is_guest",
                      "first_seen", "last_seen")
 _APP_TELEMETRY = ("name", "category", "source_type", "tx_bytes", "rx_bytes",
                   "total_bytes", "sessions", "client_count", "first_seen", "last_seen")
+_DEVICE_TELEMETRY = ("name", "model", "device_type", "mac", "ip", "firmware",
+                     "update_available", "adopted", "online", "uptime_seconds",
+                     "client_count", "first_seen", "last_seen", "meta")
 
 
 def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict,
@@ -908,6 +913,21 @@ def _ingest_integration_push(db: Session, body: "PushPayload", counts: dict,
             db.add(NetworkApp(**{k: v for k, v in kw.items() if k != "id"}))
         else:
             for f in _APP_TELEMETRY:
+                if f in kw:
+                    setattr(cur, f, kw[f])
+        counts["network"] += 1
+    for row in body.network_devices:
+        if not _ok(row):
+            continue
+        kw = _deser(NetworkDevice, row)
+        cur = (db.query(NetworkDevice)
+               .filter(NetworkDevice.tenant_id == kw.get("tenant_id"),
+                       NetworkDevice.integration_id == kw.get("integration_id"),
+                       NetworkDevice.device_key == kw.get("device_key")).first())
+        if cur is None:
+            db.add(NetworkDevice(**{k: v for k, v in kw.items() if k != "id"}))
+        else:
+            for f in _DEVICE_TELEMETRY:
                 if f in kw:
                     setattr(cur, f, kw[f])
         counts["network"] += 1

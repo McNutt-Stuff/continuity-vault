@@ -1352,23 +1352,34 @@ _SOURCE_PAGES = [
          "Field mapping controls what's searchable."]),
     _source_doc(
         "integration-ubiquiti", "Ubiquiti UniFi (Integration)", "server", 92,
-        "Network intelligence from your Ubiquiti UniFi controller — see which apps and cloud "
-        "services are in use on your network.",
+        "Network intelligence from your Ubiquiti UniFi controller — your network's gateway, "
+        "switches and access points, plus which apps and cloud services are in use.",
         "Integrations run on an **appliance** with local LAN access. The Ubiquiti integration "
-        "queries your UniFi Dream Machine / controller for the applications and cloud services in "
-        "use, which clients are using them, and how much traffic — powering shadow-app detection "
-        "and analytics. It does not back up files; it produces network intelligence signals.",
+        "queries your UniFi Dream Machine / controller for your network infrastructure (gateway, "
+        "switches and access points — with firmware and update status), the applications and cloud "
+        "services in use, which clients are using them, and how much traffic — powering asset "
+        "discovery, shadow-app detection and analytics. It does not back up files; it produces "
+        "network intelligence signals.",
         ["Open **Integrations** and choose **Ubiquiti UniFi**.",
          "Enter the controller host (e.g. `192.168.1.1`) and an admin username/password.",
          "Arkive mints a scoped API key from those credentials, then discards the password.",
          "The appliance polls the controller on an interval (default 60 min)."],
-        ["**Network signals** — clients, applications and traffic volumes (not file backups). "
-         "Feeds shadow-app detection and network analytics."],
+        ["**Network signals** — infrastructure devices (gateway, switches, access points with "
+         "firmware + update status), segmentation/security posture (IDS/IPS, guest isolation), "
+         "clients, applications and traffic volumes (not file backups). Feeds asset discovery, "
+         "shadow-app detection and network analytics."],
         ["Runs on an appliance because it needs LAN access to the controller.",
          "The admin password is used once to mint a scoped API key, then discarded.",
          "Polls on an interval (default 60 minutes)."],
         required_plan="business",
         extra=(
+            "\n## Network infrastructure\n"
+            "Beyond clients and apps, Arkive inventories the network itself — your **gateway, "
+            "switches and access points** — with each device's model, firmware version and whether "
+            "an **update is available**, plus online/offline state. It also reads your "
+            "segmentation/security posture (**IDS/IPS** threat management and **guest network "
+            "isolation**). These become Signal Platform signals for asset discovery, patch/firmware "
+            "tracking and posture — with no extra configuration beyond the controller login.\n"
             "\n## Application data requires DPI\n"
             "Per-app traffic (which cloud services are in use) comes from the controller's "
             "**Deep Packet Inspection**. If you see clients but no apps, enable "

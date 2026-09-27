@@ -1784,6 +1784,34 @@ class NetworkSample(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+class NetworkDevice(Base):
+    """A network INFRASTRUCTURE device — gateway / switch / access point —
+    discovered by a network integration (UniFi). Distinct from NetworkClient
+    (endpoints ON the network); this is the network itself. Feeds infrastructure,
+    firmware and update signals for the Signal Platform."""
+
+    __tablename__ = "network_devices"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    integration_id = Column(String, index=True)
+    device_key = Column(String, index=True)     # stable id (MAC)
+    name = Column(String, default="")
+    model = Column(String, default="")
+    device_type = Column(String, default="")    # gateway | switch | ap | other
+    mac = Column(String, default="")
+    ip = Column(String, default="")
+    firmware = Column(String, default="")
+    update_available = Column(Boolean, default=False)
+    adopted = Column(Boolean, default=True)
+    online = Column(Boolean, default=True)
+    uptime_seconds = Column(BigInteger, default=0)
+    client_count = Column(Integer, default=0)
+    first_seen = Column(DateTime, nullable=True)
+    last_seen = Column(DateTime, nullable=True)
+    meta = Column(JSON, default=dict)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
 # ---------------------------------------------------------------------------
 # Arkive Signal Platform (shared infrastructure — see
 # docs/adr/0001-signals-are-shared-infrastructure.md). Signals are normalized,

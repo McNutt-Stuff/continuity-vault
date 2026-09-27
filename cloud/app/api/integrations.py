@@ -1144,6 +1144,8 @@ class IntegrationReport(BaseModel):
     clients: list[dict] = []
     apps: list[dict] = []
     usage: list[dict] = []
+    devices: list[dict] = []      # network infrastructure (gateway/switch/ap)
+    network_config: dict = {}     # {vlans, guest_isolation, ids_enabled, ips_enabled}
     stats: dict = {}
     credentials_update: dict | None = None
 
@@ -1334,6 +1336,9 @@ def _ingest_report(db: Session, tid: str, inst: IntegrationInstance,
         u.total_bytes = _safe_int(ud.get("total_bytes", 0)) or (u.tx_bytes + u.rx_bytes)
         u.last_seen = _parse_dt(ud.get("last_seen")) or now
 
+    # Network infrastructure (gateway/switch/AP) + segmentation/security config.
+    _ingest_network_devices(db, tid, inst, body, now)
+
     st = body.stats or {}
     db.add(IntegrationRun(
         tenant_id=tid, integration_id=inst.id, integration_type=inst.integration_type,
@@ -1342,6 +1347,45 @@ def _ingest_report(db: Session, tid: str, inst: IntegrationInstance,
         bytes_seen=_safe_int(st.get("bytes_seen", 0)), error=err))
     if status == "ok":
         _roll_daily_samples(db, tid, inst, body, now)
+
+
+def _ingest_network_devices(db, tid, inst, body, now) -> None:
+    """Upsert network infrastructure devices (gateway/switch/AP) + store the site's
+    segmentation/security config on the instance. New signal source, so guarded:
+    a collector that doesn't report devices leaves existing rows untouched."""
+    from ..models import NetworkDevice
+    if body.devices:
+        existing = {d.device_key: d for d in db.query(NetworkDevice).filter(
+            NetworkDevice.tenant_id == tid, NetworkDevice.integration_id == inst.id).all()}
+        seen = set()
+        for dd in body.devices:
+            key = dd.get("device_key") or dd.get("mac")
+            if not key:
+                continue
+            seen.add(key)
+            d = existing.get(key)
+            if d is None:
+                d = NetworkDevice(tenant_id=tid, integration_id=inst.id,
+                                  device_key=key, first_seen=now)
+                db.add(d)
+            d.name = dd.get("name") or d.name or key
+            d.model = dd.get("model") or d.model
+            d.device_type = dd.get("device_type") or d.device_type or "other"
+            d.mac = dd.get("mac") or d.mac or key
+            d.ip = dd.get("ip") or d.ip
+            d.firmware = dd.get("firmware") or d.firmware
+            d.update_available = bool(dd.get("update_available"))
+            d.adopted = bool(dd.get("adopted", True))
+            d.online = bool(dd.get("online", True))
+            d.uptime_seconds = _safe_int(dd.get("uptime_seconds", 0))
+            d.client_count = _safe_int(dd.get("client_count", 0))
+            d.last_seen = _parse_dt(dd.get("last_seen")) or now
+        # A device the controller no longer reports as present → offline (not deleted).
+        for k, d in existing.items():
+            if k not in seen:
+                d.online = False
+    if body.network_config:
+        inst.config = {**(inst.config or {}), "network": body.network_config}
 
 
 def _day_bucket(dt: datetime) -> datetime:

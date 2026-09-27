@@ -497,11 +497,16 @@ def collect(config: dict, credentials: dict, log) -> dict:
         apps.sort(key=lambda a: -a["total_bytes"])
         clients = list(by_mac.values())
         total_bytes = sum(a["total_bytes"] for a in apps)
-        log.info("ubiquiti: collected %d client(s), %d app(s), %s bytes",
-                 len(clients), len(apps), total_bytes)
+        # --- Infrastructure devices + segmentation/security posture -----------
+        devices, dev_status = _fetch_devices(c, base, site, headers, log)
+        network_config = _fetch_network_config(c, base, site, headers, log)
+        log.info("ubiquiti: collected %d client(s), %d app(s), %d device(s), %s bytes",
+                 len(clients), len(apps), len(devices), total_bytes)
         stats = {"clients": len(clients), "apps": len(apps), "bytes_seen": total_bytes,
+                 "devices": len(devices),
                  "diag": {"site": site, "auth_mode": auth_mode,
-                          "devices_http": sta_status, "traffic_http": traffic_status}}
+                          "devices_http": sta_status, "traffic_http": traffic_status,
+                          "infra_http": dev_status}}
         if not clients:
             detail = f"site '{site}'"
             if isinstance(sta_status, int) and sta_status >= 300:
@@ -517,5 +522,86 @@ def collect(config: dict, credentials: dict, log) -> dict:
             "clients": clients,
             "apps": apps,
             "usage": usage,
+            "devices": devices,
+            "network_config": network_config,
             "stats": stats,
         }
+
+
+def _map_device_type(t: str) -> str:
+    t = (t or "").lower()
+    if t in ("ugw", "udm", "uxg", "usg"):
+        return "gateway"
+    if t == "usw":
+        return "switch"
+    if t == "uap":
+        return "ap"
+    return "other"
+
+
+def _fetch_devices(c, base, site, headers, log) -> tuple[list, object]:
+    """Fetch UniFi infrastructure devices (gateway/switch/AP) with firmware + update
+    state. Best-effort and defensive: a failure returns [] and the HTTP status so an
+    empty result is diagnosable, never a crash."""
+    out: list[dict] = []
+    dev_status: object = None
+    try:
+        r = c.get(f"{base}/proxy/network/api/s/{site}/stat/device", headers=headers)
+        dev_status = r.status_code
+        if r.status_code >= 300:
+            log.warning("ubiquiti: stat/device → HTTP %s", r.status_code)
+            return out, dev_status
+        body = r.json()
+        rows = body.get("data", body) if isinstance(body, dict) else body
+        for d in rows or []:
+            mac = (d.get("mac") or "").lower()
+            if not mac:
+                continue
+            out.append({
+                "device_key": mac, "mac": mac,
+                "name": d.get("name") or d.get("model") or mac,
+                "model": d.get("model", ""),
+                "device_type": _map_device_type(d.get("type", "")),
+                "ip": d.get("ip", ""),
+                "firmware": d.get("version", ""),
+                "update_available": bool(d.get("upgradable")),
+                "adopted": bool(d.get("adopted", True)),
+                "online": int(d.get("state", 0) or 0) == 1,
+                "uptime_seconds": int(d.get("uptime", 0) or 0),
+                "client_count": int(d.get("num_sta", 0) or 0),
+                "last_seen": _now_iso(),
+            })
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ubiquiti: stat/device failed: %s", exc)
+    return out, dev_status
+
+
+def _fetch_network_config(c, base, site, headers, log) -> dict:
+    """Fetch segmentation/security posture: IDS/IPS (threat management) + guest
+    network isolation. Best-effort; missing keys simply aren't reported."""
+    cfg: dict = {}
+    try:
+        r = c.get(f"{base}/proxy/network/api/s/{site}/rest/setting", headers=headers)
+        if r.status_code < 300:
+            body = r.json()
+            rows = body.get("data", body) if isinstance(body, dict) else body
+            for s in rows or []:
+                if s.get("key") == "ips":
+                    mode = (s.get("ips_mode") or s.get("mode") or "").lower()
+                    cfg["ids_enabled"] = bool(s.get("enabled")) or mode in ("ids", "ips", "idsips")
+                    cfg["ips_enabled"] = mode in ("ips", "idsips")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ubiquiti: rest/setting failed: %s", exc)
+    try:
+        r = c.get(f"{base}/proxy/network/api/s/{site}/rest/wlanconf", headers=headers)
+        if r.status_code < 300:
+            body = r.json()
+            rows = body.get("data", body) if isinstance(body, dict) else body
+            guest = [w for w in (rows or []) if w.get("is_guest")]
+            if guest:
+                cfg["guest_networks"] = len(guest)
+                cfg["guest_isolation"] = all(
+                    bool(w.get("l2_isolation", True)) for w in guest)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ubiquiti: wlanconf failed: %s", exc)
+    return cfg
