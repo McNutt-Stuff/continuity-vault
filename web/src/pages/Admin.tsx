@@ -7059,7 +7059,7 @@ const BLANK_VER: PlanVer = {
 const VERSION_KEYS: (keyof PlanVer)[] = [
   "base_price_cents", "protection_cents_per_tb", "cloud_cents_per_tb", "cloud_plus_cents_per_tb",
   "per_user_cents", "per_member_cents", "included_users", "included_members", "included_tb",
-  "min_tb", "entitlements", "compatible_addons",
+  "min_tb", "features", "entitlements", "compatible_addons",
 ];
 interface PlanForm {
   code: string; name: string; family: string; status: string;
@@ -7072,6 +7072,7 @@ function CatalogAdmin() {
   const [plans, setPlans] = useState<CatalogPlan[] | null>(null);
   const [form, setForm] = useState<PlanForm | null>(null);
   const [ents, setEnts] = useState<EntDef[]>([]);
+  const [flagOpts, setFlagOpts] = useState<{ value: string; label: string }[]>([]);
   const [addonOpts, setAddonOpts] = useState<{ value: string; label: string }[]>([]);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState("");
@@ -7079,6 +7080,7 @@ function CatalogAdmin() {
   async function load() {
     try { const r = await api.get<{ plans: CatalogPlan[] }>("/admin/catalog"); setPlans(r.plans || []); } catch { setPlans([]); }
     try { setEnts(await entRegistry()); } catch { /* ignore */ }
+    try { const c = await flagCatalog(); setFlagOpts(c.map((f) => ({ value: f.name, label: f.label }))); } catch { /* ignore */ }
     try { const a = await api.get<{ addons: Addon[] }>("/admin/addons"); setAddonOpts((a.addons || []).map((x) => ({ value: x.code, label: x.name || x.code }))); } catch { /* ignore */ }
   }
   useEffect(() => { void load(); }, []);
@@ -7134,19 +7136,26 @@ function CatalogAdmin() {
   function setSeats(n: number) { setV(isFamily ? { included_members: n, included_users: 0 } : { included_users: n, included_members: 0 }); }
   function setPerSeat(c: number) { setV(isFamily ? { per_member_cents: c, per_user_cents: 0 } : { per_user_cents: c, per_member_cents: 0 }); }
 
-  // "Features granted" on a plan = the feature-flag-backed entitlements only (stored
-  // in the version's entitlements map as {key: true}); quantity/capacity entitlements
-  // are handled by the Base plan / Usage fields, not this list.
-  const featureOpts = ents.filter((d) => d.feature).map((d) => ({ value: d.key, label: d.title }));
-  const featureKeys = new Set(featureOpts.map((o) => o.value));
-  const featureValue = form ? Object.keys(form.v.entitlements || {})
-    .filter((k) => featureKeys.has(k) && (form.v.entitlements as Record<string, unknown>)[k]) : [];
+  // "Features granted" on a plan = the feature flags this plan enables, stored on the
+  // version's ``features`` list (flag names) — the SAME full catalog an add-on offers,
+  // so a plan can grant any flag. Legacy plans stored these as feature-mapped
+  // entitlements ({ent_key: true}); surface those as selected too, and migrate them
+  // onto ``features`` (dropping the mapped entitlement bool) when the admin edits.
+  const _featureEntByFlag = new Map(ents.filter((d) => d.feature).map((d) => [d.feature as string, d.key]));
+  const featureValue = form ? Array.from(new Set([
+    ...(form.v.features || []),
+    ...ents.filter((d) => d.feature && (form.v.entitlements as Record<string, unknown>)?.[d.key] === true)
+      .map((d) => d.feature as string),
+  ])) : [];
   function setFeatures(sel: string[]) {
     if (!form) return;
+    // Single source of truth going forward: keep any NON-feature entitlements, drop
+    // the feature-mapped bools (they're now represented by the features list).
     const keep: Record<string, unknown> = {};
-    for (const [k, val] of Object.entries(form.v.entitlements || {})) if (!featureKeys.has(k)) keep[k] = val;
-    for (const k of sel) keep[k] = true;
-    setV({ entitlements: keep });
+    for (const [k, val] of Object.entries(form.v.entitlements || {})) {
+      if (![..._featureEntByFlag.values()].includes(k)) keep[k] = val;
+    }
+    setV({ features: sel, entitlements: keep });
   }
 
   if (!plans) return <Card><div className="muted">Loading catalog…</div></Card>;
@@ -7202,7 +7211,7 @@ function CatalogAdmin() {
 
           <div className="faint" style={{ fontSize: 11.5, margin: "14px 0 6px", fontWeight: 600 }}>What's included</div>
           <div className="grid grid-2" style={{ gap: 12 }}>
-            <MultiSelect label="Features granted" options={featureOpts} value={featureValue} onChange={setFeatures} placeholder="No features included" />
+            <MultiSelect label="Features granted" options={flagOpts} value={featureValue} onChange={setFeatures} placeholder="No features included" />
             <MultiSelect label="Compatible add-ons" options={addonOpts} value={form.v.compatible_addons || []} onChange={(compatible_addons) => setV({ compatible_addons })} placeholder="All add-ons" />
           </div>
 

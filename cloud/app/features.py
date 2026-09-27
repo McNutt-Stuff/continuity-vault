@@ -141,6 +141,17 @@ def _plan_addon_grant_src(tenant, name: str, db=None):
                     granted = bool(v.entitlements[ent_key]); origin = "plan"
             except Exception:  # noqa: BLE001
                 pass
+    # A catalog plan version can also enable a flag DIRECTLY by name (its ``features``
+    # list) — the same way an add-on does — so a plan can grant ANY feature flag, not
+    # only the entitlement-mapped ones. Needs a db session for the catalog lookup.
+    if db is not None and tenant is not None and plan:
+        try:
+            from . import catalog
+            v = catalog.effective_version(db, plan)
+            if v is not None and v.features and name in v.features:
+                granted = True; origin = "plan"
+        except Exception:  # noqa: BLE001
+            pass
     # Add-ons can ENABLE a flag (via their entitlements map or a direct feature_flags
     # entry). Needs a db session; when absent, only the plan layer applies.
     if db is not None and tenant is not None:
