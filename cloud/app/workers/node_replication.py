@@ -510,6 +510,33 @@ def _pull(s) -> int:
                     skip_by_tenant[tid] = skip_by_tenant.get(tid, 0) + 1
         if deferred:
             db.commit()
+        # Appliance-based integration instances are normally node-authoritative
+        # (created on the node, pushed UP — so they're intentionally NOT in
+        # _PULL_ORDER). But an instance created on the CONTROL PLANE (e.g. before
+        # this tenant was node-assigned, or via an unproxied create) is orphaned:
+        # it's never pulled down, the node can't serve the integration, and the
+        # appliance's report 404s here then falls back to the CP — stranding all the
+        # telemetry there and making the integration vanish from the node-proxied
+        # portal. Seed any CP-only instance INSERT-ONLY so the node owns it going
+        # forward, without ever clobbering a node-created one (which keeps its
+        # runtime + is reconciled via the push).
+        try:
+            from ..models import IntegrationInstance as _II
+            _cols = set(_II.__table__.columns.keys())
+            seeded = 0
+            for row in bundle.get("integration_instances", []) or []:
+                iid = row.get("id")
+                if iid and not db.get(_II, iid):
+                    db.add(_II(**{k: v for k, v in row.items() if k in _cols}))
+                    seeded += 1
+            if seeded:
+                db.commit()
+                n += seeded
+                logger.info("seeded %d control-plane-orphaned integration "
+                            "instance(s) onto this node", seeded)
+        except Exception:  # noqa: BLE001 — never break a pull on the seed
+            db.rollback()
+            logger.debug("integration instance seed failed", exc_info=True)
         # is_self is local: correct it now (the CP's is_self=True is excluded from
         # the pull, but a previously-replicated bad value must still be healed).
         # Without a correct is_self, the scheduler's active-tenant filter resolves

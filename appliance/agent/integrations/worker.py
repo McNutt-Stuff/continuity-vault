@@ -106,6 +106,8 @@ class IntegrationWorker:
             "clients": report.get("clients", []),
             "apps": report.get("apps", []),
             "usage": report.get("usage", []),
+            "devices": report.get("devices", []),
+            "network_config": report.get("network_config", {}),
             "stats": report.get("stats", {}),
         }
         try:
