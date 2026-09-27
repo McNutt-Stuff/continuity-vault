@@ -9,5 +9,6 @@ from __future__ import annotations
 
 from . import models  # noqa: F401 — register tables
 from . import providers  # noqa: F401 — registers the "arkive" core provider
+from . import signal_evidence  # noqa: F401 — registers the "signals" evidence provider
 from . import registry  # noqa: F401
 from . import engine  # noqa: F401

@@ -38,11 +38,34 @@ def run_tenant(db: Session, tenant) -> dict:
     try:
         _protection_gap_findings(db, tenant)
         _asset_reconciliation(db, tenant)
+        _provider_health_findings(db, tenant)
         engine.refresh_freshness(db, tid)
     except Exception:  # noqa: BLE001
         db.rollback()
         logger.exception("signal analysis derivation failed for tenant %s", tid)
     return results
+
+
+def _provider_health_findings(db: Session, tenant) -> None:
+    """A provider that is failing (not merely unconfigured) is a monitoring gap —
+    never treat dead telemetry as a clean environment. Surfaced as a finding +
+    auto-resolved when the provider recovers."""
+    from ..models import SignalProviderHealth
+    tid = tenant.id
+    active_fps: set[str] = set()
+    for h in db.query(SignalProviderHealth).filter(
+            SignalProviderHealth.tenant_id == tid).all():
+        if h.connection_status not in ("degraded", "offline"):
+            continue
+        f = engine.upsert_finding(
+            db, tid, "provider_stale",
+            title=f"Signal provider not reporting: {h.provider}",
+            description=(h.last_error or "The provider stopped collecting; coverage is degraded.")[:400],
+            severity="medium", category="SECURITY",
+            subject_type="provider", subject_id=h.provider,
+            remediation={"label": "View providers", "route": "/signals"})
+        active_fps.add(f.fingerprint)
+    engine.resolve_findings_not_in(db, tid, "provider_stale", active_fps)
 
 
 def _protection_gap_findings(db: Session, tenant) -> None:
