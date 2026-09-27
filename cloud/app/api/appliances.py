@@ -1425,12 +1425,23 @@ def heartbeat(body: HeartbeatRequest,
     # missed it, crashed mid-handling, or its result POST failed) is redelivered
     # on a later heartbeat until it is acked or its signed TTL expires. This stops
     # recovery/ingest from stalling forever on a single dropped delivery.
+    from .. import services
+    # OWNERSHIP: for a NODE-hosted tenant this box (the control plane) must NOT hand
+    # out commands — the assigned node owns the command queue + signs with the fleet
+    # key. When both the CP and the node delivered, the appliance flip-flopped
+    # endpoints, posted a command's result to the OTHER box (404 "command not
+    # found") and rejected the other box's differently-signed commands ("signature
+    # verify failed"). We still advertise node_url so the appliance follows it home;
+    # command delivery happens ONLY on the box that owns the appliance (node_url is
+    # None there). tenant_node_url returns None on the owning node (is_self).
+    appliance_node_url = services.tenant_node_url(db, appliance.tenant_id)
     ttl = settings.command_ttl_seconds or 900
     redeliver_after = max(60, settings.heartbeat_interval_seconds * 2)
-    cmds = (db.query(ApplianceCommand)
-            .filter(ApplianceCommand.appliance_id == appliance.id,
-                    ApplianceCommand.status.in_(["pending", "delivered"]))
-            .order_by(ApplianceCommand.sequence.asc()).all())
+    cmds = ([] if appliance_node_url else
+            (db.query(ApplianceCommand)
+             .filter(ApplianceCommand.appliance_id == appliance.id,
+                     ApplianceCommand.status.in_(["pending", "delivered"]))
+             .order_by(ApplianceCommand.sequence.asc()).all()))
     delivered = []
     delivered_types = []
     # Per-heartbeat inline-payload budget. OPEN_INGEST_WINDOW commands carry the
@@ -1466,12 +1477,11 @@ def heartbeat(body: HeartbeatRequest,
         logger.info("delivered %d command(s) to appliance %s: %s%s",
                     len(delivered), appliance.id, delivered_types,
                     f" (deferred {deferred} for next heartbeat)" if deferred else "")
-    from .. import services
     return {"commands": delivered,
             "config": _appliance_runtime_config(db, appliance),
             "latest_version": _appliance_bundle_version(),
             "control_plane_key_id": fleet.cloud_public_bundle().get("keyId"),
-            "node_url": services.tenant_node_url(db, appliance.tenant_id),
+            "node_url": appliance_node_url,
             "next_heartbeat_seconds": settings.heartbeat_interval_seconds}
 
 
