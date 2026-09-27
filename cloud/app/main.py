@@ -35,6 +35,7 @@ from .api import (
     restore,
     rules,
     search,
+    signals,
     signup,
     site,
     snapshots,
@@ -198,6 +199,7 @@ app.include_router(connectors.router, prefix=API)
 app.include_router(collections.router, prefix=API)
 app.include_router(rules.router, prefix=API)
 app.include_router(search.router, prefix=API)
+app.include_router(signals.router, prefix=API)
 app.include_router(snapshots.router, prefix=API)
 app.include_router(storage_instances.router, prefix=API)
 app.include_router(index_status.router, prefix=API)

@@ -73,6 +73,10 @@ def _should_proxy(method: str, path: str) -> bool:
         return True
     if path == "/api/restore" or path.startswith("/api/restore/"):
         return True
+    # Signals are generated + stored on the node that processes the tenant, so the
+    # Signals explorer/findings/provider-health are served from there.
+    if path == "/api/signals" or path.startswith("/api/signals/"):
+        return True
     # Vault Recovery Key management touches the vault key store, which lives on
     # the tenant's node — create/rotate/status must run there.
     if path == "/api/recovery-key" or path.startswith("/api/recovery-key/"):

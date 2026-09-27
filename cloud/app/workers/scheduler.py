@@ -118,6 +118,10 @@ def start_scheduler() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("integration health check failed")
             try:
+                _run_signal_platform()
+            except Exception:  # noqa: BLE001
+                logger.exception("signal platform sweep failed")
+            try:
                 _check_node_health()
             except Exception:  # noqa: BLE001
                 logger.exception("node health check failed")
@@ -260,6 +264,7 @@ def _alert_admins_storage_failed(db, cs, err: str) -> None:
 
 _last_appliance_health: datetime | None = None
 _last_integration_health: datetime | None = None
+_last_signal_platform: datetime | None = None
 
 
 def _recent_audit_exists(db, tenant_id, action: str, resource: str, hours: int) -> bool:
@@ -470,6 +475,44 @@ def _maybe_flag_appliance_flapping(db, appliance) -> None:
             dedupe_key=f"appliance_flap:{appliance.id}", dedupe_within_hours=24)
     except Exception:  # noqa: BLE001
         logger.exception("appliance flap alert failed for %s", getattr(appliance, "id", "?"))
+
+
+def _signal_platform_enabled(t) -> bool:
+    """Tenant has opted into the Signal Platform (or Compliance, which consumes
+    signals). Default OFF — only explicitly-enabled tenants incur the sweep."""
+    ff = t.feature_flags or {}
+    return bool(ff.get("signal_platform_enabled") is True
+                or ff.get("compliance_enabled") is True)
+
+
+def _run_signal_platform() -> None:
+    """Generate normalized signals + derive findings for opted-in tenants THIS box
+    owns, reusing already-collected data (no new vendor calls). Runs ~every 15 min."""
+    global _last_signal_platform
+    now = datetime.utcnow()
+    if _last_signal_platform and (now - _last_signal_platform) < timedelta(minutes=15):
+        return
+    _last_signal_platform = now
+    from ..models import Tenant
+    from ..signals import analysis
+    tenants = 0
+    total_signals = 0
+    with SessionLocal() as db:
+        owned = _owned_tenant_ids(db)
+        for t in db.query(Tenant).all():
+            if t.id not in owned or not _signal_platform_enabled(t):
+                continue
+            try:
+                res = analysis.run_tenant(db, t)
+                db.commit()
+                tenants += 1
+                total_signals += sum(int((r or {}).get("signals", 0)) for r in res.values())
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("signal platform sweep failed for tenant %s", t.id)
+    if tenants:
+        logger.info("signal platform sweep: %d tenant(s), %d signal(s) refreshed",
+                    tenants, total_signals)
 
 
 def _check_integration_health() -> None:
