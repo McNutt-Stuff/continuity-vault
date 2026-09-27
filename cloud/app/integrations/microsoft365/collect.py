@@ -133,16 +133,53 @@ def _ensure_managed_collection(db: Session, inst, source, vault, prof: dict):
     """Create/refresh the Data Map Collection that protects a managed source on
     the user's behalf — routed + scheduled per the org profile, owned by the
     user's vault, flagged managed (so the standard connector scheduler skips it;
-    the M365 worker collects it via the admin app-only token)."""
+    the M365 worker collects it via the admin app-only token).
+
+    The collection is bound to the source by STABLE keys, not the source's row id:
+    a re-provisioned source gets a fresh id, and keying the collection off that id
+    used to orphan the existing collection (and all its protected data) and start a
+    new empty one. We now match by source_key (and, for a per-user source, the
+    owning vault + workload) and RE-LINK the collection to the current source id —
+    which also heals any pre-existing orphan on the next collection run."""
     from ...models import Collection
     st = _WORKLOADS[source.workload]["source_type"]
+    candidates = (db.query(Collection)
+                  .filter(Collection.tenant_id == source.tenant_id,
+                          Collection.source_type == st).all())
+
+    def _managed_for_inst(c) -> bool:
+        cfg = c.config or {}
+        return bool(cfg.get("managed") and cfg.get("m365_instance_id") == inst.id)
+
+    def _doc_count(cid: str) -> int:
+        from ...models import SearchDocument
+        from sqlalchemy import func
+        return int(db.query(func.count(SearchDocument.id))
+                   .filter(SearchDocument.collection_id == cid).scalar() or 0)
+
     coll = None
-    for c in (db.query(Collection)
-              .filter(Collection.tenant_id == source.tenant_id,
-                      Collection.source_type == st).all()):
-        if (c.config or {}).get("m365_source_id") == source.id:
-            coll = c
-            break
+    # For a per-user source, the owning vault holds exactly one logical managed
+    # collection per workload — but a past source-id churn may have left several
+    # (an orphan with all the data + an empty re-created one). Pick the one that
+    # actually holds the data so we consolidate onto it and never strand history.
+    if vault is not None and source.ownership_type == "managed_user":
+        mine = [c for c in candidates if _managed_for_inst(c)
+                and c.vault_id == vault.id
+                and (c.config or {}).get("m365_workload") == source.workload]
+        if mine:
+            coll = max(mine, key=lambda c: _doc_count(c.id))
+    # Otherwise (org source, or first-ever run) bind by exact id, then by the
+    # stable Microsoft resource key (which survives a source-id change).
+    if coll is None:
+        for c in candidates:
+            if _managed_for_inst(c) and (c.config or {}).get("m365_source_id") == source.id:
+                coll = c
+                break
+    if coll is None and source.source_key:
+        for c in candidates:
+            if _managed_for_inst(c) and (c.config or {}).get("m365_source_key") == source.source_key:
+                coll = c
+                break
     dests = prof.get("destinations") or ["cv-cloud"]
     interval = prof.get("backup_interval_minutes")
     if coll is None:
@@ -152,16 +189,25 @@ def _ensure_managed_collection(db: Session, inst, source, vault, prof: dict):
             backup_interval_minutes=interval,
             config={"m365_source_id": source.id, "managed": True,
                     "m365_workload": source.workload,
+                    "m365_source_key": source.source_key,
                     "m365_instance_id": inst.id})
         db.add(coll)
         db.flush()
     else:
-        # Keep the data-map profile in sync with the org settings + mapping.
+        # Keep the data-map profile in sync with the org settings + mapping, and
+        # RE-BIND to the current source + stamp the stable key so a future source-id
+        # change never orphans this collection (or its protected data) again.
         coll.destinations = list(dests)
         coll.backup_interval_minutes = interval
         coll.name = source.name
         if vault is not None and coll.vault_id != vault.id:
             coll.vault_id = vault.id
+        cfg = dict(coll.config or {})
+        cfg.update({"m365_source_id": source.id, "managed": True,
+                    "m365_workload": source.workload,
+                    "m365_source_key": source.source_key,
+                    "m365_instance_id": inst.id})
+        coll.config = cfg
     return coll
 
 
