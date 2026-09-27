@@ -507,12 +507,38 @@ def _run_signal_platform() -> None:
                 db.commit()
                 tenants += 1
                 total_signals += sum(int((r or {}).get("signals", 0)) for r in res.values())
+                _alert_signal_providers_offline(db, t)
             except Exception:  # noqa: BLE001
                 db.rollback()
                 logger.exception("signal platform sweep failed for tenant %s", t.id)
     if tenants:
         logger.info("signal platform sweep: %d tenant(s), %d signal(s) refreshed",
                     tenants, total_signals)
+
+
+def _alert_signal_providers_offline(db, tenant) -> None:
+    """Alert platform admins when a tenant's signal provider is failing (degraded/
+    offline) — a monitoring blind spot, never a clean state. Deduped per provider."""
+    from ..models import SignalProviderHealth
+    bad = [h for h in db.query(SignalProviderHealth)
+           .filter(SignalProviderHealth.tenant_id == tenant.id).all()
+           if h.connection_status in ("degraded", "offline")]
+    if not bad:
+        return
+    try:
+        from .. import admin_notifications
+        cust = tenant.name or tenant.id
+        rows = [{"icon": "activity", "name": h.provider,
+                 "detail": (h.last_error or h.connection_status)[:120]} for h in bad[:6]]
+        admin_notifications.raise_alert(
+            db, "platform_health",
+            subject=f"[Arkive] Signal provider degraded — {cust}",
+            title="Signal provider not reporting",
+            intro=f"{len(bad)} signal provider(s) for {cust} are failing — coverage is degraded.",
+            rows=rows, severity="warning", tenant_id=tenant.id,
+            dedupe_key=f"signal_provider:{tenant.id}", dedupe_within_hours=12)
+    except Exception:  # noqa: BLE001
+        logger.exception("signal provider offline alert failed for %s", tenant.id)
 
 
 def _check_integration_health() -> None:
