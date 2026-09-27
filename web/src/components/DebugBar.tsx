@@ -74,7 +74,7 @@ function chainShort(c: DebugCall): string {
 type Tab = "requests" | "server" | "errors" | "fleet";
 
 interface FleetNode {
-  node_id: string; name: string; endpoint: string;
+  node_id: string; name: string; endpoint: string; kind?: string;
   reachable: boolean | null; ms: number | null; error: string | null;
   chain: RouteHop[];
 }
@@ -87,6 +87,7 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
   const [liveErr, setLiveErr] = useState<string>("");
   const [selected, setSelected] = useState<DebugCall | null>(null);
   const [fleet, setFleet] = useState<FleetNode[] | null>(null);
+  const [fleetNote, setFleetNote] = useState<string>("");
   const [fleetErr, setFleetErr] = useState<string>("");
   const [fleetLoading, setFleetLoading] = useState(false);
   const timer = useRef<number | null>(null);
@@ -95,8 +96,10 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
 
   const loadFleet = async () => {
     setFleetLoading(true); setFleetErr("");
-    try { setFleet((await api.get<{ nodes: FleetNode[] }>("/debug-panel/fleet-path")).nodes); }
-    catch (e: any) { setFleetErr(e?.message || "failed to probe the fleet"); }
+    try {
+      const r = await api.get<{ nodes: FleetNode[]; note?: string }>("/debug-panel/fleet-path");
+      setFleet(r.nodes); setFleetNote(r.note || "");
+    } catch (e: any) { setFleetErr(e?.message || "failed to probe the fleet"); }
     finally { setFleetLoading(false); }
   };
   useEffect(() => { if (tab === "fleet" && fleet === null && !fleetLoading) void loadFleet(); }, [tab]);
@@ -131,7 +134,7 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
           display: "flex", flexDirection: "column", background: "var(--panel)",
           borderBottom: "1px solid var(--border-soft)" }}>
           <div className="row" style={{ gap: 6, padding: "6px 10px", borderBottom: "1px solid var(--border-soft)", background: "var(--bg-elev)" }}>
-            {(["requests", "server", "errors", ...(live?.is_admin ? ["fleet"] : [])] as Tab[]).map((t) => (
+            {(["requests", "server", "errors", "fleet"] as Tab[]).map((t) => (
               <button key={t} className={"btn sm " + (tab === t ? "primary" : "ghost")}
                 onClick={() => setTab(t)} style={{ textTransform: "capitalize" }}>
                 {t}{t === "requests" ? ` · ${calls.length}` : ""}{t === "errors" && live ? ` · ${live.recent_errors.length}` : ""}{t === "fleet" && fleet ? ` · ${fleet.length}` : ""}
@@ -205,12 +208,12 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
             {tab === "fleet" && (
               <div className="stack" style={{ gap: 6 }}>
                 <div style={{ color: "var(--text-faint)", marginBottom: 2 }}>
-                  Live CP→node round trip to every customer node (fleet-authed). Your own
-                  requests only proxy when your tenant is node-hosted; this probes the path regardless.
+                  Live CP→node round trip{live?.is_admin ? " to every customer node" : " for your tenant"} (fleet-authed).
+                  Your own requests only proxy when your tenant is node-hosted; this probes the path regardless.
                 </div>
-                {fleetLoading && <div className="muted">Probing the fleet…</div>}
+                {fleetLoading && <div className="muted">Probing…</div>}
                 {fleetErr && <div style={{ color: "var(--danger-c)" }}>{fleetErr}</div>}
-                {fleet && fleet.length === 0 && <div className="muted">No customer nodes in the fleet.</div>}
+                {fleet && fleet.length === 0 && <div className="muted">{fleetNote || "No nodes to probe."}</div>}
                 {fleet?.map((f) => (
                   <div key={f.node_id} className="row" style={{ gap: 10, alignItems: "center", borderBottom: "1px solid var(--border-soft)", padding: "4px 0" }}>
                     <span style={{ color: f.reachable ? "var(--ok)" : "var(--danger-c)", fontWeight: 700, minWidth: 60 }}>
@@ -218,6 +221,7 @@ export function DebugBar({ onDisable }: { onDisable?: () => void }) {
                     </span>
                     <span style={{ flex: 1, wordBreak: "break-all" }}>
                       {f.chain.map(hopLabel).join(" → ")}
+                      {f.kind === "standby" ? <span style={{ color: "var(--text-faint)" }}> · standby</span> : null}
                       {f.error ? <span style={{ color: "var(--danger-c)" }}> — {f.error}</span> : null}
                     </span>
                     <span style={{ color: (f.ms ?? 0) > 500 ? "var(--warn)" : "var(--text-dim)", whiteSpace: "nowrap" }}>

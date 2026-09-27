@@ -141,34 +141,49 @@ def live(principal: security.Principal = Depends(security.get_principal),
 
 @router.get("/fleet-path")
 def fleet_path(principal: security.Principal = Depends(security.get_principal),
+               tenant: Tenant = Depends(security.get_tenant),
                db: Session = Depends(get_db)):
-    """Platform-admin only: probe the CP→node path to EVERY customer-tenant node
-    with a real fleet-authed round trip, so an admin (whose own tenant is CP-hosted
-    and never proxies) can still SEE the end-to-end inter-node path + timing. Each
-    entry returns the assembled chain [control-plane, node] using the node's own
+    """Probe the CP→node path with a real fleet-authed round trip so ANY overlay
+    user can SEE the end-to-end inter-node path + timing (their own requests only
+    proxy when their tenant is node-hosted). SCOPED: a platform admin sees every
+    customer-tenant node; a regular user sees ONLY their own tenant's active (+
+    standby) node — we never expose the whole fleet topology to a customer. Each
+    entry returns the assembled chain [control-plane, node] via the node's own
     X-Arkive-Hop breadcrumb."""
     import httpx
     from ..config import get_settings
     from ..models import Node
     from . import site as _site
 
-    if not principal.is_platform_admin:
-        raise HTTPException(403, "Platform admin only.")
+    user = db.get(User, principal.user_id)
+    if not (principal.is_platform_admin
+            or features.resolve(user, tenant, "debug_overlay_enabled", db)):
+        raise HTTPException(403, "The debug overlay is not enabled for this account.")
     s = get_settings()
     cp_label = s.node_name or s.domain or "control-plane"
     if (s.node_role or "control-plane") != "control-plane":
-        return {"cp": cp_label, "nodes": [], "note": "not the control plane"}
+        return {"cp": cp_label, "nodes": [], "scope": "node",
+                "note": "served on a customer node"}
+    if principal.is_platform_admin:
+        nodes = db.query(Node).filter(Node.role == "customer-tenant").all()
+        scope = "fleet"
+    else:
+        ids = [x for x in (tenant.node_id, tenant.standby_node_id) if x]
+        nodes = (db.query(Node).filter(Node.id.in_(ids)).all() if ids else [])
+        scope = "tenant"
     try:
         secret = _site._fleet_secret()
     except Exception:  # noqa: BLE001
         secret = None
     out = []
-    for n in db.query(Node).filter(Node.role == "customer-tenant").all():
+    for n in nodes:
         if not n.endpoint:
             continue
         base = n.endpoint.rstrip("/")
         cp_hop = {"role": "control-plane", "name": cp_label, "ms": None}
-        row = {"node_id": n.id, "name": n.name, "endpoint": n.endpoint,
+        role = ("standby" if (scope == "tenant" and n.id == tenant.standby_node_id
+                              and n.id != tenant.node_id) else "active")
+        row = {"node_id": n.id, "name": n.name, "endpoint": n.endpoint, "kind": role,
                "reachable": None, "ms": None, "chain": [cp_hop], "error": None}
         t0 = time.perf_counter()
         try:
@@ -193,4 +208,7 @@ def fleet_path(principal: security.Principal = Depends(security.get_principal),
             row["chain"] = [cp_hop, {"role": "node", "name": n.name,
                                      "error": "unreachable"}]
         out.append(row)
-    return {"cp": cp_label, "nodes": out}
+    note = ("" if out else
+            ("Your data is served directly by the control plane — no node hop."
+             if scope == "tenant" else "No customer nodes in the fleet."))
+    return {"cp": cp_label, "nodes": out, "scope": scope, "note": note}
