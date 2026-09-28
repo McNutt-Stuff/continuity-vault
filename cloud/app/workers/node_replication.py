@@ -526,7 +526,6 @@ def _pull(s) -> int:
         # (node owns its runtime; the push reconciles the CP).
         try:
             from ..models import IntegrationInstance as _II
-            _cols = set(_II.__table__.columns.keys())
             standby_tids = set(bundle.get("standby_tenant_ids") or [])
             seeded = warmed = 0
             for row in bundle.get("integration_instances", []) or []:
@@ -535,13 +534,14 @@ def _pull(s) -> int:
                     continue
                 existing = db.get(_II, iid)
                 if existing is None:
-                    db.add(_II(**{k: v for k, v in row.items() if k in _cols}))
-                    seeded += 1
+                    # apply_one() deserializes datetimes/JSON via _upsert and wraps
+                    # in a SAVEPOINT — a raw _II(**row) would pass ISO strings to
+                    # DateTime columns and fail the insert (silently swallowed).
+                    if apply_one(_II, row):
+                        seeded += 1
                 elif row.get("tenant_id") in standby_tids:
-                    for k, v in row.items():
-                        if k in _cols and k != "id":
-                            setattr(existing, k, v)
-                    warmed += 1
+                    if apply_one(_II, row):
+                        warmed += 1
             if seeded or warmed:
                 db.commit()
                 n += seeded + warmed
