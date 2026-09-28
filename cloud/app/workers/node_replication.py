@@ -512,28 +512,42 @@ def _pull(s) -> int:
             db.commit()
         # Appliance-based integration instances are normally node-authoritative
         # (created on the node, pushed UP — so they're intentionally NOT in
-        # _PULL_ORDER). But an instance created on the CONTROL PLANE (e.g. before
-        # this tenant was node-assigned, or via an unproxied create) is orphaned:
-        # it's never pulled down, the node can't serve the integration, and the
-        # appliance's report 404s here then falls back to the CP — stranding all the
-        # telemetry there and making the integration vanish from the node-proxied
-        # portal. Seed any CP-only instance INSERT-ONLY so the node owns it going
-        # forward, without ever clobbering a node-created one (which keeps its
-        # runtime + is reconciled via the push).
+        # _PULL_ORDER). Two cases still need them applied on pull:
+        #   1) An instance created on the CONTROL PLANE (before this tenant was
+        #      node-assigned, or via an unproxied create) is orphaned: never pulled
+        #      down, so the node can't serve the integration and the appliance's
+        #      report 404s here then falls back to the CP — stranding the telemetry.
+        #   2) A tenant this node is the warm STANDBY for: the instance must stay in
+        #      sync (config/credentials/status) so that ON SWITCHOVER the promoted
+        #      node can drive the appliance immediately — integrations move with the
+        #      tenant, like receipts + the search index.
+        # Seed missing instances INSERT-ONLY; for a STANDBY tenant additionally keep
+        # an existing copy fully warmed. An ACTIVE tenant's instance is left alone
+        # (node owns its runtime; the push reconciles the CP).
         try:
             from ..models import IntegrationInstance as _II
             _cols = set(_II.__table__.columns.keys())
-            seeded = 0
+            standby_tids = set(bundle.get("standby_tenant_ids") or [])
+            seeded = warmed = 0
             for row in bundle.get("integration_instances", []) or []:
                 iid = row.get("id")
-                if iid and not db.get(_II, iid):
+                if not iid:
+                    continue
+                existing = db.get(_II, iid)
+                if existing is None:
                     db.add(_II(**{k: v for k, v in row.items() if k in _cols}))
                     seeded += 1
-            if seeded:
+                elif row.get("tenant_id") in standby_tids:
+                    for k, v in row.items():
+                        if k in _cols and k != "id":
+                            setattr(existing, k, v)
+                    warmed += 1
+            if seeded or warmed:
                 db.commit()
-                n += seeded
-                logger.info("seeded %d control-plane-orphaned integration "
-                            "instance(s) onto this node", seeded)
+                n += seeded + warmed
+                if seeded:
+                    logger.info("seeded %d control-plane/standby integration "
+                                "instance(s) onto this node", seeded)
         except Exception:  # noqa: BLE001 — never break a pull on the seed
             db.rollback()
             logger.debug("integration instance seed failed", exc_info=True)
@@ -880,12 +894,19 @@ def _push(s) -> int:
                 ins_high = row.generated_at
         # Integration telemetry the appliances reported (instance status + network
         # rows changed since the cursor). Curation (monitor_state/of_interest) is
-        # CP-owned, so pushing telemetry back never clobbers it.
-        for i in db.query(IntegrationInstance).all():
+        # CP-owned, so pushing telemetry back never clobbers it. Scope to OWNED
+        # tenants so a node that a tenant just MIGRATED away from stops pushing its
+        # now-stale integration state up and clobbering the new active node's push.
+        iiq = db.query(IntegrationInstance)
+        if owned_tids is not None:
+            iiq = iiq.filter(IntegrationInstance.tenant_id.in_(owned_tids))
+        for i in iiq.all():
             integ_instances.append(_row(i))
         for model, sink in ((NetworkClient, net_clients), (NetworkApp, net_apps),
                             (NetworkUsage, net_usage), (NetworkDevice, net_devices)):
             q = db.query(model)
+            if owned_tids is not None:
+                q = q.filter(model.tenant_id.in_(owned_tids))
             if integ_since is not None:
                 q = q.filter(model.updated_at > integ_since)
             for row in q.order_by(model.updated_at.asc()).limit(4000).all():
@@ -893,6 +914,8 @@ def _push(s) -> int:
                 if row.updated_at and (integ_high is None or row.updated_at > integ_high):
                     integ_high = row.updated_at
         rq2 = db.query(IntegrationRun)
+        if owned_tids is not None:
+            rq2 = rq2.filter(IntegrationRun.tenant_id.in_(owned_tids))
         if integ_since is not None:
             rq2 = rq2.filter(IntegrationRun.created_at > integ_since)
         for row in rq2.order_by(IntegrationRun.created_at.asc()).limit(1000).all():
