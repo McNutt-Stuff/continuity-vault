@@ -431,12 +431,42 @@ def rebuild(db: Session, user: User) -> int:
         SearchDocument.category.in_(_INTERACTION_CATEGORIES))
     if vids:
         mq = mq.filter(SearchDocument.vault_id.in_(vids))
-    # Buffer per-message parsed parties so we can union + attribute after seeding.
-    message_rows: list[tuple] = []
+    # First pass: parse every message's parties (buffered) and, per EMAIL identifier,
+    # record how many DISTINCT other people it co-occurs with + which roles it played.
+    # A mailbox OWNER sends/receives across hundreds of correspondents; a single heavy
+    # correspondent only co-occurs with the owner. This discovers the user's OWN
+    # address(es) even for a LOCAL import (outlook_local / PST) that carries no
+    # connected-account identity and no is_from_me hint — without it those messages
+    # fall to direction "unknown" and never count toward sent/received.
+    parsed_msgs: list[tuple] = []
+    co_emails: dict[str, set[str]] = defaultdict(set)
+    email_roles: dict[str, set[str]] = defaultdict(set)
     for source_type, doc_type, object_id, meta, modified_at, size in mq.all():
         parties, has_from, has_to = _message_parties(meta or {})
         if not parties:
             continue
+        parsed_msgs.append((source_type or "", doc_type or "", object_id or "",
+                            parties, _meta_direction(meta or {}), modified_at, int(size or 0)))
+        emails = [v for (t, v, _r, _n, _role) in parties if t == "email"]
+        emails_set = set(emails)
+        for (t, v, _r, _n, role) in parties:
+            if t == "email":
+                if len(co_emails[v]) < 64:  # cap — the 10-distinct threshold is tiny
+                    co_emails[v].update(e for e in emails_set if e != v)
+                email_roles[v].add(role)
+    # Self = an email that co-occurs with many distinct correspondents AND both sends
+    # (from) and receives (to/cc/bcc) — the shape of a mailbox owner, not a contact.
+    auto_self = {v for v, co in co_emails.items()
+                 if len(co) >= 10 and ("from" in email_roles[v])
+                 and bool(email_roles[v] & {"to", "cc", "bcc"})}
+    if auto_self:
+        self_ids = self_ids | auto_self
+        logger.info("unified contacts: inferred %d self email(s) for %s: %s",
+                    len(auto_self), user.id, ", ".join(sorted(auto_self))[:300])
+
+    # Second pass: attribute counterparties + direction against the full self set.
+    message_rows: list[tuple] = []
+    for source_type, doc_type, object_id, parties, meta_dir, modified_at, size in parsed_msgs:
         # Counterparties = everyone who isn't the user.
         counter = [(t, v, raw, name, role) for (t, v, raw, name, role) in parties if v not in self_ids]
         if not counter:
@@ -444,13 +474,13 @@ def rebuild(db: Session, user: User) -> int:
         self_in_from = any(v in self_ids and role == "from" for (_t, v, _r, _n, role) in parties)
         self_in_to = any(v in self_ids and role in ("to", "cc", "bcc")
                          for (_t, v, _r, _n, role) in parties)
-        direction = (_meta_direction(meta or {})
+        direction = (meta_dir
                      or ("out" if self_in_from else "in" if self_in_to else "unknown"))
         # Union counterparties on the same message? No — different recipients of a
         # group email aren't the same person. Only union a single counterparty's
         # own identifiers is N/A here (one value each). Keep them separate.
-        message_rows.append((source_type or "", doc_type or "", object_id or "",
-                             counter, direction, modified_at, int(size or 0)))
+        message_rows.append((source_type, doc_type, object_id,
+                             counter, direction, modified_at, size))
 
     # --- Assemble persons by union root --------------------------------------
     people: dict[str, _Person] = {}
@@ -968,6 +998,45 @@ def merge(db: Session, user: User, primary_id: str, other_id: str) -> None:
     if (other.details or {}) and not (primary.details or {}):
         primary.details = other.details
     primary.starred = primary.starred or other.starred
+    # Combine interaction analytics so the merged contact's sources (icons + "how
+    # you connect") and sent/received counts reflect BOTH records — otherwise the
+    # primary keeps only its own pre-merge stats while showing the other's moved
+    # exchanges/identities (missing icons + undercounted direction totals).
+    primary.source_types = sorted(set(primary.source_types or []) | set(other.source_types or []))
+    primary.interaction_count = int(primary.interaction_count or 0) + int(other.interaction_count or 0)
+    _times = [t for t in (primary.first_interaction_at, other.first_interaction_at) if t]
+    primary.first_interaction_at = min(_times) if _times else None
+    _times = [t for t in (primary.last_interaction_at, other.last_interaction_at) if t]
+    primary.last_interaction_at = max(_times) if _times else None
+    primary.stats = _merge_stats(primary.stats, other.stats)
+    primary.primary_email = primary.primary_email or other.primary_email
+    primary.primary_phone = primary.primary_phone or other.primary_phone
     primary.updated_at = _now()
     db.delete(other)
     db.commit()
+
+
+def _merge_stats(a: dict | None, b: dict | None) -> dict:
+    """Combine two contacts' analytics blobs (summing counts, unioning months) so a
+    merge doesn't lose the folded-in record's sources/direction totals."""
+    a, b = dict(a or {}), dict(b or {})
+    by_source: dict[str, int] = defaultdict(int)
+    for blob in (a.get("by_source") or {}, b.get("by_source") or {}):
+        for k, v in blob.items():
+            by_source[k] += int(v or 0)
+    adir, bdir = a.get("by_direction") or {}, b.get("by_direction") or {}
+    by_month: dict[str, int] = defaultdict(int)
+    for lst in (a.get("by_month") or [], b.get("by_month") or []):
+        for row in lst:
+            by_month[row.get("m")] += int(row.get("count") or 0)
+    by_month.pop(None, None)
+    top = max(by_source.items(), key=lambda kv: kv[1])[0] if by_source else ""
+    return {
+        "by_source": dict(by_source),
+        "by_direction": {"in": int(adir.get("in") or 0) + int(bdir.get("in") or 0),
+                         "out": int(adir.get("out") or 0) + int(bdir.get("out") or 0)},
+        "by_month": [{"m": m, "count": c} for m, c in sorted(by_month.items())],
+        "bytes": int(a.get("bytes") or 0) + int(b.get("bytes") or 0),
+        "top_source": top,
+        "identity_count": int(a.get("identity_count") or 0) + int(b.get("identity_count") or 0),
+    }
