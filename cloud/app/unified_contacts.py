@@ -49,9 +49,58 @@ _INTERACTION_DOC_TYPES = ("email", "message", "post", "comment", "dm", "chat")
 # overridable per contact via ``pinned_circle``.
 CIRCLES = ("inner", "close", "active", "acquaintance", "dormant")
 
+# Common English given-name diminutives → canonical, so "Rob" matches "Robert",
+# "Bill" matches "William", etc. Bidirectional lookup is built below. Deliberately
+# high-signal only (used to SUGGEST, not silently merge).
+_NICKNAMES: dict[str, str] = {
+    "rob": "robert", "robbie": "robert", "bob": "robert", "bobby": "robert",
+    "bill": "william", "billy": "william", "will": "william", "willie": "william",
+    "liam": "william", "jim": "james", "jimmy": "james", "jamie": "james",
+    "mike": "michael", "mick": "michael", "mikey": "michael",
+    "dave": "david", "davey": "david", "tom": "thomas", "tommy": "thomas",
+    "dick": "richard", "rick": "richard", "ricky": "richard", "rich": "richard",
+    "rich ": "richard", "chuck": "charles", "charlie": "charles", "chas": "charles",
+    "joe": "joseph", "joey": "joseph", "tony": "anthony", "ant": "anthony",
+    "steve": "steven", "stevie": "steven", " steph": "stephen", "chris": "christopher",
+    "topher": "christopher", "matt": "matthew", "matty": "matthew",
+    "dan": "daniel", "danny": "daniel", "ben": "benjamin", "benny": "benjamin",
+    "sam": "samuel", "sammy": "samuel", "nick": "nicholas", "nicky": "nicholas",
+    "andy": "andrew", "drew": "andrew", "ed": "edward", "eddie": "edward",
+    "ted": "edward", "teddy": "edward", "ron": "ronald", "ronnie": "ronald",
+    "pat": "patrick", "paddy": "patrick", "greg": "gregory", "jeff": "jeffrey",
+    "ken": "kenneth", "kenny": "kenneth", "larry": "lawrence", "gabe": "gabriel",
+    "nate": "nathaniel", "zach": "zachary", "zack": "zachary", "alex": "alexander",
+    "xander": "alexander", "fred": "frederick", "freddie": "frederick",
+    "phil": "philip", "vince": "vincent", "vinny": "vincent", "gus": "augustus",
+    "art": "arthur", "artie": "arthur", "frank": "franklin", "hank": "henry",
+    "harry": "henry", "jack": "john", "johnny": "john", "jon": "jonathan",
+    # Female
+    "liz": "elizabeth", "lizzie": "elizabeth", "beth": "elizabeth", "betty": "elizabeth",
+    "eliza": "elizabeth", "kate": "katherine", "katie": "katherine", "kathy": "katherine",
+    "kat": "katherine", "cathy": "catherine", "sue": "susan", "susie": "susan",
+    "maggie": "margaret", "meg": "margaret", "peggy": "margaret", "marge": "margaret",
+    "jen": "jennifer", "jenny": "jennifer", "becky": "rebecca", "becca": "rebecca",
+    "cindy": "cynthia", "deb": "deborah", "debbie": "deborah", "chris ": "christine",
+    "chrissy": "christine", "pam": "pamela", "pammy": "pamela", "trish": "patricia",
+    "patty": "patricia", "val": "valerie", "vicky": "victoria", "vick": "victoria",
+    "steph": "stephanie", "steffi": "stephanie", "tina": "christina",
+    "nancy": "ann", "annie": "ann", "fran": "frances", "gail": "abigail",
+    "abby": "abigail", "allie": "alison", "andi": "andrea", "angie": "angela",
+    "barb": "barbara", "babs": "barbara", "carrie": "caroline", "connie": "constance",
+    "dot": "dorothy", "dottie": "dorothy", "ginny": "virginia", "josie": "josephine",
+    "mandy": "amanda", "mel": "melissa", "missy": "melissa", "nat": "natalie",
+    "sandy": "sandra", "terri": "theresa", "wendy": "gwendolyn",
+}
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _canon_given(token: str) -> str:
+    """Canonicalize a given name through the nickname map (Rob→robert)."""
+    t = (token or "").strip().lower().strip(".")
+    return _NICKNAMES.get(t, t)
 
 
 def _norm_name(name: str) -> str:
@@ -60,6 +109,38 @@ def _norm_name(name: str) -> str:
 
 def _sort_key(name: str) -> str:
     return _norm_name(name)
+
+
+def _name_similarity(a: str, b: str) -> float:
+    """Loose person-name match → confidence 0..1 (0 = no match). Requires the same
+    SURNAME, then matches the given name exactly, via a nickname/diminutive
+    (Rob↔Robert), as a prefix (Rob↔Robert), or as an initial (R.↔Robert). Keeps
+    middle names out of the way by comparing first + last tokens only."""
+    ta = [t for t in _norm_name(a).replace(",", " ").split() if t]
+    tb = [t for t in _norm_name(b).replace(",", " ").split() if t]
+    if len(ta) < 2 or len(tb) < 2:
+        return 0.0
+    # Surnames must match (allow a surname that's an initial only if the other is 1 char).
+    sa, sb = ta[-1].strip("."), tb[-1].strip(".")
+    if sa != sb:
+        return 0.0
+    ga, gb = ta[0].strip("."), tb[0].strip(".")
+    if not ga or not gb:
+        return 0.0
+    if ga == gb:
+        return 0.95
+    ca, cb = _canon_given(ga), _canon_given(gb)
+    if ca == cb:                              # Rob↔Robert (both → "robert")
+        return 0.9
+    # One is an initial of the other (R ↔ Robert).
+    if (len(ga) == 1 and gb.startswith(ga)) or (len(gb) == 1 and ga.startswith(gb)):
+        return 0.6
+    # One a clear prefix of the other (min 3 chars) — "Rob" ⊂ "Robert".
+    if len(ga) >= 3 and cb.startswith(ca):
+        return 0.78
+    if len(gb) >= 3 and ca.startswith(cb):
+        return 0.78
+    return 0.0
 
 
 class _Union:
@@ -431,11 +512,13 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
 
 
 def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime) -> None:
-    """Raise conservative merge suggestions: two deduced contacts that share a
-    normalized name but NO identifier look like the same person — surface it for
-    the user to accept rather than silently merging."""
+    """Raise conservative LINK + MERGE suggestions for people who look like the
+    same person but share no identifier — using LOOSE NAME MATCHING (Rob↔Robert,
+    initials, prefixes). A loose message-only contact that name-matches a real
+    contact card becomes a LINK suggestion (attach its identifier); two substantive
+    contacts become a MERGE suggestion. Always surfaced for the user to accept —
+    never merged silently."""
     tid = user.tenant_id
-    # Clear stale pending suggestions; keep accepted/dismissed for audit.
     db.query(ContactSuggestion).filter(
         ContactSuggestion.tenant_id == tid,
         ContactSuggestion.owner_user_id == user.id,
@@ -445,34 +528,76 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
         ContactSuggestion.owner_user_id == user.id,
         ContactSuggestion.status == "dismissed").all()}
 
-    # Re-read the persisted contacts so we have real ids to reference.
     rows = (db.query(UnifiedContact)
             .filter(UnifiedContact.tenant_id == tid,
                     UnifiedContact.owner_user_id == user.id,
                     UnifiedContact.hidden.is_(False)).all())
-    by_name: dict[str, list[UnifiedContact]] = defaultdict(list)
-    for c in rows:
-        nk = _norm_name(c.display_name)
-        if nk and " " in nk:  # only multi-token names (avoid merging every "John")
-            by_name[nk].append(c)
-    for nk, group in by_name.items():
+    multi = [c for c in rows if len(_norm_name(c.display_name).split()) >= 2]
+    # Identity count per contact (to decide link-vs-merge + which side is "loose").
+    idn_count: dict[str, int] = defaultdict(int)
+    one_identity: dict[str, tuple] = {}  # contact_id -> (kind, value, raw, source)
+    for ci in (db.query(ContactIdentity)
+               .filter(ContactIdentity.tenant_id == tid,
+                       ContactIdentity.owner_user_id == user.id).all()):
+        idn_count[ci.contact_id] += 1
+        one_identity[ci.contact_id] = (ci.kind, ci.value, ci.raw_value, ci.source_type)
+
+    def _loose(c: UnifiedContact) -> bool:
+        return (idn_count.get(c.id, 0) <= 1 and not c.labels and not c.relationship
+                and not c.notes and not (c.details or {}) and not c.starred
+                and not c.pinned_circle)
+
+    def _curation_score(c: UnifiedContact) -> tuple:
+        # Prefer the richer record as the primary / link target.
+        return (0 if _loose(c) else 1, idn_count.get(c.id, 0),
+                int(c.interaction_count or 0), len(c.source_types or []))
+
+    # Bucket by surname so we only compare plausible pairs (O(n²) within a surname).
+    by_surname: dict[str, list[UnifiedContact]] = defaultdict(list)
+    for c in multi:
+        by_surname[_norm_name(c.display_name).split()[-1].strip(".")].append(c)
+
+    emitted: set[str] = set()
+    for surname, group in by_surname.items():
         if len(group) < 2:
             continue
-        # Order by interaction count; suggest merging the rest into the strongest.
-        group.sort(key=lambda c: -(c.interaction_count or 0))
-        primary = group[0]
-        for other in group[1:]:
-            fp = hashlib.sha256(
-                f"merge:{min(primary.id, other.id)}:{max(primary.id, other.id)}"
-                .encode()).hexdigest()[:24]
-            if fp in dismissed:
-                continue
-            db.add(ContactSuggestion(
-                tenant_id=tid, owner_user_id=user.id, kind="merge",
-                contact_id=primary.id, merge_contact_id=other.id,
-                reason=f"Same name “{primary.display_name}”, no shared identifier",
-                confidence=0.5, status="pending", fingerprint=fp,
-                created_at=now, updated_at=now))
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a, b = group[i], group[j]
+                sim = _name_similarity(a.display_name, b.display_name)
+                if sim <= 0:
+                    continue
+                # Primary = the richer record; other = the one we'd fold in.
+                primary, other = (a, b) if _curation_score(a) >= _curation_score(b) else (b, a)
+                pair = f"{min(primary.id, other.id)}:{max(primary.id, other.id)}"
+                if pair in emitted:
+                    continue
+                emitted.add(pair)
+                # LINK when the "other" is a loose single-identifier contact and the
+                # primary is a real record — attach the identifier rather than merge.
+                oid = one_identity.get(other.id)
+                if _loose(other) and not _loose(primary) and oid:
+                    fp = hashlib.sha256(f"link:{primary.id}:{oid[0]}:{oid[1]}".encode()).hexdigest()[:24]
+                    if fp in dismissed:
+                        continue
+                    db.add(ContactSuggestion(
+                        tenant_id=tid, owner_user_id=user.id, kind="link_identity",
+                        contact_id=primary.id, identity_kind=oid[0],
+                        identity_value=oid[1], identity_raw=oid[2] or oid[1],
+                        identity_source=oid[3] or "",
+                        reason=f"“{other.display_name}” looks like {primary.display_name}",
+                        confidence=round(sim, 2), status="pending", fingerprint=fp,
+                        created_at=now, updated_at=now))
+                else:
+                    fp = hashlib.sha256(f"merge:{pair}".encode()).hexdigest()[:24]
+                    if fp in dismissed:
+                        continue
+                    db.add(ContactSuggestion(
+                        tenant_id=tid, owner_user_id=user.id, kind="merge",
+                        contact_id=primary.id, merge_contact_id=other.id,
+                        reason=f"“{other.display_name}” may be the same person as {primary.display_name}",
+                        confidence=round(sim, 2), status="pending", fingerprint=fp,
+                        created_at=now, updated_at=now))
 
 
 # --------------------------------------------------------------------------- #
