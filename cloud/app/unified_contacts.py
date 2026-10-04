@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -297,19 +298,47 @@ class _Person:
         return "Unknown"
 
 
-def _circle_for(interactions: int, last_at: datetime | None, now: datetime) -> str:
-    """Derive a closeness tier from interaction volume + recency. Deliberately
-    simple + explainable; the user can pin any contact to a tier."""
-    days = (now - last_at).days if last_at else 99999
-    if days > 365 or interactions == 0:
-        return "dormant"
-    if interactions >= 400 and days <= 60:
-        return "inner"
-    if interactions >= 120 and days <= 120:
-        return "close"
-    if interactions >= 20 and days <= 240:
-        return "active"
-    return "acquaintance"
+def _closeness_score(p: "_Person", now: datetime) -> float:
+    """A balanced closeness score: interaction volume (log-compressed so a heavy
+    texter doesn't dwarf everyone), weighted by recency and two-way reciprocity.
+    One-way volume (newsletters, you→them only) is discounted so it can't buy an
+    inner-circle seat."""
+    if not p.last_at or p.interactions <= 0:
+        return 0.0
+    days = max(0, (now - p.last_at).days)
+    recency = math.exp(-days / 120.0)                    # ~1 now, ~0.37 at 120d, ~0.05 at 365d
+    reciprocity = 1.0 if (p.in_count > 0 and p.out_count > 0) else 0.55
+    return math.log1p(p.interactions) * recency * reciprocity
+
+
+def _assign_tiers(people: dict[str, "_Person"], now: datetime) -> dict[str, str]:
+    """Assign each person a closeness tier by RELATIVE rank (not absolute volume),
+    with recency gates, so 'inner circle' stays the few recent, frequent, two-way
+    relationships even for a heavy-messaging account. The user can still pin a tier."""
+    tiers: dict[str, str] = {}
+    scored: list[tuple[str, float, int]] = []
+    for p in people.values():
+        days = (now - p.last_at).days if p.last_at else 10 ** 9
+        if p.interactions <= 0 or days > 365:
+            tiers[p.key] = "dormant"
+            continue
+        scored.append((p.key, _closeness_score(p, now), days))
+    scored.sort(key=lambda t: t[1], reverse=True)
+    active = len(scored)
+    # Small, capped bands scaled to the network size. Inner is tight + recent.
+    inner_n = min(12, max(4, round(active * 0.04)))
+    close_n = inner_n + min(30, max(8, round(active * 0.12)))
+    active_n = close_n + min(120, max(20, round(active * 0.30)))
+    for rank, (key, score, days) in enumerate(scored):
+        if rank < inner_n and days <= 45 and score > 0:
+            tiers[key] = "inner"
+        elif rank < close_n and days <= 150:
+            tiers[key] = "close"
+        elif rank < active_n and days <= 300:
+            tiers[key] = "active"
+        else:
+            tiers[key] = "acquaintance"
+    return tiers
 
 
 def rebuild(db: Session, user: User) -> int:
@@ -461,6 +490,10 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
         if ci.value:
             val_to_contact[f"{ci.kind}:{ci.value}"] = ci.contact_id
 
+    # Relative closeness tiering (rank-based, recency-gated) computed over the
+    # whole population so 'inner' is the few closest, not everyone over a threshold.
+    tier_by_person = _assign_tiers(people, now)
+
     kept_contact_ids: set[str] = set()
     for person in people.values():
         # Match to an existing contact by any overlapping identity value.
@@ -508,7 +541,7 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
         contact.primary_phone = next((v for (k, v) in person.identities if k == "phone"),
                                      contact.primary_phone or "")
         # Computed circle unless the user pinned one.
-        auto_circle = _circle_for(person.interactions, person.last_at, now)
+        auto_circle = tier_by_person.get(person.key, "acquaintance")
         contact.circle = contact.pinned_circle or auto_circle
         contact.updated_at = now
 

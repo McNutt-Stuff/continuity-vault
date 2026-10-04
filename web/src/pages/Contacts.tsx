@@ -891,6 +891,7 @@ function CirclesMap({ onSelect }: { onSelect: (id: string) => void }) {
   const [circle, setCircle] = useState("");
   const [within, setWithin] = useState(0);   // days; 0 = all time
   const [limit, setLimit] = useState(80);
+  const [zoom, setZoom] = useState(1);
   useEffect(() => {
     const p = new URLSearchParams({ limit: String(limit) });
     if (circle) p.set("circle", circle);
@@ -930,9 +931,12 @@ function CirclesMap({ onSelect }: { onSelect: (id: string) => void }) {
   );
   if (!g) return <Card>{controls}<Loading label="Drawing your circles…" card={false} /></Card>;
   const peopleCount = g.nodes.filter((n) => !n.me).length;
-  const W = 760, H = 620, cx = W / 2, cy = H / 2;
-  const rings = [70, 140, 210, 280]; // inner→acquaintance; dormant placed outermost
-  const ringFor: Record<string, number> = { inner: rings[0], close: rings[1], active: rings[2], acquaintance: rings[3], dormant: 300 };
+  // Base ring radii; the zoom slider scales the whole canvas so a crowded ring
+  // can be spread out (the container scrolls when zoomed past the viewport).
+  const BR = [70, 140, 210, 280, 300].map((r) => r * zoom);
+  const W = 760 * zoom, H = 620 * zoom, cx = W / 2, cy = H / 2;
+  const ringFor: Record<string, number> = { inner: BR[0], close: BR[1], active: BR[2], acquaintance: BR[3], dormant: BR[4] };
+  const nodeScale = Math.min(1.5, Math.max(0.85, zoom));
   // When filtered to a single circle, spread everyone across the ring evenly on one band.
   const byCircle: Record<string, GraphNode[]> = {};
   for (const n of g.nodes) if (!n.me) (byCircle[n.circle] ||= []).push(n);
@@ -952,10 +956,19 @@ function CirclesMap({ onSelect }: { onSelect: (id: string) => void }) {
           No people match these filters. Widen the time window or pick another circle.
         </div>
       ) : (
-      <div style={{ overflow: "auto" }}>
-        <svg width={W} height={H} style={{ maxWidth: "100%" }}>
+      <>
+      <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8, justifyContent: "flex-end" }}>
+        <span className="faint" style={{ fontSize: 11.5 }}>Zoom</span>
+        <button className="btn ghost sm" title="Zoom out" onClick={() => setZoom((z) => Math.max(0.6, +(z - 0.2).toFixed(2)))}>–</button>
+        <input type="range" min={0.6} max={2.4} step={0.1} value={zoom}
+               onChange={(e) => setZoom(Number(e.target.value))} style={{ width: 160 }} />
+        <button className="btn ghost sm" title="Zoom in" onClick={() => setZoom((z) => Math.min(2.4, +(z + 0.2).toFixed(2)))}>+</button>
+        <button className="btn ghost sm" onClick={() => setZoom(1)}>Reset</button>
+      </div>
+      <div style={{ overflow: "auto", maxHeight: "72vh" }}>
+        <svg width={W} height={H} style={{ maxWidth: "none", display: "block" }}>
           {CIRCLES.slice(0, 5).map((c, i) => (
-            <circle key={c.key} cx={cx} cy={cy} r={[70, 140, 210, 280, 300][i]}
+            <circle key={c.key} cx={cx} cy={cy} r={BR[i]}
                     fill="none" stroke="var(--border)" strokeWidth={1} strokeDasharray="3 4" />
           ))}
           {g.edges.map((e, i) => {
@@ -969,15 +982,15 @@ function CirclesMap({ onSelect }: { onSelect: (id: string) => void }) {
             const p = pos[n.id]; if (!p) return null;
             if (n.me) return (
               <g key="me">
-                <circle cx={p.x} cy={p.y} r={26} fill="var(--brand)" />
-                <text x={p.x} y={p.y + 4} textAnchor="middle" fill="#fff" fontSize={12} fontWeight={700}>You</text>
+                <circle cx={p.x} cy={p.y} r={26 * nodeScale} fill="var(--brand)" />
+                <text x={p.x} y={p.y + 4} textAnchor="middle" fill="#fff" fontSize={12 * nodeScale} fontWeight={700}>You</text>
               </g>
             );
-            const r = 9 + (n.weight || 0) * 12;
+            const r = (9 + (n.weight || 0) * 12) * nodeScale;
             return (
               <g key={n.id} style={{ cursor: "pointer" }} onClick={() => onSelect(n.id)}>
                 <circle cx={p.x} cy={p.y} r={r} fill={avatarColor(n.name)} stroke={n.starred ? "var(--warn)" : "transparent"} strokeWidth={2} />
-                <text x={p.x} y={p.y + r + 11} textAnchor="middle" fill="var(--text-dim)" fontSize={10}>
+                <text x={p.x} y={p.y + r + 11} textAnchor="middle" fill="var(--text-dim)" fontSize={10 * nodeScale}>
                   {n.name.length > 16 ? n.name.slice(0, 15) + "…" : n.name}
                 </text>
               </g>
@@ -985,6 +998,7 @@ function CirclesMap({ onSelect }: { onSelect: (id: string) => void }) {
           })}
         </svg>
       </div>
+      </>
       )}
       <div className="spread" style={{ marginTop: 8, flexWrap: "wrap", gap: 10 }}>
         <div className="row" style={{ gap: 14, flexWrap: "wrap" }}>
