@@ -4,6 +4,7 @@ import { api } from "../api";
 import { Card, Loading, Pill, timeAgo } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
+import { notify } from "../components/dialog";
 
 // ---- Types -----------------------------------------------------------------
 interface Stats {
@@ -121,8 +122,14 @@ export default function Contacts() {
 
   async function rebuild() {
     setBusy(true);
-    try { await api.post("/contacts/rebuild"); await loadOverview(); await loadList(); }
-    finally { setBusy(false); }
+    try {
+      const r = await api.post<{ contacts: number }>("/contacts/rebuild");
+      await loadOverview(); await loadList();
+      notify({ title: "Contacts rebuilt", message: `Linked ${r.contacts} ${r.contacts === 1 ? "person" : "people"} across your sources.`, tone: "ok" });
+    } catch (e) {
+      const msg = (e as { message?: string }).message || "The rebuild request failed.";
+      notify({ title: "Couldn't rebuild contacts", message: msg, tone: "danger" });
+    } finally { setBusy(false); }
   }
 
   const grouped = useMemo(() => {
@@ -145,7 +152,9 @@ export default function Contacts() {
             <Icon name="gear" size={13} /> Customize
           </button>
           <button className="btn ghost sm" onClick={rebuild} disabled={busy}>
-            <Icon name="repeat" size={13} /> {busy ? "Rebuilding…" : "Rebuild"}
+            <span style={busy ? { display: "inline-block", animation: "spin 1s linear infinite" } : undefined}>
+              <Icon name="repeat" size={13} />
+            </span> {busy ? "Rebuilding…" : "Rebuild"}
           </button>
         </div>
       </div>
@@ -292,9 +301,13 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged }:
   useEffect(() => { setC(null); setExchanges(null); void load(); void loadExchanges(); }, [id]);
 
   async function patch(body: Partial<Contact>) {
-    const d = await api.put<Contact>(`/contacts/${id}`, body);
-    setC((cur) => cur ? { ...cur, ...d } : d);
-    onChanged();
+    try {
+      const d = await api.put<Contact>(`/contacts/${id}`, body);
+      setC((cur) => cur ? { ...cur, ...d } : d);
+      onChanged();
+    } catch (e) {
+      notify({ message: (e as { message?: string }).message || "Couldn't save the change.", tone: "danger" });
+    }
   }
 
   if (!c) return <Card><Loading label="Loading contact…" card={false} /></Card>;
@@ -625,7 +638,11 @@ function Suggestions({ onChanged }: { onChanged: () => void }) {
   async function load() { try { setList((await api.get<{ suggestions: Suggestion[] }>("/contacts/suggestions")).suggestions); } catch { setList([]); } }
   useEffect(() => { void load(); }, []);
   async function act(id: string, action: "accept" | "dismiss") {
-    await api.post(`/contacts/suggestions/${id}/${action}`); await load(); onChanged();
+    try {
+      await api.post(`/contacts/suggestions/${id}/${action}`); await load(); onChanged();
+    } catch (e) {
+      notify({ message: (e as { message?: string }).message || "Couldn't update the suggestion.", tone: "danger" });
+    }
   }
   if (list === null) return <Loading label="Loading suggestions…" />;
   if (list.length === 0) return <Card><div className="muted" style={{ padding: "16px 4px" }}>No suggestions right now — your contacts look well-linked.</div></Card>;
