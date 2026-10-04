@@ -326,9 +326,10 @@ class _Person:
                 nm = _name_from_email(value)
                 if nm:
                     return nm
-        # Fall back to a human-ish label from the strongest identity.
+        # Fall back to a human-ish label from the strongest identity (bounded —
+        # a raw message field can be a giant blob).
         for (kind, value), d in self.identities.items():
-            return d.get("raw") or value
+            return (d.get("raw") or value)[:200]
         return "Unknown"
 
 
@@ -467,7 +468,7 @@ def rebuild(db: Session, user: User) -> int:
             continue
         p = _person(f"{idents[0][0]}:{idents[0][1]}")
         if seed["name"]:
-            p.names[seed["name"]] += 3  # a real contact card is a strong name signal
+            p.names[seed["name"][:200]] += 3  # a real contact card is a strong name signal
         for (t, v) in idents:
             p.add_identity(t, v, raw=v, source_type=seed["source_type"],
                            source_object_id=seed["object_id"])
@@ -482,9 +483,9 @@ def rebuild(db: Session, user: User) -> int:
             # signal — it's what lets an email-only person match their phone/handle
             # contact by name. Fall back to a bare non-identifier raw otherwise.
             if name:
-                p.names[name.strip()] += 2
+                p.names[name.strip()[:200]] += 2
             elif raw and raw != v and "@" not in raw and not raw.replace("+", "").isdigit():
-                p.names[raw.strip()] += 1
+                p.names[raw.strip()[:200]] += 1
             if p.key not in seen_people:
                 seen_people.add(p.key)
                 p.note_interaction(direction=direction, source_type=source_type,
@@ -592,14 +593,16 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
         kept_contact_ids.add(contact.id)
         person_to_contact[person.key] = contact.id
 
-        name = person.best_name()
+        # Bound the name — a message field can be a giant recipient/raw blob, and
+        # sort_key is indexed (btree rejects values past ~2704 bytes).
+        name = (person.best_name() or "Unknown")[:200]
         contact.display_name = name
-        contact.sort_key = _sort_key(name)
+        contact.sort_key = _sort_key(name)[:200]
         parts = name.split()
         if parts and not contact.given_name:
-            contact.given_name = parts[0]
+            contact.given_name = parts[0][:120]
         if len(parts) > 1 and not contact.family_name:
-            contact.family_name = parts[-1]
+            contact.family_name = parts[-1][:120]
         # Interaction analytics.
         contact.interaction_count = person.interactions
         contact.first_interaction_at = person.first_at
@@ -638,8 +641,8 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
                 continue  # keep the user's manual/confirmed link as-is
             db.add(ContactIdentity(
                 tenant_id=tid, owner_user_id=user.id, contact_id=contact.id,
-                kind=kind, value=value, raw_value=d.get("raw") or value,
-                label=d.get("label") or "", source_type=d.get("source_type") or "",
+                kind=kind, value=value[:255], raw_value=(d.get("raw") or value)[:255],
+                label=(d.get("label") or "")[:120], source_type=d.get("source_type") or "",
                 source_object_id=d.get("source_object_id") or "",
                 link_method="auto", confirmed=True, confidence=1.0,
                 last_seen=now, created_at=now, updated_at=now))
