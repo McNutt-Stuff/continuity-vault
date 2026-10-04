@@ -31,8 +31,8 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from . import contacts
-from .models import (ContactIdentity, ContactSuggestion, SearchDocument,
-                     UnifiedContact, User, Vault)
+from .models import (ConnectorAccount, ContactIdentity, ContactSuggestion,
+                     SearchDocument, UnifiedContact, User, Vault)
 from .taxonomy import canonical_attr
 
 logger = logging.getLogger("cv.unified_contacts")
@@ -169,9 +169,11 @@ def _user_vault_ids(db: Session, user: User) -> list[str]:
     return [r[0] for r in db.query(Vault.id).filter(Vault.owner_user_id == user.id).all()]
 
 
-def _self_identifiers(user: User) -> set[str]:
+def _self_identifiers(db: Session, user: User) -> set[str]:
     """The user's OWN identifiers, so message direction (inbound/outbound) and
-    self-exclusion work. Best-effort from the account profile."""
+    self-exclusion work. From the account profile PLUS the identities of the
+    user's connected source accounts (e.g. a Gmail account's own address), so a
+    login email that differs from the mailbox address still resolves 'self'."""
     out: set[str] = set()
     e = contacts.normalize_email(getattr(user, "email", "") or "")
     if e:
@@ -183,6 +185,17 @@ def _self_identifiers(user: User) -> set[str]:
     p = contacts.normalize_phone(getattr(user, "phone", "") or "")
     if p:
         out.add(p)
+    # Connected accounts the user owns identify the user across their own sources.
+    try:
+        for (uname,) in (db.query(ConnectorAccount.account_username)
+                         .filter(ConnectorAccount.tenant_id == user.tenant_id,
+                                 ConnectorAccount.owner_user_id == user.id).all()):
+            for norm in (contacts.normalize_email(uname or ""),
+                         contacts.normalize_phone(uname or "")):
+                if norm:
+                    out.add(norm)
+    except Exception:  # noqa: BLE001 — never let self-id enrichment break a rebuild
+        logger.exception("unified_contacts: self-identifier enrichment failed")
     return out
 
 
@@ -206,6 +219,23 @@ def _message_parties(meta: dict) -> tuple[list[tuple[str, str, str]], bool, bool
             if c:
                 parties.append((c[0], c[1], str(raw), canon))  # type: ignore
     return parties, has_from, has_to  # type: ignore
+
+
+def _meta_direction(meta: dict) -> str | None:
+    """An explicit inbound/outbound hint the collector may have written (e.g. the
+    iMessage collector's is_from_me / direction), used before falling back to
+    inferring direction from the user's self identifiers."""
+    if not meta:
+        return None
+    fm = meta.get("is_from_me")
+    if isinstance(fm, bool):
+        return "out" if fm else "in"
+    d = str(meta.get("direction") or meta.get("message_direction") or "").strip().lower()
+    if d in ("out", "sent", "outgoing", "outbound", "from_me"):
+        return "out"
+    if d in ("in", "received", "incoming", "inbound", "to_me"):
+        return "in"
+    return None
 
 
 class _Person:
@@ -287,7 +317,7 @@ def rebuild(db: Session, user: User) -> int:
     Preserves user curation + manual links. Returns the number of contacts."""
     tid = user.tenant_id
     vids = _user_vault_ids(db, user)
-    self_ids = _self_identifiers(user)
+    self_ids = _self_identifiers(db, user)
     now = _now()
     uf = _Union()
 
@@ -349,7 +379,8 @@ def rebuild(db: Session, user: User) -> int:
         self_in_from = any(v in self_ids and role == "from" for (_t, v, _r, role) in parties)
         self_in_to = any(v in self_ids and role in ("to", "cc", "bcc")
                          for (_t, v, _r, role) in parties)
-        direction = ("out" if self_in_from else "in" if self_in_to else "unknown")
+        direction = (_meta_direction(meta or {})
+                     or ("out" if self_in_from else "in" if self_in_to else "unknown"))
         # Union counterparties on the same message? No — different recipients of a
         # group email aren't the same person. Only union a single counterparty's
         # own identifiers is N/A here (one value each). Keep them separate.
@@ -624,7 +655,7 @@ def exchanges(db: Session, user: User, contact: UnifiedContact, *,
     Search (source_type + object_id). Never re-extracts — reads the index only."""
     tid = user.tenant_id
     vids = _user_vault_ids(db, user)
-    self_ids = _self_identifiers(user)
+    self_ids = _self_identifiers(db, user)
     vals = identity_values(db, tid, user.id, contact.id)
     want = set().union(*vals.values()) if vals else set()
     if not want:
@@ -651,7 +682,8 @@ def exchanges(db: Session, user: User, contact: UnifiedContact, *,
             "source_type": source_type or "", "doc_type": doc_type or "",
             "object_id": object_id or "", "title": title or "",
             "preview": preview or "",
-            "direction": "out" if self_in_from else "in" if self_in_to else "unknown",
+            "direction": (_meta_direction(meta or {})
+                          or ("out" if self_in_from else "in" if self_in_to else "unknown")),
             "modified_at": modified_at.isoformat() if modified_at else None,
             "size_bytes": int(size or 0),
         })

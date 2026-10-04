@@ -98,6 +98,7 @@ export default function Contacts() {
   const [sort, setSort] = useState("circle");
   const [starredOnly, setStarredOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(params.get("c"));
+  const [fullId, setFullId] = useState<string | null>(params.get("full"));
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -147,6 +148,18 @@ export default function Contacts() {
     for (const c of contacts || []) (m[c.circle] ||= []).push(c);
     return m;
   }, [contacts]);
+
+  useEffect(() => {
+    const p: Record<string, string> = {};
+    if (fullId) p.full = fullId; else if (selected) p.c = selected;
+    setParams(p);
+  }, [fullId]);
+
+  if (fullId) return (
+    <ContactFull id={fullId} relationships={ov?.prefs.relationships || []} labels={ov?.prefs.labels || []}
+                 onBack={() => setFullId(null)}
+                 onChanged={() => { loadList(); loadOverview(); }} />
+  );
 
   return (
     <div>
@@ -264,7 +277,8 @@ export default function Contacts() {
           {selected && (
             <ContactDetail id={selected} relationships={ov?.prefs.relationships || []}
                            labels={ov?.prefs.labels || []}
-                           onClose={() => setSelected(null)} onChanged={() => { loadList(); loadOverview(); }} />
+                           onClose={() => setSelected(null)} onChanged={() => { loadList(); loadOverview(); }}
+                           onExpand={() => setFullId(selected)} />
           )}
         </div>
       )}
@@ -309,8 +323,8 @@ function ContactRow({ c, active, onClick }: { c: Contact; active: boolean; onCli
 }
 
 // ---- Detail ----------------------------------------------------------------
-function ContactDetail({ id, relationships, labels, onClose, onChanged }:
-  { id: string; relationships: string[]; labels: string[]; onClose: () => void; onChanged: () => void }) {
+function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand }:
+  { id: string; relationships: string[]; labels: string[]; onClose: () => void; onChanged: () => void; onExpand?: () => void }) {
   const [c, setC] = useState<Contact | null>(null);
   const [exchanges, setExchanges] = useState<Exchange[] | null>(null);
   const [exTotal, setExTotal] = useState(0);
@@ -349,7 +363,7 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged }:
   const maxMonth = Math.max(1, ...months.map((m) => m.count));
 
   return (
-    <Card style={{ position: "sticky", top: 12 }}>
+    <Card style={{ position: "sticky", top: 12, maxHeight: "calc(100vh - 24px)", overflowY: "auto" }}>
       <div className="spread" style={{ alignItems: "flex-start", marginBottom: 12 }}>
         <div className="row" style={{ gap: 12, alignItems: "center" }}>
           <Avatar name={c.display_name} size={52} />
@@ -368,7 +382,10 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged }:
             </div>
           </div>
         </div>
-        <button className="btn ghost sm" onClick={onClose}><Icon name="x" size={14} /></button>
+        <div className="row" style={{ gap: 6 }}>
+          {onExpand && <button className="btn ghost sm" title="Open full profile" onClick={onExpand}>Full profile</button>}
+          <button className="btn ghost sm" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
       </div>
 
       {/* Relationship + circle + labels */}
@@ -482,6 +499,201 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged }:
             </div>
           )}
     </Card>
+  );
+}
+
+// ---- Full-page contact profile ---------------------------------------------
+function ContactFull({ id, relationships, labels, onBack, onChanged }:
+  { id: string; relationships: string[]; labels: string[]; onBack: () => void; onChanged: () => void }) {
+  const [c, setC] = useState<Contact | null>(null);
+  const [exchanges, setExchanges] = useState<Exchange[] | null>(null);
+  const [exTotal, setExTotal] = useState(0);
+  const [exLimit, setExLimit] = useState(60);
+  const [editDetails, setEditDetails] = useState(false);
+  const [merging, setMerging] = useState(false);
+
+  async function load() {
+    try { setC(await api.get<Contact>(`/contacts/${id}`)); } catch { setC(null); }
+  }
+  async function loadExchanges() {
+    try {
+      const r = await api.get<{ total: number; items: Exchange[] }>(`/contacts/${id}/exchanges?limit=${exLimit}`);
+      setExchanges(r.items); setExTotal(r.total);
+    } catch { setExchanges([]); }
+  }
+  useEffect(() => { setC(null); void load(); }, [id]);
+  useEffect(() => { void loadExchanges(); }, [id, exLimit]);
+
+  async function patch(body: Partial<Contact>) {
+    try {
+      const d = await api.put<Contact>(`/contacts/${id}`, body);
+      setC((cur) => cur ? { ...cur, ...d } : d);
+      onChanged();
+    } catch (e) {
+      notify({ message: (e as { message?: string }).message || "Couldn't save the change.", tone: "danger" });
+    }
+  }
+
+  if (!c) return (
+    <div>
+      <button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 12 }}>← Back to My Circles</button>
+      <Card><Loading label="Loading profile…" card={false} /></Card>
+    </div>
+  );
+
+  const dir = c.stats?.by_direction || {};
+  const bySource = Object.entries(c.stats?.by_source || {}).sort((a, b) => b[1] - a[1]);
+  const months = c.stats?.by_month || [];
+  const maxMonth = Math.max(1, ...months.map((m) => m.count));
+
+  return (
+    <div>
+      <button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 12 }}>← Back to My Circles</button>
+
+      {/* Header */}
+      <Card style={{ marginBottom: 14 }}>
+        <div className="spread" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+          <div className="row" style={{ gap: 16, alignItems: "center" }}>
+            <Avatar name={c.display_name} size={72} starred={c.starred} />
+            <div>
+              <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                <h1 style={{ margin: 0, fontSize: 26 }}>{c.display_name}</h1>
+                <button className="btn ghost sm" title="Star" onClick={() => patch({ starred: !c.starred })}
+                        style={{ color: c.starred ? "var(--warn)" : "var(--text-faint)", fontSize: 18 }}>★</button>
+              </div>
+              {c.nickname && <div className="faint" style={{ fontSize: 13 }}>“{c.nickname}”</div>}
+              <div className="faint" style={{ fontSize: 13, marginTop: 2 }}>
+                <span style={{ color: CIRCLE_META[c.circle]?.color }}>● </span>
+                {CIRCLE_META[c.circle]?.label}{c.pinned_circle ? " (pinned)" : ""}
+                {c.relationship ? ` · ${c.relationship}` : ""}
+                {c.primary_email ? ` · ${c.primary_email}` : ""}
+                {c.primary_phone ? ` · ${c.primary_phone}` : ""}
+              </div>
+            </div>
+          </div>
+          <a className="btn ghost sm" href={`/search?q=${encodeURIComponent(c.primary_email || c.display_name)}`}>
+            <Icon name="search" size={13} /> Open in Search
+          </a>
+        </div>
+
+        {/* Controls */}
+        <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+          <select className="input sm" value={c.relationship || ""} onChange={(e) => patch({ relationship: e.target.value })}>
+            <option value="">— relationship —</option>
+            {relationships.map((r) => <option key={r} value={r}>{r}</option>)}
+          </select>
+          <select className="input sm" value={c.pinned_circle || ""} onChange={(e) => patch({ pinned_circle: e.target.value })}
+                  title="Pin to a circle (overrides the computed tier)">
+            <option value="">Auto circle</option>
+            {CIRCLES.map((x) => <option key={x.key} value={x.key}>Pin: {x.label}</option>)}
+          </select>
+          <button className="btn ghost sm" onClick={() => patch({ hidden: !c.hidden })}>{c.hidden ? "Unhide" : "Hide"}</button>
+          <button className="btn ghost sm" onClick={() => setMerging((v) => !v)}><Icon name="repeat" size={12} /> Merge</button>
+        </div>
+        {merging && <div style={{ marginTop: 10 }}>
+          <MergeInto currentId={id} currentName={c.display_name}
+                     onMerged={() => { onChanged(); onBack(); }} onCancel={() => setMerging(false)} />
+        </div>}
+        <div style={{ marginTop: 10 }}>
+          <LabelEditor current={c.labels || []} palette={labels} onChange={(l) => patch({ labels: l })} />
+        </div>
+      </Card>
+
+      {/* Stat row */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px,1fr))", gap: 10, marginBottom: 14 }}>
+        <StatBox label="Interactions" value={c.interaction_count} />
+        <StatBox label="Sent" value={dir.out || 0} />
+        <StatBox label="Received" value={dir.in || 0} />
+        <StatBox label="Identifiers" value={c.stats?.identity_count || (c.identities?.length || 0)} />
+        <StatBox label="Sources" value={bySource.length} />
+      </div>
+      <div className="faint" style={{ fontSize: 12, marginBottom: 14 }}>
+        {c.first_interaction_at ? `First seen ${timeAgo(c.first_interaction_at)}` : ""}
+        {c.first_interaction_at && c.last_interaction_at ? " · " : ""}
+        {c.last_interaction_at ? `last ${timeAgo(c.last_interaction_at)}` : ""}
+      </div>
+
+      {/* Two-column body */}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(300px, 1fr) minmax(320px, 1.2fr)", gap: 14, alignItems: "start" }}>
+        <div className="stack" style={{ gap: 14 }}>
+          {months.length > 0 && (
+            <Card>
+              <div className="faint" style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 8 }}>Interaction timeline</div>
+              <div className="row" style={{ gap: 2, alignItems: "flex-end", height: 70 }}>
+                {months.slice(-36).map((m) => (
+                  <div key={m.m} title={`${m.m}: ${m.count}`} style={{
+                    flex: 1, height: `${Math.max(4, (m.count / maxMonth) * 100)}%`,
+                    background: "var(--brand)", borderRadius: 2, minWidth: 3,
+                  }} />
+                ))}
+              </div>
+            </Card>
+          )}
+          {bySource.length > 0 && (
+            <Card>
+              <div className="faint" style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 8 }}>How you connect</div>
+              <div className="stack" style={{ gap: 6 }}>
+                {bySource.map(([s, n]) => (
+                  <div key={s} className="row" style={{ gap: 8, alignItems: "center" }}>
+                    <SourceIcon type={s} size={16} />
+                    <span style={{ fontSize: 13, flex: 1 }}>{s}</span>
+                    <span className="faint" style={{ fontSize: 12.5 }}>{n.toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+          <Card>
+            <Identities contactId={id} identities={c.identities || []}
+                        onChanged={(updated) => { if (updated) { setC(updated); onChanged(); } else void load(); }} />
+          </Card>
+          <Card>
+            <div className="spread" style={{ marginBottom: 6, alignItems: "center" }}>
+              <div className="faint" style={{ fontSize: 11.5, fontWeight: 600 }}>Details</div>
+              <button className="btn ghost sm" onClick={() => setEditDetails((v) => !v)}>
+                <Icon name="edit" size={12} /> {editDetails ? "Done" : "Edit"}
+              </button>
+            </div>
+            <DetailsSections details={c.details || {}} editing={editDetails} onChange={(d) => patch({ details: d })} />
+            <div className="faint" style={{ fontSize: 11.5, fontWeight: 600, margin: "14px 0 5px" }}>Notes</div>
+            <textarea className="input" rows={3} defaultValue={c.notes || ""} placeholder="Private notes about this person…"
+                      onBlur={(e) => { if (e.target.value !== (c.notes || "")) patch({ notes: e.target.value }); }} />
+          </Card>
+        </div>
+
+        <Card>
+          <div className="spread" style={{ marginBottom: 8, alignItems: "center" }}>
+            <div className="faint" style={{ fontSize: 11.5, fontWeight: 600 }}>Exchanges {exTotal ? `(${exTotal})` : ""}</div>
+          </div>
+          {exchanges === null ? <Loading label="Loading exchanges…" card={false} />
+            : exchanges.length === 0 ? <div className="muted" style={{ fontSize: 12.5 }}>No exchanges indexed yet.</div>
+              : (
+                <div className="stack" style={{ gap: 5 }}>
+                  {exchanges.map((x, i) => (
+                    <div key={i} className="card" style={{ padding: "8px 11px", marginTop: 0 }}>
+                      <div className="row" style={{ gap: 7, alignItems: "center" }}>
+                        <SourceIcon type={x.source_type} size={14} />
+                        <span style={{ fontSize: 10.5, color: x.direction === "out" ? "var(--brand)" : x.direction === "in" ? "var(--ok)" : "var(--text-faint)" }}>
+                          {x.direction === "out" ? "↑ sent" : x.direction === "in" ? "↓ received" : "·"}
+                        </span>
+                        <span style={{ fontSize: 13, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {x.title || "(untitled)"}
+                        </span>
+                        <span className="faint" style={{ fontSize: 11 }}>{x.modified_at ? timeAgo(x.modified_at) : ""}</span>
+                      </div>
+                      {x.preview && <div className="faint" style={{ fontSize: 11.5, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{x.preview}</div>}
+                    </div>
+                  ))}
+                  {exchanges.length < exTotal && (
+                    <button className="btn ghost sm" style={{ marginTop: 6 }} onClick={() => setExLimit((n) => n + 60)}>
+                      Load more ({exTotal - exchanges.length} more)
+                    </button>
+                  )}
+                </div>
+              )}
+        </Card>
+      </div>
+    </div>
   );
 }
 
