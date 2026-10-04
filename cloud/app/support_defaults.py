@@ -895,6 +895,66 @@ Still stuck? **[Contact support](/support/contact-support)**.
 """,
         help_routes=[]),
     _doc(
+        "unified-contacts", "Unified Contacts (My Circles)", "Your Data", _YOUR_DATA, 79, "user",
+        "A unified, deduced view of the people in your life — linked across every source, with interaction history and a relationship map.",
+        """
+# Unified Contacts — “My Circles”
+
+**Unified Contacts** builds a single, deduced record for each **person** in your
+life and links together everything we can attribute to them — their emails, phone
+numbers, social handles and the contact cards from every source — into one central
+Rolodex.
+
+It is derived **entirely from what Arkive has already indexed** — your contact
+sources plus the senders/recipients of your messages and emails. It never scans
+your data a second time: it mines the same unified search index, so there's no
+extra collection and nothing new to configure.
+
+## What it shows
+
+- **People, deduced.** One entry per person, with their best‑guess name and every
+  identifier we linked to them — automatically, as a suggestion you confirm, or
+  manually.
+- **Circles.** Each person is placed in a closeness tier — *Inner circle*, *Close*,
+  *Active*, *Acquaintance*, *Dormant* — computed from how much and how recently you
+  interact. Pin anyone to a tier yourself.
+- **Relationship + labels.** Tag people as family, friend, colleague, client, …
+  and add your own labels. The sets are customizable.
+- **Interaction analytics.** Total exchanges, sent vs. received, a timeline of when
+  you talk, and *how* you connect (which sources/methods, by volume).
+- **Rich details.** Keep personal, business, intimate and custom fields plus private
+  notes on each person — yours alone.
+- **Relationship map.** A visual of your circles: you at the center, each person
+  placed by tier, lines weighted by how much you interact.
+
+## Drilling into exchanges
+
+Open a person to see your **exchanges** with them — the texts, emails and messages
+that reference any of their identifiers, pulled straight from the index — and jump
+to the full list in **[Unified Search](/support/unified-search)**.
+
+## Linking
+
+- **Auto‑link** joins identifiers that clearly belong together (e.g. a contact card
+  listing an email + phone).
+- **Suggestions** surface anything ambiguous — two entries with the same name but no
+  shared identifier — for you to **accept** or **dismiss**. Nothing ambiguous is
+  merged silently.
+- **Manual links** let you attach any identifier to a person yourself; a manual
+  decision always sticks across rebuilds.
+
+## Privacy
+
+Unified Contacts is **yours** — it only ever shows **your own** contacts and
+exchanges; it is never shared across members. Details and notes are private to you.
+
+## Enabling it
+
+Available when the **Unified Contacts** feature is enabled for your account. Open
+**Contacts** in the sidebar, then use **Rebuild** after connecting new sources.
+""",
+        help_routes=["/contacts"]),
+    _doc(
         "signals-overview", "The Signal Platform", "Your Data", _YOUR_DATA, 80, "activity",
         "How Arkive turns what it already collects into a live picture of your environment — assets, protection gaps and coverage.",
         """
