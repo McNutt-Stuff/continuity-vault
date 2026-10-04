@@ -431,34 +431,44 @@ def rebuild(db: Session, user: User) -> int:
         SearchDocument.category.in_(_INTERACTION_CATEGORIES))
     if vids:
         mq = mq.filter(SearchDocument.vault_id.in_(vids))
-    # First pass: parse every message's parties (buffered) and, per EMAIL identifier,
-    # record how many DISTINCT other people it co-occurs with + which roles it played.
-    # A mailbox OWNER sends/receives across hundreds of correspondents; a single heavy
-    # correspondent only co-occurs with the owner. This discovers the user's OWN
-    # address(es) even for a LOCAL import (outlook_local / PST) that carries no
-    # connected-account identity and no is_from_me hint — without it those messages
-    # fall to direction "unknown" and never count toward sent/received.
+    # First pass: parse every message's parties (buffered) and, per source, count how
+    # many messages each EMAIL appears in + which roles it played. The mailbox OWNER
+    # is a party in a LARGE FRACTION of a source's messages and BOTH sends and
+    # receives; even a heavy correspondent shows in only a small slice. This discovers
+    # the user's OWN address(es) even for a LOCAL import (outlook_local / PST) that
+    # carries no connected-account identity and no is_from_me hint — without it those
+    # messages fall to direction "unknown" and never count toward sent/received.
     parsed_msgs: list[tuple] = []
-    co_emails: dict[str, set[str]] = defaultdict(set)
-    email_roles: dict[str, set[str]] = defaultdict(set)
+    src_total: dict[str, int] = defaultdict(int)
+    email_appear: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    email_roles: dict[str, dict[str, set]] = defaultdict(lambda: defaultdict(set))
     for source_type, doc_type, object_id, meta, modified_at, size in mq.all():
         parties, has_from, has_to = _message_parties(meta or {})
         if not parties:
             continue
-        parsed_msgs.append((source_type or "", doc_type or "", object_id or "",
+        st = source_type or ""
+        parsed_msgs.append((st, doc_type or "", object_id or "",
                             parties, _meta_direction(meta or {}), modified_at, int(size or 0)))
-        emails = [v for (t, v, _r, _n, _role) in parties if t == "email"]
-        emails_set = set(emails)
+        src_total[st] += 1
+        seen_e: set[str] = set()
         for (t, v, _r, _n, role) in parties:
             if t == "email":
-                if len(co_emails[v]) < 64:  # cap — the 10-distinct threshold is tiny
-                    co_emails[v].update(e for e in emails_set if e != v)
-                email_roles[v].add(role)
-    # Self = an email that co-occurs with many distinct correspondents AND both sends
-    # (from) and receives (to/cc/bcc) — the shape of a mailbox owner, not a contact.
-    auto_self = {v for v, co in co_emails.items()
-                 if len(co) >= 10 and ("from" in email_roles[v])
-                 and bool(email_roles[v] & {"to", "cc", "bcc"})}
+                email_roles[st][v].add(role)
+                if v not in seen_e:
+                    seen_e.add(v)
+                    email_appear[st][v] += 1
+    # Self = an email present in a LARGE FRACTION (>=50%) of a source's messages that
+    # both sends and receives — the shape of a mailbox owner, not a contact. The high
+    # fraction is what separates the owner (~100%) from even a frequent correspondent.
+    auto_self: set[str] = set()
+    for st, counts in email_appear.items():
+        total = src_total.get(st, 0)
+        if total < 20:
+            continue
+        for v, c in counts.items():
+            roles = email_roles[st][v]
+            if c >= 0.5 * total and "from" in roles and (roles & {"to", "cc", "bcc"}):
+                auto_self.add(v)
     if auto_self:
         self_ids = self_ids | auto_self
         logger.info("unified contacts: inferred %d self email(s) for %s: %s",
