@@ -1935,3 +1935,105 @@ class Finding(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+# ---------------------------------------------------------------------------
+# Unified Contacts — "My Circles" personal relationship graph. A deduced person
+# (UnifiedContact) links together every identifier/handle/source-object we can
+# attribute to them (ContactIdentity), with auto/suggested/manual linking
+# (ContactSuggestion). Built per-user from contact + message/email/social docs,
+# node-local (like ContactLink) and replicated for display. New TABLES — no ALTER.
+# ---------------------------------------------------------------------------
+class UnifiedContact(Base):
+    """A deduced person: the unified record that ties together all the identifiers,
+    handles and source objects we can attribute to one human, plus relationship
+    labels, computed "circle" tier, interaction stats and rich user-curated
+    details. One row per (owner_user_id, person)."""
+
+    __tablename__ = "unified_contacts"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, index=True, nullable=False)
+    owner_user_id = Column(String, index=True, nullable=True)
+    display_name = Column(String, default="", index=True)     # deduced best name
+    sort_key = Column(String, default="", index=True)         # lowercased for ordering
+    given_name = Column(String, default="")
+    family_name = Column(String, default="")
+    nickname = Column(String, default="")
+    primary_email = Column(String, default="")                # denormalized for the list
+    primary_phone = Column(String, default="")
+    avatar_url = Column(String, default="")
+    # Computed closeness tier (overridable via pinned_circle): inner | close |
+    # active | acquaintance | dormant.
+    circle = Column(String, default="acquaintance", index=True)
+    pinned_circle = Column(String, default="")                # manual tier override
+    # Primary relationship: family | friend | partner | colleague | client |
+    # acquaintance | other (customizable set lives in account settings).
+    relationship = Column(String, default="", index=True)
+    labels = Column(JSON, default=list)                       # free-form tags (customizable)
+    starred = Column(Boolean, default=False, index=True)
+    hidden = Column(Boolean, default=False, index=True)       # archived / excluded from circles
+    notes = Column(Text, default="")
+    # Rich, expandable detail sections: {personal:{}, business:{}, intimate:{},
+    # custom:{}} — each an object of free key/value fields the user curates.
+    details = Column(JSON, default=dict)
+    # Interaction analytics (denormalized for the list + detail header).
+    interaction_count = Column(BigInteger, default=0)
+    first_interaction_at = Column(DateTime, nullable=True)
+    last_interaction_at = Column(DateTime, nullable=True, index=True)
+    # {by_source:{src:count}, by_direction:{in,out}, by_month:[{m,count}],
+    #  bytes:int, top_source:str} — recomputed on rebuild.
+    stats = Column(JSON, default=dict)
+    source_types = Column(JSON, default=list)                 # sources this person appears in
+    meta = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class ContactIdentity(Base):
+    """One identifier/handle/source-object attributed to a UnifiedContact. The
+    linkage layer: an email/phone/social-handle/name, how it was linked (auto |
+    suggested | manual), and whether it's been confirmed. Drives both dedup and
+    the per-contact drill-down into exchanges."""
+
+    __tablename__ = "contact_identities"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, index=True, nullable=False)
+    owner_user_id = Column(String, index=True, nullable=True)
+    contact_id = Column(String, index=True, nullable=False)
+    kind = Column(String, default="email", index=True)        # email|phone|handle|social|name|profile
+    value = Column(String, default="", index=True)            # normalized match key
+    raw_value = Column(String, default="")                    # as-seen
+    label = Column(String, default="")                        # home|work|mobile|...
+    source_type = Column(String, default="", index=True)      # gmail|imessage|facebook|...
+    source_object_id = Column(String, default="")             # the contact record / profile object
+    link_method = Column(String, default="auto", index=True)  # auto|suggested|manual
+    confirmed = Column(Boolean, default=True)                 # suggested links start unconfirmed
+    confidence = Column(Float, default=1.0)
+    last_seen = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class ContactSuggestion(Base):
+    """A pending suggestion the user can accept or dismiss: either LINK a loose
+    identifier to an existing contact, or MERGE two deduced contacts that look
+    like the same person. Keeps auto-linking conservative — anything ambiguous
+    surfaces here instead of silently merging."""
+
+    __tablename__ = "contact_suggestions"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, index=True, nullable=False)
+    owner_user_id = Column(String, index=True, nullable=True)
+    kind = Column(String, default="link_identity", index=True)  # link_identity | merge
+    contact_id = Column(String, index=True, nullable=False)      # target / primary contact
+    merge_contact_id = Column(String, default="")               # the other contact (merge)
+    identity_kind = Column(String, default="")                  # for link_identity
+    identity_value = Column(String, default="")
+    identity_raw = Column(String, default="")
+    identity_source = Column(String, default="")
+    reason = Column(String, default="")                         # why we suggest it
+    confidence = Column(Float, default=0.5)
+    status = Column(String, default="pending", index=True)      # pending|accepted|dismissed
+    fingerprint = Column(String, index=True)                    # dedup identical suggestions
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+

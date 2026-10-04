@@ -64,6 +64,11 @@ FLAGS: dict[str, bool] = {
     # detection and coverage — and (Phase 2) the AI Compliance add-on. Gates the
     # Signals surfaces; the collection substrate is always on where a provider runs.
     "signal_platform_enabled": False,
+    # Unified Contacts ("My Circles"): a deduced, cross-source personal contact
+    # graph built from contact/message/email/social data already collected — a
+    # Rolodex that links a person to all their identifiers, interaction history,
+    # relationship labels and a relationship map. Reuses existing contact linking.
+    "unified_contacts_enabled": False,
 }
 
 # Human labels for the admin UI.
@@ -82,6 +87,7 @@ LABELS = {
     "ha_auto_failover": "Automatic failover to standby node (HA)",
     "debug_overlay_enabled": "Live debug overlay (behind-the-scenes diagnostics)",
     "signal_platform_enabled": "Signal Platform (asset awareness & protection-gap detection)",
+    "unified_contacts_enabled": "Unified Contacts (My Circles — personal relationship graph)",
 }
 
 
