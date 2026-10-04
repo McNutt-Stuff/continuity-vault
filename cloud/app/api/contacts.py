@@ -9,7 +9,7 @@ these routes are proxied there (see ``api/node_proxy``).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -212,18 +212,24 @@ def put_settings(body: SettingsBody,
 # Circles relationship graph                                                  #
 # --------------------------------------------------------------------------- #
 @router.get("/graph")
-def circles_graph(limit: int = 60,
+def circles_graph(limit: int = 60, circle: str | None = None, within_days: int = 0,
                   principal: security.Principal = Depends(security.get_principal),
                   tenant: Tenant = Depends(security.get_tenant),
                   db: Session = Depends(get_db)):
     """Nodes + edges for the "My Circles" map: YOU at the center, each contact a
-    node placed by its circle tier, edges weighted by interaction volume."""
+    node placed by its circle tier, edges weighted by interaction volume. Supports
+    narrowing by circle tier + recent-activity window so a big graph stays readable."""
     user = _guard(principal, tenant, db)
-    rows = (db.query(UnifiedContact)
-            .filter(UnifiedContact.tenant_id == tenant.id,
-                    UnifiedContact.owner_user_id == user.id,
-                    UnifiedContact.hidden.is_(False))
-            .order_by(UnifiedContact.interaction_count.desc())
+    query = (db.query(UnifiedContact)
+             .filter(UnifiedContact.tenant_id == tenant.id,
+                     UnifiedContact.owner_user_id == user.id,
+                     UnifiedContact.hidden.is_(False)))
+    if circle:
+        query = query.filter(UnifiedContact.circle == circle)
+    if within_days and within_days > 0:
+        cutoff = _now() - timedelta(days=within_days)
+        query = query.filter(UnifiedContact.last_interaction_at >= cutoff)
+    rows = (query.order_by(UnifiedContact.interaction_count.desc())
             .limit(max(1, min(300, limit))).all())
     me_name = (user.display_name or user.full_name or "You")
     nodes = [{"id": "me", "name": me_name, "circle": "me", "me": True}]

@@ -4,7 +4,7 @@ import { api } from "../api";
 import { Card, Loading, Pill, timeAgo } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
-import { notify } from "../components/dialog";
+import { notify, confirmDialog } from "../components/dialog";
 
 // ---- Types -----------------------------------------------------------------
 interface Stats {
@@ -315,6 +315,7 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged }:
   const [exchanges, setExchanges] = useState<Exchange[] | null>(null);
   const [exTotal, setExTotal] = useState(0);
   const [editDetails, setEditDetails] = useState(false);
+  const [merging, setMerging] = useState(false);
 
   async function load() {
     try {
@@ -384,7 +385,13 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged }:
         <button className="btn ghost sm" onClick={() => patch({ hidden: !c.hidden })}>
           {c.hidden ? "Unhide" : "Hide"}
         </button>
+        <button className="btn ghost sm" title="Merge / link into another contact" onClick={() => setMerging((v) => !v)}>
+          <Icon name="repeat" size={12} /> Merge
+        </button>
       </div>
+      {merging && <MergeInto currentId={id} currentName={c.display_name}
+                             onMerged={() => { onChanged(); onClose(); }}
+                             onCancel={() => setMerging(false)} />}
       <LabelEditor current={c.labels || []} palette={labels} onChange={(l) => patch({ labels: l })} />
 
       {/* Stats */}
@@ -474,6 +481,61 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged }:
             </div>
           )}
     </Card>
+  );
+}
+
+// ---- Merge / manual link ---------------------------------------------------
+function MergeInto({ currentId, currentName, onMerged, onCancel }:
+  { currentId: string; currentName: string; onMerged: () => void; onCancel: () => void }) {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<Contact[]>([]);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const p = new URLSearchParams({ sort: "frequency", limit: "20" });
+      if (q) p.set("q", q);
+      api.get<{ contacts: Contact[] }>(`/contacts?${p.toString()}`)
+        .then((r) => setResults(r.contacts.filter((x) => x.id !== currentId)))
+        .catch(() => setResults([]));
+    }, 220);
+    return () => clearTimeout(t);
+  }, [q, currentId]);
+  async function doMerge(target: Contact) {
+    const ok = await confirmDialog({
+      title: "Merge contacts?",
+      message: `Combine “${currentName}” into “${target.display_name}”. All identifiers (emails, phone numbers, handles) and history move under ${target.display_name}. This can't be undone.`,
+      confirmLabel: "Merge", tone: "warn",
+    });
+    if (!ok) return;
+    try {
+      await api.post("/contacts/merge", { primary_id: target.id, other_id: currentId });
+      notify({ title: "Contacts merged", message: `Linked into ${target.display_name}.`, tone: "ok" });
+      onMerged();
+    } catch (e) {
+      notify({ message: (e as { message?: string }).message || "Couldn't merge the contacts.", tone: "danger" });
+    }
+  }
+  return (
+    <div className="card" style={{ padding: "10px 12px", marginTop: 0, marginBottom: 12, background: "var(--inset)" }}>
+      <div className="spread" style={{ marginBottom: 6 }}>
+        <span className="faint" style={{ fontSize: 11.5, fontWeight: 600 }}>Link this person into another contact</span>
+        <button className="btn ghost sm" onClick={onCancel}><Icon name="x" size={12} /></button>
+      </div>
+      <input className="input sm" autoFocus placeholder="Search people by name, email or phone…"
+             value={q} onChange={(e) => setQ(e.target.value)} style={{ width: "100%" }} />
+      <div className="stack" style={{ gap: 3, marginTop: 7, maxHeight: 230, overflow: "auto" }}>
+        {results.map((r) => (
+          <div key={r.id} onClick={() => doMerge(r)} className="row"
+               style={{ gap: 8, alignItems: "center", padding: "5px 7px", borderRadius: 6, cursor: "pointer" }}
+               onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover)")}
+               onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+            <Avatar name={r.display_name} size={26} />
+            <span style={{ fontSize: 12.5, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.display_name}</span>
+            <span className="faint" style={{ fontSize: 11 }}>{r.interaction_count.toLocaleString()}</span>
+          </div>
+        ))}
+        {results.length === 0 && <div className="muted" style={{ fontSize: 12, padding: "4px 2px" }}>No matches.</div>}
+      </div>
+    </div>
   );
 }
 
@@ -601,16 +663,57 @@ function Identities({ contactId, identities, onChanged }:
 // ---- Circles map -----------------------------------------------------------
 function CirclesMap({ onSelect }: { onSelect: (id: string) => void }) {
   const [g, setG] = useState<GraphData | null>(null);
-  useEffect(() => { api.get<GraphData>("/contacts/graph?limit=80").then(setG).catch(() => setG({ nodes: [], edges: [] })); }, []);
-  if (!g) return <Loading label="Drawing your circles…" />;
+  const [circle, setCircle] = useState("");
+  const [within, setWithin] = useState(0);   // days; 0 = all time
+  const [limit, setLimit] = useState(80);
+  useEffect(() => {
+    const p = new URLSearchParams({ limit: String(limit) });
+    if (circle) p.set("circle", circle);
+    if (within) p.set("within_days", String(within));
+    setG(null);
+    api.get<GraphData>(`/contacts/graph?${p.toString()}`).then(setG).catch(() => setG({ nodes: [], edges: [] }));
+  }, [circle, within, limit]);
+  const controls = (
+    <div className="filter-bar" style={{ marginBottom: 12 }}>
+      <label className="filter-select">
+        <span>Circle</span>
+        <select value={circle} onChange={(e) => setCircle(e.target.value)}>
+          <option value="">All circles</option>
+          {CIRCLES.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+        </select>
+      </label>
+      <label className="filter-select">
+        <span>Active within</span>
+        <select value={within} onChange={(e) => setWithin(Number(e.target.value))}>
+          <option value={0}>Any time</option>
+          <option value={30}>Last 30 days</option>
+          <option value={90}>Last 90 days</option>
+          <option value={365}>Last year</option>
+          <option value={1095}>Last 3 years</option>
+        </select>
+      </label>
+      <label className="filter-select">
+        <span>Show up to</span>
+        <select value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
+          <option value={40}>40 people</option>
+          <option value={80}>80 people</option>
+          <option value={150}>150 people</option>
+          <option value={300}>300 people</option>
+        </select>
+      </label>
+    </div>
+  );
+  if (!g) return <Card>{controls}<Loading label="Drawing your circles…" card={false} /></Card>;
+  const peopleCount = g.nodes.filter((n) => !n.me).length;
   const W = 760, H = 620, cx = W / 2, cy = H / 2;
   const rings = [70, 140, 210, 280]; // inner→acquaintance; dormant placed outermost
   const ringFor: Record<string, number> = { inner: rings[0], close: rings[1], active: rings[2], acquaintance: rings[3], dormant: 300 };
+  // When filtered to a single circle, spread everyone across the ring evenly on one band.
   const byCircle: Record<string, GraphNode[]> = {};
   for (const n of g.nodes) if (!n.me) (byCircle[n.circle] ||= []).push(n);
   const pos: Record<string, { x: number; y: number }> = { me: { x: cx, y: cy } };
-  for (const [circle, list] of Object.entries(byCircle)) {
-    const r = ringFor[circle] ?? 300;
+  for (const [circ, list] of Object.entries(byCircle)) {
+    const r = ringFor[circ] ?? 300;
     list.forEach((n, i) => {
       const a = (i / list.length) * Math.PI * 2 - Math.PI / 2;
       pos[n.id] = { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
@@ -618,6 +721,12 @@ function CirclesMap({ onSelect }: { onSelect: (id: string) => void }) {
   }
   return (
     <Card>
+      {controls}
+      {peopleCount === 0 ? (
+        <div className="muted" style={{ fontSize: 13, padding: "24px 0", textAlign: "center" }}>
+          No people match these filters. Widen the time window or pick another circle.
+        </div>
+      ) : (
       <div style={{ overflow: "auto" }}>
         <svg width={W} height={H} style={{ maxWidth: "100%" }}>
           {CIRCLES.slice(0, 5).map((c, i) => (
@@ -651,12 +760,16 @@ function CirclesMap({ onSelect }: { onSelect: (id: string) => void }) {
           })}
         </svg>
       </div>
-      <div className="row" style={{ gap: 14, marginTop: 8, flexWrap: "wrap" }}>
-        {CIRCLES.map((c) => (
-          <span key={c.key} className="row" style={{ gap: 5, alignItems: "center", fontSize: 11.5 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: c.color }} /> {c.label}
-          </span>
-        ))}
+      )}
+      <div className="spread" style={{ marginTop: 8, flexWrap: "wrap", gap: 10 }}>
+        <div className="row" style={{ gap: 14, flexWrap: "wrap" }}>
+          {CIRCLES.map((c) => (
+            <span key={c.key} className="row" style={{ gap: 5, alignItems: "center", fontSize: 11.5 }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: c.color }} /> {c.label}
+            </span>
+          ))}
+        </div>
+        <span className="faint" style={{ fontSize: 11.5 }}>{peopleCount} shown</span>
       </div>
     </Card>
   );
