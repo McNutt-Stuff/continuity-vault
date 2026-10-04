@@ -123,9 +123,16 @@ export default function Contacts() {
   async function rebuild() {
     setBusy(true);
     try {
-      const r = await api.post<{ contacts: number }>("/contacts/rebuild");
-      await loadOverview(); await loadList();
+      const r = await api.post<{ contacts: number; overview?: Overview; page?: Contact[] }>("/contacts/rebuild");
+      // Seed straight from the rebuild response (computed on the node that just
+      // built them) so the UI shows the result immediately; the CP replica the
+      // normal reads use only catches up on the next replication push (~30s).
+      if (r.overview) setOv(r.overview);
+      if (r.page) setContacts(r.page);
+      else { await loadOverview(); await loadList(); }
       notify({ title: "Contacts rebuilt", message: `Linked ${r.contacts} ${r.contacts === 1 ? "person" : "people"} across your sources.`, tone: "ok" });
+      // Reconcile against the CP replica once it has replicated (keeps filters live).
+      window.setTimeout(() => { void loadOverview(); void loadList(); }, 35000);
     } catch (e) {
       const err = e as { status?: number; message?: string };
       const msg = err.status === 404
@@ -270,7 +277,7 @@ export default function Contacts() {
 
 function MiniStat({ label, value, tint, onClick }: { label: string; value: number; tint?: string; onClick?: () => void }) {
   return (
-    <Card onClick={onClick} style={{ cursor: onClick ? "pointer" : undefined, padding: "12px 14px" }}>
+    <Card onClick={onClick} style={{ cursor: onClick ? "pointer" : undefined, padding: "12px 14px", marginTop: 0 }}>
       <div style={{ fontSize: 22, fontWeight: 700, color: tint }}>{value.toLocaleString()}</div>
       <div className="faint" style={{ fontSize: 11.5 }}>{label}</div>
     </Card>

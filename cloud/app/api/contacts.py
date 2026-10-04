@@ -137,6 +137,10 @@ def overview(principal: security.Principal = Depends(security.get_principal),
              tenant: Tenant = Depends(security.get_tenant),
              db: Session = Depends(get_db)):
     user = _guard(principal, tenant, db)
+    return _overview_payload(db, tenant, user)
+
+
+def _overview_payload(db: Session, tenant: Tenant, user: User) -> dict:
     rows = db.query(UnifiedContact).filter(
         UnifiedContact.tenant_id == tenant.id,
         UnifiedContact.owner_user_id == user.id,
@@ -159,6 +163,17 @@ def overview(principal: security.Principal = Depends(security.get_principal),
             "by_relationship": by_relationship, "pending_suggestions": pending,
             "top_contacts": [_contact_view(c) for c in top],
             "prefs": _prefs(user)}
+
+
+def _default_page(db: Session, tenant: Tenant, user: User, limit: int = 500) -> list[dict]:
+    """Default-sorted (closeness) first page — used to seed the UI right after a
+    rebuild, so it shows the just-built contacts without waiting for the CP replica."""
+    rows = db.query(UnifiedContact).filter(
+        UnifiedContact.tenant_id == tenant.id,
+        UnifiedContact.owner_user_id == user.id,
+        UnifiedContact.hidden.is_(False)).all()
+    rows.sort(key=lambda c: (CIRCLE_ORDER.get(c.circle, 9), -(c.interaction_count or 0)))
+    return [_contact_view(c) for c in rows[:max(1, min(1000, limit))]]
 
 
 @router.get("/settings")
@@ -314,7 +329,12 @@ def rebuild_now(principal: security.Principal = Depends(security.get_principal),
                 db: Session = Depends(get_db)):
     user = _guard(principal, tenant, db)
     n = unified_contacts.rebuild(db, user)
-    return {"ok": True, "contacts": n}
+    # Return the freshly-built overview + first page from THIS node, so the portal
+    # renders the result immediately instead of reading the CP replica, which only
+    # catches up on the next node→CP replication push (~30s → "mapped N but zeros").
+    return {"ok": True, "contacts": n,
+            "overview": _overview_payload(db, tenant, user),
+            "page": _default_page(db, tenant, user)}
 
 
 # --------------------------------------------------------------------------- #
