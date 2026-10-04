@@ -217,9 +217,10 @@ def _message_parties(meta: dict) -> tuple[list[tuple[str, str, str, str]], bool,
         elif canon in ("to", "cc", "bcc"):
             has_to = True
         for raw in contacts._iter_values(v):
-            parsed = contacts.parse_party(str(raw))
-            if parsed:
-                parties.append((parsed[0], parsed[1], str(raw), parsed[2], canon))  # type: ignore
+            for piece in contacts.split_addresses(raw):
+                parsed = contacts.parse_party(piece)
+                if parsed:
+                    parties.append((parsed[0], parsed[1], piece, parsed[2], canon))  # type: ignore
     return parties, has_from, has_to  # type: ignore
 
 

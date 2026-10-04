@@ -106,12 +106,44 @@ def parse_party(value: str) -> tuple[str, str, str] | None:
             if name and ("@" in name or re.fullmatch(r"[+()\-.\s\d]+", name)):
                 name = ""
             return ("email", e, name)
-    p = normalize_phone(inner)
-    if p:
-        if name and ("@" in name or re.fullmatch(r"[+()\-.\s\d]+", name)):
-            name = ""
-        return ("phone", p, name)
+    # Phone ONLY when the value is phone-shaped (digits/punctuation) — never strip
+    # digits out of free text like "Me, +1201…" (a group-chat participant blob),
+    # which would mint a phone whose raw blob then became a contact's display name.
+    if re.fullmatch(r"[+()\-.\s\d]+", inner or ""):
+        p = normalize_phone(inner)
+        if p:
+            return ("phone", p, name)
     return None
+
+
+def split_addresses(value) -> list[str]:
+    """Split a from/to value that may be a comma/semicolon-separated participant
+    list ("Me, +1201…, John <j@x>") into individual addresses, WITHOUT splitting a
+    comma inside a quoted display name ("Doe, John" <j@x>) or inside <>."""
+    s = str(value or "")
+    if "," not in s and ";" not in s:
+        return [s] if s.strip() else []
+    out: list[str] = []
+    buf: list[str] = []
+    depth = 0          # inside <>
+    inq = False        # inside "..."
+    for ch in s:
+        if ch == '"':
+            inq = not inq
+            buf.append(ch)
+        elif ch == "<":
+            depth += 1
+            buf.append(ch)
+        elif ch == ">":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+        elif ch in ",;" and depth == 0 and not inq:
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    out.append("".join(buf))
+    return [p.strip() for p in out if p.strip()]
 
 
 
