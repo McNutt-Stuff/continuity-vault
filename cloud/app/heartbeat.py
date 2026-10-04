@@ -49,6 +49,32 @@ def _telemetry() -> dict:
 
 
 UPDATE_MARKER = "/run/arkive/updating"
+UPDATE_REPORT = "/etc/arkive/update-report.json"
+
+
+def _update_report() -> dict | None:
+    """Outcome of this node's last self-update (written by node-update.sh), shipped
+    to the control plane once so a failed/stuck update surfaces in Platform Logs
+    rather than only in this node's local journald."""
+    try:
+        import os
+        if not os.path.exists(UPDATE_REPORT):
+            return None
+        with open(UPDATE_REPORT) as fh:
+            rep = json.load(fh)
+        return rep if isinstance(rep, dict) else None
+    except Exception:
+        return None
+
+
+def _clear_update_report() -> None:
+    """Delete the update report once the control plane has received it (in the
+    heartbeat payload), so each outcome is reported exactly once."""
+    try:
+        import os
+        os.remove(UPDATE_REPORT)
+    except Exception:
+        pass
 
 
 def _update_in_progress() -> bool:
@@ -137,6 +163,7 @@ def send_heartbeat() -> dict | None:
         "cloud": cloud,
         "updating": _update_in_progress(),
         "service_health": _service_health(s.node_role),
+        "update_report": _update_report(),
     }
     url = s.control_plane_url.rstrip("/") + "/api/nodes/heartbeat"
     req = urllib.request.Request(
@@ -153,6 +180,11 @@ def send_heartbeat() -> dict | None:
     except Exception as e:
         print(f"[heartbeat] failed to reach control plane: {e}", file=sys.stderr)
         return None
+
+    # The control plane received this heartbeat (and with it any self-update
+    # outcome). Clear the report so it's reported exactly once.
+    if payload.get("update_report"):
+        _clear_update_report()
 
     # Persist the config layers this node was assigned (bound profiles + per-node
     # overrides) so the running processes (scheduler, notifications) apply them.

@@ -164,6 +164,7 @@ class NodeHeartbeat(BaseModel):
     cloud: dict = {}
     updating: bool = False
     service_health: dict | None = None
+    update_report: dict | None = None
 
 
 def _effective_settings(db: Session, node: Node) -> tuple[dict, list[str]]:
@@ -263,6 +264,48 @@ def _handle_service_health(db: Session, node, sh: dict, service_down: bool,
             dedupe_key=f"node-service-recovered:{node.id}", dedupe_within_hours=1)
 
 
+def _handle_update_report(db: Session, node, rep: dict) -> None:
+    """Ingest a node self-update outcome (success/failure + install log tail) into
+    Platform Logs and alert platform admins when an update FAILED. The updater runs
+    OUTSIDE cv-cloud, so this report is the only way its result reaches the CP."""
+    from .. import admin_notifications, logsink
+    ok = bool(rep.get("ok"))
+    frm = str(rep.get("from") or "")[:40]
+    to = str(rep.get("to") or "")[:40]
+    ts = str(rep.get("ts") or "")
+    # Prefix each line with the report timestamp + level so logsink parses the
+    # right severity (INFO on success, ERROR on failure) and timestamps the batch.
+    prefix = f"{ts} {'INFO' if ok else 'ERROR'} " if ts else ""
+    raw = [str(l) for l in (rep.get("lines") or []) if str(l).strip()][-200:]
+    header = (f"node self-update {'succeeded' if ok else 'FAILED'}: "
+              f"{frm or 'none'} -> {to or '?'}")
+    lines = [prefix + header] + [prefix + l for l in raw]
+    try:
+        logsink.ingest_device_logs(db, source="node", lines=lines,
+                                   node_id=node.id, device_name=node.name)
+    except Exception:  # noqa: BLE001
+        logger.exception("node %s: update-report ingest failed", node.name)
+    if ok:
+        logger.info("node %s (%s): %s", node.name, node.role, header)
+        return
+    logger.error("node %s (%s): %s", node.name, node.role, header)
+    try:
+        admin_notifications.emit(
+            db, "node_alert", severity="critical",
+            subject=f"[Arkive] Node self-update FAILED — {node.name}",
+            title="Node self-update failed",
+            intro=(f"The self-update on node {node.name} ({node.role}) failed; it is "
+                   f"still running the previous bundle ({frm or 'unknown'}). The install "
+                   "log tail was captured to Platform Logs."),
+            rows=[{"icon": "server", "name": node.name, "detail": node.role},
+                  {"icon": "download", "name": "Target", "detail": to or "unknown"}],
+            cta={"label": "View node logs",
+                 "url": f"https://{get_settings().domain}/admin/logs?node_id={node.id}"},
+            dedupe_key=f"node-update-failed:{node.id}:{to}", dedupe_within_hours=6)
+    except Exception:  # noqa: BLE001
+        logger.exception("node %s: update-failure alert failed", node.name)
+
+
 @public_router.post("/nodes/heartbeat")
 def node_heartbeat(body: NodeHeartbeat,
                    request: Request,
@@ -324,6 +367,13 @@ def node_heartbeat(body: NodeHeartbeat,
             _handle_service_health(db, node, sh, service_down, prev_status)
         except Exception:  # noqa: BLE001
             logger.exception("node %s: service-health handling failed", node.name)
+    # A finished self-update reports its outcome (success/failure + install log
+    # tail) so a stuck/failed node update is visible in Platform Logs + alerts.
+    if body.update_report:
+        try:
+            _handle_update_report(db, node, body.update_report)
+        except Exception:  # noqa: BLE001
+            logger.exception("node %s: update-report handling failed", node.name)
     merged, applied = _effective_settings(db, node)
     overrides = dict(node.config_overrides or {})
     effective = {**merged, **overrides}  # override wins over profile
