@@ -19,6 +19,7 @@ import Rules from "./pages/Rules";
 import Compliance from "./pages/Compliance";
 import ComplianceFramework from "./pages/ComplianceFramework";
 import Signals from "./pages/Signals";
+import Contacts from "./pages/Contacts";
 import Appliances from "./pages/Appliances";
 import CloudStorage from "./pages/CloudStorage";
 import Snapshots from "./pages/Snapshots";
@@ -36,6 +37,7 @@ import SetupWizard from "./pages/SetupWizard";
 const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
   { to: "/", label: "Overview", icon: "grid", group: "" },
   { to: "/insights", label: "Insights", icon: "insights", group: "" },
+  { to: "/contacts", label: "Contacts", icon: "user", group: "" },
   { to: "/search", label: "Unified Search", icon: "search", group: "" },
   { to: "/connectors", label: "Sources", icon: "link", group: "Data sources" },
   { to: "/devices", label: "Devices", icon: "user", group: "Data sources" },
@@ -106,6 +108,7 @@ export default function App() {
             {me.features?.compliance_enabled === true && me.can_admin && <Route path="/compliance" element={<Compliance />} />}
             {me.features?.compliance_enabled === true && me.can_admin && <Route path="/compliance/:framework" element={<ComplianceFramework />} />}
             {me.features?.signal_platform_enabled === true && me.can_admin && <Route path="/signals" element={<Signals />} />}
+            {me.features?.unified_contacts_enabled === true && <Route path="/contacts" element={<Contacts />} />}
             <Route path="/activity" element={<ActivityPage />} />
             <Route path="/snapshots" element={<Snapshots />} />
             <Route path="/appliances" element={<Appliances />} />
@@ -154,6 +157,7 @@ function Sidebar() {
     // Compliance is a Business admin capability, OFF by default.
     if (n.to === "/compliance" && !(me?.features?.compliance_enabled === true && me?.can_admin)) return false;
     if (n.to === "/signals" && !(me?.features?.signal_platform_enabled === true && me?.can_admin)) return false;
+    if (n.to === "/contacts" && me?.features?.unified_contacts_enabled !== true) return false;
     const req = NAV_REQUIRES[n.to];
     if (!req || !options || options.length === 0) return true;  // unconfigured → show all
     return options.includes(req);
