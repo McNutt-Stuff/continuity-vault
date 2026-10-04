@@ -50,6 +50,36 @@ from .api import (
 
 settings = get_settings()
 
+
+def _persist_env_flag(key: str, value: str, path: str = "/etc/continuity-vault.env") -> bool:
+    """Best-effort upsert of KEY=value in the node env file so a runtime-applied
+    setting survives a restart. Returns True on write. Never raises (the file may
+    be read-only or owned by root) — the caller falls back to an env-var hint."""
+    try:
+        import os
+        lines: list[str] = []
+        if os.path.exists(path):
+            with open(path, "r") as fh:
+                lines = fh.read().splitlines()
+        prefix = f"{key}="
+        out, found = [], False
+        for ln in lines:
+            if ln.strip().startswith(prefix) or ln.strip().startswith(f"export {prefix}"):
+                out.append(f"{key}={value}")
+                found = True
+            else:
+                out.append(ln)
+        if not found:
+            out.append(f"{key}={value}")
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write("\n".join(out) + "\n")
+        os.replace(tmp, path)  # atomic
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 app = FastAPI(
     title="Arkive Control Plane",
     version="0.1.0",
@@ -316,11 +346,13 @@ def startup() -> None:
     else:
         start_scheduler()
 
-    # Loud, non-silent guard for a common federation misconfiguration: a control
-    # plane with node-assigned tenants but node_sync_scope (CV_NODE_SYNC_SCOPE) OFF.
-    # CP→node file-op proxying now works regardless (node_proxy keys off actual
-    # tenant assignment), but connector forwarding to nodes + index replication
-    # federation still gate on this flag — so surface it in Platform Logs.
+    # Self-heal a common federation misconfiguration: a control plane with
+    # node-assigned tenants but node_sync_scope (CV_NODE_SYNC_SCOPE) OFF. Those
+    # tenants CANNOT be fully served without federation (connector forwarding +
+    # index replication to their node), so — rather than silently cripple it —
+    # auto-enable sync scope for this process (the settings singleton is shared,
+    # so live readers pick it up) and persist CV_NODE_SYNC_SCOPE=true to the env
+    # so it survives restarts. Mirrors config._force_customer_tenant_federation.
     if role == "control-plane" and not settings.node_sync_scope:
         try:
             from .db import SessionLocal
@@ -328,13 +360,15 @@ def startup() -> None:
             with SessionLocal() as _db:
                 _n = _db.query(Tenant).filter(Tenant.node_id.isnot(None)).count()
             if _n:
-                _logging.getLogger("cv.startup").error(
-                    "FEDERATION FLAG OFF: %d tenant(s) are assigned to a node but "
-                    "CV_NODE_SYNC_SCOPE is not set on this control plane. File-op "
-                    "proxying now works regardless, but connector-forwarding + index "
-                    "replication to nodes stay DISABLED. Set CV_NODE_SYNC_SCOPE=true "
-                    "in /etc/continuity-vault.env and restart cv-cloud for full "
-                    "federation.", _n)
+                object.__setattr__(settings, "node_sync_scope", True)
+                _persisted = _persist_env_flag("CV_NODE_SYNC_SCOPE", "true")
+                _logging.getLogger("cv.startup").warning(
+                    "FEDERATION AUTO-ENABLED: %d tenant(s) are node-assigned but "
+                    "CV_NODE_SYNC_SCOPE was not set; enabling federation (connector "
+                    "forwarding + index replication) for this process%s.", _n,
+                    " and persisting it to /etc/continuity-vault.env" if _persisted
+                    else " (could not persist to the env file — set "
+                    "CV_NODE_SYNC_SCOPE=true manually to survive restarts)")
         except Exception:  # noqa: BLE001 — a diagnostic must never break startup
             pass
 
