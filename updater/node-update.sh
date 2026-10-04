@@ -88,14 +88,23 @@ if [[ "$remote" == "$current" && "${CV_FORCE:-0}" != "1" ]]; then
 fi
 
 log "updating ${current:-none} -> ${remote}"
-tmp="$(mktemp -d)"
+# Stage on the SAME (large) volume as the source, never the default /tmp — many
+# node images mount /tmp as a small RAM-backed tmpfs, so a multi-MB bundle fills
+# it and curl fails with "(23) Failure writing output to destination".
+stage_parent="$(dirname "$SRC_DIR")"
+tmp="$(mktemp -d "${stage_parent}/.arkive-update.XXXXXX" 2>/dev/null || mktemp -d)"
 trap 'rm -rf "$tmp"; rm -f "$RUN_LOG"' EXIT
 # Marker the heartbeat reads so the admin console shows an intentional "Updating"
 # state (not a scary offline/restart blip) while we re-install. Cleared on exit.
 mkdir -p /run/arkive 2>/dev/null || true
 : > /run/arkive/updating 2>/dev/null || true
 trap 'rm -rf "$tmp"; rm -f /run/arkive/updating "$RUN_LOG"' EXIT
-curl -fsSL "${CP}/api/nodes/bundle" -o "$tmp/bundle.tar.gz"
+if ! curl -fSL "${CP}/api/nodes/bundle" -o "$tmp/bundle.tar.gz"; then
+  avail="$(df -Pk "$tmp" 2>/dev/null | awk 'NR==2{print $4" KiB free on "$6}')"
+  log "bundle download failed (curl) writing to ${tmp} [${avail:-df unavailable}]"
+  write_report 0
+  exit 1
+fi
 # Stage into a fresh dir, then swap, so a bad download never corrupts the source.
 rm -rf "$SRC_DIR.new"; mkdir -p "$SRC_DIR.new"
 tar -xzf "$tmp/bundle.tar.gz" -C "$SRC_DIR.new"
