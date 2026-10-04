@@ -616,6 +616,13 @@ class PushPayload(BaseModel):
     # Managed integration Collections created on the node (M365) that must exist on
     # the CP before their receipts (they normally flow CP→node only).
     managed_collections: list[dict] = []
+    # Unified Contacts built on the node + replicated UP so the CP displays them.
+    # Per-user SNAPSHOT: contacts_users lists the users whose full set is enclosed,
+    # so the CP replaces each user's contacts/identities/suggestions wholesale.
+    contacts_users: list[str] = []
+    unified_contacts: list[dict] = []
+    contact_identities: list[dict] = []
+    contact_suggestions: list[dict] = []
 
 
 _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
@@ -884,8 +891,41 @@ def push(body: PushPayload, authorization: str = Header(default=""),
             logger.warning("node-sync: dropped %d/%d log rows from node %s "
                            "(unknown tenant or missing id)", dropped_logs,
                            len(body.log_entries), push_node.name)
+    _ingest_unified_contacts(db, body, counts, valid_users)
     db.commit()
     return {"ok": True, **counts}
+
+
+def _ingest_unified_contacts(db: Session, body: "PushPayload", counts: dict,
+                             valid_users: set) -> None:
+    """Replace each enclosed user's Unified Contacts set wholesale (the node sent a
+    full per-user snapshot in contacts_users), so adds AND deletes both land on the
+    CP-displayed replica. Skipped silently if the feature's tables are absent."""
+    if not body.contacts_users:
+        return
+    try:
+        from ..models import (ContactIdentity as _CI, ContactSuggestion as _CS,
+                              UnifiedContact as _UC)
+    except Exception:  # noqa: BLE001
+        return
+    users = [u for u in body.contacts_users if u in valid_users]
+    if not users:
+        return
+    # Clear the users' existing replica, then insert the snapshot.
+    for model in (_CI, _CS, _UC):
+        db.query(model).filter(model.owner_user_id.in_(users)).delete(
+            synchronize_session=False)
+    db.flush()
+    for row in body.unified_contacts:
+        if row.get("owner_user_id") in valid_users:
+            _upsert(db, _UC, row)
+    for row in body.contact_identities:
+        if row.get("owner_user_id") in valid_users:
+            _upsert(db, _CI, row)
+    for row in body.contact_suggestions:
+        if row.get("owner_user_id") in valid_users:
+            _upsert(db, _CS, row)
+    counts["contacts"] = len(body.unified_contacts)
 
 
 # Telemetry fields on network rows; monitor_state / of_interest are CP-curated.

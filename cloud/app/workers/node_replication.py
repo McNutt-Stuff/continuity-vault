@@ -808,6 +808,22 @@ def _push(s) -> int:
         except ValueError:
             m365_since = None
     m365_high = m365_since
+    # Unified Contacts are built on the node (federated) but DISPLAYED from the CP,
+    # so replicate them UP. Per-user SNAPSHOT (full set) so deletes propagate: push
+    # every contact/identity/suggestion for any user whose contacts changed since
+    # the cursor; the CP replaces that user's set wholesale.
+    contacts_users: list = []
+    unified_contacts: list = []
+    contact_identities: list = []
+    contact_suggestions: list = []
+    contacts_cursor = _read_state().get("contacts_cursor")
+    contacts_since = None
+    if contacts_cursor:
+        try:
+            contacts_since = datetime.fromisoformat(contacts_cursor)
+        except ValueError:
+            contacts_since = None
+    contacts_high = contacts_since
     with SessionLocal() as db:
         # Only push data for tenants THIS node is ACTIVE for. A warm-standby node
         # also holds other tenants' replicated receipts/docs in its local DB — those
@@ -920,6 +936,33 @@ def _push(s) -> int:
             rq2 = rq2.filter(IntegrationRun.created_at > integ_since)
         for row in rq2.order_by(IntegrationRun.created_at.asc()).limit(1000).all():
             integ_runs.append(_row(row))
+        # Unified Contacts: per-user snapshot of any user whose contacts changed
+        # since the cursor (so the CP-displayed replica reflects adds AND deletes).
+        try:
+            from ..models import (ContactIdentity as _CI, ContactSuggestion as _CS,
+                                  UnifiedContact as _UC)
+            ucq = db.query(_UC.owner_user_id, _UC.updated_at)
+            if owned_tids is not None:
+                ucq = ucq.filter(_UC.tenant_id.in_(owned_tids))
+            if contacts_since is not None:
+                ucq = ucq.filter(_UC.updated_at > contacts_since)
+            changed_uids: set = set()
+            for uid, upd in ucq.all():
+                if uid:
+                    changed_uids.add(uid)
+                if upd and (contacts_high is None or upd > contacts_high):
+                    contacts_high = upd
+            changed_uids = set(list(changed_uids)[:200])  # bound per push
+            if changed_uids:
+                contacts_users = list(changed_uids)
+                for row in db.query(_UC).filter(_UC.owner_user_id.in_(changed_uids)).all():
+                    unified_contacts.append(_row(row))
+                for row in db.query(_CI).filter(_CI.owner_user_id.in_(changed_uids)).all():
+                    contact_identities.append(_row(row))
+                for row in db.query(_CS).filter(_CS.owner_user_id.in_(changed_uids)).all():
+                    contact_suggestions.append(_row(row))
+        except Exception:  # noqa: BLE001 — contacts optional; never break the push
+            logger.debug("unified contacts collection failed", exc_info=True)
         # Outbound-email history the node's email service recorded, so the admin's
         # per-user communications log on the control plane is complete.
         cq = db.query(Communication)
@@ -967,7 +1010,7 @@ def _push(s) -> int:
             or appliance_storages or customer_storage_health or compliance_signals or insights
             or integ_instances or net_clients or net_apps or net_usage or net_devices or integ_runs
             or communications or alerts
-            or m365_identities or m365_sources):
+            or m365_identities or m365_sources or unified_contacts):
         # Nothing to replicate, but this node's own logs still must reach the CP.
         _push_logs(s)
         return 0
@@ -981,7 +1024,7 @@ def _push(s) -> int:
                 or appliance_storages or customer_storage_health or compliance_signals or insights
                 or integ_instances or net_clients
                 or net_apps or net_usage or net_devices or integ_runs or communications or alerts
-                or m365_identities or m365_sources)
+                or m365_identities or m365_sources or unified_contacts)
     if has_data:
         res = _post("/nodes/sync/push", {
             "node": node, "role": role,
@@ -996,6 +1039,9 @@ def _push(s) -> int:
             "communications": communications, "admin_alerts": alerts,
             "m365_external_identities": m365_identities, "m365_managed_sources": m365_sources,
             "managed_collections": managed_collections,
+            "contacts_users": contacts_users, "unified_contacts": unified_contacts,
+            "contact_identities": contact_identities,
+            "contact_suggestions": contact_suggestions,
         })
         if res and res.get("ok"):
             if high is not None:
@@ -1010,6 +1056,8 @@ def _push(s) -> int:
                 st = _read_state(); st["admin_alerts_cursor"] = alerts_high.isoformat(); _write_state(st)
             if m365_high is not None:
                 st = _read_state(); st["m365_cursor"] = m365_high.isoformat(); _write_state(st)
+            if contacts_high is not None:
+                st = _read_state(); st["contacts_cursor"] = contacts_high.isoformat(); _write_state(st)
             logger.info("replication push: receipts=%d documents=%d jobs=%d agents=%d "
                         "appliances=%d storages=%d insights=%d integrations=%d network=%d m365=%d",
                         len(receipts), len(documents), len(jobs), len(agents),
