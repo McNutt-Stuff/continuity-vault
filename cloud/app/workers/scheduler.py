@@ -1049,15 +1049,16 @@ _last_contact_build: datetime | None = None
 
 
 def _run_contact_directory() -> None:
-    """Rebuild the contact directory (phone/email → name) for users who opted in,
-    for the tenants THIS node is responsible for. Rate-limited to a few hours —
-    it's derived from the contact index which changes slowly."""
+    """Rebuild the contact directory (phone/email → name) AND the Unified Contacts
+    graph ("My Circles") for users who opted in / have the flag, for the tenants
+    THIS node is responsible for. Both are DERIVED FROM THE SEARCH INDEX (no new
+    extraction), which changes slowly — rate-limited to a few hours."""
     global _last_contact_build
     now = datetime.utcnow()
     if _last_contact_build and (now - _last_contact_build) < timedelta(hours=6):
         return
     _last_contact_build = now
-    from .. import contacts
+    from .. import contacts, features, unified_contacts
     from ..models import User
     settings = get_settings()
     is_cp = (settings.node_role or "control-plane") == "control-plane"
@@ -1066,16 +1067,26 @@ def _run_contact_directory() -> None:
         if is_cp:
             assigned = {tid for (tid,) in
                         db.query(Tenant.id).filter(Tenant.node_id.isnot(None)).all()}
-        users = [u for u in db.query(User).filter(
-                    User.status == "active",
-                    User.contact_linking_enabled.is_(True)).all()
+        users = [u for u in db.query(User).filter(User.status == "active").all()
                  if u.tenant_id not in assigned]
+        tenants: dict[str, object] = {}
         for u in users:
+            if getattr(u, "contact_linking_enabled", False):
+                try:
+                    contacts.build_directory(db, u)
+                except Exception:  # noqa: BLE001
+                    db.rollback()
+                    logger.exception("contact directory build failed for %s", u.id)
+            t = tenants.get(u.tenant_id)
+            if t is None:
+                t = db.get(Tenant, u.tenant_id)
+                tenants[u.tenant_id] = t
             try:
-                contacts.build_directory(db, u)
+                if t is not None and features.resolve(u, t, "unified_contacts_enabled", db):
+                    unified_contacts.rebuild(db, u)
             except Exception:  # noqa: BLE001
                 db.rollback()
-                logger.exception("contact directory build failed for %s", u.id)
+                logger.exception("unified contacts rebuild failed for %s", u.id)
 
 
 def _run_notifications() -> None:
