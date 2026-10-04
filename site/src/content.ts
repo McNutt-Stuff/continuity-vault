@@ -87,6 +87,15 @@ export const features = {
         { ico: "🚦", h: "Findings that self-resolve", p: "Deduplicated, prioritized issues link straight to the fix and clear themselves the moment the underlying condition is resolved." },
       ],
     },
+    {
+      title: "Know your people",
+      items: [
+        { ico: "👤", h: "Unified Contacts", p: "A deduced Rolodex: Arkive links every email, number and handle to one person across all your sources — no re-scanning, mined from what it already indexed." },
+        { ico: "🫂", h: "My Circles", p: "See who's closest — inner circle to acquaintance — ranked by how much and how recently you connect, with a relationship map you can explore." },
+        { ico: "🏷️", h: "Label & curate", p: "Tag people as family, friends, colleagues and more, keep rich private details, and confirm or merge links with a tap." },
+        { ico: "🧵", h: "Every exchange", p: "Open anyone to drill into your whole history with them — texts, emails and messages — straight from Unified Search." },
+      ],
+    },
   ],
 };
 
