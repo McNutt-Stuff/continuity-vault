@@ -102,6 +102,11 @@ def parse_party(value: str) -> tuple[str, str, str] | None:
     if em:
         e = normalize_email(em.group(0))
         if e:
+            # Outlook/Exchange internal pseudo-addresses (IPM.Note.*, meeting
+            # responses) are never real people — don't make them contacts.
+            local = e.split("@", 1)[0]
+            if local.startswith("ipm.") or "schedule.meeting" in local:
+                return None
             # A "name" that's itself an address/number isn't a real display name.
             if name and ("@" in name or re.fullmatch(r"[+()\-.\s\d]+", name)):
                 name = ""

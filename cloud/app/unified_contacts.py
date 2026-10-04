@@ -737,12 +737,17 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
                 emitted.add(pair)
                 oid = one_identity.get(other.id)
                 is_link = _loose(other) and not _loose(primary) and oid
-                # AUTO-MERGE the safe case: an exact-name (first+last) match where the
-                # primary is an address-book-backed contact and the other is a loose
-                # message-only single-identifier contact → fold it in without asking
-                # (gated by the user's auto_link pref). Card-backing keeps common-name
-                # false merges out; the user can disable auto-link or unlink after.
-                if (is_link and auto_merge and sim >= 0.95 and primary.id in card_backed):
+                # AUTO-MERGE an EXACT first+last name match when at least one side is
+                # address-book-backed (its name came from a contact card = authoritative):
+                # folds duplicate cards + a message contact that matches a card by name
+                # without asking. Gated by auto_link; card-backing keeps different
+                # same-named strangers apart; reversible by unlinking.
+                exact_card = (sim >= 0.95
+                              and (primary.id in card_backed or other.id in card_backed))
+                if auto_merge and exact_card:
+                    # Keep the card-backed record as primary when only the other is.
+                    if other.id in card_backed and primary.id not in card_backed:
+                        primary, other = other, primary
                     try:
                         merge(db, user, primary.id, other.id)
                         merged_away.add(other.id)
