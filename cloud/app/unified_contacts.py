@@ -712,10 +712,19 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
         return (0 if _loose(c) else 1, idn_count.get(c.id, 0),
                 int(c.interaction_count or 0), len(c.source_types or []))
 
+    # Snapshot every scalar we need BEFORE the compare loop. merge() commits + deletes
+    # mid-loop; with expire_on_commit the ORM objects would then raise on re-access, so
+    # we never touch them again — we compare plain Python snapshots and merge by id.
+    snap: dict[str, dict] = {
+        c.id: {"id": c.id, "name": c.display_name, "loose": _loose(c),
+               "score": _curation_score(c), "oid": one_identity.get(c.id),
+               "card": c.id in card_backed}
+        for c in multi}
+
     # Bucket by surname so we only compare plausible pairs (O(n²) within a surname).
-    by_surname: dict[str, list[UnifiedContact]] = defaultdict(list)
+    by_surname: dict[str, list[dict]] = defaultdict(list)
     for c in multi:
-        by_surname[_norm_name(c.display_name).split()[-1].strip(".")].append(c)
+        by_surname[_norm_name(c.display_name).split()[-1].strip(".")].append(snap[c.id])
 
     emitted: set[str] = set()
     for surname, group in by_surname.items():
@@ -724,50 +733,55 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
                 a, b = group[i], group[j]
-                if a.id in merged_away or b.id in merged_away:
+                if a["id"] in merged_away or b["id"] in merged_away:
                     continue
-                sim = _name_similarity(a.display_name, b.display_name)
+                sim = _name_similarity(a["name"], b["name"])
                 if sim <= 0:
                     continue
                 # Primary = the richer record; other = the one we'd fold in.
-                primary, other = (a, b) if _curation_score(a) >= _curation_score(b) else (b, a)
-                pair = f"{min(primary.id, other.id)}:{max(primary.id, other.id)}"
+                primary, other = (a, b) if a["score"] >= b["score"] else (b, a)
+                pair = f"{min(primary['id'], other['id'])}:{max(primary['id'], other['id'])}"
                 if pair in emitted:
                     continue
                 emitted.add(pair)
-                oid = one_identity.get(other.id)
-                is_link = _loose(other) and not _loose(primary) and oid
-                # AUTO-MERGE an EXACT first+last name match when at least one side is
-                # address-book-backed (its name came from a contact card = authoritative):
-                # folds duplicate cards + a message contact that matches a card by name
-                # without asking. Gated by auto_link; card-backing keeps different
-                # same-named strangers apart; reversible by unlinking.
-                exact_card = (sim >= 0.95
-                              and (primary.id in card_backed or other.id in card_backed))
-                if auto_merge and exact_card:
+                oid = other["oid"]
+                is_link = other["loose"] and not primary["loose"] and oid
+                # AUTO-MERGE decision (gated by auto_link):
+                #  - EXACT first+last (>=0.95): merge if either side is address-book-
+                #    backed OR both are thin single-identifier records (very likely the
+                #    same person split across sources — the bulk of the dup suggestions).
+                #  - NICKNAME/high (>=0.9): only the safe LINK shape — a loose contact
+                #    folding into a card-backed same-surname record (Rob → Robert).
+                both_loose = primary["loose"] and other["loose"]
+                card = primary["card"] or other["card"]
+                do_auto = ((sim >= 0.95 and (card or both_loose))
+                           or (sim >= 0.9 and is_link and primary["card"]))
+                if auto_merge and do_auto:
                     # Keep the card-backed record as primary when only the other is.
-                    if other.id in card_backed and primary.id not in card_backed:
+                    if other["card"] and not primary["card"]:
                         primary, other = other, primary
+                    p_id, o_id = primary["id"], other["id"]
+                    p_name, o_name = primary["name"], other["name"]
+                    merged_away.add(o_id)
                     try:
-                        merge(db, user, primary.id, other.id)
-                        merged_away.add(other.id)
+                        merge(db, user, p_id, o_id)
                         logger.info("unified contacts: auto-merged '%s' into '%s' (%s)",
-                                    other.display_name, primary.display_name, user.id)
+                                    o_name, p_name, user.id)
                     except Exception:  # noqa: BLE001
                         logger.exception("auto-merge failed for %s", user.id)
                     continue
                 # LINK when the "other" is a loose single-identifier contact and the
                 # primary is a real record — attach the identifier rather than merge.
                 if is_link:
-                    fp = hashlib.sha256(f"link:{primary.id}:{oid[0]}:{oid[1]}".encode()).hexdigest()[:24]
+                    fp = hashlib.sha256(f"link:{primary['id']}:{oid[0]}:{oid[1]}".encode()).hexdigest()[:24]
                     if fp in dismissed:
                         continue
                     db.add(ContactSuggestion(
                         tenant_id=tid, owner_user_id=user.id, kind="link_identity",
-                        contact_id=primary.id, identity_kind=oid[0],
+                        contact_id=primary["id"], identity_kind=oid[0],
                         identity_value=oid[1], identity_raw=oid[2] or oid[1],
                         identity_source=oid[3] or "",
-                        reason=f"“{other.display_name}” looks like {primary.display_name}",
+                        reason=f"“{other['name']}” looks like {primary['name']}",
                         confidence=round(sim, 2), status="pending", fingerprint=fp,
                         created_at=now, updated_at=now))
                 else:
@@ -776,8 +790,8 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
                         continue
                     db.add(ContactSuggestion(
                         tenant_id=tid, owner_user_id=user.id, kind="merge",
-                        contact_id=primary.id, merge_contact_id=other.id,
-                        reason=f"“{other.display_name}” may be the same person as {primary.display_name}",
+                        contact_id=primary["id"], merge_contact_id=other["id"],
+                        reason=f"“{other['name']}” may be the same person as {primary['name']}",
                         confidence=round(sim, 2), status="pending", fingerprint=fp,
                         created_at=now, updated_at=now))
 

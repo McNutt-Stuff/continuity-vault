@@ -305,8 +305,11 @@ def act_suggestion(sid: str, action: str,
         db.commit()
         return {"ok": True, "status": "dismissed"}
     # accept
+    removed_id = None
+    primary_id = s.contact_id
     if s.kind == "merge" and s.merge_contact_id:
         unified_contacts.merge(db, user, s.contact_id, s.merge_contact_id)
+        removed_id = s.merge_contact_id
     elif s.kind == "link_identity":
         db.add(ContactIdentity(
             tenant_id=tenant.id, owner_user_id=user.id, contact_id=s.contact_id,
@@ -317,7 +320,12 @@ def act_suggestion(sid: str, action: str,
     s.status = "accepted"
     s.updated_at = _now()
     db.commit()
-    return {"ok": True, "status": "accepted"}
+    # Live result from THIS node so the portal updates instantly (CP replica lags
+    # ~30s): the updated target contact + the id removed by a merge + a fresh overview.
+    primary = db.get(UnifiedContact, primary_id)
+    return {"ok": True, "status": "accepted", "removed_id": removed_id,
+            "primary": _contact_detail(db, primary) if primary else None,
+            "overview": _overview_payload(db, tenant, user)}
 
 
 # --------------------------------------------------------------------------- #
@@ -337,7 +345,14 @@ def merge_contacts(body: MergeBody,
     if body.primary_id == body.other_id:
         raise HTTPException(400, "cannot merge a contact into itself")
     unified_contacts.merge(db, user, body.primary_id, body.other_id)
-    return {"ok": True}
+    # Return the live result from THIS node (the merged target + the id that was
+    # removed + a fresh overview/page) so the portal updates immediately instead of
+    # reading the CP replica, which only catches up on the next push (~30s).
+    primary = db.get(UnifiedContact, body.primary_id)
+    return {"ok": True, "removed_id": body.other_id,
+            "primary": _contact_detail(db, primary) if primary else None,
+            "overview": _overview_payload(db, tenant, user),
+            "page": _default_page(db, tenant, user)}
 
 
 @router.post("/rebuild")

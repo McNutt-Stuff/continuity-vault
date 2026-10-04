@@ -118,6 +118,20 @@ export default function Contacts() {
       setContacts(r.contacts);
     } catch { setContacts([]); }
   }
+
+  // A curation change (merge / accept-suggestion / edit) happened on the node. When a
+  // contact was merged away, drop it from the list IMMEDIATELY (optimistic) — the CP
+  // replica the reads use only catches up on the next replication push (~30s), so
+  // without this the merged person lingers. Reconcile once the push has landed.
+  function onContactsChanged(removedId?: string) {
+    if (removedId) {
+      setContacts((cs) => (cs ? cs.filter((c) => c.id !== removedId) : cs));
+      if (selected === removedId) setSelected(null);
+    }
+    void loadOverview();
+    if (removedId) window.setTimeout(() => { void loadList(); void loadOverview(); }, 35000);
+    else void loadList();
+  }
   useEffect(() => { void loadOverview(); }, []);
   useEffect(() => { void loadList(); }, [q, circle, relationship, sort, starredOnly]);
   useEffect(() => { if (selected) setParams({ c: selected }); else setParams({}); }, [selected]);
@@ -159,7 +173,7 @@ export default function Contacts() {
   if (fullId) return (
     <ContactFull id={fullId} relationships={ov?.prefs.relationships || []} labels={ov?.prefs.labels || []}
                  onBack={() => setFullId(null)}
-                 onChanged={() => { loadList(); loadOverview(); }} />
+                 onChanged={onContactsChanged} />
   );
 
   return (
@@ -281,14 +295,14 @@ export default function Contacts() {
           {selected && (
             <ContactDetail id={selected} relationships={ov?.prefs.relationships || []}
                            labels={ov?.prefs.labels || []}
-                           onClose={() => setSelected(null)} onChanged={() => { loadList(); loadOverview(); }}
+                           onClose={() => setSelected(null)} onChanged={onContactsChanged}
                            onExpand={() => setFullId(selected)} />
           )}
         </div>
       )}
 
       {tab === "circles" && <CirclesMap onSelect={(id) => { setTab("people"); setSelected(id); }} />}
-      {tab === "suggestions" && <Suggestions onChanged={() => { loadOverview(); loadList(); }} />}
+      {tab === "suggestions" && <Suggestions onChanged={onContactsChanged} />}
     </div>
   );
 }
@@ -328,7 +342,7 @@ function ContactRow({ c, active, onClick }: { c: Contact; active: boolean; onCli
 
 // ---- Detail ----------------------------------------------------------------
 function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand }:
-  { id: string; relationships: string[]; labels: string[]; onClose: () => void; onChanged: () => void; onExpand?: () => void }) {
+  { id: string; relationships: string[]; labels: string[]; onClose: () => void; onChanged: (removedId?: string) => void; onExpand?: () => void }) {
   const [c, setC] = useState<Contact | null>(null);
   const [exchanges, setExchanges] = useState<Exchange[] | null>(null);
   const [exTotal, setExTotal] = useState(0);
@@ -411,7 +425,7 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
         </button>
       </div>
       {merging && <MergeInto currentId={id} currentName={c.display_name}
-                             onMerged={() => { onChanged(); onClose(); }}
+                             onMerged={(rid) => { onChanged(rid); onClose(); }}
                              onCancel={() => setMerging(false)} />}
       <LabelEditor current={c.labels || []} palette={labels} onChange={(l) => patch({ labels: l })} />
 
@@ -508,7 +522,7 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
 
 // ---- Full-page contact profile ---------------------------------------------
 function ContactFull({ id, relationships, labels, onBack, onChanged }:
-  { id: string; relationships: string[]; labels: string[]; onBack: () => void; onChanged: () => void }) {
+  { id: string; relationships: string[]; labels: string[]; onBack: () => void; onChanged: (removedId?: string) => void }) {
   const [c, setC] = useState<Contact | null>(null);
   const [exchanges, setExchanges] = useState<Exchange[] | null>(null);
   const [exTotal, setExTotal] = useState(0);
@@ -596,7 +610,7 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
         </div>
         {merging && <div style={{ marginTop: 10 }}>
           <MergeInto currentId={id} currentName={c.display_name}
-                     onMerged={() => { onChanged(); onBack(); }} onCancel={() => setMerging(false)} />
+                     onMerged={(rid) => { onChanged(rid); onBack(); }} onCancel={() => setMerging(false)} />
         </div>}
         <div style={{ marginTop: 10 }}>
           <LabelEditor current={c.labels || []} palette={labels} onChange={(l) => patch({ labels: l })} />
@@ -703,7 +717,7 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
 
 // ---- Merge / manual link ---------------------------------------------------
 function MergeInto({ currentId, currentName, onMerged, onCancel }:
-  { currentId: string; currentName: string; onMerged: () => void; onCancel: () => void }) {
+  { currentId: string; currentName: string; onMerged: (removedId: string) => void; onCancel: () => void }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<Contact[]>([]);
   useEffect(() => {
@@ -724,9 +738,9 @@ function MergeInto({ currentId, currentName, onMerged, onCancel }:
     });
     if (!ok) return;
     try {
-      await api.post("/contacts/merge", { primary_id: target.id, other_id: currentId });
+      const r = await api.post<{ removed_id?: string }>("/contacts/merge", { primary_id: target.id, other_id: currentId });
       notify({ title: "Contacts merged", message: `Linked into ${target.display_name}.`, tone: "ok" });
-      onMerged();
+      onMerged(r.removed_id || currentId);
     } catch (e) {
       notify({ message: (e as { message?: string }).message || "Couldn't merge the contacts.", tone: "danger" });
     }
@@ -1019,15 +1033,22 @@ function CirclesMap({ onSelect }: { onSelect: (id: string) => void }) {
 }
 
 // ---- Suggestions -----------------------------------------------------------
-function Suggestions({ onChanged }: { onChanged: () => void }) {
+function Suggestions({ onChanged }: { onChanged: (removedId?: string) => void }) {
   const [list, setList] = useState<Suggestion[] | null>(null);
   async function load() { try { setList((await api.get<{ suggestions: Suggestion[] }>("/contacts/suggestions")).suggestions); } catch { setList([]); } }
   useEffect(() => { void load(); }, []);
   async function act(id: string, action: "accept" | "dismiss") {
     try {
-      await api.post(`/contacts/suggestions/${id}/${action}`); await load(); onChanged();
+      // Optimistically drop the acted suggestion (the CP replica the list reads from
+      // lags the node ~30s — an immediate reload would re-add it), then reconcile once
+      // the push has landed. Forward any merged-away id to the parent.
+      setList((l) => (l ? l.filter((s) => s.id !== id) : l));
+      const r = await api.post<{ removed_id?: string }>(`/contacts/suggestions/${id}/${action}`);
+      onChanged(r.removed_id || undefined);
+      window.setTimeout(() => { void load(); }, 35000);
     } catch (e) {
       notify({ message: (e as { message?: string }).message || "Couldn't update the suggestion.", tone: "danger" });
+      void load();
     }
   }
   if (list === null) return <Loading label="Loading suggestions…" />;
