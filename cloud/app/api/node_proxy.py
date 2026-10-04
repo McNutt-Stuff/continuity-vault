@@ -77,6 +77,10 @@ def _should_proxy(method: str, path: str) -> bool:
     # Signals explorer/findings/provider-health are served from there.
     if path == "/api/signals" or path.startswith("/api/signals/"):
         return True
+    # Unified Contacts are deduced from the node-local search index (and curated
+    # there), so the contacts explorer + drill-down into exchanges run on the node.
+    if path == "/api/contacts" or path.startswith("/api/contacts/"):
+        return True
     # Vault Recovery Key management touches the vault key store, which lives on
     # the tenant's node — create/rotate/status must run there.
     if path == "/api/recovery-key" or path.startswith("/api/recovery-key/"):

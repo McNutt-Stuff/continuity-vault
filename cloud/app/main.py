@@ -18,6 +18,7 @@ from .api import (
     comms,
     connectors,
     compliance,
+    contacts,
     costs,
     dashboard,
     debug,
@@ -200,6 +201,7 @@ app.include_router(collections.router, prefix=API)
 app.include_router(rules.router, prefix=API)
 app.include_router(search.router, prefix=API)
 app.include_router(signals.router, prefix=API)
+app.include_router(contacts.router, prefix=API)
 app.include_router(snapshots.router, prefix=API)
 app.include_router(storage_instances.router, prefix=API)
 app.include_router(index_status.router, prefix=API)

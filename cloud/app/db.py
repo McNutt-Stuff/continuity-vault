@@ -227,6 +227,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE users ADD COLUMN notification_prefs JSON",
         "ALTER TABLE users ADD COLUMN notification_emails JSON",
         "ALTER TABLE users ADD COLUMN contact_linking_enabled BOOLEAN DEFAULT false",
+        "ALTER TABLE users ADD COLUMN contacts_prefs JSON",
         "ALTER TABLE users ADD COLUMN last_plan_change_at TIMESTAMP",
         "ALTER TABLE users ADD COLUMN timezone VARCHAR DEFAULT ''",
         "ALTER TABLE billing_profiles ADD COLUMN activated_at TIMESTAMP",

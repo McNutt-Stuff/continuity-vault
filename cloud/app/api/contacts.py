@@ -1,0 +1,459 @@
+"""Unified Contacts API — "My Circles" personal relationship graph.
+
+Read + curate the deduced people built by ``unified_contacts`` from the search
+index. Personal, per-user feature gated by the ``unified_contacts_enabled`` flag.
+Federation: contacts + the index they're mined from live on the tenant's node, so
+these routes are proxied there (see ``api/node_proxy``).
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
+
+from .. import security, unified_contacts
+from ..db import get_db
+from ..models import (ContactIdentity, ContactSuggestion, Tenant, UnifiedContact,
+                      User)
+
+logger = logging.getLogger("cv.api.contacts")
+router = APIRouter(prefix="/contacts", tags=["contacts"])
+
+# Default customization — the user can override in account settings
+# (User.contacts_prefs). Kept here so the feature works out of the box.
+DEFAULT_RELATIONSHIPS = ["family", "partner", "friend", "colleague", "client",
+                         "acquaintance", "other"]
+DEFAULT_LABELS = ["favorite", "emergency", "work", "personal", "vip"]
+CIRCLE_ORDER = {"inner": 0, "close": 1, "active": 2, "acquaintance": 3, "dormant": 4}
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _guard(principal: security.Principal, tenant: Tenant, db: Session) -> User:
+    """Personal feature: require the flag; the view is always the caller's OWN
+    contacts (no cross-member access)."""
+    user = db.get(User, principal.user_id)
+    if not user:
+        raise HTTPException(401, "no account")
+    from .. import features
+    if not features.resolve(user, tenant, "unified_contacts_enabled", db):
+        raise HTTPException(403, "Unified Contacts is not enabled for this account.")
+    return user
+
+
+def _prefs(user: User) -> dict:
+    p = dict(user.contacts_prefs or {})
+    p.setdefault("relationships", DEFAULT_RELATIONSHIPS)
+    p.setdefault("labels", DEFAULT_LABELS)
+    p.setdefault("auto_link", True)
+    return p
+
+
+def _contact_view(c: UnifiedContact, *, full: bool = False) -> dict:
+    out = {
+        "id": c.id, "display_name": c.display_name, "nickname": c.nickname,
+        "given_name": c.given_name, "family_name": c.family_name,
+        "primary_email": c.primary_email, "primary_phone": c.primary_phone,
+        "avatar_url": c.avatar_url, "circle": c.circle,
+        "pinned_circle": c.pinned_circle, "relationship": c.relationship,
+        "labels": c.labels or [], "starred": bool(c.starred), "hidden": bool(c.hidden),
+        "interaction_count": int(c.interaction_count or 0),
+        "last_interaction_at": c.last_interaction_at.isoformat() if c.last_interaction_at else None,
+        "first_interaction_at": c.first_interaction_at.isoformat() if c.first_interaction_at else None,
+        "source_types": c.source_types or [], "stats": c.stats or {},
+    }
+    if full:
+        out["notes"] = c.notes or ""
+        out["details"] = c.details or {}
+    return out
+
+
+def _identity_view(i: ContactIdentity) -> dict:
+    return {
+        "id": i.id, "kind": i.kind, "value": i.value, "raw_value": i.raw_value,
+        "label": i.label, "source_type": i.source_type,
+        "link_method": i.link_method, "confirmed": bool(i.confirmed),
+        "confidence": float(i.confidence or 0),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# List + overview                                                             #
+# --------------------------------------------------------------------------- #
+@router.get("")
+def list_contacts(q: str = "", circle: str | None = None, relationship: str | None = None,
+                  label: str | None = None, source: str | None = None,
+                  starred: bool = False, include_hidden: bool = False,
+                  sort: str = "circle", limit: int = 500, offset: int = 0,
+                  principal: security.Principal = Depends(security.get_principal),
+                  tenant: Tenant = Depends(security.get_tenant),
+                  db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    query = db.query(UnifiedContact).filter(
+        UnifiedContact.tenant_id == tenant.id,
+        UnifiedContact.owner_user_id == user.id)
+    if not include_hidden:
+        query = query.filter(UnifiedContact.hidden.is_(False))
+    if circle:
+        query = query.filter(UnifiedContact.circle == circle)
+    if relationship:
+        query = query.filter(UnifiedContact.relationship == relationship)
+    if starred:
+        query = query.filter(UnifiedContact.starred.is_(True))
+    if q:
+        like = f"%{q.strip().lower()}%"
+        query = query.filter(or_(UnifiedContact.sort_key.like(like),
+                                 UnifiedContact.primary_email.like(like),
+                                 UnifiedContact.primary_phone.like(like)))
+    rows = query.all()
+    if label:
+        rows = [c for c in rows if label in (c.labels or [])]
+    if source:
+        rows = [c for c in rows if source in (c.source_types or [])]
+    # Sort: circle (closeness) then interaction volume; or by recency / name.
+    if sort == "recent":
+        rows.sort(key=lambda c: (c.last_interaction_at or datetime.min), reverse=True)
+    elif sort == "name":
+        rows.sort(key=lambda c: c.sort_key or "")
+    elif sort == "frequency":
+        rows.sort(key=lambda c: -(c.interaction_count or 0))
+    else:  # circle
+        rows.sort(key=lambda c: (CIRCLE_ORDER.get(c.circle, 9),
+                                 -(c.interaction_count or 0)))
+    total = len(rows)
+    page = rows[offset:offset + max(1, min(1000, limit))]
+    return {"total": total, "contacts": [_contact_view(c) for c in page]}
+
+
+@router.get("/overview")
+def overview(principal: security.Principal = Depends(security.get_principal),
+             tenant: Tenant = Depends(security.get_tenant),
+             db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    rows = db.query(UnifiedContact).filter(
+        UnifiedContact.tenant_id == tenant.id,
+        UnifiedContact.owner_user_id == user.id,
+        UnifiedContact.hidden.is_(False)).all()
+    by_circle: dict[str, int] = {k: 0 for k in CIRCLE_ORDER}
+    by_source: dict[str, int] = {}
+    by_relationship: dict[str, int] = {}
+    for c in rows:
+        by_circle[c.circle] = by_circle.get(c.circle, 0) + 1
+        for s in (c.source_types or []):
+            by_source[s] = by_source.get(s, 0) + 1
+        if c.relationship:
+            by_relationship[c.relationship] = by_relationship.get(c.relationship, 0) + 1
+    pending = db.query(ContactSuggestion).filter(
+        ContactSuggestion.tenant_id == tenant.id,
+        ContactSuggestion.owner_user_id == user.id,
+        ContactSuggestion.status == "pending").count()
+    top = sorted(rows, key=lambda c: -(c.interaction_count or 0))[:8]
+    return {"total": len(rows), "by_circle": by_circle, "by_source": by_source,
+            "by_relationship": by_relationship, "pending_suggestions": pending,
+            "top_contacts": [_contact_view(c) for c in top],
+            "prefs": _prefs(user)}
+
+
+@router.get("/settings")
+def get_settings_ep(principal: security.Principal = Depends(security.get_principal),
+                    tenant: Tenant = Depends(security.get_tenant),
+                    db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    return {"prefs": _prefs(user), "contact_linking_enabled": bool(user.contact_linking_enabled)}
+
+
+class SettingsBody(BaseModel):
+    relationships: list[str] | None = None
+    labels: list[str] | None = None
+    auto_link: bool | None = None
+
+
+@router.put("/settings")
+def put_settings(body: SettingsBody,
+                 principal: security.Principal = Depends(security.get_principal),
+                 tenant: Tenant = Depends(security.get_tenant),
+                 db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    p = _prefs(user)
+    if body.relationships is not None:
+        p["relationships"] = [s.strip() for s in body.relationships if s.strip()]
+    if body.labels is not None:
+        p["labels"] = [s.strip() for s in body.labels if s.strip()]
+    if body.auto_link is not None:
+        p["auto_link"] = bool(body.auto_link)
+    user.contacts_prefs = p
+    db.commit()
+    return {"prefs": p}
+
+
+# --------------------------------------------------------------------------- #
+# Circles relationship graph                                                  #
+# --------------------------------------------------------------------------- #
+@router.get("/graph")
+def circles_graph(limit: int = 60,
+                  principal: security.Principal = Depends(security.get_principal),
+                  tenant: Tenant = Depends(security.get_tenant),
+                  db: Session = Depends(get_db)):
+    """Nodes + edges for the "My Circles" map: YOU at the center, each contact a
+    node placed by its circle tier, edges weighted by interaction volume."""
+    user = _guard(principal, tenant, db)
+    rows = (db.query(UnifiedContact)
+            .filter(UnifiedContact.tenant_id == tenant.id,
+                    UnifiedContact.owner_user_id == user.id,
+                    UnifiedContact.hidden.is_(False))
+            .order_by(UnifiedContact.interaction_count.desc())
+            .limit(max(1, min(300, limit))).all())
+    me_name = (user.display_name or user.full_name or "You")
+    nodes = [{"id": "me", "name": me_name, "circle": "me", "me": True}]
+    edges = []
+    maxi = max((int(c.interaction_count or 0) for c in rows), default=1) or 1
+    for c in rows:
+        nodes.append({
+            "id": c.id, "name": c.display_name, "circle": c.circle,
+            "relationship": c.relationship, "labels": c.labels or [],
+            "interaction_count": int(c.interaction_count or 0),
+            "weight": round((int(c.interaction_count or 0) / maxi), 3),
+            "starred": bool(c.starred),
+        })
+        edges.append({"source": "me", "target": c.id,
+                      "weight": round((int(c.interaction_count or 0) / maxi), 3),
+                      "circle": c.circle})
+    return {"nodes": nodes, "edges": edges}
+
+
+# --------------------------------------------------------------------------- #
+# Suggestions                                                                 #
+# --------------------------------------------------------------------------- #
+@router.get("/suggestions")
+def list_suggestions(principal: security.Principal = Depends(security.get_principal),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    out = []
+    for s in (db.query(ContactSuggestion)
+              .filter(ContactSuggestion.tenant_id == tenant.id,
+                      ContactSuggestion.owner_user_id == user.id,
+                      ContactSuggestion.status == "pending")
+              .order_by(ContactSuggestion.confidence.desc()).limit(200).all()):
+        primary = db.get(UnifiedContact, s.contact_id)
+        other = db.get(UnifiedContact, s.merge_contact_id) if s.merge_contact_id else None
+        out.append({
+            "id": s.id, "kind": s.kind, "reason": s.reason,
+            "confidence": float(s.confidence or 0),
+            "contact": _contact_view(primary) if primary else None,
+            "merge_contact": _contact_view(other) if other else None,
+            "identity": ({"kind": s.identity_kind, "value": s.identity_value,
+                          "raw": s.identity_raw, "source": s.identity_source}
+                         if s.kind == "link_identity" else None),
+        })
+    return {"suggestions": out}
+
+
+@router.post("/suggestions/{sid}/{action}")
+def act_suggestion(sid: str, action: str,
+                   principal: security.Principal = Depends(security.get_principal),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    s = db.get(ContactSuggestion, sid)
+    if not s or s.owner_user_id != user.id:
+        raise HTTPException(404, "suggestion not found")
+    if action not in ("accept", "dismiss"):
+        raise HTTPException(400, "action must be accept or dismiss")
+    if action == "dismiss":
+        s.status = "dismissed"
+        s.updated_at = _now()
+        db.commit()
+        return {"ok": True, "status": "dismissed"}
+    # accept
+    if s.kind == "merge" and s.merge_contact_id:
+        unified_contacts.merge(db, user, s.contact_id, s.merge_contact_id)
+    elif s.kind == "link_identity":
+        db.add(ContactIdentity(
+            tenant_id=tenant.id, owner_user_id=user.id, contact_id=s.contact_id,
+            kind=s.identity_kind, value=s.identity_value,
+            raw_value=s.identity_raw or s.identity_value,
+            source_type=s.identity_source, link_method="manual", confirmed=True,
+            confidence=1.0, created_at=_now(), updated_at=_now()))
+    s.status = "accepted"
+    s.updated_at = _now()
+    db.commit()
+    return {"ok": True, "status": "accepted"}
+
+
+# --------------------------------------------------------------------------- #
+# Merge + rebuild                                                             #
+# --------------------------------------------------------------------------- #
+class MergeBody(BaseModel):
+    primary_id: str
+    other_id: str
+
+
+@router.post("/merge")
+def merge_contacts(body: MergeBody,
+                   principal: security.Principal = Depends(security.get_principal),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    if body.primary_id == body.other_id:
+        raise HTTPException(400, "cannot merge a contact into itself")
+    unified_contacts.merge(db, user, body.primary_id, body.other_id)
+    return {"ok": True}
+
+
+@router.post("/rebuild")
+def rebuild_now(principal: security.Principal = Depends(security.get_principal),
+                tenant: Tenant = Depends(security.get_tenant),
+                db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    n = unified_contacts.rebuild(db, user)
+    return {"ok": True, "contacts": n}
+
+
+# --------------------------------------------------------------------------- #
+# Single contact: detail, exchanges, curation, identities                     #
+# --------------------------------------------------------------------------- #
+@router.get("/{cid}")
+def get_contact(cid: str,
+                principal: security.Principal = Depends(security.get_principal),
+                tenant: Tenant = Depends(security.get_tenant),
+                db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    c = db.get(UnifiedContact, cid)
+    if not c or c.owner_user_id != user.id:
+        raise HTTPException(404, "contact not found")
+    ids = (db.query(ContactIdentity)
+           .filter(ContactIdentity.contact_id == cid)
+           .order_by(ContactIdentity.kind, ContactIdentity.value).all())
+    return {**_contact_view(c, full=True),
+            "identities": [_identity_view(i) for i in ids]}
+
+
+@router.get("/{cid}/exchanges")
+def contact_exchanges(cid: str, limit: int = 50, offset: int = 0,
+                      principal: security.Principal = Depends(security.get_principal),
+                      tenant: Tenant = Depends(security.get_tenant),
+                      db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    c = db.get(UnifiedContact, cid)
+    if not c or c.owner_user_id != user.id:
+        raise HTTPException(404, "contact not found")
+    return unified_contacts.exchanges(db, user, c, limit=limit, offset=offset)
+
+
+class ContactUpdate(BaseModel):
+    display_name: str | None = None
+    nickname: str | None = None
+    relationship: str | None = None
+    labels: list[str] | None = None
+    pinned_circle: str | None = None
+    starred: bool | None = None
+    hidden: bool | None = None
+    notes: str | None = None
+    details: dict | None = None
+
+
+@router.put("/{cid}")
+def update_contact(cid: str, body: ContactUpdate,
+                   principal: security.Principal = Depends(security.get_principal),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    c = db.get(UnifiedContact, cid)
+    if not c or c.owner_user_id != user.id:
+        raise HTTPException(404, "contact not found")
+    if body.display_name is not None:
+        c.display_name = body.display_name.strip() or c.display_name
+        c.sort_key = c.display_name.lower()
+    if body.nickname is not None:
+        c.nickname = body.nickname.strip()
+    if body.relationship is not None:
+        c.relationship = body.relationship.strip()
+    if body.labels is not None:
+        c.labels = sorted({s.strip() for s in body.labels if s.strip()})
+    if body.pinned_circle is not None:
+        pin = body.pinned_circle.strip()
+        if pin and pin not in CIRCLE_ORDER:
+            raise HTTPException(400, "invalid circle")
+        c.pinned_circle = pin
+        if pin:
+            c.circle = pin
+    if body.starred is not None:
+        c.starred = bool(body.starred)
+    if body.hidden is not None:
+        c.hidden = bool(body.hidden)
+    if body.notes is not None:
+        c.notes = body.notes
+    if body.details is not None:
+        c.details = body.details
+    c.updated_at = _now()
+    db.commit()
+    return _contact_view(c, full=True)
+
+
+class IdentityBody(BaseModel):
+    kind: str
+    value: str
+    label: str | None = ""
+
+
+@router.post("/{cid}/identities")
+def add_identity(cid: str, body: IdentityBody,
+                 principal: security.Principal = Depends(security.get_principal),
+                 tenant: Tenant = Depends(security.get_tenant),
+                 db: Session = Depends(get_db)):
+    """Manually link an identifier to a contact (normalized like the engine does)."""
+    user = _guard(principal, tenant, db)
+    c = db.get(UnifiedContact, cid)
+    if not c or c.owner_user_id != user.id:
+        raise HTTPException(404, "contact not found")
+    from .. import contacts as _c
+    kind = body.kind.strip().lower()
+    raw = body.value.strip()
+    if kind == "email":
+        norm = _c.normalize_email(raw)
+    elif kind == "phone":
+        norm = _c.normalize_phone(raw)
+    else:
+        norm = raw.lower()
+    if not norm:
+        raise HTTPException(400, "could not normalize that identifier")
+    existing = (db.query(ContactIdentity)
+                .filter(ContactIdentity.tenant_id == tenant.id,
+                        ContactIdentity.owner_user_id == user.id,
+                        ContactIdentity.kind == kind,
+                        ContactIdentity.value == norm).first())
+    if existing:
+        existing.contact_id = cid
+        existing.link_method = "manual"
+        existing.confirmed = True
+        existing.updated_at = _now()
+    else:
+        db.add(ContactIdentity(
+            tenant_id=tenant.id, owner_user_id=user.id, contact_id=cid,
+            kind=kind, value=norm, raw_value=raw, label=(body.label or "").strip(),
+            link_method="manual", confirmed=True, confidence=1.0,
+            created_at=_now(), updated_at=_now()))
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/{cid}/identities/{iid}")
+def remove_identity(cid: str, iid: str,
+                    principal: security.Principal = Depends(security.get_principal),
+                    tenant: Tenant = Depends(security.get_tenant),
+                    db: Session = Depends(get_db)):
+    user = _guard(principal, tenant, db)
+    i = db.get(ContactIdentity, iid)
+    if not i or i.owner_user_id != user.id or i.contact_id != cid:
+        raise HTTPException(404, "identity not found")
+    db.delete(i)
+    db.commit()
+    return {"ok": True}

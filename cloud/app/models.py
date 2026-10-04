@@ -140,6 +140,10 @@ class User(Base):
     # Opt-in: build a contact directory so messages that only carry a phone/email
     # can show the linked contact name (see ContactLink).
     contact_linking_enabled = Column(Boolean, default=False)
+    # Unified Contacts ("My Circles") per-user customization: {relationships:[...],
+    # labels:[...], circle_thresholds:{...}, auto_link:bool}. Missing keys fall back
+    # to code defaults in unified_contacts/api.
+    contacts_prefs = Column(JSON, default=dict)
     created_at = Column(DateTime, default=_now)
 
     tenant = relationship("Tenant", back_populates="users")
