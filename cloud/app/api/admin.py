@@ -2342,6 +2342,9 @@ def _node_view(db: Session, n: Node) -> dict:
 
     mem = tel.get("memory") or {}
     stg = tel.get("storage") or {}
+    from .. import sysinfo
+    mnts = tel.get("mounts") or []
+    m_alerts = sysinfo.mount_alerts(mnts)
     tenant_count = db.query(func.count(Tenant.id)).filter(Tenant.node_id == n.id).scalar()
     standby_count = db.query(func.count(Tenant.id)).filter(Tenant.standby_node_id == n.id).scalar()
     backup_ids = list(n.backup_service_ids or [])
@@ -2366,6 +2369,8 @@ def _node_view(db: Session, n: Node) -> dict:
             "cpu_pct": tel.get("cpu_pct"),
             "mem_pct": mem.get("pct"),
             "disk_pct": stg.get("pct"),
+            "mounts": mnts,
+            "mount_alerts": m_alerts,
         },
         "cpus": tel.get("cpus"),
         "uptime_seconds": tel.get("uptime_seconds"),

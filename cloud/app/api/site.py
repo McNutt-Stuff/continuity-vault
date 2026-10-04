@@ -264,6 +264,46 @@ def _handle_service_health(db: Session, node, sh: dict, service_down: bool,
             dedupe_key=f"node-service-recovered:{node.id}", dedupe_within_hours=1)
 
 
+def _fmt_bytes(n: int) -> str:
+    v = float(n or 0)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if v < 1024 or unit == "TiB":
+            return f"{v:.0f} {unit}" if unit in ("B", "KiB") else f"{v:.1f} {unit}"
+        v /= 1024
+    return f"{v:.1f} TiB"
+
+
+def _handle_mount_health(db: Session, node, telemetry: dict) -> None:
+    """Alert when a node's critical volume is (nearly) full. A full /tmp silently
+    breaks self-updates + DB backups; a full / or /var stalls the service — so
+    surface it in Platform Logs + a deduped admin alert, per the never-silent rule."""
+    from .. import admin_notifications, sysinfo
+    alerts = sysinfo.mount_alerts((telemetry or {}).get("mounts") or [])
+    if not alerts:
+        return
+    crit = [a for a in alerts if a["severity"] == "critical"]
+    worst = crit or alerts
+    for a in worst:
+        logger.warning("node %s (%s): mount %s is %.0f%% full (%s free of %s)",
+                       node.name, node.role, a["path"], a["pct"],
+                       _fmt_bytes(a["free"]), _fmt_bytes(a["total"]))
+    sev = "critical" if crit else "warning"
+    rows = [{"icon": "server", "name": node.name, "detail": node.role}] + [
+        {"icon": "activity", "name": a["path"],
+         "detail": f"{a['pct']:.0f}% full · {_fmt_bytes(a['free'])} free"} for a in worst[:4]]
+    admin_notifications.emit(
+        db, "node_alert", severity=sev,
+        subject=f"[Arkive] Node volume {'FULL' if crit else 'nearly full'} — {node.name}",
+        title="Node volume is full" if crit else "Node volume nearly full",
+        intro=(f"A critical volume on node {node.name} ({node.role}) is "
+               f"{'full' if crit else 'nearly full'}. A full /tmp breaks node "
+               "self-updates and database backups; a full / or /var stalls the service."),
+        rows=rows,
+        cta={"label": "View node logs",
+             "url": f"https://{get_settings().domain}/admin/logs?node_id={node.id}"},
+        dedupe_key=f"node-mount:{node.id}:{sev}", dedupe_within_hours=6)
+
+
 def _handle_update_report(db: Session, node, rep: dict) -> None:
     """Ingest a node self-update outcome (success/failure + install log tail) into
     Platform Logs and alert platform admins when an update FAILED. The updater runs
@@ -367,6 +407,12 @@ def node_heartbeat(body: NodeHeartbeat,
             _handle_service_health(db, node, sh, service_down, prev_status)
         except Exception:  # noqa: BLE001
             logger.exception("node %s: service-health handling failed", node.name)
+        # A full critical volume (esp. a tmpfs /tmp) silently breaks updates +
+        # backups — surface it from the reported telemetry.
+        try:
+            _handle_mount_health(db, node, body.telemetry)
+        except Exception:  # noqa: BLE001
+            logger.exception("node %s: mount-health handling failed", node.name)
     # A finished self-update reports its outcome (success/failure + install log
     # tail) so a stuck/failed node update is visible in Platform Logs + alerts.
     if body.update_report:

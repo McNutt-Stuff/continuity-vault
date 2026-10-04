@@ -361,6 +361,12 @@ function TopologyAdmin() {
                       <span className="faint">· {n.role}</span>
                       {n.role === "customer-tenant" && <span className="faint">· {n.tenants} tnt</span>}
                       {n.standby_tenants > 0 && <span title="Warm standby for other nodes' tenants" className="row" style={{ gap: 3, color: "var(--accent, #7c9cff)" }}><Icon name="shield" size={11} /> {n.standby_tenants} standby</span>}
+                      {(n.health?.mount_alerts || []).length > 0 && (
+                        <span title={(n.health.mount_alerts).map((a: any) => `${a.path} ${a.pct.toFixed(0)}% full`).join("\n")}
+                              className="row" style={{ gap: 3, color: (n.health.mount_alerts).some((a: any) => a.severity === "critical") ? "#f2545b" : "#f5a623" }}>
+                          <Icon name="activity" size={11} /> {(n.health.mount_alerts).some((a: any) => a.severity === "critical") ? "volume full" : "volume low"}
+                        </span>
+                      )}
                     </span>
                     <span className="row" style={{ gap: 10, alignItems: "center" }}>
                       <span className="row" style={{ gap: 6 }}>
@@ -2810,6 +2816,41 @@ function NodeDetail({ id, onBack, storageSvcs, emailSvcs, onEdit, onService, onR
               <div className="faint" style={{ fontSize: 10.5, marginTop: 4 }}>Load {(live?.load || node.telemetry?.load || []).join(" ") || "—"}</div>
             </Card>
           </div>
+          {(() => {
+            const mnts = (live?.mounts || node.telemetry?.mounts || []) as any[];
+            if (!mnts.length) return null;
+            const alertBy: Record<string, string> = {};
+            (node.health?.mount_alerts || []).forEach((a: any) => { alertBy[a.path] = a.severity; });
+            return (
+              <Card style={{ marginBottom: 14 }}>
+                <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Volumes</h3>
+                <div style={{ display: "grid", gap: 10 }}>
+                  {mnts.map((m: any) => {
+                    const sev = alertBy[m.path];
+                    const pct = Math.min(100, m.pct || 0);
+                    const col = sev === "critical" ? "#f2545b" : sev === "warning" ? "#f5a623" : "#4f7cff";
+                    return (
+                      <div key={m.path}>
+                        <div className="spread" style={{ fontSize: 12.5, marginBottom: 4 }}>
+                          <span className="row" style={{ gap: 6, fontWeight: 600 }}>
+                            <code>{m.path}</code>
+                            {sev && <Pill tone={sev === "critical" ? "danger" : "warn"} dot>{sev === "critical" ? "full" : "nearly full"}</Pill>}
+                          </span>
+                          <span className="faint">{bytes(m.used)} / {bytes(m.total)} · {bytes(m.free)} free · {pct.toFixed(0)}%</span>
+                        </div>
+                        <div style={{ height: 6, background: "var(--inset)", borderRadius: 3, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${pct}%`, borderRadius: 3, background: col }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="faint" style={{ fontSize: 11, marginTop: 8 }}>
+                  A full <code>/tmp</code> (often a small RAM-backed tmpfs) silently breaks node self-updates and database backups.
+                </div>
+              </Card>
+            );
+          })()}
           <Card>
             <div className="spread" style={{ marginBottom: 10 }}>
               <h3 style={{ margin: 0, fontSize: 15 }}>Trends</h3>

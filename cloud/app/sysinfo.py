@@ -112,6 +112,63 @@ def disk(path: str) -> dict:
         return {"total": 0, "used": 0, "free": 0, "pct": 0}
 
 
+# Mounts whose EXHAUSTION silently breaks the node: /tmp fills → self-update +
+# pg_dump fail (curl "(23) Failure writing output"); / or /var fills → DB/logs
+# stall. Reported so a full critical volume surfaces in health/telemetry.
+_CRITICAL_MOUNTS = ("/", "/tmp", "/var", "/var/tmp")
+
+
+def mounts(extra: tuple[str, ...] = ()) -> list[dict]:
+    """Usage of the critical mounts, one entry per distinct filesystem (so /tmp
+    is shown only when it's a SEPARATE volume, e.g. a small RAM-backed tmpfs)."""
+    out: list[dict] = []
+    seen_dev: set = set()
+    for p in list(_CRITICAL_MOUNTS) + [x for x in extra if x]:
+        if not p or not os.path.exists(p):
+            continue
+        try:
+            dev = os.stat(p).st_dev
+        except Exception:
+            dev = p
+        if dev in seen_dev:
+            continue
+        seen_dev.add(dev)
+        d = disk(p)
+        d["path"] = p
+        out.append(d)
+    return out
+
+
+# Fullness thresholds (%). Small/critical volumes (tmp) warn earlier because a
+# full /tmp breaks self-updates + pg_dump even while the big data volume is empty.
+_MOUNT_WARN = {"/tmp": 85.0, "/var/tmp": 85.0}
+_MOUNT_CRIT = {"/tmp": 95.0, "/var/tmp": 95.0}
+_MOUNT_WARN_DEFAULT = 90.0
+_MOUNT_CRIT_DEFAULT = 97.0
+
+
+def mount_alerts(mlist: list[dict]) -> list[dict]:
+    """Return the mounts()-style entries breaching a fullness threshold, each
+    tagged severity warning|critical. Pure (no host calls) so the control plane
+    can run it over a node's REPORTED telemetry, not just the local host."""
+    alerts: list[dict] = []
+    for m in mlist or []:
+        total = m.get("total") or 0
+        if not total:
+            continue
+        p = m.get("path") or ""
+        pct = m.get("pct") or 0
+        if pct >= _MOUNT_CRIT.get(p, _MOUNT_CRIT_DEFAULT):
+            sev = "critical"
+        elif pct >= _MOUNT_WARN.get(p, _MOUNT_WARN_DEFAULT):
+            sev = "warning"
+        else:
+            continue
+        alerts.append({"path": p, "pct": pct, "free": m.get("free") or 0,
+                       "total": total, "severity": sev})
+    return alerts
+
+
 def net_rates() -> dict:
     """Per-second send/recv rates across physical interfaces (delta-based)."""
     global _prev_net
@@ -165,6 +222,7 @@ def snapshot(object_store: str = "") -> dict:
         "cpu_pct": cpu_percent(),
         "memory": mem(),
         "storage": disk(path),
+        "mounts": mounts((path,)),
         "net": net_rates(),
         "load": load_avg(),
         "cpus": os.cpu_count() or 0,
