@@ -127,7 +127,10 @@ export default function Contacts() {
       await loadOverview(); await loadList();
       notify({ title: "Contacts rebuilt", message: `Linked ${r.contacts} ${r.contacts === 1 ? "person" : "people"} across your sources.`, tone: "ok" });
     } catch (e) {
-      const msg = (e as { message?: string }).message || "The rebuild request failed.";
+      const err = e as { status?: number; message?: string };
+      const msg = err.status === 404
+        ? "Unified Contacts isn't available on your node yet — it may still be updating. Please try again shortly."
+        : (err.message || "The rebuild request failed.");
       notify({ title: "Couldn't rebuild contacts", message: msg, tone: "danger" });
     } finally { setBusy(false); }
   }
