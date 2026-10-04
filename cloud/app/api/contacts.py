@@ -355,8 +355,12 @@ def get_contact(cid: str,
     c = db.get(UnifiedContact, cid)
     if not c or c.owner_user_id != user.id:
         raise HTTPException(404, "contact not found")
+    return _contact_detail(db, c)
+
+
+def _contact_detail(db: Session, c: UnifiedContact) -> dict:
     ids = (db.query(ContactIdentity)
-           .filter(ContactIdentity.contact_id == cid)
+           .filter(ContactIdentity.contact_id == c.id)
            .order_by(ContactIdentity.kind, ContactIdentity.value).all())
     return {**_contact_view(c, full=True),
             "identities": [_identity_view(i) for i in ids]}
@@ -468,7 +472,8 @@ def add_identity(cid: str, body: IdentityBody,
             link_method="manual", confirmed=True, confidence=1.0,
             created_at=_now(), updated_at=_now()))
     db.commit()
-    return {"ok": True}
+    db.refresh(c)
+    return _contact_detail(db, c)
 
 
 @router.delete("/{cid}/identities/{iid}")
@@ -482,4 +487,7 @@ def remove_identity(cid: str, iid: str,
         raise HTTPException(404, "identity not found")
     db.delete(i)
     db.commit()
-    return {"ok": True}
+    c = db.get(UnifiedContact, cid)
+    if not c or c.owner_user_id != user.id:
+        raise HTTPException(404, "contact not found")
+    return _contact_detail(db, c)

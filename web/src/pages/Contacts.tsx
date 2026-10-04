@@ -433,7 +433,8 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged }:
       )}
 
       {/* Identities */}
-      <Identities contactId={id} identities={c.identities || []} onChanged={() => load()} />
+      <Identities contactId={id} identities={c.identities || []}
+                  onChanged={(updated) => { if (updated) { setC(updated); onChanged(); } else void load(); }} />
 
       {/* Rich details */}
       <div className="spread" style={{ margin: "16px 0 6px", alignItems: "center" }}>
@@ -619,16 +620,27 @@ function DetailsSections({ details, editing, onChange }:
 }
 
 function Identities({ contactId, identities, onChanged }:
-  { contactId: string; identities: Identity[]; onChanged: () => void }) {
+  { contactId: string; identities: Identity[]; onChanged: (updated?: Contact) => void }) {
   const [kind, setKind] = useState("email");
   const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
   async function add() {
-    if (!value.trim()) return;
-    await api.post(`/contacts/${contactId}/identities`, { kind, value });
-    setValue(""); onChanged();
+    if (!value.trim() || busy) return;
+    setBusy(true);
+    try {
+      const updated = await api.post<Contact>(`/contacts/${contactId}/identities`, { kind, value: value.trim() });
+      setValue(""); onChanged(updated);
+    } catch (e) {
+      notify({ message: (e as { message?: string }).message || "Couldn't add that identifier — check the format.", tone: "danger" });
+    } finally { setBusy(false); }
   }
   async function remove(iid: string) {
-    await api.del(`/contacts/${contactId}/identities/${iid}`); onChanged();
+    try {
+      const updated = await api.del<Contact>(`/contacts/${contactId}/identities/${iid}`);
+      onChanged(updated);
+    } catch (e) {
+      notify({ message: (e as { message?: string }).message || "Couldn't unlink that identifier.", tone: "danger" });
+    }
   }
   return (
     <div>
@@ -645,6 +657,7 @@ function Identities({ contactId, identities, onChanged }:
             <button className="btn ghost sm" onClick={() => remove(i.id)} title="Unlink"><Icon name="trash" size={11} /></button>
           </div>
         ))}
+        {identities.length === 0 && <div className="muted" style={{ fontSize: 12 }}>No identifiers linked yet.</div>}
       </div>
       <div className="row" style={{ gap: 6, marginTop: 7 }}>
         <select className="input sm" value={kind} onChange={(e) => setKind(e.target.value)} style={{ width: 90 }}>
@@ -654,7 +667,7 @@ function Identities({ contactId, identities, onChanged }:
         </select>
         <input className="input sm" placeholder="Link an identifier…" value={value} style={{ flex: 1 }}
                onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") add(); }} />
-        <button className="btn sm" onClick={add}><Icon name="plus" size={12} /></button>
+        <button className="btn sm" onClick={add} disabled={busy}><Icon name="plus" size={12} /></button>
       </div>
     </div>
   );
