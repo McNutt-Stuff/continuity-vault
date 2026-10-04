@@ -101,6 +101,7 @@ export default function Contacts() {
   const [fullId, setFullId] = useState<string | null>(params.get("full"));
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSources, setShowSources] = useState(false);
 
   async function loadOverview() {
     try { setOv(await api.get<Overview>("/contacts/overview")); } catch { /* flag off */ }
@@ -189,11 +190,14 @@ export default function Contacts() {
           <MiniStat label="People" value={ov.total} />
           <MiniStat label="Inner circle" value={ov.by_circle.inner || 0} tint="var(--brand)" />
           <MiniStat label="Close" value={ov.by_circle.close || 0} tint="var(--brand-2)" />
-          <MiniStat label="Sources linked" value={Object.keys(ov.by_source).length} />
+          <MiniStat label="Sources linked" value={Object.keys(ov.by_source).length}
+                    onClick={() => setShowSources(true)} />
           <MiniStat label="Suggestions" value={ov.pending_suggestions}
                     onClick={() => setTab("suggestions")} tint={ov.pending_suggestions ? "var(--warn)" : undefined} />
         </div>
       )}
+
+      {showSources && <SourcesModal onClose={() => setShowSources(false)} />}
 
       <div className="row" style={{ gap: 6, marginBottom: 14, borderBottom: "1px solid var(--border)" }}>
         {([["people", "People"], ["circles", "Circles map"], ["suggestions", "Suggestions"]] as const).map(([k, l]) => (
@@ -1094,6 +1098,64 @@ function ContactsSettings({ onClose }: { onClose: () => void }) {
               </div>
             </div>
           )}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ---- Sources used for linking/parsing --------------------------------------
+interface SourceStat { source_type: string; contacts: number; interactions: number; identities: number; indexed: number; }
+function SourcesModal({ onClose }: { onClose: () => void }) {
+  const [rows, setRows] = useState<SourceStat[] | null>(null);
+  useEffect(() => {
+    api.get<{ sources: SourceStat[] }>("/contacts/sources").then((r) => setRows(r.sources)).catch(() => setRows([]));
+  }, []);
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+         onClick={onClose}>
+      <Card style={{ maxWidth: 580, width: "100%", maxHeight: "82vh", overflowY: "auto" }}>
+        <div onClick={(e) => e.stopPropagation()}>
+          <div className="spread" style={{ marginBottom: 4, alignItems: "center" }}>
+            <h2 style={{ margin: 0, fontSize: 18 }}>Sources feeding your circles</h2>
+            <button className="btn ghost sm" onClick={onClose}><Icon name="x" size={14} /></button>
+          </div>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 12 }}>
+            Which connected sources are being parsed into people. "Indexed" is how many of that source's
+            messages/cards are in your vault; a source with many indexed but few contacts may need a Rebuild.
+          </div>
+          {rows === null ? <Loading label="Loading sources…" card={false} />
+            : rows.length === 0 ? <div className="muted" style={{ fontSize: 13 }}>No sources parsed yet. Connect message/contact sources, then Rebuild.</div>
+              : (
+                <div className="stack" style={{ gap: 6 }}>
+                  <div className="row" style={{ gap: 8, fontSize: 10.5, fontWeight: 600, color: "var(--text-dim)", padding: "0 10px" }}>
+                    <span style={{ flex: 1 }}>SOURCE</span>
+                    <span style={{ width: 62, textAlign: "right" }}>PEOPLE</span>
+                    <span style={{ width: 86, textAlign: "right" }}>INTERACTIONS</span>
+                    <span style={{ width: 62, textAlign: "right" }}>INDEXED</span>
+                  </div>
+                  {rows.map((s) => {
+                    const gap = s.indexed > 50 && s.contacts === 0;
+                    return (
+                      <div key={s.source_type} className="card" style={{ padding: "8px 10px", marginTop: 0 }}>
+                        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                          <SourceIcon type={s.source_type} size={18} />
+                          <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }} className="row">
+                            {s.source_type}
+                            {gap && <Pill tone="warn">indexed · not linked</Pill>}
+                          </span>
+                          <span style={{ width: 62, textAlign: "right", fontSize: 12.5 }}>{s.contacts.toLocaleString()}</span>
+                          <span style={{ width: 86, textAlign: "right", fontSize: 12.5 }}>{s.interactions.toLocaleString()}</span>
+                          <span style={{ width: 62, textAlign: "right", fontSize: 12.5 }} className="faint">{s.indexed.toLocaleString()}</span>
+                        </div>
+                        {s.identities > 0 && (
+                          <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>{s.identities.toLocaleString()} identifier{s.identities === 1 ? "" : "s"} linked</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
         </div>
       </Card>
     </div>

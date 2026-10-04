@@ -249,6 +249,17 @@ def circles_graph(limit: int = 60, circle: str | None = None, within_days: int =
     return {"nodes": nodes, "edges": edges}
 
 
+@router.get("/sources")
+def contact_sources(principal: security.Principal = Depends(security.get_principal),
+                    tenant: Tenant = Depends(security.get_tenant),
+                    db: Session = Depends(get_db)):
+    """Which sources are feeding the contact graph — contacts/interactions/identifiers
+    linked per source, plus how many of each source's docs are in the index (so a
+    source with indexed docs but few contacts is a visible parsing gap)."""
+    user = _guard(principal, tenant, db)
+    return {"sources": unified_contacts.sources_breakdown(db, user)}
+
+
 # --------------------------------------------------------------------------- #
 # Suggestions                                                                 #
 # --------------------------------------------------------------------------- #

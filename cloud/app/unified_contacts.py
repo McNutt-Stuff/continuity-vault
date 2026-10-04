@@ -714,6 +714,47 @@ def identity_values(db: Session, tenant_id: str, user_id: str,
     return out
 
 
+def sources_breakdown(db: Session, user: User) -> list[dict]:
+    """Per-source contribution to the contact graph: how many contacts + interactions
+    each source produced, how many identifiers it linked, and how many of its docs
+    are in the index — so a source with indexed docs but few contacts is a visible gap."""
+    from sqlalchemy import func
+    tid = user.tenant_id
+    vids = _user_vault_ids(db, user)
+    agg: dict[str, dict] = {}
+
+    def row(st: str) -> dict:
+        return agg.setdefault(st or "unknown", {
+            "source_type": st or "unknown", "contacts": 0, "interactions": 0,
+            "identities": 0, "indexed": 0})
+
+    for st, n in (db.query(ContactIdentity.source_type, func.count())
+                  .filter(ContactIdentity.tenant_id == tid,
+                          ContactIdentity.owner_user_id == user.id)
+                  .group_by(ContactIdentity.source_type).all()):
+        if st:
+            row(st)["identities"] = int(n or 0)
+    for src_types, stats in (db.query(UnifiedContact.source_types, UnifiedContact.stats)
+                             .filter(UnifiedContact.tenant_id == tid,
+                                     UnifiedContact.owner_user_id == user.id,
+                                     UnifiedContact.hidden.is_(False)).all()):
+        for st in (src_types or []):
+            row(st)["contacts"] += 1
+        for st, cnt in ((stats or {}).get("by_source") or {}).items():
+            row(st)["interactions"] += int(cnt or 0)
+    iq = db.query(SearchDocument.source_type, func.count()).filter(
+        SearchDocument.tenant_id == tid,
+        SearchDocument.is_current.is_(True),
+        SearchDocument.category.in_(_INTERACTION_CATEGORIES + ("contact",)))
+    if vids:
+        iq = iq.filter(SearchDocument.vault_id.in_(vids))
+    for st, n in iq.group_by(SearchDocument.source_type).all():
+        if st:
+            row(st)["indexed"] = int(n or 0)
+    return sorted(agg.values(),
+                  key=lambda r: (-r["interactions"], -r["contacts"], r["source_type"]))
+
+
 def exchanges(db: Session, user: User, contact: UnifiedContact, *,
               limit: int = 50, offset: int = 0, scan_cap: int = 20000) -> dict:
     """The communication exchanges with a contact, mined from the search index
