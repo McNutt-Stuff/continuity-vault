@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -239,6 +240,29 @@ def _meta_direction(meta: dict) -> str | None:
     return None
 
 
+# Address local-parts that are roles/systems, never a person's name.
+_ROLE_LOCALS = {"info", "support", "admin", "noreply", "no-reply", "donotreply",
+                "do-not-reply", "sales", "hello", "contact", "team", "notifications",
+                "notification", "mailer-daemon", "postmaster", "help", "billing",
+                "accounts", "office", "mail", "news", "newsletter", "updates",
+                "service", "alerts", "security", "abuse", "webmaster", "marketing"}
+
+
+def _name_from_email(email: str) -> str:
+    """Derive a display name from a ``firstname.lastname@`` address so an email-only
+    person gets a real name (and can name-match a contact card). Returns "" for role
+    addresses, Outlook/Exchange internal pseudo-addresses, or single-token locals."""
+    local = (email or "").split("@", 1)[0].lower()
+    if not local or local in _ROLE_LOCALS:
+        return ""
+    if local.startswith("ipm.") or "schedule.meeting" in local:
+        return ""
+    parts = [p for p in re.split(r"[._\-+]+", local) if len(p) >= 2 and not p.isdigit()]
+    if len(parts) < 2 or len(parts) > 4 or parts[0] in _ROLE_LOCALS:
+        return ""
+    return " ".join(p.capitalize() for p in parts)
+
+
 class _Person:
     """In-memory accumulator for one deduced person during a rebuild."""
 
@@ -292,6 +316,13 @@ class _Person:
     def best_name(self) -> str:
         if self.names:
             return max(self.names.items(), key=lambda kv: (kv[1], len(kv[0])))[0]
+        # Derive a human name from a firstname.lastname@ address so an email-only
+        # person gets a real name (and can name-match a contact card → merge).
+        for (kind, value), d in self.identities.items():
+            if kind == "email":
+                nm = _name_from_email(value)
+                if nm:
+                    return nm
         # Fall back to a human-ish label from the strongest identity.
         for (kind, value), d in self.identities.items():
             return d.get("raw") or value
@@ -684,11 +715,17 @@ def identity_values(db: Session, tenant_id: str, user_id: str,
 
 
 def exchanges(db: Session, user: User, contact: UnifiedContact, *,
-              limit: int = 50, offset: int = 0, scan_cap: int = 8000) -> dict:
+              limit: int = 50, offset: int = 0, scan_cap: int = 20000) -> dict:
     """The communication exchanges with a contact, mined from the search index
     (message/social/email docs whose from/to/cc/bcc matches ANY of the contact's
     identifiers). Returns lightweight rows the UI links straight into Unified
-    Search (source_type + object_id). Never re-extracts — reads the index only."""
+    Search (source_type + object_id). Never re-extracts — reads the index only.
+
+    Narrows to docs whose search_blob contains one of the contact's identifiers so
+    we scan THE PERSON'S messages across the whole index, not just the most-recent
+    slice (a heavy account has far more than scan_cap total messages, so the old
+    recent-only scan missed most of a contact's history)."""
+    from sqlalchemy import or_
     tid = user.tenant_id
     vids = _user_vault_ids(db, user)
     self_ids = _self_identifiers(db, user)
@@ -705,6 +742,12 @@ def exchanges(db: Session, user: User, contact: UnifiedContact, *,
         SearchDocument.category.in_(_INTERACTION_CATEGORIES))
     if vids:
         q = q.filter(SearchDocument.vault_id.in_(vids))
+    # A normalized phone key (e.g. 4088592476) is a substring of the stored form
+    # (+14088592476); an email matches verbatim. The Python verify below keeps it
+    # precise, so a loose substring match only widens the candidate set.
+    needles = [n for n in want if n and len(n) >= 4]
+    if needles:
+        q = q.filter(or_(*[SearchDocument.search_blob.ilike(f"%{n}%") for n in needles]))
     rows = q.order_by(SearchDocument.modified_at.desc().nullslast()).limit(scan_cap).all()
     hits: list[dict] = []
     for source_type, doc_type, object_id, title, preview, meta, modified_at, size in rows:
