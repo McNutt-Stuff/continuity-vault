@@ -1135,7 +1135,11 @@ function SourcesModal({ onClose }: { onClose: () => void }) {
                     <span style={{ width: 62, textAlign: "right" }}>INDEXED</span>
                   </div>
                   {rows.map((s) => {
-                    const gap = s.indexed > 50 && s.contacts === 0;
+                    // A real gap = indexed docs but nothing parsed (no contacts AND
+                    // no identifiers). Card sources contribute identifiers, not
+                    // "interactions", so they're not a gap.
+                    const gap = s.indexed > 50 && s.contacts === 0 && s.identities === 0;
+                    const cardSource = s.contacts === 0 && s.identities > 0;
                     return (
                       <div key={s.source_type} className="card" style={{ padding: "8px 10px", marginTop: 0 }}>
                         <div className="row" style={{ gap: 8, alignItems: "center" }}>
@@ -1143,13 +1147,14 @@ function SourcesModal({ onClose }: { onClose: () => void }) {
                           <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }} className="row">
                             {s.source_type}
                             {gap && <Pill tone="warn">indexed · not linked</Pill>}
+                            {cardSource && <Pill tone="info">address book</Pill>}
                           </span>
                           <span style={{ width: 62, textAlign: "right", fontSize: 12.5 }}>{s.contacts.toLocaleString()}</span>
                           <span style={{ width: 86, textAlign: "right", fontSize: 12.5 }}>{s.interactions.toLocaleString()}</span>
                           <span style={{ width: 62, textAlign: "right", fontSize: 12.5 }} className="faint">{s.indexed.toLocaleString()}</span>
                         </div>
                         {s.identities > 0 && (
-                          <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>{s.identities.toLocaleString()} identifier{s.identities === 1 ? "" : "s"} linked</div>
+                          <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>{s.identities.toLocaleString()} identifier{s.identities === 1 ? "" : "s"} linked{cardSource ? " (names + numbers for your people)" : ""}</div>
                         )}
                       </div>
                     );

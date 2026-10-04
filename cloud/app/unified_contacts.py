@@ -556,7 +556,10 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
         contact.interaction_count = person.interactions
         contact.first_interaction_at = person.first_at
         contact.last_interaction_at = person.last_at
-        contact.source_types = sorted(person.sources.keys())
+        # Sources = where you INTERACT + where an identifier/name came from (so an
+        # address book like Google Contacts/iCloud shows on the people it named).
+        id_sources = {d.get("source_type") for d in person.identities.values() if d.get("source_type")}
+        contact.source_types = sorted(set(person.sources.keys()) | id_sources)
         top_source = (max(person.sources.items(), key=lambda kv: kv[1])[0]
                       if person.sources else "")
         contact.stats = {
