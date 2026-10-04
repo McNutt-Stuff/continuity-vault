@@ -98,6 +98,7 @@ export default function Contacts() {
   const [starredOnly, setStarredOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(params.get("c"));
   const [busy, setBusy] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   async function loadOverview() {
     try { setOv(await api.get<Overview>("/contacts/overview")); } catch { /* flag off */ }
@@ -140,11 +141,16 @@ export default function Contacts() {
           </div>
         </div>
         <div className="row" style={{ gap: 8 }}>
+          <button className="btn ghost sm" onClick={() => setShowSettings(true)}>
+            <Icon name="gear" size={13} /> Customize
+          </button>
           <button className="btn ghost sm" onClick={rebuild} disabled={busy}>
             <Icon name="repeat" size={13} /> {busy ? "Rebuilding…" : "Rebuild"}
           </button>
         </div>
       </div>
+
+      {showSettings && <ContactsSettings onClose={() => { setShowSettings(false); loadOverview(); }} />}
 
       {ov && (
         <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(150px,1fr))", marginBottom: 14 }}>
@@ -647,6 +653,68 @@ function Suggestions({ onChanged }: { onChanged: () => void }) {
           </div>
         </Card>
       ))}
+    </div>
+  );
+}
+
+// ---- Settings / customization ----------------------------------------------
+function ContactsSettings({ onClose }: { onClose: () => void }) {
+  const [relationships, setRelationships] = useState<string[]>([]);
+  const [labels, setLabels] = useState<string[]>([]);
+  const [autoLink, setAutoLink] = useState(true);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    api.get<{ prefs: { relationships: string[]; labels: string[]; auto_link: boolean } }>("/contacts/settings")
+      .then((r) => { setRelationships(r.prefs.relationships); setLabels(r.prefs.labels); setAutoLink(r.prefs.auto_link); setLoaded(true); })
+      .catch(() => setLoaded(true));
+  }, []);
+  async function save() {
+    await api.put("/contacts/settings", { relationships, labels, auto_link: autoLink });
+    onClose();
+  }
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+         onClick={onClose}>
+      <Card style={{ maxWidth: 460, width: "100%" }}>
+        <div onClick={(e) => e.stopPropagation()}>
+          <div className="spread" style={{ marginBottom: 12, alignItems: "center" }}>
+            <h2 style={{ margin: 0, fontSize: 18 }}>Customize contacts</h2>
+            <button className="btn ghost sm" onClick={onClose}><Icon name="x" size={14} /></button>
+          </div>
+          {!loaded ? <Loading label="Loading…" card={false} /> : (
+            <div className="stack" style={{ gap: 14 }}>
+              <TagList title="Relationship types" value={relationships} onChange={setRelationships} />
+              <TagList title="Label palette" value={labels} onChange={setLabels} />
+              <label className="row" style={{ gap: 8, fontSize: 13, alignItems: "center" }}>
+                <input type="checkbox" checked={autoLink} onChange={(e) => setAutoLink(e.target.checked)} />
+                Auto-link identifiers that clearly belong to the same person
+              </label>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="btn primary sm" onClick={save}><Icon name="check" size={12} /> Save</button>
+                <button className="btn ghost sm" onClick={onClose}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function TagList({ title, value, onChange }: { title: string; value: string[]; onChange: (v: string[]) => void }) {
+  const [adding, setAdding] = useState("");
+  return (
+    <div>
+      <div className="faint" style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 6 }}>{title}</div>
+      <div className="row" style={{ gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+        {value.map((t) => (
+          <span key={t} onClick={() => onChange(value.filter((x) => x !== t))} title="Remove"
+                style={{ cursor: "pointer", fontSize: 11.5, padding: "3px 9px", borderRadius: 10, background: "var(--inset)" }}>{t} ✕</span>
+        ))}
+        <input className="input sm" placeholder="+ add" value={adding} style={{ width: 90 }}
+               onChange={(e) => setAdding(e.target.value)}
+               onKeyDown={(e) => { if (e.key === "Enter" && adding.trim() && !value.includes(adding.trim())) { onChange([...value, adding.trim()]); setAdding(""); } }} />
+      </div>
     </div>
   );
 }
