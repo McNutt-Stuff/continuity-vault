@@ -199,12 +199,12 @@ def _self_identifiers(db: Session, user: User) -> set[str]:
     return out
 
 
-def _message_parties(meta: dict) -> tuple[list[tuple[str, str, str]], bool, bool]:
+def _message_parties(meta: dict) -> tuple[list[tuple[str, str, str, str]], bool, bool]:
     """Split a message doc's identifiers into (parties, has_from, has_to) where
-    each party is (ident_type, normalized, raw). ``has_from``/``has_to`` note which
-    role fields were present so we can infer direction against the user's self ids.
-    Index-only: reads the meta the connector already wrote."""
-    parties: list[tuple[str, str, str]] = []
+    each party is (ident_type, normalized, raw, display_name). ``has_from``/
+    ``has_to`` note which role fields were present so we can infer direction against
+    the user's self ids. Index-only: reads the meta the connector already wrote."""
+    parties: list[tuple[str, str, str, str]] = []
     has_from = has_to = False
     for k, v in (meta or {}).items():
         canon = canonical_attr(k)
@@ -215,9 +215,9 @@ def _message_parties(meta: dict) -> tuple[list[tuple[str, str, str]], bool, bool
         elif canon in ("to", "cc", "bcc"):
             has_to = True
         for raw in contacts._iter_values(v):
-            c = contacts.classify(str(raw))
-            if c:
-                parties.append((c[0], c[1], str(raw), canon))  # type: ignore
+            parsed = contacts.parse_party(str(raw))
+            if parsed:
+                parties.append((parsed[0], parsed[1], str(raw), parsed[2], canon))  # type: ignore
     return parties, has_from, has_to  # type: ignore
 
 
@@ -373,12 +373,12 @@ def rebuild(db: Session, user: User) -> int:
         if not parties:
             continue
         # Counterparties = everyone who isn't the user.
-        counter = [(t, v, raw, role) for (t, v, raw, role) in parties if v not in self_ids]
+        counter = [(t, v, raw, name, role) for (t, v, raw, name, role) in parties if v not in self_ids]
         if not counter:
             continue
-        self_in_from = any(v in self_ids and role == "from" for (_t, v, _r, role) in parties)
+        self_in_from = any(v in self_ids and role == "from" for (_t, v, _r, _n, role) in parties)
         self_in_to = any(v in self_ids and role in ("to", "cc", "bcc")
-                         for (_t, v, _r, role) in parties)
+                         for (_t, v, _r, _n, role) in parties)
         direction = (_meta_direction(meta or {})
                      or ("out" if self_in_from else "in" if self_in_to else "unknown"))
         # Union counterparties on the same message? No — different recipients of a
@@ -411,12 +411,15 @@ def rebuild(db: Session, user: User) -> int:
     for source_type, counter, direction, modified_at, size in message_rows:
         # One interaction per message per distinct counterparty person.
         seen_people: set[str] = set()
-        for (t, v, raw, role) in counter:
+        for (t, v, raw, name, role) in counter:
             p = _person(f"{t}:{v}")
             p.add_identity(t, v, raw=raw, source_type=source_type)
-            # A bare name-ish raw ("Barry Mainz <...>" is split already) seeds a
-            # weak name only when the raw clearly isn't the identifier itself.
-            if raw and raw != v and "@" not in raw and not raw.replace("+", "").isdigit():
+            # The mailbox's display name ("Kashif Javaid <k@x>") is a solid name
+            # signal — it's what lets an email-only person match their phone/handle
+            # contact by name. Fall back to a bare non-identifier raw otherwise.
+            if name:
+                p.names[name.strip()] += 2
+            elif raw and raw != v and "@" not in raw and not raw.replace("+", "").isdigit():
                 p.names[raw.strip()] += 1
             if p.key not in seen_people:
                 seen_people.add(p.key)
@@ -673,11 +676,11 @@ def exchanges(db: Session, user: User, contact: UnifiedContact, *,
     hits: list[dict] = []
     for source_type, doc_type, object_id, title, preview, meta, modified_at, size in rows:
         parties, has_from, has_to = _message_parties(meta or {})
-        if not any(v in want for (_t, v, _r, _role) in parties):
+        if not any(v in want for (_t, v, _r, _n, _role) in parties):
             continue
-        self_in_from = any(v in self_ids and role == "from" for (_t, v, _r, role) in parties)
+        self_in_from = any(v in self_ids and role == "from" for (_t, v, _r, _n, role) in parties)
         self_in_to = any(v in self_ids and role in ("to", "cc", "bcc")
-                         for (_t, v, _r, role) in parties)
+                         for (_t, v, _r, _n, role) in parties)
         hits.append({
             "source_type": source_type or "", "doc_type": doc_type or "",
             "object_id": object_id or "", "title": title or "",

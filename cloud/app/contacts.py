@@ -80,6 +80,41 @@ def classify(value: str) -> tuple[str, str] | None:
     return None
 
 
+# Pull an email out of a value that may carry a display name ("Name <e@x.com>").
+_EMAIL_FIND_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_ANGLE_RE = re.compile(r'^\s*"?([^"<>]*?)"?\s*<\s*([^>]+?)\s*>\s*$')
+
+
+def parse_party(value: str) -> tuple[str, str, str] | None:
+    """Parse a message from/to value that may be ``Name <email>``, ``"Name" <+phone>``
+    or a bare identifier. Returns ``(type, normalized, display_name)`` or None — so
+    the display name a mailbox carries isn't lost (``classify`` drops it, which left
+    an email sender un-named and therefore unlinkable to the same person's phone)."""
+    v = str(value or "").strip()
+    if not v:
+        return None
+    name, inner = "", v
+    m = _ANGLE_RE.match(v)
+    if m:
+        name = m.group(1).strip().strip('"').strip()
+        inner = m.group(2).strip()
+    em = _EMAIL_FIND_RE.search(inner) or _EMAIL_FIND_RE.search(v)
+    if em:
+        e = normalize_email(em.group(0))
+        if e:
+            # A "name" that's itself an address/number isn't a real display name.
+            if name and ("@" in name or re.fullmatch(r"[+()\-.\s\d]+", name)):
+                name = ""
+            return ("email", e, name)
+    p = normalize_phone(inner)
+    if p:
+        if name and ("@" in name or re.fullmatch(r"[+()\-.\s\d]+", name)):
+            name = ""
+        return ("phone", p, name)
+    return None
+
+
+
 def _iter_values(v):
     if isinstance(v, (list, tuple)):
         for x in v:
