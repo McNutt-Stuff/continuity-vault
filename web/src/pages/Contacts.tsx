@@ -189,27 +189,47 @@ export default function Contacts() {
       {tab === "people" && (
         <div style={{ display: "grid", gridTemplateColumns: selected ? "minmax(320px, 1fr) minmax(360px, 1.3fr)" : "1fr", gap: 14, alignItems: "start" }}>
           <div>
-            <Card style={{ marginBottom: 12 }}>
-              <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                <input className="input sm" placeholder="Search people…" value={q}
-                       onChange={(e) => setQ(e.target.value)} style={{ flex: "1 1 180px" }} />
-                <select className="input sm" value={circle} onChange={(e) => setCircle(e.target.value)}>
-                  <option value="">All circles</option>
-                  {CIRCLES.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
-                </select>
-                <select className="input sm" value={relationship} onChange={(e) => setRelationship(e.target.value)}>
-                  <option value="">All relationships</option>
-                  {(ov?.prefs.relationships || []).map((r) => <option key={r} value={r}>{r}</option>)}
-                </select>
-                <select className="input sm" value={sort} onChange={(e) => setSort(e.target.value)}>
-                  <option value="circle">By closeness</option>
-                  <option value="frequency">Most contacted</option>
-                  <option value="recent">Recent</option>
-                  <option value="name">Name</option>
-                </select>
-                <button className={`btn sm ${starredOnly ? "primary" : "ghost"}`} onClick={() => setStarredOnly((v) => !v)}>★</button>
+            <div className="filter-toolbar" style={{ marginBottom: 14 }}>
+              <div className="search-bar" style={{ padding: "9px 13px" }}>
+                <Icon name="search" size={16} />
+                <input placeholder="Search people by name, email or phone…" value={q}
+                       onChange={(e) => setQ(e.target.value)} />
+                {q && <button className="filter-bar-clear" title="Clear" onClick={() => setQ("")}>×</button>}
               </div>
-            </Card>
+              <div className="filter-bar">
+                <label className="filter-select">
+                  <span>Circle</span>
+                  <select value={circle} onChange={(e) => setCircle(e.target.value)}>
+                    <option value="">All circles</option>
+                    {CIRCLES.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+                  </select>
+                </label>
+                <label className="filter-select">
+                  <span>Relationship</span>
+                  <select value={relationship} onChange={(e) => setRelationship(e.target.value)}>
+                    <option value="">All relationships</option>
+                    {(ov?.prefs.relationships || []).map((r) => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </label>
+                <label className="filter-select">
+                  <span>Sort by</span>
+                  <select value={sort} onChange={(e) => setSort(e.target.value)}>
+                    <option value="circle">Closeness</option>
+                    <option value="frequency">Most contacted</option>
+                    <option value="recent">Recent</option>
+                    <option value="name">Name</option>
+                  </select>
+                </label>
+                <button className="filter-chip"
+                        onClick={() => setStarredOnly((v) => !v)}
+                        style={{ cursor: "pointer", alignSelf: "flex-end", padding: "6px 12px",
+                                 borderColor: starredOnly ? "var(--brand)" : "var(--border)",
+                                 background: starredOnly ? "rgba(79,124,255,.1)" : "transparent",
+                                 color: starredOnly ? "var(--text)" : "var(--text-dim)" }}>
+                  ★ Starred
+                </button>
+              </div>
+            </div>
             {contacts === null ? <Loading label="Loading your people…" />
               : contacts.length === 0 ? (
                 <Card><div className="muted" style={{ padding: "16px 4px" }}>
