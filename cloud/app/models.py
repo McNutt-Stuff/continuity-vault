@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -2039,5 +2040,31 @@ class ContactSuggestion(Base):
     fingerprint = Column(String, index=True)                    # dedup identical suggestions
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class ContactExchange(Base):
+    """A lightweight ref from a UnifiedContact to one message/social/email doc the
+    contact took part in, populated at rebuild by mining the index once. Lets the
+    per-contact drill-down page a contact's FULL history by contact_id (indexed),
+    instead of scanning the whole search index per view. Title/preview are fetched
+    from SearchDocument by object_id on read, so these rows stay small."""
+
+    __tablename__ = "contact_exchanges"
+    id = Column(String, primary_key=True, default=_uuid)
+    tenant_id = Column(String, index=True, nullable=False)
+    owner_user_id = Column(String, index=True, nullable=True)
+    contact_id = Column(String, index=True, nullable=False)
+    source_type = Column(String, default="", index=True)
+    doc_type = Column(String, default="")
+    object_id = Column(String, default="", index=True)
+    direction = Column(String, default="unknown")               # in|out|unknown
+    modified_at = Column(DateTime, nullable=True, index=True)
+    size_bytes = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_now)
+
+    __table_args__ = (
+        Index("ix_contact_exchanges_contact_modified", "contact_id", "modified_at"),
+    )
+
 
 

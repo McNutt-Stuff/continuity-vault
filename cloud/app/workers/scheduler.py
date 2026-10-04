@@ -1070,10 +1070,12 @@ def _run_contact_directory() -> None:
         users = [u for u in db.query(User).filter(User.status == "active").all()
                  if u.tenant_id not in assigned]
         tenants: dict[str, object] = {}
+        n_dir = n_contacts = 0
         for u in users:
             if getattr(u, "contact_linking_enabled", False):
                 try:
                     contacts.build_directory(db, u)
+                    n_dir += 1
                 except Exception:  # noqa: BLE001
                     db.rollback()
                     logger.exception("contact directory build failed for %s", u.id)
@@ -1084,9 +1086,13 @@ def _run_contact_directory() -> None:
             try:
                 if t is not None and features.resolve(u, t, "unified_contacts_enabled", db):
                     unified_contacts.rebuild(db, u)
+                    n_contacts += 1
             except Exception:  # noqa: BLE001
                 db.rollback()
                 logger.exception("unified contacts rebuild failed for %s", u.id)
+        if n_dir or n_contacts:
+            logger.info("scheduled contact build: directory=%d user(s), "
+                        "unified-contacts rebuilt=%d user(s)", n_dir, n_contacts)
 
 
 def _run_notifications() -> None:

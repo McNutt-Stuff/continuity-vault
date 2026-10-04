@@ -81,6 +81,12 @@ def _should_proxy(method: str, path: str) -> bool:
     # from the CP's replicated copy — so READS (GET) are served here from the CP,
     # while WRITES (rebuild / curation / link / merge / accept) proxy to the node
     # that owns the contacts, which then replicates the change back up.
+    # EXCEPTION: a contact's exchanges drill-down is read from the node's local
+    # ContactExchange index + full search index (not replicated to the CP), so that
+    # GET proxies to the node too — same as search.
+    if (path.startswith("/api/contacts/") and path.endswith("/exchanges")
+            and method == "GET"):
+        return True
     if (path == "/api/contacts" or path.startswith("/api/contacts/")) and method != "GET":
         return True
     # Vault Recovery Key management touches the vault key store, which lives on

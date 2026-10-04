@@ -33,8 +33,8 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from . import contacts
-from .models import (ConnectorAccount, ContactIdentity, ContactSuggestion,
-                     SearchDocument, UnifiedContact, User, Vault)
+from .models import (ConnectorAccount, ContactExchange, ContactIdentity,
+                     ContactSuggestion, SearchDocument, UnifiedContact, User, Vault)
 from .taxonomy import canonical_attr
 
 logger = logging.getLogger("cv.unified_contacts")
@@ -246,6 +246,9 @@ _ROLE_LOCALS = {"info", "support", "admin", "noreply", "no-reply", "donotreply",
                 "notification", "mailer-daemon", "postmaster", "help", "billing",
                 "accounts", "office", "mail", "news", "newsletter", "updates",
                 "service", "alerts", "security", "abuse", "webmaster", "marketing"}
+# Address-book sources — an identity from one of these makes a contact "card-backed"
+# (authoritative name), which is the gate for safe AUTO-merge of same-named people.
+_CARD_SOURCES = {"google_contacts", "icloud", "carddav", "contacts", "outlook_contacts"}
 
 
 def _name_from_email(email: str) -> str:
@@ -444,7 +447,8 @@ def rebuild(db: Session, user: User) -> int:
         # Union counterparties on the same message? No — different recipients of a
         # group email aren't the same person. Only union a single counterparty's
         # own identifiers is N/A here (one value each). Keep them separate.
-        message_rows.append((source_type or "", counter, direction, modified_at, int(size or 0)))
+        message_rows.append((source_type or "", doc_type or "", object_id or "",
+                             counter, direction, modified_at, int(size or 0)))
 
     # --- Assemble persons by union root --------------------------------------
     people: dict[str, _Person] = {}
@@ -468,7 +472,7 @@ def rebuild(db: Session, user: User) -> int:
             p.add_identity(t, v, raw=v, source_type=seed["source_type"],
                            source_object_id=seed["object_id"])
 
-    for source_type, counter, direction, modified_at, size in message_rows:
+    for source_type, doc_type, object_id, counter, direction, modified_at, size in message_rows:
         # One interaction per message per distinct counterparty person.
         seen_people: set[str] = set()
         for (t, v, raw, name, role) in counter:
@@ -496,17 +500,59 @@ def rebuild(db: Session, user: User) -> int:
             p.add_identity(ci.kind, ci.value, raw=ci.raw_value, label=ci.label,
                            source_type=ci.source_type, source_object_id=ci.source_object_id)
 
-    n = _persist(db, user, people, existing_manual, now)
+    n, person_to_contact = _persist(db, user, people, existing_manual, now)
+    _write_exchanges(db, user, message_rows, person_to_contact, uf, now)
     _suggest(db, user, people, now)
     db.commit()
     logger.info("unified contacts rebuilt for %s: %d person(s)", user.id, n)
     return n
 
 
+# How many recent exchanges to index per contact (the drill-down paginates; the
+# "Open in Search" link covers the long tail). Bounds the node-local index size.
+_EXCHANGE_CAP = 1000
+
+
+def _write_exchanges(db: Session, user: User, message_rows: list,
+                     person_to_contact: dict[str, str], uf: "_Union",
+                     now: datetime) -> None:
+    """Populate the ContactExchange index from the mined messages so the drill-down
+    reads a contact's history by contact_id (fast, complete) instead of scanning
+    the whole search index per view. Node-local; the exchanges GET is proxied to
+    the owning node. Capped per contact to bound size."""
+    tid = user.tenant_id
+    by_contact: dict[str, list[dict]] = defaultdict(list)
+    for source_type, doc_type, object_id, counter, direction, modified_at, size in message_rows:
+        if not object_id:
+            continue
+        seen_cids: set[str] = set()
+        for (t, v, _raw, _name, _role) in counter:
+            cid = person_to_contact.get(uf.find(f"{t}:{v}"))
+            if not cid or cid in seen_cids:
+                continue
+            seen_cids.add(cid)
+            by_contact[cid].append({
+                "tenant_id": tid, "owner_user_id": user.id, "contact_id": cid,
+                "source_type": source_type, "doc_type": doc_type, "object_id": object_id,
+                "direction": direction, "modified_at": modified_at,
+                "size_bytes": int(size or 0), "created_at": now})
+    # Replace this user's exchange index wholesale (contacts can split/merge).
+    db.query(ContactExchange).filter(
+        ContactExchange.tenant_id == tid,
+        ContactExchange.owner_user_id == user.id).delete(synchronize_session=False)
+    batch: list[dict] = []
+    for cid, rows in by_contact.items():
+        rows.sort(key=lambda d: d["modified_at"] or datetime.min, reverse=True)
+        batch.extend(rows[:_EXCHANGE_CAP])
+    for i in range(0, len(batch), 5000):
+        db.bulk_insert_mappings(ContactExchange, batch[i:i + 5000])
+
+
 def _persist(db: Session, user: User, people: dict[str, _Person],
-             existing_manual: dict[str, list[ContactIdentity]], now: datetime) -> int:
+             existing_manual: dict[str, list[ContactIdentity]], now: datetime) -> tuple[int, dict[str, str]]:
     """Upsert deduced people into UnifiedContact/ContactIdentity, matching to
-    existing rows by identity overlap so user curation is preserved."""
+    existing rows by identity overlap so user curation is preserved. Returns
+    (kept_count, person.key -> contact_id) so the caller can index exchanges."""
     tid = user.tenant_id
     # Map every known identity value -> existing contact_id (for matching).
     val_to_contact: dict[str, str] = {}
@@ -526,6 +572,7 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
     tier_by_person = _assign_tiers(people, now)
 
     kept_contact_ids: set[str] = set()
+    person_to_contact: dict[str, str] = {}
     for person in people.values():
         # Match to an existing contact by any overlapping identity value.
         match_id = None
@@ -543,6 +590,7 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
             db.flush()
             existing_contacts[contact.id] = contact
         kept_contact_ids.add(contact.id)
+        person_to_contact[person.key] = contact.id
 
         name = person.best_name()
         contact.display_name = name
@@ -608,8 +656,10 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
             continue  # keep user-touched contacts even if the index went quiet
         db.query(ContactIdentity).filter(
             ContactIdentity.contact_id == cid).delete(synchronize_session=False)
+        db.query(ContactExchange).filter(
+            ContactExchange.contact_id == cid).delete(synchronize_session=False)
         db.delete(contact)
-    return len(kept_contact_ids)
+    return len(kept_contact_ids), person_to_contact
 
 
 def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime) -> None:
@@ -637,11 +687,16 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
     # Identity count per contact (to decide link-vs-merge + which side is "loose").
     idn_count: dict[str, int] = defaultdict(int)
     one_identity: dict[str, tuple] = {}  # contact_id -> (kind, value, raw, source)
+    card_backed: set[str] = set()        # has an address-book identity → authoritative name
     for ci in (db.query(ContactIdentity)
                .filter(ContactIdentity.tenant_id == tid,
                        ContactIdentity.owner_user_id == user.id).all()):
         idn_count[ci.contact_id] += 1
         one_identity[ci.contact_id] = (ci.kind, ci.value, ci.raw_value, ci.source_type)
+        if (ci.source_type or "") in _CARD_SOURCES:
+            card_backed.add(ci.contact_id)
+    auto_merge = bool((user.contacts_prefs or {}).get("auto_link", True))
+    merged_away: set[str] = set()
 
     def _loose(c: UnifiedContact) -> bool:
         return (idn_count.get(c.id, 0) <= 1 and not c.labels and not c.relationship
@@ -665,6 +720,8 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
                 a, b = group[i], group[j]
+                if a.id in merged_away or b.id in merged_away:
+                    continue
                 sim = _name_similarity(a.display_name, b.display_name)
                 if sim <= 0:
                     continue
@@ -674,10 +731,25 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
                 if pair in emitted:
                     continue
                 emitted.add(pair)
+                oid = one_identity.get(other.id)
+                is_link = _loose(other) and not _loose(primary) and oid
+                # AUTO-MERGE the safe case: an exact-name (first+last) match where the
+                # primary is an address-book-backed contact and the other is a loose
+                # message-only single-identifier contact → fold it in without asking
+                # (gated by the user's auto_link pref). Card-backing keeps common-name
+                # false merges out; the user can disable auto-link or unlink after.
+                if (is_link and auto_merge and sim >= 0.95 and primary.id in card_backed):
+                    try:
+                        merge(db, user, primary.id, other.id)
+                        merged_away.add(other.id)
+                        logger.info("unified contacts: auto-merged '%s' into '%s' (%s)",
+                                    other.display_name, primary.display_name, user.id)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("auto-merge failed for %s", user.id)
+                    continue
                 # LINK when the "other" is a loose single-identifier contact and the
                 # primary is a real record — attach the identifier rather than merge.
-                oid = one_identity.get(other.id)
-                if _loose(other) and not _loose(primary) and oid:
+                if is_link:
                     fp = hashlib.sha256(f"link:{primary.id}:{oid[0]}:{oid[1]}".encode()).hexdigest()[:24]
                     if fp in dismissed:
                         continue
@@ -759,16 +831,50 @@ def sources_breakdown(db: Session, user: User) -> list[dict]:
 
 
 def exchanges(db: Session, user: User, contact: UnifiedContact, *,
-              limit: int = 50, offset: int = 0, scan_cap: int = 20000) -> dict:
-    """The communication exchanges with a contact, mined from the search index
-    (message/social/email docs whose from/to/cc/bcc matches ANY of the contact's
-    identifiers). Returns lightweight rows the UI links straight into Unified
-    Search (source_type + object_id). Never re-extracts — reads the index only.
+              limit: int = 50, offset: int = 0) -> dict:
+    """A contact's exchanges, paginated by contact_id from the ContactExchange index
+    (built at rebuild) — complete + fast regardless of index size. Titles/previews
+    are fetched from SearchDocument by object_id on read. Falls back to scanning the
+    index directly when the exchange index is empty (pre-first-rebuild / CP-hosted
+    contact built before this shipped)."""
+    tid = user.tenant_id
+    base = db.query(ContactExchange).filter(
+        ContactExchange.tenant_id == tid,
+        ContactExchange.owner_user_id == user.id,
+        ContactExchange.contact_id == contact.id)
+    total = base.count()
+    if total == 0:
+        return _exchanges_scan(db, user, contact, limit=limit, offset=offset)
+    rows = (base.order_by(ContactExchange.modified_at.desc().nullslast())
+            .offset(max(0, offset)).limit(max(1, min(200, limit))).all())
+    oids = [r.object_id for r in rows if r.object_id]
+    docs: dict[str, tuple] = {}
+    if oids:
+        for oid, title, preview in (db.query(
+                SearchDocument.object_id, SearchDocument.title, SearchDocument.preview)
+                .filter(SearchDocument.tenant_id == tid,
+                        SearchDocument.object_id.in_(oids),
+                        SearchDocument.is_current.is_(True)).all()):
+            docs.setdefault(oid, (title, preview))
+    items = []
+    for r in rows:
+        title, preview = docs.get(r.object_id, ("", ""))
+        items.append({
+            "source_type": r.source_type or "", "doc_type": r.doc_type or "",
+            "object_id": r.object_id or "", "title": title or "", "preview": preview or "",
+            "direction": r.direction or "unknown",
+            "modified_at": r.modified_at.isoformat() if r.modified_at else None,
+            "size_bytes": int(r.size_bytes or 0),
+        })
+    return {"total": total, "items": items}
 
-    Narrows to docs whose search_blob contains one of the contact's identifiers so
-    we scan THE PERSON'S messages across the whole index, not just the most-recent
-    slice (a heavy account has far more than scan_cap total messages, so the old
-    recent-only scan missed most of a contact's history)."""
+
+def _exchanges_scan(db: Session, user: User, contact: UnifiedContact, *,
+                    limit: int = 50, offset: int = 0, scan_cap: int = 20000) -> dict:
+    """Fallback: mine the search index directly for a contact's exchanges (used when
+    the ContactExchange index isn't populated yet). Narrows via search_blob ILIKE
+    the contact's identifiers so it scans the person's messages across the whole
+    index, then verifies precisely with _message_parties."""
     from sqlalchemy import or_
     tid = user.tenant_id
     vids = _user_vault_ids(db, user)
@@ -829,6 +935,9 @@ def merge(db: Session, user: User, primary_id: str, other_id: str) -> None:
         ci.contact_id = primary_id
         ci.link_method = "manual"  # the merge is an explicit human decision
         ci.confirmed = True
+    # Move the other's indexed exchanges onto the primary (next rebuild re-caps).
+    db.query(ContactExchange).filter(ContactExchange.contact_id == other_id).update(
+        {ContactExchange.contact_id: primary_id}, synchronize_session=False)
     # Union light curation.
     primary.labels = sorted(set((primary.labels or []) + (other.labels or [])))
     primary.relationship = primary.relationship or other.relationship
