@@ -28,8 +28,8 @@ interface KeyRow {
   strength_bits: number; pq_hybrid: boolean; root_key_hash: string | null;
 }
 
-const ROLE_TONE: Record<string, "info" | "ok" | "warn"> = { owner: "ok", admin: "info", "security-admin": "info", member: "warn" };
-const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member", "security-admin": "Security admin" };
+const ROLE_TONE: Record<string, "info" | "ok" | "warn"> = { owner: "ok", admin: "info", member: "warn" };
+const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member" };
 const roleLabel = (r: string) => ROLE_LABEL[r] ?? r;
 
 type Tab = "members" | "appliances" | "keys";

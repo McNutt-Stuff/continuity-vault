@@ -117,7 +117,7 @@ class User(Base):
     last_name = Column(String, default="")
     phone = Column(String, default="")
     timezone = Column(String, default="")  # IANA tz the user picked (blank = browser default)
-    role = Column(String, default="member")  # owner | security-admin | member | support-admin
+    role = Column(String, default="member")  # owner | admin | member | support-admin
     is_platform_admin = Column(Boolean, default=False)  # backend admin console
     email_verified = Column(Boolean, default=False)
     status = Column(String, default="active")

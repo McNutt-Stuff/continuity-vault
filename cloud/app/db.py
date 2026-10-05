@@ -410,6 +410,10 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE m365_external_identities DROP CONSTRAINT IF EXISTS uq_m365_ext_identity",
         "ALTER TABLE m365_external_identities ADD CONSTRAINT uq_m365_ext_identity_tenant "
         "UNIQUE (tenant_id, microsoft_tenant_id, entra_object_id)",
+        # "security-admin" is a RETIRED legacy alias for the org "admin" role (the
+        # product only has owner | admin | member). Fold any remaining rows into
+        # admin so the role no longer exists anywhere. Tiny (users table) — safe inline.
+        "UPDATE users SET role = 'admin' WHERE role = 'security-admin'",
     ]
     for statement in statements:
         try:

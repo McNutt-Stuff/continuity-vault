@@ -156,7 +156,7 @@ def set_cloud_storage_policy(body: CloudStoragePolicyUpdate,
 
 def _tenant_owner(db: Session, tid: str):
     return (db.query(User)
-            .filter(User.tenant_id == tid, User.role.in_(("owner", "admin", "security-admin")))
+            .filter(User.tenant_id == tid, User.role.in_(("owner", "admin")))
             .order_by(User.role.asc()).first())
 
 

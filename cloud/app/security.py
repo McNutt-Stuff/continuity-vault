@@ -165,7 +165,7 @@ def require_platform_admin(principal: Principal = Depends(get_principal)) -> Pri
 
 def require_security_admin(principal: Principal = Depends(get_principal)) -> Principal:
     if not (is_org_admin(principal.role) or principal.is_platform_admin):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "security-admin role required")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "organization admin required")
     return principal
 
 
@@ -173,9 +173,10 @@ def require_security_admin(principal: Principal = Depends(get_principal)) -> Pri
 #
 # Customer-facing roles: owner (full control + billing), admin (manage users,
 # appliances, keys and see org-wide *aggregate* statistics), member (own data
-# only). "security-admin" is the legacy name for an org admin.
+# only). (The old "security-admin" was a legacy alias for admin — now retired and
+# migrated to "admin"; see db._apply_additive_migrations.)
 
-ORG_ADMIN_ROLES = {"owner", "admin", "security-admin"}
+ORG_ADMIN_ROLES = {"owner", "admin"}
 
 
 def is_org_admin(role: str) -> bool:

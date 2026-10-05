@@ -1248,7 +1248,7 @@ def _run_weekly_org(db, notif, owned: set[str], now: datetime) -> None:
     for t in org_tenants:
         admins = (db.query(User)
                   .filter(User.tenant_id == t.id, User.status == "active",
-                          User.role.in_(["owner", "security-admin"])).all())
+                          User.role.in_(["owner", "admin"])).all())
         for u in admins:
             try:
                 notif.send_notification(db, u, "weekly_org", dedupe_key=f"weekly:{week}")

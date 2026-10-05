@@ -324,7 +324,7 @@ def _sees_org_shared(db, user: User) -> bool:
     t = db.get(Tenant, user.tenant_id)
     if t is None or (t.tenant_type or "shared") == "shared":
         return True
-    return (user.role or "").lower() in ("owner", "security-admin", "admin")
+    return (user.role or "").lower() in ("owner", "admin")
 
 
 def _effective_source_type(c) -> str:

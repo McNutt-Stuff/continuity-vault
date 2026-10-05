@@ -18,8 +18,8 @@ interface UserDetail {
 }
 interface Activity { action: string; resource: string; category: string; severity: string; detail: any; created_at: string | null }
 
-const ROLE_TONE: Record<string, "info" | "ok" | "warn"> = { owner: "ok", admin: "info", "security-admin": "info", member: "warn" };
-const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member", "security-admin": "Security admin" };
+const ROLE_TONE: Record<string, "info" | "ok" | "warn"> = { owner: "ok", admin: "info", member: "warn" };
+const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member" };
 const SEV_TONE: Record<string, "ok" | "warn" | "danger" | "info"> = { info: "info", notice: "info", warning: "warn", critical: "danger" };
 
 export default function OrganizationUser() {

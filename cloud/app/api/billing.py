@@ -731,7 +731,7 @@ def update_plan(body: PlanUpdate,
     user = db.get(User, principal.user_id)
     dedicated = (tenant.tenant_type or "dedicated") != "shared"
     if dedicated and not (security.is_org_admin(principal.role) or principal.is_platform_admin):
-        raise HTTPException(403, "security-admin role required")
+        raise HTTPException(403, "organization admin required")
     # Tenant/User are CONTROL-PLANE authoritative and fully replicated CP→node. On a
     # customer-tenant node a local write is clobbered by the next pull (~30s), so the
     # plan change is applied on the CP and mirrored back down. We forward it there,
@@ -764,7 +764,7 @@ def _apply_plan_change(db: Session, *, tenant: Tenant, user, actor_role: str,
     valid = {t["id"] for t in STORAGE_TIERS}
     actor_id = user.id if user else None
     # Shared-tenant personal accounts each manage their own protection destinations
-    # (no org role required); org tenants keep the security-admin-gated tenant-wide plan.
+    # (no org role required); org tenants keep the org-admin-gated tenant-wide plan.
     if (tenant.tenant_type or "dedicated") == "shared":
         summary: list[str] = []
         if body.options is not None:
@@ -786,7 +786,7 @@ def _apply_plan_change(db: Session, *, tenant: Tenant, user, actor_role: str,
             _notify_plan_change(db, user, view, summary)
         return view
     if not (security.is_org_admin(actor_role) or is_platform_admin):
-        raise HTTPException(403, "security-admin role required")
+        raise HTTPException(403, "organization admin required")
     # Snapshot the whole plan up-front so we reliably notify on ANY change —
     # including appliance removals / capacity changes the old per-field checks missed.
     before_sig = _plan_sig(tenant.protection_options, tenant.licensed_bytes, tenant.appliance_plan)

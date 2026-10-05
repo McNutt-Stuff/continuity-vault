@@ -17,7 +17,7 @@ def _applicable_types(db: Session, user: User) -> list[dict]:
     """The notification types shown to this user — org summaries only for org admins."""
     tenant = db.get(Tenant, user.tenant_id)
     is_org = bool(tenant and (tenant.tenant_type or "dedicated") != "shared")
-    can_org = user.role in ("owner", "security-admin") or user.is_platform_admin
+    can_org = user.role in ("owner", "admin") or user.is_platform_admin
     out = []
     for t in notifications.NOTIFICATION_TYPES:
         if t["scope"] == "org" and not (is_org and can_org):

@@ -104,7 +104,7 @@ async function editUserDialog(u: any, isShared: boolean): Promise<boolean> {
     : [
         { name: "display_name", label: "Name", defaultValue: u.display_name },
         { name: "role", label: "Role", defaultValue: u.role,
-          options: ["owner", "security-admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
+          options: ["owner", "admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
       ];
   fields.push({ name: "status", label: "Status", defaultValue: u.status,
     options: ["active", "suspended"].map((v) => ({ label: v, value: v })) });
@@ -1797,7 +1797,7 @@ function TenantDetail({ id, onBack }: { id: string; onBack: () => void }) {
           { name: "email", label: "Email", required: true },
           { name: "display_name", label: "Name" },
           { name: "role", label: "Role", defaultValue: "member",
-            options: ["owner", "security-admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
+            options: ["owner", "admin", "member", "support-admin"].map((v) => ({ label: v, value: v })) },
         ];
     const r = await formDialog({
       title: isShared ? "Add account" : "Add user",
