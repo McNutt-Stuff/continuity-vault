@@ -79,6 +79,9 @@ FLAGS: dict[str, bool] = {
     # Rolodex that links a person to all their identifiers, interaction history,
     # relationship labels and a relationship map. Reuses existing contact linking.
     "unified_contacts_enabled": False,
+    # Owner impersonation: an owner may sign in AS an opted-in member to see their
+    # experience (audited; the member still opts in per-account). OFF by default.
+    "impersonation_enabled": False,
 }
 
 # Human labels for the admin UI.
@@ -100,6 +103,7 @@ LABELS = {
     "signal_ai_enabled": "AI usage detection (shadow-AI tools & findings — on with Signals)",
     "network_analytics_enabled": "Network Analytics (unified apps/devices across sources)",
     "unified_contacts_enabled": "Unified Contacts (My Circles — personal relationship graph)",
+    "impersonation_enabled": "Owner impersonation (sign in as an opted-in member)",
 }
 
 

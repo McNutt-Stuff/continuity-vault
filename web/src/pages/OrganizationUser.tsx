@@ -28,6 +28,7 @@ export default function OrganizationUser() {
   const nav = useNavigate();
   const { me, impersonate } = useAuth();
   const isOwner = me?.is_owner || me?.role === "owner";
+  const impersonationOn = me?.features?.impersonation_enabled === true;
   const [u, setU] = useState<UserDetail | null>(null);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -187,7 +188,7 @@ export default function OrganizationUser() {
             </div>
           </div>
           <div className="row" style={{ gap: 6 }}>
-            {isOwner && !u.is_you && !u.permissions.is_owner && !u.is_platform_admin && u.allow_impersonation && (
+            {isOwner && !u.is_you && !u.permissions.is_owner && !u.is_platform_admin && u.allow_impersonation && impersonationOn && (
               <button className="btn sm primary" onClick={startImpersonation}><Icon name="user" size={13} /> Impersonate</button>
             )}
             <button className="btn sm ghost" onClick={editProfile}><Icon name="edit" size={13} /> Edit</button>
@@ -234,7 +235,7 @@ export default function OrganizationUser() {
           <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
             Members only ever access their own data. Admins manage the organization but never see another member's content.
           </div>
-          {!u.permissions.is_owner && !u.is_platform_admin && (
+          {!u.permissions.is_owner && !u.is_platform_admin && impersonationOn && (
             <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
               <div className="spread" style={{ alignItems: "center", gap: 10 }}>
                 <div>

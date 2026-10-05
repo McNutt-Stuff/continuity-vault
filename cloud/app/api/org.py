@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from .. import audit, authcodes, emailer, keybroker, security
+from .. import audit, authcodes, emailer, features, keybroker, security
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
@@ -283,6 +283,9 @@ def update_user(uid: str, body: UpdateUserRequest,
     if body.status is not None and body.status in ("active", "suspended"):
         u.status = body.status
     if body.allow_impersonation is not None:
+        actor = db.get(User, principal.user_id)
+        if body.allow_impersonation and not features.resolve(actor, tenant, "impersonation_enabled"):
+            raise HTTPException(403, "impersonation isn't enabled for this organization")
         u.allow_impersonation = bool(body.allow_impersonation)
     db.commit()
     verify = _send_verification(u) if changed_email else None
@@ -478,6 +481,9 @@ def impersonate_user(uid: str,
     (so the member's own passkey is still required for recovery/destructive ops)."""
     if not security.is_owner(principal.role):
         raise HTTPException(403, "only an owner can impersonate a member")
+    owner = db.get(User, principal.user_id)
+    if not features.resolve(owner, tenant, "impersonation_enabled"):
+        raise HTTPException(403, "impersonation isn't enabled for this organization")
     if principal.impersonator_id:
         raise HTTPException(409, "already impersonating — exit the current session first")
     u = db.get(User, uid)
