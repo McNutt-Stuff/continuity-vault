@@ -2513,6 +2513,218 @@ def fetch_instagram(access_token: str, content_cap: int = _DEFAULT_CAP,
             params = None
 
 
+# --------------------------------------------------------------------------- #
+# Instagram (personal) — instagrapi private-API backup                         #
+#                                                                               #
+# A username/password + 2FA option for PERSONAL accounts (Instagram's Basic     #
+# Display OAuth is deprecated). We follow instagrapi's anti-abuse best-practices #
+# strictly: a persistent session is reused across syncs (never re-login per run)#
+# and every private call is spaced by a random 2–5s delay so a backup never     #
+# bursts and trips Instagram's throttles. Bounded amounts per run keep each sync #
+# small; rate-limit errors stop the run cleanly and it resumes next schedule.    #
+# --------------------------------------------------------------------------- #
+_INSTAGRAM_SESSION_ROOT = os.path.join(
+    os.path.dirname(os.environ.get("CV_KEY_STORE", "./cv_keystore").rstrip("/")) or ".",
+    "instagram-sessions")
+_IG_MEDIA_PER_RUN = 60
+_IG_THREADS_PER_RUN = 20
+_IG_THREAD_MSGS = 40
+_IG_FOLLOWING_CAP = 300
+
+
+def _instagram_client(settings: Optional[dict] = None):
+    """A rate-limit-friendly instagrapi client. ``delay_range`` inserts a random
+    2–5s pause between private-API calls (instagrapi best-practice) so a backup
+    never bursts. Reuses a saved session (``settings``) when provided."""
+    try:
+        from instagrapi import Client
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "instagrapi is not installed on this server — it ships in "
+            "cloud/requirements.txt; redeploy so Instagram can be backed up.") from exc
+    cl = Client()
+    cl.delay_range = [2, 5]
+    if settings:
+        try:
+            cl.set_settings(settings)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("instagram: set_settings failed (ignored): %s", exc)
+    return cl
+
+
+def instagram_start_session(username: str, password: str):
+    """Begin an interactive Instagram sign-in. Returns ``(status, state)``:
+    ``"linked"`` (no 2FA; state has ``{settings, username}``) or ``"needs_2fa"``
+    (a 6-digit code is required; state has ``{client, username, password}``).
+    Mirrors the iCloud flow so the UI collects the OTP in the same window."""
+    from instagrapi.exceptions import (TwoFactorRequired, BadPassword,
+                                        ChallengeRequired, ClientError)
+    user = (username or "").strip().lstrip("@")
+    pw = password or ""
+    if not user or not pw:
+        raise PermissionError("Enter your Instagram username and password.")
+    cl = _instagram_client()
+    try:
+        cl.login(user, pw)
+    except TwoFactorRequired:
+        logger.info("instagram: 2FA required for %s", user)
+        return "needs_2fa", {"client": cl, "username": user, "password": pw}
+    except ChallengeRequired as exc:
+        raise PermissionError(
+            "Instagram wants to verify this sign-in in the Instagram app. Open "
+            "Instagram on your phone, approve the login (or confirm it's you), then "
+            "reconnect here. If your account has two-factor authentication on, "
+            "you'll be asked for a 6-digit code instead.") from exc
+    except BadPassword as exc:
+        raise PermissionError("Instagram rejected the username or password — check "
+                              "them and try again.") from exc
+    except ClientError as exc:  # noqa: BLE001
+        detail = (str(exc).strip() or exc.__class__.__name__)
+        if any(s in detail.lower() for s in ("please_wait", "few minutes", "429")):
+            raise PermissionError("Instagram is rate-limiting sign-ins from this "
+                                  "server — wait a few minutes and try again.") from exc
+        raise PermissionError(f"Instagram sign-in failed: {detail}") from exc
+    logger.info("instagram: signed in (no 2FA) for %s", user)
+    return "linked", {"settings": cl.get_settings(), "username": user}
+
+
+def instagram_verify_2fa(state: dict, code: str) -> dict:
+    """Complete sign-in with the 6-digit code. Returns ``{settings, username}`` to
+    persist so later syncs reuse the session instead of re-authenticating."""
+    from instagrapi.exceptions import TwoFactorRequired, ClientError
+    cl = state["client"]
+    user = state["username"]
+    digits = re.sub(r"\D", "", code or "")
+    if len(digits) < 6:
+        raise PermissionError("Enter the 6-digit code from your authenticator app or text.")
+    try:
+        cl.login(user, state["password"], verification_code=digits)
+    except TwoFactorRequired as exc:
+        raise PermissionError("That code wasn't accepted — check it and try again.") from exc
+    except ClientError as exc:  # noqa: BLE001
+        raise PermissionError(
+            f"Couldn't verify the code: {str(exc) or exc.__class__.__name__}") from exc
+    logger.info("instagram: 2FA verified for %s", user)
+    return {"settings": cl.get_settings(), "username": user}
+
+
+def _ig_ns_handle(username: str) -> str:
+    """Namespace an Instagram handle so the contact graph only matches it to other
+    Instagram handles (never a Twitter/email "john")."""
+    return "instagram:" + (username or "").strip().lstrip("@").lower()
+
+
+def _ig_contact(u) -> SourceObject:
+    """Normalize an instagrapi user into a contact SourceObject tagged with a
+    namespaced Instagram handle so Unified Contacts can link the person."""
+    uname = getattr(u, "username", "") or ""
+    name = (getattr(u, "full_name", "") or "").strip() or uname
+    return SourceObject(
+        object_id=f"instagram:user:{u.pk}",
+        doc_type="contact", category="contact", title=name,
+        content=json.dumps({"username": uname}).encode(),
+        preview=f"@{uname}",
+        meta={"instagram_handle": _ig_ns_handle(uname), "username": uname,
+              "full_name": name, "platform": "instagram",
+              "profile_pic": str(getattr(u, "profile_pic_url", "") or "")},
+        labels=["Instagram", "Contacts"], modified_at=None)
+
+
+def fetch_instagram_personal(creds: dict, config: Optional[dict] = None,
+                             content_cap: int = _DEFAULT_CAP) -> Iterable[SourceObject]:
+    """Back up a PERSONAL Instagram account via instagrapi — own posts (photos +
+    videos), direct messages, and the following graph — all rate-limited. The saved
+    session is reused; the password only re-auths an expired session. Yields lazily
+    so a large library ingests in bounded batches."""
+    from instagrapi.exceptions import (LoginRequired, PleaseWaitFewMinutes,
+                                        ClientThrottledError)
+    options = {"includeCategories": (config or {}).get("includeCategories")}
+    cl = _instagram_client(creds.get("settings"))
+    user = creds.get("username") or ""
+    # Validate/refresh the session once up front (cheap call).
+    try:
+        cl.get_timeline_feed()
+    except LoginRequired:
+        if not creds.get("password"):
+            raise PermissionError("Instagram session expired — reconnect the source "
+                                  "and re-enter your password + 2FA code.")
+        cl.login(user, creds["password"])
+    uid = cl.user_id or cl.user_id_from_username(user)
+
+    # 1) Own media → photos + videos (feeds Photos + Search).
+    if _want(options, "media"):
+        try:
+            medias = cl.user_medias_v1(uid, amount=_IG_MEDIA_PER_RUN)
+        except (PleaseWaitFewMinutes, ClientThrottledError) as exc:
+            logger.warning("instagram: media throttled for %s — stopping run: %s", user, exc)
+            medias = []
+        for m in medias:
+            is_video = int(getattr(m, "media_type", 1)) == 2 or bool(getattr(m, "video_url", None))
+            kind = "video" if is_video else "image"
+            url = str(getattr(m, "video_url", "") or getattr(m, "thumbnail_url", "") or "")
+            content, backed = (_download(url, content_cap) if url
+                               else (json.dumps({"pk": str(m.pk)}).encode(), False))
+            code = getattr(m, "code", "") or ""
+            cap = (getattr(m, "caption_text", "") or "")[:80] or "Instagram media"
+            yield SourceObject(
+                object_id=f"instagram:media:{m.pk}",
+                doc_type=kind, category=("video" if is_video else "image"),
+                title=cap, content=content,
+                preview=f"https://instagram.com/p/{code}",
+                meta={"created": str(getattr(m, "taken_at", "") or ""),
+                      "media_type": "VIDEO" if is_video else "IMAGE", "kind": kind,
+                      "permalink": f"https://instagram.com/p/{code}",
+                      "like_count": getattr(m, "like_count", 0),
+                      "content_backed_up": backed},
+                labels=["Instagram", "Posts"],
+                modified_at=getattr(m, "taken_at", None))
+
+    # 2) Direct messages → messages + DM participants as contacts.
+    if _want(options, "messages"):
+        try:
+            threads = cl.direct_threads(amount=_IG_THREADS_PER_RUN)
+        except (PleaseWaitFewMinutes, ClientThrottledError) as exc:
+            logger.warning("instagram: DMs throttled for %s — skipping: %s", user, exc)
+            threads = []
+        seen_people: set = set()
+        for t in threads:
+            users_by_id = {str(u.pk): u for u in (getattr(t, "users", []) or [])}
+            if _want(options, "contacts"):
+                for u in users_by_id.values():
+                    if str(u.pk) not in seen_people:
+                        seen_people.add(str(u.pk))
+                        yield _ig_contact(u)
+            for msg in (getattr(t, "messages", []) or [])[:_IG_THREAD_MSGS]:
+                sender = users_by_id.get(str(getattr(msg, "user_id", "")))
+                sender_handle = _ig_ns_handle(sender.username) if sender else _ig_ns_handle(user)
+                recips = [_ig_ns_handle(u.username) for u in users_by_id.values()
+                          if str(u.pk) != str(getattr(msg, "user_id", ""))]
+                text = (getattr(msg, "text", "") or "").strip()
+                if not text:
+                    continue
+                yield SourceObject(
+                    object_id=f"instagram:dm:{msg.id}",
+                    doc_type="message", category="message",
+                    title=text[:80] or "Instagram DM",
+                    content=json.dumps({"text": text}).encode(), preview=text[:400],
+                    meta={"from": sender_handle, "to": recips, "thread": str(t.id),
+                          "created": str(getattr(msg, "timestamp", "") or ""),
+                          "kind": "dm", "platform": "instagram"},
+                    labels=["Instagram", "Direct Messages"],
+                    modified_at=getattr(msg, "timestamp", None))
+
+    # 3) Following → contacts (bounded; followers are far more throttle-prone).
+    if _want(options, "contacts"):
+        try:
+            following = cl.user_following(uid, amount=_IG_FOLLOWING_CAP)
+        except (PleaseWaitFewMinutes, ClientThrottledError) as exc:
+            logger.warning("instagram: following throttled for %s — skipping: %s", user, exc)
+            following = {}
+        for u in (following or {}).values():
+            yield _ig_contact(u)
+
+
+
 def fetch_linkedin(access_token: str, content_cap: int = _DEFAULT_CAP,
                    options: Optional[dict] = None) -> Iterable[SourceObject]:
     """Back up as much of the member's LinkedIn account as the granted access

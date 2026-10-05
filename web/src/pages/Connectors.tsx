@@ -95,6 +95,7 @@ export default function Connectors() {
   const [loaded, setLoaded] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [icloudConnect, setIcloudConnect] = useState<CatalogItem | null>(null);
+  const [instagramConnect, setInstagramConnect] = useState<CatalogItem | null>(null);
 
   async function load() {
     try {
@@ -238,6 +239,12 @@ export default function Connectors() {
         // iCloud needs a real password + a one-time 2FA code — handled in a single
         // self-contained modal (authenticating → code entry) rather than chained dialogs.
         setIcloudConnect(c);
+        return;
+      }
+      if (c.type === "instagram") {
+        // Personal Instagram signs in with username/password + a 2FA code, same
+        // single-window flow as iCloud (instagrapi private API).
+        setInstagramConnect(c);
         return;
       }
       let result: Record<string, string> | null;
@@ -685,6 +692,14 @@ export default function Connectors() {
         />
       )}
 
+      {instagramConnect && (
+        <InstagramConnectModal
+          displayName={instagramConnect.displayName}
+          onClose={() => setInstagramConnect(null)}
+          onLinked={async () => { setInstagramConnect(null); flash(`${instagramConnect.displayName} connected`); await load(); }}
+        />
+      )}
+
       {setup && (
         <Card style={{ marginBottom: 16, borderColor: "var(--warn)" }}>
           <div className="spread" style={{ marginBottom: 8 }}>
@@ -973,6 +988,130 @@ function ICloudConnectModal({ displayName, onClose, onLinked }:
               <div className="faint" style={{ fontSize: 11 }}>
                 Seeing a different code on each device usually means more than one sign-in was requested —
                 use <b>Start over</b> to trigger a single fresh code.
+              </div>
+            </div>
+          )}
+
+          {phase === "verifying" && (
+            <div className="row" style={{ gap: 12, alignItems: "center", padding: "20px 4px" }}>
+              <span className="spinner" />
+              <div style={{ fontWeight: 600 }}>Verifying code…</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Personal Instagram sign-in in a SINGLE window (instagrapi): username + password,
+// an "authenticating…" state, then the 6-digit 2FA code inline — same pattern as
+// iCloud. Only personal accounts; nothing is posted and the session is reused.
+function InstagramConnectModal({ displayName, onClose, onLinked }:
+  { displayName: string; onClose: () => void; onLinked: () => Promise<void> | void }) {
+  type Phase = "form" | "authenticating" | "code" | "verifying";
+  const [phase, setPhase] = useState<Phase>("form");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [label, setLabel] = useState("");
+  const [code, setCode] = useState("");
+  const [pending, setPending] = useState("");
+  const [err, setErr] = useState("");
+  const busy = phase === "authenticating" || phase === "verifying";
+
+  async function start() {
+    if (!username.trim() || !password) { setErr("Enter your Instagram username and password."); return; }
+    setErr(""); setPhase("authenticating");
+    try {
+      const r = await api.post<{ status: string; pending?: string }>(`/connectors/instagram/start`,
+        { account_label: label.trim() || username.trim(), username: username.trim().replace(/^@/, ""), password });
+      if (r.status === "linked") { await onLinked(); return; }
+      if (r.status === "needs_2fa" && r.pending) { setPending(r.pending); setCode(""); setPhase("code"); return; }
+      setErr("Unexpected response from Instagram."); setPhase("form");
+    } catch (e) { setErr((e as ApiError).message || "Sign-in failed"); setPhase("form"); }
+  }
+
+  async function verify() {
+    const digits = code.replace(/\D/g, "");
+    if (digits.length !== 6) { setErr("Enter the 6-digit code."); return; }
+    setErr(""); setPhase("verifying");
+    try {
+      await api.post(`/connectors/instagram/verify`, { pending, code: digits });
+      await onLinked();
+    } catch (e) { setErr((e as ApiError).message || "That code wasn't accepted"); setPhase("code"); }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={() => { if (!busy) onClose(); }}>
+      <div className="modal-panel" style={{ width: "min(460px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+        <div className="spread">
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <div className="result-icon" style={{ background: "var(--inset)", width: 30, height: 30 }}>
+              <BrandIcon name="instagram" size={17} />
+            </div>
+            <h3 style={{ margin: 0 }}>Connect {displayName}</h3>
+          </div>
+          <button className="btn ghost sm" disabled={busy} onClick={onClose}>Close</button>
+        </div>
+
+        <div className="modal-body" style={{ marginTop: 12 }}>
+          {phase === "form" && (
+            <div className="stack" style={{ gap: 10 }}>
+              <div className="faint" style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                Sign in to your <b>personal</b> Instagram account. Arkive backs up your posts,
+                direct messages and your contacts (followers/following). We sign in like the
+                app does and reuse a saved session — nothing is posted on your behalf.
+              </div>
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="faint" style={{ fontSize: 11.5 }}>Instagram username</span>
+                <input className="input" autoFocus value={username} placeholder="yourhandle"
+                       onChange={(e) => setUsername(e.target.value)}
+                       onKeyDown={(e) => e.key === "Enter" && void start()} />
+              </label>
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="faint" style={{ fontSize: 11.5 }}>Password</span>
+                <input className="input" type="password" value={password}
+                       onChange={(e) => setPassword(e.target.value)}
+                       onKeyDown={(e) => e.key === "Enter" && void start()} />
+              </label>
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="faint" style={{ fontSize: 11.5 }}>Account label (optional)</span>
+                <input className="input" value={label} placeholder="My Instagram"
+                       onChange={(e) => setLabel(e.target.value)}
+                       onKeyDown={(e) => e.key === "Enter" && void start()} />
+              </label>
+              {err && <div style={{ color: "var(--danger)", fontSize: 12.5 }}>{err}</div>}
+              <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+                <button className="btn ghost sm" onClick={onClose}>Cancel</button>
+                <button className="btn primary" onClick={() => void start()}>Continue</button>
+              </div>
+            </div>
+          )}
+
+          {phase === "authenticating" && (
+            <div className="row" style={{ gap: 12, alignItems: "center", padding: "20px 4px" }}>
+              <span className="spinner" />
+              <div className="stack" style={{ gap: 2 }}>
+                <div style={{ fontWeight: 600 }}>Signing in to Instagram…</div>
+                <div className="faint" style={{ fontSize: 12 }}>If two-factor is on, Instagram is sending you a 6-digit code.</div>
+              </div>
+            </div>
+          )}
+
+          {phase === "code" && (
+            <div className="stack" style={{ gap: 10 }}>
+              <div className="faint" style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                Enter the 6-digit code from your <b>authenticator app</b> or the text/email Instagram sent.
+              </div>
+              <input className="input" autoFocus inputMode="numeric" maxLength={6} placeholder="123456"
+                     value={code}
+                     onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                     onKeyDown={(e) => e.key === "Enter" && void verify()}
+                     style={{ fontSize: 22, letterSpacing: 6, textAlign: "center" }} />
+              {err && <div style={{ color: "var(--danger)", fontSize: 12.5 }}>{err}</div>}
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+                <button className="btn ghost sm" onClick={() => { setErr(""); setCode(""); setPhase("form"); }}>Start over</button>
+                <button className="btn primary" disabled={code.replace(/\D/g, "").length !== 6} onClick={() => void verify()}>Verify</button>
               </div>
             </div>
           )}

@@ -545,6 +545,104 @@ def icloud_verify(body: ICloudVerifyRequest,
     return {"status": "linked", "id": account.id}
 
 
+# --- Instagram (personal) — username/password + 2FA via instagrapi ----------
+# Same two-request OTP pattern as iCloud: /start signs in (and pushes a 2FA code
+# if the account has it on), /verify completes with the 6-digit code. The pending
+# instagrapi client lives in this short-lived registry between the two requests.
+_INSTAGRAM_PENDING: dict[str, dict] = {}
+_INSTAGRAM_PENDING_TTL = 600
+
+
+def _instagram_prune_pending() -> None:
+    now = time.time()
+    for k in [k for k, v in _INSTAGRAM_PENDING.items()
+              if now - v["ts"] > _INSTAGRAM_PENDING_TTL]:
+        _INSTAGRAM_PENDING.pop(k, None)
+
+
+def _create_instagram_account(db: Session, tenant: Tenant, principal: security.Principal,
+                              label: str, username: str, password: str,
+                              settings: dict) -> ConnectorAccount:
+    # Persist the authenticated session (settings) so syncs reuse it without
+    # re-authenticating; the password is kept only to re-auth an expired session.
+    creds = {"username": username, "password": password, "settings": settings}
+    account = ConnectorAccount(
+        tenant_id=tenant.id, owner_user_id=principal.user_id, connector_type="instagram",
+        account_label=(label or "Instagram"), account_username=(username or None),
+        auth_status="linked", encrypted_credentials=credstore.encrypt(tenant.id, creds),
+        scopes=[])
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    audit.record(db, actor=principal.user_id, action="connector.linked",
+                 tenant_id=tenant.id, resource=account.id, detail={"type": "instagram"})
+    return account
+
+
+class InstagramStartRequest(BaseModel):
+    account_label: str | None = None
+    username: str
+    password: str
+
+
+@router.post("/instagram/start")
+def instagram_start(body: InstagramStartRequest,
+                    principal: security.Principal = Depends(security.require_passkey),
+                    tenant: Tenant = Depends(security.get_tenant),
+                    db: Session = Depends(get_db)):
+    """Begin a personal Instagram sign-in. Returns ``{"status":"linked",...}`` when
+    no 2FA is needed, or ``{"status":"needs_2fa","pending":...}`` to collect a code."""
+    from ..connectors import live
+    _instagram_prune_pending()
+    try:
+        status, state = live.instagram_start_session(body.username, body.password)
+    except PermissionError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Instagram sign-in failed: {exc}")
+    if status == "linked":
+        account = _create_instagram_account(
+            db, tenant, principal, body.account_label or body.username,
+            body.username.strip().lstrip("@"), body.password, state.get("settings") or {})
+        return {"status": "linked", "id": account.id}
+    pending = uuid.uuid4().hex
+    _INSTAGRAM_PENDING[pending] = {
+        "state": state, "username": body.username.strip().lstrip("@"),
+        "password": body.password, "tid": tenant.id, "uid": principal.user_id,
+        "label": body.account_label or body.username, "ts": time.time()}
+    return {"status": "needs_2fa", "pending": pending}
+
+
+class InstagramVerifyRequest(BaseModel):
+    pending: str
+    code: str
+
+
+@router.post("/instagram/verify")
+def instagram_verify(body: InstagramVerifyRequest,
+                     principal: security.Principal = Depends(security.require_passkey),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    """Complete the Instagram sign-in with the 6-digit code; store the session."""
+    from ..connectors import live
+    _instagram_prune_pending()
+    p = _INSTAGRAM_PENDING.get(body.pending)
+    if not p or p["tid"] != tenant.id or p["uid"] != principal.user_id:
+        raise HTTPException(400, "verification session expired — start again")
+    try:
+        result = live.instagram_verify_2fa(p["state"], body.code)
+    except PermissionError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"couldn't verify the code: {exc}")
+    account = _create_instagram_account(db, tenant, principal, p["label"],
+                                        p["username"], p["password"],
+                                        result.get("settings") or {})
+    _INSTAGRAM_PENDING.pop(body.pending, None)
+    return {"status": "linked", "id": account.id}
+
+
+
 @router.get("/accounts")
 def list_accounts(principal: security.Principal = Depends(security.get_principal),
                   tenant: Tenant = Depends(security.get_tenant),

@@ -145,15 +145,10 @@ def _providers() -> Dict[str, ProviderSpec]:
             client_secret=s.facebook_client_secret,
             extra_auth_params={},
         ),
-        "instagram": ProviderSpec(
-            connector_type="instagram",
-            authorize_url="https://api.instagram.com/oauth/authorize",
-            token_url="https://api.instagram.com/oauth/access_token",
-            scopes=["user_profile", "user_media"],
-            client_id=s.instagram_client_id,
-            client_secret=s.instagram_client_secret,
-            extra_auth_params={},
-        ),
+        # Instagram is NOT OAuth here: personal accounts sign in with
+        # username/password + 2FA via instagrapi (Basic Display OAuth is
+        # deprecated). Its connect flow is the dedicated Instagram modal, so it
+        # must resolve to "token" mode — hence no ProviderSpec entry.
         "linkedin": ProviderSpec(
             connector_type="linkedin",
             authorize_url="https://www.linkedin.com/oauth/v2/authorization",
@@ -188,8 +183,9 @@ def _providers() -> Dict[str, ProviderSpec]:
 
 
 OAUTH_TYPES = set(_providers().keys())
-# Providers that authorize with a manually-entered token / app password.
-TOKEN_TYPES = {"onepassword", "icloud"}
+# Providers that authorize with a manually-entered token / app password, or a
+# dedicated sign-in modal (iCloud, Instagram: username/password + 2FA).
+TOKEN_TYPES = {"onepassword", "icloud", "instagram"}
 
 
 def get_spec(connector_type: str) -> Optional[ProviderSpec]:

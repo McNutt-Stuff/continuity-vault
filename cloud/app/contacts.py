@@ -109,6 +109,27 @@ def classify(value: str) -> tuple[str, str] | None:
     return None
 
 
+# A social handle identity must be PLATFORM-NAMESPACED ("instagram:john") so the
+# same username on two networks never collides into one person. Bare handles
+# (no namespace) are intentionally NOT matched — only connectors that emit a
+# namespaced handle participate, which keeps contact merging conservative.
+_HANDLE_RE = re.compile(r"^[a-z0-9_]+:[a-z0-9_.]{1,40}$")
+
+
+def normalize_handle(raw: str) -> str | None:
+    """Normalize a namespaced social handle to a stable match key, else None."""
+    s = str(raw or "").strip().lower().lstrip("@")
+    if ":" not in s:
+        return None
+    platform, _, handle = s.partition(":")
+    handle = handle.strip().lstrip("@")
+    if not platform or not handle:
+        return None
+    key = f"{platform}:{handle}"
+    return key if _HANDLE_RE.match(key) else None
+
+
+
 # Pull an email out of a value that may carry a display name ("Name <e@x.com>").
 _EMAIL_FIND_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _ANGLE_RE = re.compile(r'^\s*"?([^"<>]*?)"?\s*<\s*([^>]+?)\s*>\s*$')
@@ -147,6 +168,10 @@ def parse_party(value: str) -> tuple[str, str, str] | None:
         p = normalize_phone(inner)
         if p:
             return ("phone", p, name)
+    # A platform-namespaced social handle ("instagram:john") is a handle identity.
+    h = normalize_handle(inner)
+    if h:
+        return ("handle", h, name)
     return None
 
 
@@ -203,6 +228,11 @@ def contact_identifiers(meta: dict) -> list[tuple[str, str]]:
             continue
         for raw in _iter_values(v):
             c = classify(str(raw))
+            if c is None:
+                # A namespaced social handle (e.g. meta "instagram_handle") is a
+                # handle identity even though it's neither an email nor a phone.
+                nh = normalize_handle(str(raw))
+                c = ("handle", nh) if nh else None
             if c and c not in seen:
                 seen.add(c)
                 out.append(c)
@@ -217,6 +247,9 @@ def message_identifiers(meta: dict) -> list[tuple[str, str, str]]:
             continue
         for raw in _iter_values(v):
             c = classify(str(raw))
+            if c is None:
+                nh = normalize_handle(str(raw))
+                c = ("handle", nh) if nh else None
             if c:
                 out.append((c[0], c[1], str(raw)))
     return out

@@ -876,23 +876,37 @@ class InstagramConnector(Connector):
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
             streaming=True,
-            searchable_fields=["media_type", "kind"],
-            facet_fields=["media_type"],
-            filter_categories=[{"id": "media", "label": "Photos & videos"}],
+            searchable_fields=["media_type", "kind", "username", "full_name", "platform"],
+            facet_fields=["media_type", "kind"],
+            # Personal backup spans media, DMs and the following graph — let the
+            # operator include/exclude each in the Data Map.
+            filter_categories=[
+                {"id": "media", "label": "Photos & videos"},
+                {"id": "messages", "label": "Direct messages"},
+                {"id": "contacts", "label": "Contacts (followers/following)"},
+            ],
         )
 
     def oauth_spec(self) -> OAuthSpec:
         return OAuthSpec(
             connector_type=self.connector_type, display_name=self.display_name,
-            auth_type="oauth2",
-            authorize_url="https://api.instagram.com/oauth/authorize",
-            token_url="https://api.instagram.com/oauth/access_token",
-            scopes=["user_profile", "user_media"],
-            icon="image", color="#e4405f", doc_types=["image", "video"],
+            # Personal accounts sign in with username/password + 2FA (instagrapi);
+            # Instagram's Basic Display OAuth is deprecated. The connect flow is a
+            # dedicated modal (like iCloud), keyed off this "custom" auth type.
+            auth_type="custom",
+            authorize_url="", token_url="", scopes=[],
+            icon="image", color="#e4405f",
+            doc_types=["image", "video", "message", "contact"],
         )
 
     def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
         config = config or {}
+        # Personal account (instagrapi): the decrypted session + username are in config.
+        if config.get("username") or config.get("settings"):
+            yield from live.fetch_instagram_personal(
+                config, config=config, content_cap=_content_cap())
+            return
+        # Legacy OAuth (Basic Display) accounts, if any remain.
         if config.get("access_token"):
             yield from live.fetch_instagram(
                 config["access_token"], _content_cap(),

@@ -54,3 +54,9 @@ pyicloud[cli]>=2.7.0,<3
 # The Open Quantum Safe Python binding is `liboqs-python` (imports as `oqs`) and
 # requires the native liboqs library. The PyPI package named `oqs` is UNRELATED.
 # liboqs-python>=0.10.0
+
+# instagrapi — personal (username/password + 2FA) Instagram backup for the
+# Instagram connector. Private mobile API wrapper; pulls own media, DMs and the
+# following/followers graph. Python 3.10+; ships curl_cffi + Pillow transitively.
+instagrapi>=2.5.0,<3
+

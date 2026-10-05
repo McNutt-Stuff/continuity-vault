@@ -1374,13 +1374,26 @@ _SOURCE_PAGES = [
          "Read-only; pick posts and/or photos in the Data Map."]),
     _source_doc(
         "source-instagram", "Instagram", "image", 80,
-        "Back up your Instagram photos and videos.",
-        "Your media library — photos and videos you've posted.",
-        _oauth_connect("Instagram"),
-        ["**Images** — photos as `image`.",
-         "**Video & Audio** — videos as `video`."],
-        ["Uses Instagram's Basic Display / media API (read-only).",
-         "Captions and media are captured together."]),
+        "Back up your personal Instagram — photos, videos, direct messages and contacts.",
+        "Your posts (photos & videos), your direct messages, and your contacts "
+        "(the people you follow and everyone in your DMs).",
+        "Instagram connects with your **personal account username and password**, "
+        "plus a **6-digit two-factor code** if you have 2FA on (just like iCloud) — "
+        "entered in a single sign-in window. Instagram's old Basic Display app "
+        "login is deprecated, so Arkive signs in the way the app does and reuses a "
+        "saved session. We only read your own data; nothing is ever posted.",
+        ["**Images** — your photos as `image`.",
+         "**Video & Audio** — your videos as `video`.",
+         "**Messages** — direct messages as `message` (feeds Unified Search & Contacts).",
+         "**Contacts** — the people you follow and DM, as `contact`, linked by their "
+         "Instagram handle in **My Circles**."],
+        ["Signs in with username/password + 2FA via the private mobile API (read-only).",
+         "Strictly rate-limited: each sync pulls a bounded batch with a few seconds "
+         "between requests, and backs off cleanly if Instagram throttles — large "
+         "libraries fill in over several runs.",
+         "If Instagram shows a device/app challenge, approve the login in the "
+         "Instagram app once, then reconnect here.",
+         "Choose what to include (photos/videos, messages, contacts) in the Data Map."]),
     _source_doc(
         "source-linkedin", "LinkedIn", "activity", 82,
         "Back up your LinkedIn profile, and — with partner access — posts, messages and connections.",
