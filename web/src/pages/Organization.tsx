@@ -28,8 +28,8 @@ interface KeyRow {
   strength_bits: number; pq_hybrid: boolean; root_key_hash: string | null;
 }
 
-const ROLE_TONE: Record<string, "info" | "ok" | "warn"> = { owner: "ok", admin: "info", member: "warn" };
-const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member", "security-admin": "Admin" };
+const ROLE_TONE: Record<string, "info" | "ok" | "warn"> = { owner: "ok", admin: "info", "security-admin": "info", member: "warn" };
+const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member", "security-admin": "Security admin" };
 const roleLabel = (r: string) => ROLE_LABEL[r] ?? r;
 
 type Tab = "members" | "appliances" | "keys";
@@ -97,39 +97,6 @@ export default function Organization() {
     if (!res || !res.name.trim() || res.name.trim() === summary?.name) return;
     try { await api.put("/org", { name: res.name.trim() }); await load(); await refresh(); }
     catch (e) { await notify({ title: "Couldn't rename", message: (e as ApiError).message, tone: "danger" }); }
-  }
-
-  async function changeRole(m: Member) {
-    const res = await formDialog({
-      title: `Change ${m.display_name}'s role`,
-      confirmLabel: "Save",
-      fields: [{ name: "role", label: "Role", defaultValue: m.role, options: [
-        { label: "Member — own data only", value: "member" },
-        { label: "Admin — manage the organization", value: "admin" },
-        ...(isOwner ? [{ label: "Owner — full control", value: "owner" }] : []),
-      ] }],
-    });
-    if (!res || res.role === m.role) return;
-    try {
-      await api.put(`/org/users/${m.id}`, { role: res.role });
-      await load();
-    } catch (e) { await notify({ title: "Couldn't update role", message: (e as ApiError).message, tone: "danger" }); }
-  }
-
-  async function toggleStatus(m: Member) {
-    const next = m.status === "active" ? "suspended" : "active";
-    try { await api.put(`/org/users/${m.id}`, { status: next }); await load(); }
-    catch (e) { await notify({ title: "Couldn't update", message: (e as ApiError).message, tone: "danger" }); }
-  }
-
-  async function removeMember(m: Member) {
-    const ok = await confirmDialog({
-      title: `Remove ${m.display_name}?`, tone: "danger", confirmLabel: "Remove member",
-      message: "They lose access immediately. Their vault and its keys remain and can be recovered by an admin.",
-    });
-    if (!ok) return;
-    try { await api.del(`/org/users/${m.id}`); await load(); }
-    catch (e) { await notify({ title: "Couldn't remove member", message: (e as ApiError).message, tone: "danger" }); }
   }
 
   async function assign(a: OrgAppliance) {
@@ -239,16 +206,7 @@ export default function Organization() {
               {m.status !== "active" && <Pill tone="warn">suspended</Pill>}
               {!m.email_verified && <Pill tone="warn">unverified</Pill>}
               {!m.has_passkey && <Pill tone="warn">no passkey</Pill>}
-              <button className="btn sm ghost" onClick={() => nav(`/organization/users/${m.id}`)}>Details</button>
-              <button className="btn sm ghost" onClick={() => changeRole(m)}>Role</button>
-              {m.id !== me?.user_id && (
-                <>
-                  <button className="btn sm ghost" onClick={() => toggleStatus(m)}>
-                    {m.status === "active" ? "Suspend" : "Restore"}
-                  </button>
-                  <button className="btn sm ghost" onClick={() => removeMember(m)}><Icon name="logout" size={13} /></button>
-                </>
-              )}
+              <button className="btn sm ghost" onClick={() => nav(`/organization/users/${m.id}`)}>Manage</button>
             </div>
           ))}
           {members.length === 0 && <div className="muted">No members yet.</div>}
