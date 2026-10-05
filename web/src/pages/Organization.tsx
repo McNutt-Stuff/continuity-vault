@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api";
 import { useAuth } from "../auth";
 import { Card, Pill, bytes, Loading } from "../components/ui";
@@ -35,6 +36,7 @@ type Tab = "members" | "appliances" | "keys";
 
 export default function Organization() {
   const { me, stepUp, refresh } = useAuth();
+  const nav = useNavigate();
   const [tab, setTab] = useState<Tab>("members");
   const [summary, setSummary] = useState<OrgSummary | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -85,6 +87,16 @@ export default function Organization() {
     } catch (e) {
       await notify({ title: "Couldn't add member", message: (e as ApiError).message, tone: "danger" });
     }
+  }
+
+  async function renameOrg() {
+    const res = await formDialog({
+      title: "Rename organization", confirmLabel: "Save",
+      fields: [{ name: "name", label: "Organization name", required: true, defaultValue: summary?.name || "" }],
+    });
+    if (!res || !res.name.trim() || res.name.trim() === summary?.name) return;
+    try { await api.put("/org", { name: res.name.trim() }); await load(); await refresh(); }
+    catch (e) { await notify({ title: "Couldn't rename", message: (e as ApiError).message, tone: "danger" }); }
   }
 
   async function changeRole(m: Member) {
@@ -177,7 +189,10 @@ export default function Organization() {
         <div className="spread">
           <div className="stack">
             <div className="muted" style={{ fontSize: 12 }}>Organization</div>
-            <h2 style={{ margin: 0 }}>{summary?.name}</h2>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <h2 style={{ margin: 0 }}>{summary?.name}</h2>
+              <button className="btn ghost sm" title="Rename organization" onClick={renameOrg}><Icon name="edit" size={14} /></button>
+            </div>
             <div className="row" style={{ gap: 8, marginTop: 4 }}>
               <Pill tone="info">{summary?.plan}</Pill>
               <Pill tone="info"><Icon name="key" size={12} /> {summary?.key_ownership_model}</Pill>
@@ -222,7 +237,9 @@ export default function Organization() {
               </div>
               <Pill tone={ROLE_TONE[m.role] ?? "info"}>{roleLabel(m.role)}</Pill>
               {m.status !== "active" && <Pill tone="warn">suspended</Pill>}
+              {!m.email_verified && <Pill tone="warn">unverified</Pill>}
               {!m.has_passkey && <Pill tone="warn">no passkey</Pill>}
+              <button className="btn sm ghost" onClick={() => nav(`/organization/users/${m.id}`)}>Details</button>
               <button className="btn sm ghost" onClick={() => changeRole(m)}>Role</button>
               {m.id !== me?.user_id && (
                 <>

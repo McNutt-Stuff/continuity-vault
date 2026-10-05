@@ -32,6 +32,7 @@ import Audit from "./pages/Audit";
 import ActivityPage from "./pages/Activity";
 import Settings from "./pages/Settings";
 import Organization from "./pages/Organization";
+import OrganizationUser from "./pages/OrganizationUser";
 import Tickets from "./pages/Tickets";
 import SetupWizard from "./pages/SetupWizard";
 
@@ -125,6 +126,7 @@ export default function App() {
             <Route path="/support/tickets" element={<Tickets />} />
             <Route path="/support/tickets/:id" element={<Tickets />} />
             {me.can_admin && <Route path="/organization" element={<Organization />} />}
+            {me.can_admin && <Route path="/organization/users/:id" element={<OrganizationUser />} />}
             {me.is_platform_admin && <Route path="/admin" element={<Navigate to="/admin/overview" replace />} />}
             {me.is_platform_admin && <Route path="/admin/:section" element={<Admin />} />}
             <Route path="*" element={<Navigate to="/" />} />

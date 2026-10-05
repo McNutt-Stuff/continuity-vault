@@ -10,9 +10,11 @@ another member's actual content.
 
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from .. import audit, authcodes, emailer, keybroker, security
@@ -22,7 +24,9 @@ from ..models import (
     Appliance,
     ApplianceAssignment,
     ApplianceStorage,
+    AuditEvent,
     Collection,
+    Passkey,
     SearchDocument,
     Tenant,
     User,
@@ -32,6 +36,7 @@ from ..models import (
 router = APIRouter(prefix="/org", tags=["organization"])
 
 ASSIGNABLE_ROLES = ("member", "admin", "owner")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 # --- helpers ---------------------------------------------------------------
@@ -92,6 +97,29 @@ def _send_invite(db: Session, u: User, org_name: str) -> dict:
     return out
 
 
+def _send_verification(u: User) -> dict:
+    """Email a confirmation code to a member's address (after an admin sets/changes
+    it) and flag the address unverified until they confirm."""
+    try:
+        code = authcodes.issue_code(u.email, "verify")
+    except Exception:  # noqa: BLE001
+        return {"sent": False}
+    settings = get_settings()
+    subject = "Confirm your Arkive email address"
+    body = (f"Please confirm this email address for your Arkive account.\n\n"
+            f"Your confirmation code: {code}\n\nOpen {settings.rp_origin}, sign in, "
+            f"and enter this code when prompted. The code expires shortly.")
+    channel = emailer.send(u.email, subject,
+                           html=emailer.render(subject, emailer.text_to_html(body),
+                                               cta={"label": "Confirm email", "url": settings.rp_origin}),
+                           text=body, category="access")
+    out = {"sent": channel in ("ses", "smtp", "log"), "channel": channel}
+    if settings.environment == "development":
+        out["dev_code"] = code
+    return out
+
+
+
 # --- organization summary --------------------------------------------------
 
 
@@ -116,6 +144,28 @@ def org_summary(principal: security.Principal = Depends(security.require_org_adm
     }
 
 
+class OrgUpdateRequest(BaseModel):
+    name: str
+
+
+@router.put("")
+def rename_org(body: OrgUpdateRequest,
+               principal: security.Principal = Depends(security.require_org_admin),
+               tenant: Tenant = Depends(security.get_tenant),
+               db: Session = Depends(get_db)):
+    """Rename the organization (owner/admin)."""
+    name = (body.name or "").strip()[:120]
+    if not name:
+        raise HTTPException(400, "enter an organization name")
+    old = tenant.name
+    tenant.name = name
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="org.renamed",
+                 tenant_id=tenant.id, category="admin", severity="notice",
+                 detail={"from": old, "to": name})
+    return {"ok": True, "name": name}
+
+
 # --- members ---------------------------------------------------------------
 
 
@@ -127,6 +177,9 @@ class CreateUserRequest(BaseModel):
 
 class UpdateUserRequest(BaseModel):
     display_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
     role: str | None = None
     status: str | None = None
 
@@ -191,8 +244,28 @@ def update_user(uid: str, body: UpdateUserRequest,
     u = db.get(User, uid)
     if not u or u.tenant_id != tenant.id:
         raise HTTPException(404, "member not found")
+    changed_email = None
+    if body.first_name is not None:
+        u.first_name = body.first_name.strip()[:80]
+    if body.last_name is not None:
+        u.last_name = body.last_name.strip()[:80]
     if body.display_name is not None:
         u.display_name = body.display_name.strip() or u.display_name
+    elif body.first_name is not None or body.last_name is not None:
+        full = f"{u.first_name} {u.last_name}".strip()
+        if full:
+            u.display_name = full
+    if body.email is not None:
+        email = body.email.strip().lower()
+        if not _EMAIL_RE.match(email):
+            raise HTTPException(400, "enter a valid email address")
+        if email != (u.email or "").lower():
+            if db.query(User).filter(func.lower(User.email) == email,
+                                     User.id != u.id).first():
+                raise HTTPException(409, "a user with this email already exists")
+            u.email = email
+            u.email_verified = False   # must re-confirm the new address
+            changed_email = email
     if body.role is not None and body.role in ASSIGNABLE_ROLES and body.role != u.role:
         # Only an owner may grant or revoke the owner role, and the last active
         # owner can't be demoted.
@@ -208,10 +281,14 @@ def update_user(uid: str, body: UpdateUserRequest,
     if body.status is not None and body.status in ("active", "suspended"):
         u.status = body.status
     db.commit()
+    verify = _send_verification(u) if changed_email else None
     audit.record(db, actor=principal.user_id, action="org.user_updated",
                  tenant_id=tenant.id, resource=u.id, category="admin", severity="notice",
-                 detail={"email": u.email, "role": u.role, "status": u.status})
-    return {"ok": True, "id": u.id, "role": u.role, "status": u.status}
+                 detail={"email": u.email, "role": u.role, "status": u.status,
+                         "email_changed": bool(changed_email)})
+    return {"ok": True, "id": u.id, "role": u.role, "status": u.status,
+            "email": u.email, "email_verified": bool(u.email_verified),
+            "verification": verify}
 
 
 @router.delete("/users/{uid}")
@@ -240,6 +317,144 @@ def remove_user(uid: str,
     audit.record(db, actor=principal.user_id, action="org.user_removed",
                  tenant_id=tenant.id, category="admin", severity="warning",
                  detail={"email": email})
+    return {"ok": True}
+
+
+# --- member detail / account management ------------------------------------
+def _passkey_view(p: Passkey) -> dict:
+    return {"id": p.id, "label": p.label or "Passkey", "transport": p.transport or "internal",
+            "created_at": p.created_at.isoformat() if p.created_at else None}
+
+
+@router.get("/users/{uid}")
+def user_detail(uid: str,
+                principal: security.Principal = Depends(security.require_org_admin),
+                tenant: Tenant = Depends(security.get_tenant),
+                db: Session = Depends(get_db)):
+    """Full account details for one member: profile, permissions, passkeys (2FA),
+    usage, and recent account activity."""
+    u = db.get(User, uid)
+    if not u or u.tenant_id != tenant.id:
+        raise HTTPException(404, "member not found")
+    vaults = db.query(Vault).filter(Vault.tenant_id == tenant.id,
+                                    Vault.owner_user_id == u.id).all()
+    obj_by_vault = _object_counts_by_vault(db, tenant.id)
+    bytes_by_vault = _bytes_by_vault(db, tenant.id)
+    passkeys = db.query(Passkey).filter(Passkey.user_id == u.id).all()
+    return {
+        "id": u.id, "email": u.email, "display_name": u.display_name,
+        "first_name": u.first_name or "", "last_name": u.last_name or "",
+        "phone": u.phone or "", "role": u.role, "status": u.status,
+        "email_verified": bool(u.email_verified),
+        "is_you": u.id == principal.user_id,
+        "is_platform_admin": bool(u.is_platform_admin),
+        "created_at": u.created_at.isoformat() if u.created_at else None,
+        "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
+        "permissions": {
+            "is_admin": security.is_org_admin(u.role),
+            "is_owner": security.is_owner(u.role),
+            "can_manage_org": security.is_org_admin(u.role),
+        },
+        "passkeys": [_passkey_view(p) for p in
+                     sorted(passkeys, key=lambda p: p.created_at or _dt_min())],
+        "usage": {
+            "vault_count": len(vaults),
+            "object_count": sum(obj_by_vault.get(v.id, 0) for v in vaults),
+            "protected_bytes": sum(bytes_by_vault.get(v.id, 0) for v in vaults),
+            "vaults": [{"id": v.id, "name": v.name,
+                        "object_count": obj_by_vault.get(v.id, 0),
+                        "protected_bytes": bytes_by_vault.get(v.id, 0)} for v in vaults],
+        },
+    }
+
+
+def _dt_min():
+    from datetime import datetime
+    return datetime.min
+
+
+@router.get("/users/{uid}/activity")
+def user_activity(uid: str, limit: int = 50,
+                  principal: security.Principal = Depends(security.require_org_admin),
+                  tenant: Tenant = Depends(security.get_tenant),
+                  db: Session = Depends(get_db)):
+    """Recent audit events by or about this member (sign-ins, admin actions, …)."""
+    u = db.get(User, uid)
+    if not u or u.tenant_id != tenant.id:
+        raise HTTPException(404, "member not found")
+    rows = (db.query(AuditEvent)
+            .filter(AuditEvent.tenant_id == tenant.id,
+                    or_(AuditEvent.actor == u.id, AuditEvent.actor == u.email,
+                        AuditEvent.resource == u.id))
+            .order_by(AuditEvent.created_at.desc())
+            .limit(min(200, max(1, limit))).all())
+    return [{"action": r.action, "resource": r.resource, "category": r.category,
+             "severity": r.severity, "detail": r.detail or {},
+             "created_at": r.created_at.isoformat() if r.created_at else None}
+            for r in rows]
+
+
+@router.post("/users/{uid}/resend-verification")
+def resend_verification(uid: str,
+                        principal: security.Principal = Depends(security.require_org_admin),
+                        tenant: Tenant = Depends(security.get_tenant),
+                        db: Session = Depends(get_db)):
+    """Re-send the email-confirmation code to a member's address."""
+    u = db.get(User, uid)
+    if not u or u.tenant_id != tenant.id:
+        raise HTTPException(404, "member not found")
+    if u.email_verified:
+        return {"ok": True, "already_verified": True}
+    verify = _send_verification(u)
+    audit.record(db, actor=principal.user_id, action="org.user_verification_sent",
+                 tenant_id=tenant.id, resource=u.id, category="admin", severity="info",
+                 detail={"email": u.email})
+    db.commit()
+    return {"ok": True, "verification": verify}
+
+
+@router.post("/users/{uid}/reset-passkeys")
+def reset_passkeys(uid: str,
+                   principal: security.Principal = Depends(security.require_org_admin),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    """Reset a member's sign-in: remove all their passkeys (2FA) and email them a
+    fresh sign-in code so they re-enroll a device. The passkey-only equivalent of a
+    password reset. Owner passkeys can only be reset by an owner."""
+    u = db.get(User, uid)
+    if not u or u.tenant_id != tenant.id:
+        raise HTTPException(404, "member not found")
+    if u.role == "owner" and not security.is_owner(principal.role):
+        raise HTTPException(403, "only an owner can reset an owner's sign-in")
+    n = db.query(Passkey).filter(Passkey.user_id == u.id).delete()
+    db.commit()
+    invite = _send_invite(db, u, tenant.name)
+    audit.record(db, actor=principal.user_id, action="org.user_passkeys_reset",
+                 tenant_id=tenant.id, resource=u.id, category="security",
+                 severity="warning", detail={"email": u.email, "removed": int(n or 0)})
+    db.commit()
+    return {"ok": True, "removed": int(n or 0), "invite": invite}
+
+
+@router.delete("/users/{uid}/passkeys/{pid}")
+def remove_passkey(uid: str, pid: str,
+                   principal: security.Principal = Depends(security.require_org_admin),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    """Remove a single passkey from a member (e.g. a lost device)."""
+    u = db.get(User, uid)
+    if not u or u.tenant_id != tenant.id:
+        raise HTTPException(404, "member not found")
+    if u.role == "owner" and not security.is_owner(principal.role):
+        raise HTTPException(403, "only an owner can manage an owner's passkeys")
+    p = db.get(Passkey, pid)
+    if not p or p.user_id != u.id:
+        raise HTTPException(404, "passkey not found")
+    db.delete(p)
+    db.commit()
+    audit.record(db, actor=principal.user_id, action="org.user_passkey_removed",
+                 tenant_id=tenant.id, resource=u.id, category="security", severity="warning",
+                 detail={"email": u.email, "passkey": p.label})
     return {"ok": True}
 
 
