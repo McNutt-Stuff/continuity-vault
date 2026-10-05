@@ -12,6 +12,7 @@ interface UserDetail {
   id: string; email: string; display_name: string; first_name: string; last_name: string;
   phone: string; role: string; status: string; email_verified: boolean; is_you: boolean;
   is_platform_admin: boolean; created_at: string | null; last_login_at: string | null;
+  allow_impersonation?: boolean;
   permissions: { is_admin: boolean; is_owner: boolean; can_manage_org: boolean };
   passkeys: Passkey[];
   usage: { vault_count: number; object_count: number; protected_bytes: number; vaults: VaultUsage[] };
@@ -25,7 +26,7 @@ const SEV_TONE: Record<string, "ok" | "warn" | "danger" | "info"> = { info: "inf
 export default function OrganizationUser() {
   const { id = "" } = useParams();
   const nav = useNavigate();
-  const { me } = useAuth();
+  const { me, impersonate } = useAuth();
   const isOwner = me?.is_owner || me?.role === "owner";
   const [u, setU] = useState<UserDetail | null>(null);
   const [activity, setActivity] = useState<Activity[]>([]);
@@ -132,6 +133,27 @@ export default function OrganizationUser() {
     catch (e) { await notify({ title: "Couldn't remove", message: (e as ApiError).message, tone: "danger" }); }
   }
 
+  async function toggleImpersonation() {
+    if (!u) return;
+    try {
+      await api.put(`/org/users/${id}`, { allow_impersonation: !u.allow_impersonation });
+      await load();
+      await notify({ message: u.allow_impersonation ? "Impersonation disabled" : "Impersonation enabled", tone: "ok" });
+    } catch (e) { await notify({ title: "Couldn't update", message: (e as ApiError).message, tone: "danger" }); }
+  }
+
+  async function startImpersonation() {
+    if (!u) return;
+    const ok = await confirmDialog({
+      title: `Impersonate ${u.display_name}?`, confirmLabel: "Enter impersonation",
+      message: "You'll see and use Arkive exactly as they do until you exit. This is audited. "
+        + "Their passkey-protected actions (key recovery, destructive operations) still require their own passkey.",
+    });
+    if (!ok) return;
+    try { await impersonate(u.id); nav("/"); }
+    catch (e) { await notify({ title: "Couldn't impersonate", message: (e as ApiError).message, tone: "danger" }); }
+  }
+
   if (!loaded) return <Loading label="Loading member…" />;
   if (!u) return <Card><div className="muted">Member not found.</div></Card>;
 
@@ -160,10 +182,14 @@ export default function OrganizationUser() {
                 <Pill tone={ROLE_TONE[u.role] ?? "info"}>{ROLE_LABEL[u.role] ?? u.role}</Pill>
                 {u.status !== "active" && <Pill tone="warn">suspended</Pill>}
                 {u.passkeys.length === 0 && <Pill tone="warn">no passkey</Pill>}
+                {u.allow_impersonation && <Pill tone="info">impersonation allowed</Pill>}
               </div>
             </div>
           </div>
           <div className="row" style={{ gap: 6 }}>
+            {isOwner && !u.is_you && !u.permissions.is_owner && !u.is_platform_admin && u.allow_impersonation && (
+              <button className="btn sm primary" onClick={startImpersonation}><Icon name="user" size={13} /> Impersonate</button>
+            )}
             <button className="btn sm ghost" onClick={editProfile}><Icon name="edit" size={13} /> Edit</button>
             {canEditOther && !u.is_you && (
               <button className="btn sm ghost" onClick={toggleStatus}>{u.status === "active" ? "Suspend" : "Restore"}</button>
@@ -208,6 +234,25 @@ export default function OrganizationUser() {
           <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
             Members only ever access their own data. Admins manage the organization but never see another member's content.
           </div>
+          {!u.permissions.is_owner && !u.is_platform_admin && (
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border-soft)" }}>
+              <div className="spread" style={{ alignItems: "center", gap: 10 }}>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>Owner impersonation</div>
+                  <div className="faint" style={{ fontSize: 12 }}>
+                    {u.allow_impersonation
+                      ? "An owner may sign in as this member to see their experience (audited)."
+                      : "Off — an owner can't sign in as this member."}
+                  </div>
+                </div>
+                {canEditOther && (
+                  <button className={`btn sm ${u.allow_impersonation ? "ghost" : "primary"}`} onClick={toggleImpersonation}>
+                    {u.allow_impersonation ? "Disable" : "Enable"}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
         </Card>
       </div>
 

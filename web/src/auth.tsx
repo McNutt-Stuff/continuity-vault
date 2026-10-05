@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { startRegistration, startAuthentication } from "@simplewebauthn/browser";
-import { api, setToken, getToken, setOnUnauthorized, setOnMaintenance, ApiError, Me, LoginResponse } from "./api";
+import { api, setToken, getToken, setOnUnauthorized, setOnMaintenance, beginImpersonation, endImpersonation, clearImpersonation, isImpersonating, ApiError, Me, LoginResponse } from "./api";
 import { setUserTimezone } from "./components/ui";
 
 interface StartResult {
@@ -28,6 +28,8 @@ interface AuthState {
   redeemRecoveryKey: (email: string, code: string) => Promise<void>;
   enrollPasskey: (label?: string) => Promise<void>;
   stepUp: () => Promise<void>;
+  impersonate: (userId: string) => Promise<void>;
+  stopImpersonating: () => Promise<void>;
   logout: () => void;
   refresh: () => Promise<void>;
 }
@@ -166,9 +168,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   function logout() {
+    clearImpersonation();
     setToken(null);
     setMe(null);
     setSessionExpired(false);
+  }
+
+  // Owner impersonation: swap to the member's session token (keeping the owner's
+  // own token stashed) so the whole app renders their experience; refresh() pulls
+  // the impersonated /me (which carries the impersonation banner info).
+  async function impersonate(userId: string) {
+    const res = await api.post<LoginResponse>(`/org/users/${userId}/impersonate`, {});
+    beginImpersonation(res.token);
+    await refresh();
+  }
+
+  // Exit impersonation: audit the stop on the server, then restore the owner token.
+  async function stopImpersonating() {
+    if (!isImpersonating()) return;
+    try { await api.post("/auth/impersonation/stop", {}); } catch { /* best-effort */ }
+    endImpersonation();
+    await refresh();
   }
 
   return (
@@ -185,6 +205,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         redeemRecoveryKey,
         enrollPasskey,
         stepUp,
+        impersonate,
+        stopImpersonating,
         logout,
         refresh,
       }}

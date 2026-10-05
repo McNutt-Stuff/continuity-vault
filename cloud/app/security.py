@@ -106,16 +106,20 @@ def verify_passkey_assertion(db: Session, user: User, credential_id: str,
 # -- Sessions ---------------------------------------------------------------
 
 
-def create_session_token(user: User, passkey_verified: bool) -> str:
-    return _serializer.dumps(
-        {
-            "uid": user.id,
-            "tid": user.tenant_id,
-            "role": user.role,
-            "admin": user.is_platform_admin,
-            "pk": passkey_verified,
-        }
-    )
+def create_session_token(user: User, passkey_verified: bool,
+                         impersonator_id: Optional[str] = None) -> str:
+    data = {
+        "uid": user.id,
+        "tid": user.tenant_id,
+        "role": user.role,
+        "admin": user.is_platform_admin,
+        "pk": passkey_verified,
+    }
+    # An impersonation session carries the real actor (the owner) so every request
+    # it makes is attributable to them, never silently to the member.
+    if impersonator_id:
+        data["imp"] = impersonator_id
+    return _serializer.dumps(data)
 
 
 @dataclass
@@ -125,6 +129,7 @@ class Principal:
     role: str
     is_platform_admin: bool
     passkey_verified: bool
+    impersonator_id: Optional[str] = None
 
 
 def _decode(token: str) -> Principal:
@@ -138,6 +143,7 @@ def _decode(token: str) -> Principal:
         role=data["role"],
         is_platform_admin=data["admin"],
         passkey_verified=data.get("pk", False),
+        impersonator_id=data.get("imp"),
     )
 
 

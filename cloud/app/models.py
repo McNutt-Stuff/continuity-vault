@@ -119,6 +119,7 @@ class User(Base):
     timezone = Column(String, default="")  # IANA tz the user picked (blank = browser default)
     role = Column(String, default="member")  # owner | admin | member | support-admin
     is_platform_admin = Column(Boolean, default=False)  # backend admin console
+    allow_impersonation = Column(Boolean, default=False)  # owner may sign in AS this user
     email_verified = Column(Boolean, default=False)
     status = Column(String, default="active")
     feature_flags = Column(JSON, default=dict)  # per-user capability flags (admin-set)

@@ -93,8 +93,11 @@ export default function App() {
   if (!me) return (<><LoggedOut /><DialogHost /></>);
 
   return (
-    <div className={"app-shell" + (me.features?.debug_overlay_enabled === true ? " with-debug" : "")}>
+    <div className={"app-shell"
+      + (me.features?.debug_overlay_enabled === true ? " with-debug" : "")
+      + (me.impersonation?.active ? " impersonating" : "")}>
       <DialogHost />
+      {me.impersonation?.active && <ImpersonationBar />}
       {me.needs_setup && <SetupWizard onDone={() => { /* refresh() hides it via me */ }} />}
       <Sidebar />
       <div className="main">
@@ -139,6 +142,30 @@ export default function App() {
           catch (e: any) { notify({ message: e?.message || "Could not disable the debug overlay", tone: "danger" }); }
         }} />
       )}
+    </div>
+  );
+}
+
+function ImpersonationBar() {
+  const { me, stopImpersonating } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const imp = me?.impersonation;
+  if (!imp?.active) return null;
+  async function exit() {
+    setBusy(true);
+    try { await stopImpersonating(); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div className="imp-bar">
+      <span className="imp-bar-dot" aria-hidden />
+      <span>
+        Impersonation mode — you're signed in as <b>{imp.target_name || me?.display_name}</b>
+        {imp.by_name ? <span className="imp-bar-by"> (as {imp.by_name})</span> : null}
+      </span>
+      <button className="imp-bar-exit" onClick={exit} disabled={busy}>
+        {busy ? "Exiting…" : "Exit impersonation"}
+      </button>
     </div>
   );
 }

@@ -76,6 +76,38 @@ h3 { font-size: 15px; }
 
 /* Layout */
 .app-shell { display: grid; grid-template-columns: 244px 1fr; height: 100vh; }
+/* Impersonation: an orange bar spans the full width across the TOP (its own grid
+   row above the sidebar + main) so the owner always knows they're acting as a
+   member. Combines with the debug dock (which adds a bottom row). */
+.app-shell.impersonating { grid-template-rows: auto 1fr; }
+.app-shell.impersonating > .imp-bar { grid-row: 1; grid-column: 1 / -1; }
+.app-shell.impersonating > .sidebar { grid-row: 2; grid-column: 1; }
+.app-shell.impersonating > .main { grid-row: 2; grid-column: 2; }
+.app-shell.impersonating.with-debug { grid-template-rows: auto 1fr auto; }
+.app-shell.impersonating.with-debug > .sidebar,
+.app-shell.impersonating.with-debug > .main { grid-row: 2; }
+.app-shell.impersonating.with-debug > .debug-dock { grid-row: 3; grid-column: 1 / -1; }
+.imp-bar {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  background: linear-gradient(90deg, #e8710a, #f08c2e);
+  color: #fff; font-size: 13px; font-weight: 600; padding: 8px 16px;
+  box-shadow: 0 1px 6px rgba(0,0,0,.25); z-index: 6;
+}
+.imp-bar b { font-weight: 800; }
+.imp-bar-by { font-weight: 500; opacity: .9; }
+.imp-bar-dot { width: 9px; height: 9px; border-radius: 50%; background: #fff;
+  box-shadow: 0 0 0 0 rgba(255,255,255,.7); animation: imp-pulse 1.8s infinite; }
+@keyframes imp-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255,255,255,.6); }
+  70% { box-shadow: 0 0 0 7px rgba(255,255,255,0); }
+  100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
+}
+.imp-bar-exit {
+  background: rgba(0,0,0,.22); color: #fff; border: 1px solid rgba(255,255,255,.55);
+  border-radius: 7px; padding: 4px 12px; font-size: 12.5px; font-weight: 700; cursor: pointer;
+}
+.imp-bar-exit:hover { background: rgba(0,0,0,.34); }
+.imp-bar-exit:disabled { opacity: .6; cursor: default; }
 /* When the live debug overlay is on, add a bottom row for it so it PUSHES the
    page up (occupies real layout space) instead of overlaying/hiding content. The
    dock spans the FULL width (under the sidebar too). */

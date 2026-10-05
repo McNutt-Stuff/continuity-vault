@@ -539,6 +539,19 @@ def me(principal: security.Principal = Depends(security.get_principal),
     user = db.get(User, principal.user_id)
     tenant = db.get(Tenant, user.tenant_id)
     ttype = (tenant.tenant_type if tenant else "dedicated") or "dedicated"
+    # When an owner is impersonating this member, surface who's really driving so
+    # the portal can show the impersonation bar and offer an exit.
+    impersonation = None
+    if principal.impersonator_id:
+        by = db.get(User, principal.impersonator_id)
+        impersonation = {
+            "active": True,
+            "by_user_id": principal.impersonator_id,
+            "by_name": (by.display_name if by else "an administrator"),
+            "by_email": (by.email if by else None),
+            "target_name": user.display_name,
+            "target_email": user.email,
+        }
     return {
         "user_id": user.id,
         "email": user.email,
@@ -559,9 +572,26 @@ def me(principal: security.Principal = Depends(security.get_principal),
         "needs_setup": user.setup_completed_at is None,
         "features": _features.effective(user, tenant, db),
         "recovery_key": (_recovery_key.status(db, user, tenant) if tenant else None),
+        "impersonation": impersonation,
         "passkeys": [{"id": p.id, "label": p.label, "transport": p.transport}
                      for p in user.passkeys],
     }
+
+
+@router.post("/impersonation/stop")
+def impersonation_stop(principal: security.Principal = Depends(security.get_principal),
+                       db: Session = Depends(get_db)):
+    """End an impersonation session (audited). The client then switches back to the
+    owner's own stored session token. A no-op if the caller isn't impersonating."""
+    if not principal.impersonator_id:
+        return {"ok": True, "impersonating": False}
+    u = db.get(User, principal.user_id)
+    audit.record(db, actor=principal.impersonator_id, action="org.impersonation_ended",
+                 tenant_id=(u.tenant_id if u else None), resource=principal.user_id,
+                 category="admin", severity="notice",
+                 detail={"target_email": (u.email if u else None),
+                         "target": (u.display_name if u else None)})
+    return {"ok": True, "impersonating": False}
 
 
 class ProfileUpdate(BaseModel):

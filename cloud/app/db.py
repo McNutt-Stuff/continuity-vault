@@ -414,6 +414,9 @@ def _apply_additive_migrations() -> None:
         # product only has owner | admin | member). Fold any remaining rows into
         # admin so the role no longer exists anywhere. Tiny (users table) — safe inline.
         "UPDATE users SET role = 'admin' WHERE role = 'security-admin'",
+        # Owner impersonation: a member must opt in (admin-enabled) before an owner
+        # can sign in AS them to see their experience.
+        "ALTER TABLE users ADD COLUMN allow_impersonation BOOLEAN DEFAULT false",
     ]
     for statement in statements:
         try:

@@ -14,6 +14,37 @@ export function getToken() {
   return token;
 }
 
+// Impersonation: when an owner impersonates a member we swap the active token for
+// the member's session token and stash the owner's own token so we can restore it
+// on exit. Survives reloads via localStorage.
+let ownerToken: string | null = localStorage.getItem("cv_owner_token");
+
+export function beginImpersonation(impToken: string) {
+  if (token && token !== impToken) {
+    ownerToken = token;
+    localStorage.setItem("cv_owner_token", token);
+  }
+  setToken(impToken);
+}
+
+export function endImpersonation(): boolean {
+  if (!ownerToken) return false;
+  const owner = ownerToken;
+  ownerToken = null;
+  localStorage.removeItem("cv_owner_token");
+  setToken(owner);
+  return true;
+}
+
+export function clearImpersonation() {
+  ownerToken = null;
+  localStorage.removeItem("cv_owner_token");
+}
+
+export function isImpersonating() {
+  return !!ownerToken;
+}
+
 // Global session-expiry hook: the AuthProvider registers a callback so any 401
 // on an authenticated request signs the user out and shows the timeout notice.
 let onUnauthorized: (() => void) | null = null;
@@ -243,6 +274,14 @@ export interface Me {
     covered_vaults?: number;
     needs_prompt?: boolean;
     stale?: boolean;
+  } | null;
+  impersonation?: {
+    active: boolean;
+    by_user_id: string;
+    by_name: string;
+    by_email?: string | null;
+    target_name?: string;
+    target_email?: string;
   } | null;
   passkeys: { id: string; label: string; transport: string }[];
 }

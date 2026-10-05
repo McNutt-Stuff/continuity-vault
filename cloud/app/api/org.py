@@ -70,6 +70,7 @@ def _user_view(db: Session, u: User, vaults: list[Vault],
         "status": u.status,
         "email_verified": bool(u.email_verified),
         "has_passkey": len(u.passkeys) > 0,
+        "allow_impersonation": bool(getattr(u, "allow_impersonation", False)),
         "vault_count": len(my_vaults),
         "object_count": sum(obj_by_vault.get(v.id, 0) for v in my_vaults),
         "protected_bytes": sum(bytes_by_vault.get(v.id, 0) for v in my_vaults),
@@ -182,6 +183,7 @@ class UpdateUserRequest(BaseModel):
     email: str | None = None
     role: str | None = None
     status: str | None = None
+    allow_impersonation: bool | None = None
 
 
 @router.get("/users")
@@ -280,6 +282,8 @@ def update_user(uid: str, body: UpdateUserRequest,
         u.role = body.role
     if body.status is not None and body.status in ("active", "suspended"):
         u.status = body.status
+    if body.allow_impersonation is not None:
+        u.allow_impersonation = bool(body.allow_impersonation)
     db.commit()
     verify = _send_verification(u) if changed_email else None
     audit.record(db, actor=principal.user_id, action="org.user_updated",
@@ -348,6 +352,7 @@ def user_detail(uid: str,
         "email_verified": bool(u.email_verified),
         "is_you": u.id == principal.user_id,
         "is_platform_admin": bool(u.is_platform_admin),
+        "allow_impersonation": bool(getattr(u, "allow_impersonation", False)),
         "created_at": u.created_at.isoformat() if u.created_at else None,
         "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
         "permissions": {
@@ -456,6 +461,45 @@ def remove_passkey(uid: str, pid: str,
                  tenant_id=tenant.id, resource=u.id, category="security", severity="warning",
                  detail={"email": u.email, "passkey": p.label})
     return {"ok": True}
+
+
+# --- impersonation ---------------------------------------------------------
+
+
+@router.post("/users/{uid}/impersonate")
+def impersonate_user(uid: str,
+                     principal: security.Principal = Depends(security.require_org_admin),
+                     tenant: Tenant = Depends(security.get_tenant),
+                     db: Session = Depends(get_db)):
+    """Start an OWNER-only impersonation session: mint a session token that assumes
+    the member's identity (so the owner sees exactly their experience). The member
+    must have opted in (``allow_impersonation``, admin-enabled). The token records
+    the real actor so every action stays attributable, and is NOT passkey-verified
+    (so the member's own passkey is still required for recovery/destructive ops)."""
+    if not security.is_owner(principal.role):
+        raise HTTPException(403, "only an owner can impersonate a member")
+    if principal.impersonator_id:
+        raise HTTPException(409, "already impersonating — exit the current session first")
+    u = db.get(User, uid)
+    if not u or u.tenant_id != tenant.id:
+        raise HTTPException(404, "member not found")
+    if u.id == principal.user_id:
+        raise HTTPException(400, "you can't impersonate yourself")
+    if u.is_platform_admin or u.role == "owner":
+        raise HTTPException(403, "owners and platform administrators can't be impersonated")
+    if u.status != "active":
+        raise HTTPException(409, "this member's account isn't active")
+    if not getattr(u, "allow_impersonation", False):
+        raise HTTPException(403, "this member hasn't allowed impersonation — enable it "
+                                 "on their account first")
+    token = security.create_session_token(u, passkey_verified=False,
+                                           impersonator_id=principal.user_id)
+    audit.record(db, actor=principal.user_id, action="org.impersonation_started",
+                 tenant_id=tenant.id, resource=u.id, category="admin", severity="warning",
+                 detail={"target_email": u.email, "target": u.display_name})
+    return {"token": token, "user_id": u.id, "display_name": u.display_name,
+            "tenant_id": u.tenant_id, "role": u.role, "is_platform_admin": False,
+            "passkey_verified": False}
 
 
 # --- appliances (assignment) ----------------------------------------------
