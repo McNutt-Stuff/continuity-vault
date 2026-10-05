@@ -78,6 +78,9 @@ _reg("endpoint.reboot_required", "PATCH", severity="low", label="Reboot required
 _reg("endpoint.patch_age", "PATCH", kind="measurement", severity="medium", label="Patch age")
 _reg("endpoint.application.installed", "APPLICATION", label="Installed application")
 
+# --- AI usage (Phase 2 — shadow-AI detection over Phase-1 app/network signals) --
+_reg("ai.tool.detected", "AI", severity="medium", label="AI tool detected")
+
 # --- Arkive-native protection / recovery (spec §16) ----------------------------
 _reg("arkive.agent.running", "ARKIVE", severity="medium", freshness=1 * _HOUR, label="Agent running")
 _reg("arkive.protection.enabled", "ARKIVE", severity="high", label="Protection enabled")

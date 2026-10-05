@@ -987,14 +987,27 @@ what Arkive already has.
 - **Findings** — deduplicated issues driven by signals: protection gaps, offline
   devices, network assets with no matching managed endpoint, out‑of‑date
   infrastructure firmware, segmentation gaps (IDS/IPS or guest isolation off),
-  and active accounts (especially privileged ones) without MFA. Findings link
-  straight to the workflow that fixes them and auto‑resolve when the condition
-  clears.
+  active accounts (especially privileged ones) without MFA, and **endpoint
+  posture gaps** (disk encryption off, anti‑malware/firewall off, a pending
+  reboot, or an overdue OS patch level). Findings link straight to the workflow
+  that fixes them and auto‑resolve when the condition clears.
 - **Coverage** — how much of each dimension (Identity, Endpoint, Network,
   Applications, Protection, Recovery) is actually being monitored, and *why* it
   isn't higher.
 - **Provider health** — whether each provider is reporting, so a silent
   integration lowers coverage instead of looking clean.
+
+## AI usage detection
+
+When the **AI usage detection** feature is enabled, Arkive correlates the
+endpoint application inventory and network app observations it already collects
+against a catalog of known AI tools and services (assistants, coding copilots,
+image/audio generators, meeting transcribers and local LLM runtimes). Each match
+becomes an *AI tool detected* signal, and any **unsanctioned ("shadow AI")** use
+raises a finding — ranked by the tool's data‑risk — so you can review whether
+sensitive or regulated data may be flowing to a third‑party AI service and
+sanction or block it. This reuses existing signals: **no new agent and no new
+data collection.**
 
 ## Privacy
 

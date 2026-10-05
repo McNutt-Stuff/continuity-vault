@@ -34,7 +34,7 @@ const FRESH_TONE: Record<string, "ok" | "warn" | "danger" | "info"> = {
 };
 const PROVIDER_ICON: Record<string, string> = {
   arkive: "shield", endpoint: "user", m365: "mail", ubiquiti: "activity",
-  node: "server", appliance: "server",
+  node: "server", appliance: "server", ai: "sparkle",
 };
 
 function Bar({ pct, tone }: { pct: number; tone: string }) {

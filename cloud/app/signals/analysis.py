@@ -14,6 +14,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from . import engine
+from .ai import detection as ai_detection
 from .provider_base import all_providers
 
 logger = logging.getLogger("cv.signals.analysis")
@@ -42,6 +43,7 @@ def run_tenant(db: Session, tenant) -> dict:
         _network_posture_findings(db, tenant)
         _identity_posture_findings(db, tenant)
         _endpoint_posture_findings(db, tenant)
+        _ai_usage(db, tenant)
         engine.refresh_freshness(db, tid)
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -233,6 +235,55 @@ def _endpoint_posture_findings(db: Session, tenant) -> None:
         active_fps.add(f.fingerprint)
 
     engine.resolve_findings_not_in(db, tid, "endpoint_posture_gap", active_fps)
+
+
+def _ai_usage(db: Session, tenant) -> None:
+    """Phase-2 AI usage detection: emit ai.tool.detected signals from existing
+    app/network signals, then raise a shadow-AI finding per unsanctioned tool.
+    Gated by the signal_ai_enabled flag (no-op when off)."""
+    from .. import features
+    if not features.resolve(None, tenant, "signal_ai_enabled", db):
+        return
+    ai_detection.detect(db, tenant)
+    _ai_usage_findings(db, tenant)
+
+
+def _ai_usage_findings(db: Session, tenant) -> None:
+    """Turn ai.tool.detected signals into findings. Sanctioned tools are informational
+    (no finding); unsanctioned ("shadow AI") use raises an ai_shadow_usage finding at
+    the tool's data-risk severity, deduped per tool+subject and auto-resolved when the
+    tool is no longer seen."""
+    from ..models import Signal
+    tid = tenant.id
+    active_fps: set[str] = set()
+    for s in (db.query(Signal)
+              .filter(Signal.tenant_id == tid, Signal.status == "active",
+                      Signal.signal_type == "ai.tool.detected").all()):
+        v = s.value or {}
+        if v.get("sanctioned"):
+            continue
+        name = v.get("name") or s.normalized_value
+        vendor = v.get("vendor") or ""
+        on_network = v.get("surface") == "network"
+        where = "on the network" if on_network else (
+            f"on {v.get('hostname')}" if v.get("hostname") else "on a managed device")
+        sev = s.severity if s.severity in ("low", "medium", "high", "critical") else "medium"
+        f = engine.upsert_finding(
+            db, tid, "ai_shadow_usage",
+            title=f"Unsanctioned AI tool in use: {name}",
+            description=(f"{name}{f' ({vendor})' if vendor else ''} was detected {where}. "
+                        "Review whether sensitive or regulated data may be sent to this AI "
+                        "service, and sanction or block it as appropriate."),
+            severity=sev, category="AI",
+            subject_type=s.subject_type, subject_id=s.subject_id,
+            signal_ids=[s.id], fingerprint_extra=f"{v.get('surface', '')}:{s.normalized_value}",
+            owner_user_id=(s.actor_id or ""),
+            remediation=({"label": "Review network apps", "route": "/integrations"}
+                         if on_network else {"label": "View devices", "route": "/devices"}),
+            meta={"vendor": vendor, "category": v.get("category", ""),
+                  "data_risk": v.get("data_risk", ""), "surface": v.get("surface", "")})
+        active_fps.add(f.fingerprint)
+    engine.resolve_findings_not_in(db, tid, "ai_shadow_usage", active_fps)
 
 
 def _protection_gap_findings(db: Session, tenant) -> None:
