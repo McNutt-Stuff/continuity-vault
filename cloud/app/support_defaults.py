@@ -1034,6 +1034,53 @@ in the sidebar to see the overview, explore signals, work findings, and check
 provider health.
 """,
         help_routes=["/signals"]),
+    _doc(
+        "network-analytics", "Network Analytics", "Your Data", _YOUR_DATA, 82, "grid",
+        "One unified view of every app, service and device across your network and endpoints — with where the data came from, what's unprotected, and what's risky.",
+        """
+# Network Analytics
+
+**Network Analytics** brings every network/traffic signal Arkive collects into
+one de‑duplicated picture: the apps and services in use, the devices using them,
+**where the data came from**, what you aren't protecting yet, what's AI, and what
+an admin has flagged as risky.
+
+## What it combines
+
+- **UniFi/Ubiquiti network traffic** — the apps and clients your controller sees
+  via Deep Packet Inspection.
+- **Endpoint web usage** — the web apps and AI services each Arkive agent reports
+  (opt‑in per device under *Devices → settings → Web & AI usage detection*).
+
+The same app seen from several sources is **merged into one row**, and devices
+are **de‑duplicated** across sources (by hardware address, else hostname), so you
+see one honest list — with small source icons showing exactly where each entry
+was observed.
+
+## Tabs
+
+- **Overview** — headline counts (apps, devices, traffic, AI services, unprotected,
+  risk‑flagged), a *where the data comes from* breakdown, and your top apps.
+- **Apps** — every app/service with search, filtering (category, source, protection,
+  AI, flagged) and sorting. Open one to see which devices use it, the per‑source
+  breakdown, and (admins) to flag it.
+- **Devices** — every device, de‑duplicated, with the apps it used.
+- **Not protected** — cross‑source **"apps you aren't protecting"**: services in
+  your traffic that Arkive can back up but you haven't connected yet, plus popular
+  services we don't have a connector for.
+
+## Flagging risky apps
+
+An organization administrator can flag any app or protocol as **Concerning**,
+**Risky** or **Blocked** (with a reason) from its drawer. Flags are audited and
+appear throughout the view and in the platform admin analytics.
+
+## Enabling it
+
+Network Analytics is **on by default**. Open **Network Analytics** in the sidebar.
+An administrator can turn it off per account from the feature settings.
+""",
+        help_routes=["/network-analytics"]),
 ]
 
 

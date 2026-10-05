@@ -26,6 +26,7 @@ from .api import (
     index_status,
     insights,
     integrations,
+    network_analytics,
     notifications,
     org,
     node_sync,
@@ -209,6 +210,7 @@ app.include_router(integrations.router, prefix=API)
 app.include_router(integrations.advanced_router, prefix=API)
 app.include_router(integrations.agent_router, prefix=API)
 app.include_router(integrations.admin_router, prefix=API)
+app.include_router(network_analytics.router, prefix=API)
 # Microsoft 365 managed integration — self-contained package router. Registered
 # defensively: a packaged integration must never be able to crash the core
 # control plane (PKG-001). A failure here is logged and skipped, not fatal.

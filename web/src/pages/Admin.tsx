@@ -8262,7 +8262,23 @@ function CustomerAnalytics() {
         <AdminStat icon="user" label="Clients seen" value={String(t.clients || 0)} tint="#4f7cff" />
         <AdminStat icon="grid" label="Customers reporting" value={String(t.tenants || 0)} tint="#2dbe60" />
         <AdminStat icon="cloud" label="Traffic observed" value={bytes(t.bytes || 0)} tint="#f5a623" />
+        <AdminStat icon="sparkle" label="AI services" value={String(t.ai_apps || 0)} tint="#9b6cff" />
+        <AdminStat icon="alert" label="Risk-flagged" value={String(t.risky_apps || 0)} tint="#f55f5f" />
       </div>
+
+      {(data?.by_source || []).length > 0 && (
+        <Card style={{ marginBottom: 16 }}>
+          <div className="row" style={{ gap: 8, marginBottom: 10 }}><Icon name="grid" size={15} /><b style={{ fontSize: 13 }}>Where the data comes from</b></div>
+          <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+            {(data.by_source || []).map((s: any) => (
+              <div key={s.source} className="row" style={{ gap: 8, alignItems: "center", padding: "8px 12px", borderRadius: 9, background: "var(--inset)" }}>
+                <b style={{ textTransform: "capitalize", fontSize: 12.5 }}>{s.source}</b>
+                <span className="faint" style={{ fontSize: 12 }}>{s.apps} apps · {bytes(s.bytes)}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <Card style={{ marginBottom: 16 }}>
         <div className="spread" style={{ marginBottom: 10 }}>

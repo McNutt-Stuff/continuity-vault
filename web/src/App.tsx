@@ -19,6 +19,7 @@ import Rules from "./pages/Rules";
 import Compliance from "./pages/Compliance";
 import ComplianceFramework from "./pages/ComplianceFramework";
 import Signals from "./pages/Signals";
+import NetworkAnalytics from "./pages/NetworkAnalytics";
 import Contacts from "./pages/Contacts";
 import Appliances from "./pages/Appliances";
 import CloudStorage from "./pages/CloudStorage";
@@ -46,6 +47,7 @@ const NAV: { to: string; label: string; icon: IconName; group: string }[] = [
   { to: "/rules", label: "Rules", icon: "shield", group: "Protection" },
   { to: "/compliance", label: "Compliance", icon: "shield", group: "Protection" },
   { to: "/signals", label: "Signals", icon: "activity", group: "Protection" },
+  { to: "/network-analytics", label: "Network Analytics", icon: "grid", group: "Protection" },
   { to: "/snapshots", label: "Recovery Points", icon: "clock", group: "Protection" },
   { to: "/activity", label: "Activity", icon: "activity", group: "Protection" },
   { to: "/cloud-storage", label: "Cloud Storage", icon: "cloud", group: "Storage" },
@@ -108,6 +110,7 @@ export default function App() {
             {me.features?.compliance_enabled === true && me.can_admin && <Route path="/compliance" element={<Compliance />} />}
             {me.features?.compliance_enabled === true && me.can_admin && <Route path="/compliance/:framework" element={<ComplianceFramework />} />}
             {me.features?.signal_platform_enabled === true && me.can_admin && <Route path="/signals" element={<Signals />} />}
+            {me.features?.network_analytics_enabled !== false && <Route path="/network-analytics" element={<NetworkAnalytics />} />}
             {me.features?.unified_contacts_enabled === true && <Route path="/contacts" element={<Contacts />} />}
             <Route path="/activity" element={<ActivityPage />} />
             <Route path="/snapshots" element={<Snapshots />} />
@@ -157,6 +160,7 @@ function Sidebar() {
     // Compliance is a Business admin capability, OFF by default.
     if (n.to === "/compliance" && !(me?.features?.compliance_enabled === true && me?.can_admin)) return false;
     if (n.to === "/signals" && !(me?.features?.signal_platform_enabled === true && me?.can_admin)) return false;
+    if (n.to === "/network-analytics" && me?.features?.network_analytics_enabled === false) return false;
     if (n.to === "/contacts" && me?.features?.unified_contacts_enabled !== true) return false;
     const req = NAV_REQUIRES[n.to];
     if (!req || !options || options.length === 0) return true;  // unconfigured → show all

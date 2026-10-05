@@ -77,6 +77,11 @@ def _should_proxy(method: str, path: str) -> bool:
     # Signals explorer/findings/provider-health are served from there.
     if path == "/api/signals" or path.startswith("/api/signals/"):
         return True
+    # Network Analytics reads + risk-flag writes operate on the node's live network
+    # tables (UniFi DPI + endpoint web usage are ingested there; NetworkApp is only
+    # pushed UP, never pulled down), so the whole surface runs on the owning node.
+    if path == "/api/network-analytics" or path.startswith("/api/network-analytics/"):
+        return True
     # Unified Contacts (My Circles) are built + curated on the node (federated), so
     # the portal reads them LIVE from the node — same as search. Serving a GET from
     # the CP's ~30s-lagged replica showed stale state (e.g. a just-rebuilt circle or

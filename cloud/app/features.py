@@ -70,6 +70,10 @@ FLAGS: dict[str, bool] = {
     # default, but only runs where the Signal Platform is enabled — clear this flag
     # to opt a tenant out while keeping the rest of the Signal Platform on.
     "signal_ai_enabled": True,
+    # Network Analytics: a unified, de-duplicated view of apps/services + devices
+    # across every network/traffic source (UniFi DPI + endpoint web usage), with
+    # unprotected-app and AI detection and risk flagging. ON by default.
+    "network_analytics_enabled": True,
     # Unified Contacts ("My Circles"): a deduced, cross-source personal contact
     # graph built from contact/message/email/social data already collected — a
     # Rolodex that links a person to all their identifiers, interaction history,
@@ -94,6 +98,7 @@ LABELS = {
     "debug_overlay_enabled": "Live debug overlay (behind-the-scenes diagnostics)",
     "signal_platform_enabled": "Signal Platform (asset awareness & protection-gap detection)",
     "signal_ai_enabled": "AI usage detection (shadow-AI tools & findings — on with Signals)",
+    "network_analytics_enabled": "Network Analytics (unified apps/devices across sources)",
     "unified_contacts_enabled": "Unified Contacts (My Circles — personal relationship graph)",
 }
 

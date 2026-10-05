@@ -1704,6 +1704,23 @@ def admin_analytics(scope: str = "platform", tenant_id: str | None = None,
     for c in clients:
         device_types[c.device_type or "device"] = device_types.get(c.device_type or "device", 0) + 1
 
+    # Source breakdown (UniFi DPI vs endpoint web usage vs …) + AI/risky counts,
+    # so the admin console reflects the unified Network Analytics signal too.
+    itype = {i.id: (i.integration_type or "network") for i in db.query(IntegrationInstance).all()}
+    itype["endpoint-web"] = "endpoint"
+    by_source: dict[str, dict] = {}
+    ai_apps = risky_apps = 0
+    for a in apps:
+        meta = a.meta if isinstance(a.meta, dict) else {}
+        if meta.get("ai"):
+            ai_apps += 1
+        if meta.get("risk"):
+            risky_apps += 1
+        src = itype.get(a.integration_id, "network")
+        e = by_source.setdefault(src, {"source": src, "apps": 0, "bytes": 0})
+        e["apps"] += 1
+        e["bytes"] += int(a.total_bytes or 0)
+
     return {
         "scope": scope,
         "totals": {
@@ -1711,7 +1728,10 @@ def admin_analytics(scope: str = "platform", tenant_id: str | None = None,
             "clients": len(clients),
             "tenants": len({a.tenant_id for a in apps}),
             "bytes": sum(int(a.total_bytes or 0) for a in apps),
+            "ai_apps": ai_apps,
+            "risky_apps": risky_apps,
         },
+        "by_source": sorted(by_source.values(), key=lambda s: -s["bytes"]),
         "top_apps": top_apps,
         "recommended_sources": recommended,
         "device_types": [{"type": k, "count": v}
