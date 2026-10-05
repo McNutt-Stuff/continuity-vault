@@ -500,8 +500,9 @@ def collect(config: dict, credentials: dict, log) -> dict:
         # --- Infrastructure devices + segmentation/security posture -----------
         devices, dev_status = _fetch_devices(c, base, site, headers, log)
         network_config = _fetch_network_config(c, base, site, headers, log)
-        log.info("ubiquiti: collected %d client(s), %d app(s), %d device(s), %s bytes",
-                 len(clients), len(apps), len(devices), total_bytes)
+        dns = _fetch_dns(c, base, site, headers, log)
+        log.info("ubiquiti: collected %d client(s), %d app(s), %d device(s), %d dns, %s bytes",
+                 len(clients), len(apps), len(devices), len(dns), total_bytes)
         stats = {"clients": len(clients), "apps": len(apps), "bytes_seen": total_bytes,
                  "devices": len(devices),
                  "diag": {"site": site, "auth_mode": auth_mode,
@@ -523,6 +524,7 @@ def collect(config: dict, credentials: dict, log) -> dict:
             "apps": apps,
             "usage": usage,
             "devices": devices,
+            "dns": dns,
             "network_config": network_config,
             "stats": stats,
         }
@@ -605,3 +607,75 @@ def _fetch_network_config(c, base, site, headers, log) -> dict:
     except Exception as exc:  # noqa: BLE001
         log.debug("ubiquiti: wlanconf failed: %s", exc)
     return cfg
+
+
+def _fetch_dns(c, base, site, headers, log) -> list:
+    """Best-effort DNS/hostname telemetry: who looked up which destination.
+
+    Powers domain-based detection (e.g. browser AI usage) the DPI engine can't
+    classify. UniFi firmwares differ wildly in whether/how they expose DNS, so we
+    try the endpoints that do when present and NORMALIZE to a common record:
+    ``{client_key, client_ip, domain, count, last_seen}``. Missing/absent data is
+    fine — we return [] and log it, never crash. The cloud only keeps the records
+    it recognizes (e.g. AI services), not a full browsing history.
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(client_key: str, client_ip: str, domain: str, count=1, last_seen: str = "") -> None:
+        dom = (domain or "").strip().lower().rstrip(".")
+        ck = (client_key or client_ip or "").strip().lower()
+        if not dom or "." not in dom:
+            return
+        k = (ck, dom)
+        if k in seen:
+            return
+        seen.add(k)
+        out.append({"client_key": ck, "client_ip": client_ip or "", "domain": dom,
+                    "count": int(count or 1), "last_seen": last_seen or _now_iso()})
+
+    # Candidate endpoints across UniFi OS versions. Each is tried defensively; the
+    # first that returns usable rows wins. Shapes vary, so parse generically.
+    candidates = (
+        ("GET", f"/proxy/network/v2/api/site/{site}/dns-queries", None),
+        ("GET", f"/proxy/network/v2/api/site/{site}/insights/dns", None),
+        ("POST", f"/proxy/network/api/s/{site}/stat/dns", {}),
+        ("GET", f"/proxy/network/api/s/{site}/stat/dns", None),
+    )
+    for method, path, payload in candidates:
+        try:
+            if method == "POST":
+                r = c.post(f"{base}{path}", headers=headers, json=payload or {})
+            else:
+                r = c.get(f"{base}{path}", headers=headers)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("ubiquiti: dns probe %s failed: %s", path, exc)
+            continue
+        if r.status_code >= 300:
+            log.debug("ubiquiti: dns probe %s → HTTP %s", path, r.status_code)
+            continue
+        try:
+            body = r.json()
+        except Exception:  # noqa: BLE001
+            continue
+        rows = body.get("data", body) if isinstance(body, dict) else body
+        if not isinstance(rows, list):
+            continue
+        for rec in rows:
+            if not isinstance(rec, dict):
+                continue
+            domain = (rec.get("domain") or rec.get("hostname") or rec.get("name")
+                      or rec.get("query") or rec.get("fqdn") or "")
+            if not domain:
+                continue
+            _add(rec.get("mac") or rec.get("client_mac") or rec.get("client_key") or "",
+                 rec.get("ip") or rec.get("client_ip") or rec.get("src_ip") or "",
+                 domain, rec.get("count") or rec.get("hits") or 1,
+                 rec.get("last_seen") or rec.get("timestamp") or "")
+        if out:
+            log.info("ubiquiti: dns telemetry via %s → %d record(s)", path, len(out))
+            return out
+    log.info("ubiquiti: no DNS telemetry exposed by this controller "
+             "(domain-based detection inactive)")
+    return out
+

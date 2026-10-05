@@ -107,6 +107,7 @@ class IntegrationWorker:
             "apps": report.get("apps", []),
             "usage": report.get("usage", []),
             "devices": report.get("devices", []),
+            "dns": report.get("dns", []),
             "network_config": report.get("network_config", {}),
             "stats": report.get("stats", {}),
         }

@@ -1002,11 +1002,16 @@ what Arkive already has.
 Whenever the Signal Platform is enabled, Arkive automatically correlates the
 endpoint application inventory and network app observations it already collects
 against a catalog of known AI tools and services (assistants, coding copilots,
-image/audio generators, meeting transcribers and local LLM runtimes). Each match
-becomes an *AI tool detected* signal, and any **unsanctioned ("shadow AI")** use
-raises a finding — ranked by the tool's data‑risk — so you can review whether
-sensitive or regulated data may be flowing to a third‑party AI service and
-sanction or block it. This reuses existing signals: **no new agent and no new
+image/audio generators, meeting transcribers and local LLM runtimes). It detects
+AI two ways: **installed desktop apps** (from the endpoint agent's app inventory)
+and **browser‑based AI services** seen on the network — when your UniFi
+controller exposes DNS/hostname telemetry, Arkive matches the destinations
+devices visit (e.g. `chat.openai.com`, `claude.ai`, `gemini.google.com`) against
+an AI‑domain catalog and records them in your apps/services and devices views.
+Each match becomes an *AI tool detected* signal, and any **unsanctioned ("shadow
+AI")** use raises a finding — ranked by the tool's data‑risk — so you can review
+whether sensitive or regulated data may be flowing to a third‑party AI service
+and sanction or block it. This reuses existing signals: **no new agent and no new
 data collection.** It's on by default with the Signal Platform; an administrator
 can opt a tenant out while keeping the rest of the platform on.
 

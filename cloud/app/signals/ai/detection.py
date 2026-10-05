@@ -74,12 +74,18 @@ def detect(db: Session, tenant) -> dict:
     except Exception:  # noqa: BLE001
         logger.exception("ai endpoint-inventory scan failed for tenant %s", tid)
 
-    # 2) Network DPI apps → web AI services seen on the network.
+    # 2) Network DPI apps / DNS-derived AI services seen on the network. A row the
+    #    ingest already tagged as AI (meta.ai, app_key "ai:<id>") is authoritative;
+    #    otherwise fall back to a catalog name match on the DPI app name.
     try:
         for a in (db.query(NetworkApp)
                   .filter(NetworkApp.tenant_id == tid).all()):
             n_obj += 1
-            entry = catalog.match(a.name)
+            meta = a.meta if isinstance(a.meta, dict) else {}
+            tool_id = meta.get("ai_tool_id") if meta.get("ai") else None
+            entry = next((e for e in catalog.CATALOG if e["id"] == tool_id), None) if tool_id else None
+            if entry is None:
+                entry = catalog.match(a.name)
             if not entry:
                 continue
             _emit(entry, subject_type="org", subject_id=tid, surface="network",

@@ -1145,6 +1145,7 @@ class IntegrationReport(BaseModel):
     apps: list[dict] = []
     usage: list[dict] = []
     devices: list[dict] = []      # network infrastructure (gateway/switch/ap)
+    dns: list[dict] = []          # DNS/hostname observations: {client_key, domain, count, last_seen}
     network_config: dict = {}     # {vlans, guest_isolation, ids_enabled, ips_enabled}
     stats: dict = {}
     credentials_update: dict | None = None
@@ -1336,6 +1337,12 @@ def _ingest_report(db: Session, tid: str, inst: IntegrationInstance,
         u.total_bytes = _safe_int(ud.get("total_bytes", 0)) or (u.tx_bytes + u.rx_bytes)
         u.last_seen = _parse_dt(ud.get("last_seen")) or now
 
+    # DNS-derived AI services — match observed hostnames against the AI catalog and
+    # synthesize an app/service row (+ per-client usage edge) so browser-based AI
+    # shows up in the apps/services tables and feeds the AI signal detector. A
+    # non-AI domain is ignored here (full DNS isn't stored).
+    _ingest_ai_dns(db, tid, inst, body, now, existing_a, existing_u)
+
     # Network infrastructure (gateway/switch/AP) + segmentation/security config.
     _ingest_network_devices(db, tid, inst, body, now)
 
@@ -1347,6 +1354,70 @@ def _ingest_report(db: Session, tid: str, inst: IntegrationInstance,
         bytes_seen=_safe_int(st.get("bytes_seen", 0)), error=err))
     if status == "ok":
         _roll_daily_samples(db, tid, inst, body, now)
+
+
+def _ingest_ai_dns(db, tid, inst, body, now, existing_a: dict, existing_u: dict) -> None:
+    """Fold DNS/hostname observations into AI app/service rows.
+
+    Each record is ``{client_key, domain, count, last_seen}``. Hostnames that match
+    the AI catalog become a NetworkApp keyed ``ai:<tool>`` (category ``AI``, tagged
+    ``meta.ai``) plus a per-client NetworkUsage edge — so they appear in the
+    apps/services + clients views and the AI signal detector picks them up. Bytes
+    are unknown from DNS, so usage carries the hit count in meta, not volume."""
+    records = getattr(body, "dns", None) or []
+    if not records:
+        return
+    from ..signals.ai import catalog as ai_catalog
+    agg: dict[str, dict] = {}   # tool_id -> {entry, clients, count, last_seen, domains}
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        host = rec.get("domain") or rec.get("host") or ""
+        entry = ai_catalog.match_domain(host)
+        if not entry:
+            continue
+        g = agg.setdefault(entry["id"], {
+            "entry": entry, "clients": set(), "count": 0,
+            "last_seen": now, "domains": set()})
+        g["count"] += _safe_int(rec.get("count", 1)) or 1
+        if host:
+            g["domains"].add(host.lower())
+        ck = rec.get("client_key") or rec.get("mac") or rec.get("client_ip")
+        if ck:
+            g["clients"].add(str(ck).lower())
+        ls = _parse_dt(rec.get("last_seen"))
+        if ls:
+            g["last_seen"] = ls
+
+    for tool_id, g in agg.items():
+        entry = g["entry"]
+        app_key = f"ai:{tool_id}"
+        a = existing_a.get(app_key)
+        if a is None:
+            a = NetworkApp(tenant_id=tid, integration_id=inst.id, app_key=app_key,
+                           first_seen=now)
+            db.add(a)
+            existing_a[app_key] = a
+        a.name = entry["name"]
+        a.category = "AI"
+        a.source_type = ""   # external AI service — no backup connector
+        a.client_count = max(len(g["clients"]), int(a.client_count or 0))
+        a.last_seen = g["last_seen"]
+        a.meta = {**(a.meta or {}), "ai": True, "ai_tool_id": tool_id,
+                  "vendor": entry.get("vendor", ""), "ai_category": entry.get("category", ""),
+                  "data_risk": entry.get("data_risk", "medium"),
+                  "sanctioned": bool(entry.get("sanctioned")),
+                  "domains": sorted(g["domains"])[:20]}
+        for ck in g["clients"]:
+            key = (ck, app_key)
+            u = existing_u.get(key)
+            if u is None:
+                u = NetworkUsage(tenant_id=tid, integration_id=inst.id,
+                                 client_key=ck, app_key=app_key)
+                db.add(u)
+                existing_u[key] = u
+            u.last_seen = g["last_seen"]
+            u.sessions = int(g["count"])
 
 
 def _ingest_network_devices(db, tid, inst, body, now) -> None:
