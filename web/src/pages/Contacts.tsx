@@ -438,17 +438,11 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
 
   return (
     <Card style={{ position: "sticky", top: 12, maxHeight: "calc(100vh - 24px)", overflowY: "auto" }}>
-      <div className="spread" style={{ alignItems: "flex-start", marginBottom: 12 }}>
-        <div className="row" style={{ gap: 12, alignItems: "center" }}>
+      <div className="spread" style={{ alignItems: "flex-start", marginBottom: 12, gap: 8 }}>
+        <div className="row" style={{ gap: 12, alignItems: "center", minWidth: 0 }}>
           <Avatar name={c.display_name} size={52} />
-          <div>
-            <div className="row" style={{ gap: 8, alignItems: "center" }}>
-              <h2 style={{ margin: 0, fontSize: 20 }}>{c.display_name}</h2>
-              <button className="btn ghost sm" title="Rename" onClick={rename}><Icon name="edit" size={13} /></button>
-              <button className="btn ghost sm" title="Star"
-                      onClick={() => patch({ starred: !c.starred })}
-                      style={{ color: c.starred ? "var(--warn)" : "var(--text-faint)" }}>★</button>
-            </div>
+          <div style={{ minWidth: 0 }}>
+            <h2 style={{ margin: 0, fontSize: 20, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.display_name}</h2>
             {c.custom_name && c.derived_name && c.derived_name !== c.display_name && (
               <div className="faint" style={{ fontSize: 11 }}>
                 Custom name ·{" "}
@@ -466,19 +460,26 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
             </div>
           </div>
         </div>
-        <div className="row" style={{ gap: 6 }}>
+        <div className="row" style={{ gap: 4, alignItems: "center", flexShrink: 0 }}>
+          <button className="icon-btn" title={c.starred ? "Unstar" : "Star"}
+                  onClick={() => patch({ starred: !c.starred })}
+                  style={{ color: c.starred ? "var(--warn)" : "var(--text-faint)" }}>
+            <Icon name="star" size={15} />
+          </button>
+          <button className="icon-btn" title="Rename" onClick={rename}><Icon name="edit" size={15} /></button>
           {onExpand && <button className="btn ghost sm" title="Open full profile" onClick={onExpand}>Full profile</button>}
-          <button className="btn ghost sm" onClick={onClose}><Icon name="x" size={14} /></button>
+          <button className="icon-btn" title="Close" onClick={onClose}><Icon name="x" size={15} /></button>
         </div>
       </div>
 
       {/* Relationship + circle + labels */}
-      <div className="row" style={{ gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-        <select className="input sm" value={c.relationship || ""} onChange={(e) => patch({ relationship: e.target.value })}>
-          <option value="">— relationship —</option>
+      <div className="row" style={{ gap: 8, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
+        <select className="pill-select" value={c.relationship || ""} onChange={(e) => patch({ relationship: e.target.value })}
+                title="Relationship">
+          <option value="">Relationship…</option>
           {relationships.map((r) => <option key={r} value={r}>{r}</option>)}
         </select>
-        <select className="input sm" value={c.pinned_circle || ""} onChange={(e) => patch({ pinned_circle: e.target.value })}
+        <select className="pill-select" value={c.pinned_circle || ""} onChange={(e) => patch({ pinned_circle: e.target.value })}
                 title="Pin to a circle (overrides the computed tier)">
           <option value="">Auto circle</option>
           {CIRCLES.map((x) => <option key={x.key} value={x.key}>Pin: {x.label}</option>)}
@@ -645,11 +646,11 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
           <div className="row" style={{ gap: 16, alignItems: "center" }}>
             <Avatar name={c.display_name} size={72} starred={c.starred} />
             <div>
-              <div className="row" style={{ gap: 10, alignItems: "center" }}>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
                 <h1 style={{ margin: 0, fontSize: 26 }}>{c.display_name}</h1>
-                <button className="btn ghost sm" title="Rename" onClick={rename}><Icon name="edit" size={14} /></button>
-                <button className="btn ghost sm" title="Star" onClick={() => patch({ starred: !c.starred })}
-                        style={{ color: c.starred ? "var(--warn)" : "var(--text-faint)", fontSize: 18 }}>★</button>
+                <button className="icon-btn" title={c.starred ? "Unstar" : "Star"} onClick={() => patch({ starred: !c.starred })}
+                        style={{ color: c.starred ? "var(--warn)" : "var(--text-faint)" }}><Icon name="star" size={16} /></button>
+                <button className="icon-btn" title="Rename" onClick={rename}><Icon name="edit" size={16} /></button>
               </div>
               {c.custom_name && c.derived_name && c.derived_name !== c.display_name && (
                 <div className="faint" style={{ fontSize: 11.5 }}>
@@ -676,12 +677,12 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
         </div>
 
         {/* Controls */}
-        <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 14 }}>
-          <select className="input sm" value={c.relationship || ""} onChange={(e) => patch({ relationship: e.target.value })}>
-            <option value="">— relationship —</option>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 14, alignItems: "center" }}>
+          <select className="pill-select" value={c.relationship || ""} onChange={(e) => patch({ relationship: e.target.value })} title="Relationship">
+            <option value="">Relationship…</option>
             {relationships.map((r) => <option key={r} value={r}>{r}</option>)}
           </select>
-          <select className="input sm" value={c.pinned_circle || ""} onChange={(e) => patch({ pinned_circle: e.target.value })}
+          <select className="pill-select" value={c.pinned_circle || ""} onChange={(e) => patch({ pinned_circle: e.target.value })}
                   title="Pin to a circle (overrides the computed tier)">
             <option value="">Auto circle</option>
             {CIRCLES.map((x) => <option key={x.key} value={x.key}>Pin: {x.label}</option>)}

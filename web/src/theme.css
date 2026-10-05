@@ -705,6 +705,35 @@ h3 { font-size: 15px; }
 .drill-row > td { background: var(--inset); border-top: none; }
 .input.sm { padding: 5px 8px; font-size: 12.5px; }
 
+/* Square icon-only button — consistent height so action rows line up */
+.icon-btn { display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0; flex-shrink: 0;
+  border: 1px solid var(--border); border-radius: 8px; background: transparent;
+  color: var(--text-dim); cursor: pointer; line-height: 0;
+  transition: background .12s, border-color .12s, color .12s; }
+.icon-btn:hover { background: var(--hover); border-color: var(--text-faint); color: var(--text); }
+
+/* Polished pill selectors (contact relationship / circle) */
+.pill-select { appearance: none; -webkit-appearance: none; height: 30px;
+  padding: 0 30px 0 13px; border: 1px solid var(--border); border-radius: 999px;
+  background-color: var(--bg-elev); color: var(--text); font-family: var(--font);
+  font-size: 12.5px; font-weight: 550; cursor: pointer; outline: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a93a6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat: no-repeat; background-position: right 11px center;
+  transition: border-color .12s, box-shadow .12s, background-color .12s; }
+.pill-select:hover { border-color: var(--text-faint); }
+.pill-select:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(79,124,255,.15); }
+.pill-select option { color: var(--text); background: var(--bg-elev); font-weight: 400; }
+
+/* Important dates list on a contact */
+.imp-dates { display: flex; flex-direction: column; gap: 6px; }
+.imp-date { display: flex; align-items: center; gap: 9px; padding: 7px 10px;
+  border: 1px solid var(--border-soft); border-radius: 10px; background: var(--panel); }
+.imp-date .imp-ico { color: var(--brand); display: inline-flex; flex-shrink: 0; }
+.imp-date .imp-when { font-weight: 650; font-size: 13px; }
+.imp-date .imp-what { color: var(--text-dim); font-size: 12px; }
+
+
 /* Support ticket thread messages */
 .ticket-msg { border: 1px solid var(--border-soft); border-radius: 12px; padding: 12px 14px; background: var(--panel); }
 .ticket-msg.staff { border-color: rgba(79,124,255,.35); background: rgba(79,124,255,.07); }

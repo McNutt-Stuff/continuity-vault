@@ -37,6 +37,8 @@ type IconName =
   | "credit-card"
   | "puzzle"
   | "plus"
+  | "star"
+  | "gift"
   | "x";
 
 const paths: Record<IconName, ReactNode> = {
@@ -217,6 +219,14 @@ const paths: Record<IconName, ReactNode> = {
   ),
   puzzle: <path d="M10 3.5a2 2 0 014 0V5h2.5a1 1 0 011 1V8.5a2 2 0 010 4V17a1 1 0 01-1 1H12v-1.5a2 2 0 00-4 0V18H5a1 1 0 01-1-1v-4.5a2 2 0 000-4V6a1 1 0 011-1h4V3.5z" />,
   plus: <path d="M12 5v14M5 12h14" />,
+  star: <path d="M12 3l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.2l5.9-.9L12 3z" />,
+  gift: (
+    <>
+      <rect x="3.5" y="8" width="17" height="4" rx="1" />
+      <path d="M5 12v8h14v-8M12 8v12" />
+      <path d="M12 8S10.5 3.5 8 4.5 9.5 8 12 8zM12 8s1.5-4.5 4-3.5S14.5 8 12 8z" />
+    </>
+  ),
   x: <path d="M6 6l12 12M18 6L6 18" />,
 };
 
