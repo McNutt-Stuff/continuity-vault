@@ -41,6 +41,7 @@ def run_tenant(db: Session, tenant) -> dict:
         _provider_health_findings(db, tenant)
         _network_posture_findings(db, tenant)
         _identity_posture_findings(db, tenant)
+        _endpoint_posture_findings(db, tenant)
         engine.refresh_freshness(db, tid)
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -165,6 +166,73 @@ def _identity_posture_findings(db: Session, tenant) -> None:
             remediation={"label": "Require MFA in Entra ID", "route": "/signals"})
         mfa_fps.add(f.fingerprint)
     engine.resolve_findings_not_in(db, tid, "identity_mfa_gap", mfa_fps)
+
+
+def _endpoint_posture_findings(db: Session, tenant) -> None:
+    """Turn endpoint device-posture signals (from the desktop agent) into findings:
+    disk encryption off, anti-malware/firewall off, a pending reboot, or an overdue
+    OS patch level. Dedups per endpoint+check and auto-resolves when the posture
+    clears. Only fires on signals the agent actually reported (present-only), so it
+    never asserts a gap for a device that didn't send that posture key."""
+    from ..models import Signal
+    tid = tenant.id
+    active_fps: set[str] = set()
+
+    # (signal_type, bad normalized_value, severity, title, description).
+    checks = (
+        ("endpoint.disk_encryption.enabled", "false", "high", "Disk encryption off",
+         "This device's disk is not encrypted — its data is exposed if the device is lost or stolen."),
+        ("endpoint.antimalware.running", "false", "high", "Anti-malware not running",
+         "No anti-malware protection is active on this device."),
+        ("endpoint.firewall.enabled", "false", "medium", "Firewall disabled",
+         "The device firewall is turned off."),
+        ("endpoint.secure_boot.enabled", "false", "medium", "Secure boot disabled",
+         "Secure boot is off, weakening boot-time integrity on this device."),
+        ("endpoint.screen_lock.enabled", "false", "low", "Screen lock disabled",
+         "This device does not lock automatically when idle."),
+        ("endpoint.auto_update.enabled", "false", "low", "Automatic updates off",
+         "Automatic OS updates are disabled on this device — security patches may lag."),
+        ("endpoint.reboot_required", "true", "low", "Reboot required",
+         "A pending reboot is needed to finish applying updates on this device."),
+    )
+    for stype, bad_val, sev, title, desc in checks:
+        for s in (db.query(Signal)
+                  .filter(Signal.tenant_id == tid, Signal.status == "active",
+                          Signal.signal_type == stype,
+                          Signal.normalized_value == bad_val).all()):
+            host = (s.value or {}).get("hostname") or s.subject_id
+            f = engine.upsert_finding(
+                db, tid, "endpoint_posture_gap",
+                title=f"{title}: {host}", description=desc, severity=sev,
+                category=s.category, subject_type="endpoint", subject_id=s.subject_id,
+                signal_ids=[s.id], fingerprint_extra=stype,
+                owner_user_id=(s.actor_id or ""),
+                remediation={"label": "View devices", "route": "/devices"})
+            active_fps.add(f.fingerprint)
+
+    # Patch age — overdue when >60d (high) or >30d (medium).
+    for s in (db.query(Signal)
+              .filter(Signal.tenant_id == tid, Signal.status == "active",
+                      Signal.signal_type == "endpoint.patch_age").all()):
+        try:
+            age = int(s.normalized_value or 0)
+        except (TypeError, ValueError):
+            continue
+        if age <= 30:
+            continue
+        host = (s.value or {}).get("hostname") or s.subject_id
+        f = engine.upsert_finding(
+            db, tid, "endpoint_posture_gap",
+            title=f"Operating system patches overdue: {host}",
+            description=f"This device last applied OS updates {age} days ago.",
+            severity="high" if age > 60 else "medium", category="PATCH",
+            subject_type="endpoint", subject_id=s.subject_id,
+            signal_ids=[s.id], fingerprint_extra="endpoint.patch_age",
+            owner_user_id=(s.actor_id or ""),
+            remediation={"label": "View devices", "route": "/devices"})
+        active_fps.add(f.fingerprint)
+
+    engine.resolve_findings_not_in(db, tid, "endpoint_posture_gap", active_fps)
 
 
 def _protection_gap_findings(db: Session, tenant) -> None:
