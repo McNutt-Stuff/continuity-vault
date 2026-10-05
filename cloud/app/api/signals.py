@@ -143,24 +143,6 @@ def overview(principal: security.Principal = Depends(security.get_principal),
             "providers": _provider_health(db, tid), "coverage": _coverage(db, tid)}
 
 
-@router.get("/{signal_id}")
-def get_signal(signal_id: str,
-               principal: security.Principal = Depends(security.get_principal),
-               tenant: Tenant = Depends(security.get_tenant),
-               db: Session = Depends(get_db)):
-    _guard(principal, tenant, db)
-    s = db.get(Signal, signal_id)
-    if not s or s.tenant_id != tenant.id:
-        raise HTTPException(404, "signal not found")
-    view = _signal_view(s)
-    view["meta"] = s.meta or {}
-    view["related_findings"] = [
-        _finding_view(f) for f in db.query(Finding)
-        .filter(Finding.tenant_id == tenant.id,
-                Finding.subject_id == s.subject_id).limit(20).all()]
-    return view
-
-
 @router.get("/providers/health")
 def providers_health(principal: security.Principal = Depends(security.get_principal),
                      tenant: Tenant = Depends(security.get_tenant),
@@ -218,6 +200,26 @@ def set_finding_status(finding_id: str, body: dict,
                          "reason": (body or {}).get("reason", "")[:300]})
     db.commit()
     return _finding_view(f)
+
+
+# NOTE: the dynamic /{signal_id} route is registered LAST so static paths like
+# /findings and /overview are matched first (FastAPI matches in definition order).
+@router.get("/{signal_id}")
+def get_signal(signal_id: str,
+               principal: security.Principal = Depends(security.get_principal),
+               tenant: Tenant = Depends(security.get_tenant),
+               db: Session = Depends(get_db)):
+    _guard(principal, tenant, db)
+    s = db.get(Signal, signal_id)
+    if not s or s.tenant_id != tenant.id:
+        raise HTTPException(404, "signal not found")
+    view = _signal_view(s)
+    view["meta"] = s.meta or {}
+    view["related_findings"] = [
+        _finding_view(f) for f in db.query(Finding)
+        .filter(Finding.tenant_id == tenant.id,
+                Finding.subject_id == s.subject_id).limit(20).all()]
+    return view
 
 
 # ------------------------------------------------------------------ helpers ----
