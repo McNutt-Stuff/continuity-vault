@@ -109,8 +109,7 @@ function OverviewTab({ ov, onGoto }: { ov: Overview; onGoto: (t: Tab) => void })
   const t = ov.totals;
   return (
     <>
-      <div style={{ display: "grid", gap: 12, alignItems: "stretch",
-        gridTemplateColumns: "repeat(auto-fit, minmax(185px, 1fr))" }}>
+      <div className="stat-grid">
         <Stat label="Apps &amp; services" value={t.apps.toLocaleString()} hint="across all sources" />
         <Stat label="Devices" value={t.devices.toLocaleString()} hint="de-duplicated" />
         <Stat label="Traffic observed" value={bytes(t.bytes)} hint="network traffic" />

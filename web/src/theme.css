@@ -139,6 +139,17 @@ h3 { font-size: 15px; }
 .grid > .card + .card { margin-top: 0; }
 @media (max-width: 900px) { .grid-2,.grid-3,.grid-4 { grid-template-columns: 1fr; } }
 
+/* Uniform tile rows — ALWAYS use these for a row of Stat/Card tiles so every tile
+   is EQUAL height + width, wraps responsively, and the global `.card + .card`
+   margin never leaks in. Never put Stat/Card tiles in a bare `.row` (flex sizes
+   them to content → uneven) or an ad-hoc inline grid (forgets the margin reset).
+   .stat-grid = compact metric tiles; .card-grid = larger content cards. */
+.stat-grid { display: grid; gap: 12px; align-items: stretch;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); }
+.card-grid { display: grid; gap: 16px; align-items: stretch;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.stat-grid > .card, .card-grid > .card { height: 100%; margin-top: 0; }
+
 .stat { display: flex; flex-direction: column; gap: 6px; }
 .stat .value { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
 .stat .label { color: var(--text-dim); font-size: 12.5px; }

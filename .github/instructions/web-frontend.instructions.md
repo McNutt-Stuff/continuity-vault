@@ -22,17 +22,24 @@ description: "React frontends — the customer portal (web) and public marketing
 - **Health badges:** pass `dot` to `Pill` only for genuine status badges (online/health/version), not
   informational chips.
 - **Cards in a grid/row are ALWAYS uniform.** When rendering a set of peer cards (stat tiles, workload/source
-  cards, framework cards, etc.), every card MUST be the same width AND height. Rules: (1) lay them out with a
-  CSS grid `gridTemplateColumns: repeat(auto-fill, minmax(<min>px, 1fr))` + `alignItems: stretch` — NEVER
-  `flex: 1 1 <n>` (flex-grow makes a less-full row's cards wider). (2) Make each card a column flexbox and pin
-  the action row to the bottom (`marginTop:auto`) so cards with more/less content still align. (3) VARIABLE
-  text must be size-bounded so one long value can't grow a card: single-line labels use
-  `whiteSpace:nowrap; overflow:hidden; textOverflow:ellipsis` (put `minWidth:0` on the flex parent);
-  multi-line blurbs use a fixed line clamp (`display:-webkit-box; WebkitLineClamp:N; WebkitBoxOrient:vertical;
-  overflow:hidden`). (4) Give the card a `minHeight` that fits its richest state so optional blocks (a score,
-  a second meta line) don't make some cards taller. A long tenant id / GUID belongs in a mono, ellipsized
-  subtitle (with a `title` tooltip), never as a big stat value. Reference: the Compliance framework cards and
-  the M365 "Protected footprint" cards.
+  cards, framework cards, etc.), every card MUST be the same width AND height. **Use the shared layout classes,
+  never an ad-hoc inline grid or a bare `.row`:** `className="stat-grid"` for compact metric/`Stat` tiles and
+  `className="card-grid"` for larger content cards (both in `theme.css`: `auto-fit minmax` + `align-items:
+  stretch` + a `> .card { height:100%; margin-top:0 }` reset). This reset is REQUIRED — the global
+  `.card + .card { margin-top:16px }` rule otherwise LEAKS into any custom grid/flex container (the plain
+  `.grid` class and these two are the only places it's reset), offsetting the 2nd+ card so a row looks "too
+  tall"/misaligned. A bare `.row` (flex) additionally sizes each card to its content → uneven widths. If you
+  truly need a one-off grid, copy the same three rules. Rules for the card internals: (1) NEVER `flex: 1 1 <n>`
+  (flex-grow makes a less-full row's cards wider). (2) Make each card a column flexbox and pin the action row to
+  the bottom (`marginTop:auto`) so cards with more/less content still align. (3) VARIABLE text must be
+  size-bounded so one long value can't grow a card: single-line labels use `whiteSpace:nowrap;
+  overflow:hidden; textOverflow:ellipsis` (put `minWidth:0` on the flex parent); multi-line blurbs use a fixed
+  line clamp (`display:-webkit-box; WebkitLineClamp:N; WebkitBoxOrient:vertical; overflow:hidden`). (4) Give the
+  card a `minHeight` that fits its richest state so optional blocks (a score, a second meta line) don't make
+  some cards taller. A long tenant id / GUID belongs in a mono, ellipsized subtitle (with a `title` tooltip),
+  never as a big stat value. Keep tile count fittable on one line (`.stat-grid` min is 155px → ~6 tiles fit the
+  1180px content width); consolidate before adding a tile that forces a lone wrap. Reference: the Network
+  Analytics overview tiles, the Compliance framework cards and the M365 "Protected footprint" cards.
 - **Tabbed detail pages share ONE tab style.** New tabbed detail views (integration/appliance/node details)
   use the Appliance Details pattern — `btn sm` pills (`primary` active / `ghost` inactive) with a leading
   `Icon` — not ad-hoc `chip` bars. Header cards follow the same pattern too: icon tile + title + a mono

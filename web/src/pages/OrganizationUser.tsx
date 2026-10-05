@@ -173,7 +173,7 @@ export default function OrganizationUser() {
       </Card>
 
       {/* Usage */}
-      <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+      <div className="stat-grid">
         <Stat label="Vaults" value={u.usage.vault_count} />
         <Stat label="Objects" value={u.usage.object_count.toLocaleString()} />
         <Stat label="Protected" value={bytes(u.usage.protected_bytes)} />
@@ -182,7 +182,7 @@ export default function OrganizationUser() {
       </div>
 
       {/* Account details + controls */}
-      <div style={{ display: "grid", gap: 16, gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
+      <div className="card-grid">
         <Card>
           <h3 style={{ marginTop: 0 }}>Account details</h3>
           <Row k="Display name" v={u.display_name} />
