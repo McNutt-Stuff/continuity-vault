@@ -46,9 +46,12 @@ interface Exchange {
   source_type: string; doc_type: string; object_id: string; title: string;
   preview: string; direction: string; modified_at?: string | null; size_bytes: number;
 }
+interface SuggIdent { kind: string; value: string; source_type?: string; link_method?: string }
 interface Suggestion {
   id: string; kind: string; reason: string; confidence: number;
   contact?: Contact | null; merge_contact?: Contact | null;
+  match?: { basis: string; name: string; confidence: number };
+  contact_identifiers?: SuggIdent[]; merge_identifiers?: SuggIdent[];
   identity?: { kind: string; value: string; raw: string; source: string } | null;
 }
 interface GraphNode {
@@ -1244,7 +1247,10 @@ function Suggestions({ onChanged }: { onChanged: (removedId?: string) => void })
                     ? <>Merge <b>{s.merge_contact?.display_name}</b> into <b>{s.contact?.display_name}</b></>
                     : <>Link {s.identity?.raw} to <b>{s.contact?.display_name}</b></>}
                 </div>
-                <div className="faint" style={{ fontSize: 11.5 }}>{s.reason}</div>
+                <div className="faint" style={{ fontSize: 11.5 }}>
+                  Matched by name{s.match ? ` · ${Math.round((s.match.confidence || s.confidence) * 100)}% confidence` : ""}
+                  {" · these records share no identifier"}
+                </div>
               </div>
             </div>
             <div className="row" style={{ gap: 6 }}>
@@ -1252,8 +1258,33 @@ function Suggestions({ onChanged }: { onChanged: (removedId?: string) => void })
               <button className="btn ghost sm" onClick={() => act(s.id, "dismiss")}>Dismiss</button>
             </div>
           </div>
+          <div className="sugg-sides">
+            <SuggSide label={s.contact?.display_name || "This record"} idents={s.contact_identifiers} />
+            {s.kind === "merge"
+              ? <SuggSide label={s.merge_contact?.display_name || "Other"} idents={s.merge_identifiers} />
+              : <SuggSide label="Identifier to link" idents={s.identity ? [{ kind: s.identity.kind, value: s.identity.raw || s.identity.value, source_type: s.identity.source }] : []} />}
+          </div>
         </Card>
       ))}
+    </div>
+  );
+}
+
+const IDENT_GLYPH: Record<string, string> = { email: "✉", phone: "☎", handle: "@" };
+function SuggSide({ label, idents }: { label: string; idents?: SuggIdent[] }) {
+  return (
+    <div className="sugg-side">
+      <div className="faint sugg-side-label">{label}</div>
+      {(idents && idents.length) ? (
+        <div className="sugg-idents">
+          {idents.map((i, n) => (
+            <span key={n} className="idf-chip" title={`${i.kind}${i.source_type ? ` · from ${i.source_type}` : ""}`}>
+              {i.source_type ? <SourceIcon type={i.source_type} size={12} /> : <span>{IDENT_GLYPH[i.kind] || "•"}</span>}
+              <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 180 }}>{i.value}</span>
+            </span>
+          ))}
+        </div>
+      ) : <div className="faint" style={{ fontSize: 11.5 }}>No identifiers</div>}
     </div>
   );
 }

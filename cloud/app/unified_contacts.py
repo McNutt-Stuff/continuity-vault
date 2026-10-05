@@ -1084,15 +1084,12 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
                 oid = other["oid"]
                 is_link = other["loose"] and not primary["loose"] and oid
                 # AUTO-MERGE decision (gated by auto_link):
-                #  - EXACT first+last (>=0.95): merge if either side is address-book-
-                #    backed OR both are thin single-identifier records (very likely the
-                #    same person split across sources — the bulk of the dup suggestions).
+                #  - EXACT first+last (>=0.95): always merge — an identical full name is
+                #    almost always the same person split across sources, and surfacing
+                #    "merge Barry Mainz into Barry Mainz" as a question is just noise.
                 #  - NICKNAME/high (>=0.9): only the safe LINK shape — a loose contact
                 #    folding into a card-backed same-surname record (Rob → Robert).
-                both_loose = primary["loose"] and other["loose"]
-                card = primary["card"] or other["card"]
-                do_auto = ((sim >= 0.95 and (card or both_loose))
-                           or (sim >= 0.9 and is_link and primary["card"]))
+                do_auto = (sim >= 0.95) or (sim >= 0.9 and is_link and primary["card"])
                 if auto_merge and do_auto:
                     # Keep the card-backed record as primary when only the other is.
                     if other["card"] and not primary["card"]:

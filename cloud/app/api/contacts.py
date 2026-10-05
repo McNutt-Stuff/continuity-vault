@@ -284,6 +284,14 @@ def list_suggestions(principal: security.Principal = Depends(security.get_princi
                      tenant: Tenant = Depends(security.get_tenant),
                      db: Session = Depends(get_db)):
     user = _guard(principal, tenant, db)
+
+    def _idents(cid: str) -> list[dict]:
+        rows = (db.query(ContactIdentity)
+                .filter(ContactIdentity.contact_id == cid)
+                .order_by(ContactIdentity.kind, ContactIdentity.value).limit(20).all())
+        return [{"kind": i.kind, "value": i.value, "source_type": i.source_type,
+                 "link_method": i.link_method} for i in rows]
+
     out = []
     for s in (db.query(ContactSuggestion)
               .filter(ContactSuggestion.tenant_id == tenant.id,
@@ -292,11 +300,22 @@ def list_suggestions(principal: security.Principal = Depends(security.get_princi
               .order_by(ContactSuggestion.confidence.desc()).limit(200).all()):
         primary = db.get(UnifiedContact, s.contact_id)
         other = db.get(UnifiedContact, s.merge_contact_id) if s.merge_contact_id else None
+        # Why we think they match: these name-based suggestions share NO identifier
+        # (if they did they'd have been auto-unioned), so the basis is the NAME —
+        # we return each side's identifiers so the user can see what's in play.
+        match = {
+            "basis": "name",
+            "name": (primary.display_name if primary else "") or (other.display_name if other else ""),
+            "confidence": float(s.confidence or 0),
+        }
         out.append({
             "id": s.id, "kind": s.kind, "reason": s.reason,
             "confidence": float(s.confidence or 0),
+            "match": match,
             "contact": _contact_view(primary) if primary else None,
             "merge_contact": _contact_view(other) if other else None,
+            "contact_identifiers": _idents(primary.id) if primary else [],
+            "merge_identifiers": _idents(other.id) if other else [],
             "identity": ({"kind": s.identity_kind, "value": s.identity_value,
                           "raw": s.identity_raw, "source": s.identity_source}
                          if s.kind == "link_identity" else None),
