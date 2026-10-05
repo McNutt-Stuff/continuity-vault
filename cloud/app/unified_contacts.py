@@ -620,6 +620,37 @@ def _write_exchanges(db: Session, user: User, message_rows: list,
         db.bulk_insert_mappings(ContactExchange, batch[i:i + 5000])
 
 
+def _combine_people(plist: list["_Person"]) -> "_Person":
+    """Merge several deduced persons that resolve to the SAME contact into one view
+    (union identities/names/sources, sum interactions, min/max dates). Prevents the
+    last-processed person from overwriting source_types/identities while
+    ``_write_exchanges`` aggregates exchanges from all of them — that mismatch left a
+    contact showing e.g. iMessage exchanges but a gmail-only icon and no phone link."""
+    if len(plist) == 1:
+        return plist[0]
+    base = _Person(plist[0].key)
+    for p in plist:
+        for name, weight in p.names.items():
+            base.names[name] += weight
+        for (kind, value), d in p.identities.items():
+            base.add_identity(kind, value, raw=d.get("raw", ""), label=d.get("label", ""),
+                              source_type=d.get("source_type", ""),
+                              source_object_id=d.get("source_object_id", ""))
+        base.interactions += p.interactions
+        for s, c in p.sources.items():
+            base.sources[s] += c
+        base.in_count += p.in_count
+        base.out_count += p.out_count
+        base.bytes += p.bytes
+        for m, c in p.by_month.items():
+            base.by_month[m] += c
+        if p.first_at and (base.first_at is None or p.first_at < base.first_at):
+            base.first_at = p.first_at
+        if p.last_at and (base.last_at is None or p.last_at > base.last_at):
+            base.last_at = p.last_at
+    return base
+
+
 def _persist(db: Session, user: User, people: dict[str, _Person],
              existing_manual: dict[str, list[ContactIdentity]], now: datetime) -> tuple[int, dict[str, str]]:
     """Upsert deduced people into UnifiedContact/ContactIdentity, matching to
@@ -643,10 +674,13 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
     # whole population so 'inner' is the few closest, not everyone over a threshold.
     tier_by_person = _assign_tiers(people, now)
 
-    kept_contact_ids: set[str] = set()
+    # Resolve every deduced person to a target contact (match an existing row by
+    # identity overlap, else create one), GROUPING persons that land on the same
+    # contact so their data is MERGED rather than last-write-wins. A new contact's
+    # identities are registered so a later person sharing one resolves to it too.
+    contact_persons: dict[str, list[_Person]] = defaultdict(list)
     person_to_contact: dict[str, str] = {}
     for person in people.values():
-        # Match to an existing contact by any overlapping identity value.
         match_id = None
         for (kind, value) in person.identities:
             cid = val_to_contact.get(f"{kind}:{value}")
@@ -661,8 +695,19 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
             db.add(contact)
             db.flush()
             existing_contacts[contact.id] = contact
-        kept_contact_ids.add(contact.id)
+            for (kind, value) in person.identities:
+                val_to_contact.setdefault(f"{kind}:{value}", contact.id)
+        contact_persons[contact.id].append(person)
         person_to_contact[person.key] = contact.id
+
+    kept_contact_ids: set[str] = set()
+    for contact_id, plist in contact_persons.items():
+        contact = existing_contacts[contact_id]
+        kept_contact_ids.add(contact_id)
+        person = _combine_people(plist)
+        # Closeness tier = best (closest) tier among the merged persons.
+        auto_circle = min((tier_by_person.get(p.key, "acquaintance") for p in plist),
+                          key=lambda t: CIRCLES.index(t) if t in CIRCLES else 99)
 
         # Bound the name — a message field can be a giant recipient/raw blob, and
         # sort_key is indexed (btree rejects values past ~2704 bytes).
@@ -697,7 +742,6 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
         contact.primary_phone = next((v for (k, v) in person.identities if k == "phone"),
                                      contact.primary_phone or "")
         # Computed circle unless the user pinned one.
-        auto_circle = tier_by_person.get(person.key, "acquaintance")
         contact.circle = contact.pinned_circle or auto_circle
         contact.updated_at = now
 
