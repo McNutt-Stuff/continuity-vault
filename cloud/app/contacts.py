@@ -60,9 +60,38 @@ def normalize_phone(raw: str) -> str | None:
     return digits
 
 
+# Gmail (and its googlemail.com alias) ignore dots in the local part and treat a
+# "+tag" suffix as the same mailbox, so andrea.boylston@gmail.com,
+# andreaboy.lston@gmail.com and andreaboylston+news@googlemail.com are ONE inbox.
+# Collapsing them is what lets a Google Contacts card match a hand-linked address.
+_GMAIL_DOMAINS = {"gmail.com", "googlemail.com"}
+# Providers where a "+tag" is an alias of the base mailbox (dots are only dropped
+# for Gmail). Conservative list of well-known plus-addressing hosts.
+_PLUS_ALIAS_DOMAINS = _GMAIL_DOMAINS | {
+    "outlook.com", "hotmail.com", "live.com", "msn.com",
+    "icloud.com", "me.com", "mac.com", "fastmail.com",
+    "proton.me", "protonmail.com", "pm.me", "yahoo.com",
+}
+
+
 def normalize_email(raw: str) -> str | None:
+    """Normalize an email to a stable match key. Lowercases/trims, then canonicalizes
+    provider aliases of the SAME mailbox: Gmail/googlemail ignore dots in the local
+    part and a '+tag' suffix (and googlemail.com == gmail.com); other well-known
+    providers ignore the '+tag' alias."""
     e = str(raw or "").strip().lower()
-    return e if _EMAIL_RE.match(e) else None
+    if not _EMAIL_RE.match(e):
+        return None
+    local, _, domain = e.rpartition("@")
+    if domain == "googlemail.com":
+        domain = "gmail.com"
+    if domain in _PLUS_ALIAS_DOMAINS and "+" in local:
+        local = local.split("+", 1)[0]
+    if domain in _GMAIL_DOMAINS:
+        local = local.replace(".", "")
+    if not local:  # e.g. "+tag@gmail.com" or "...@gmail.com" of only dots
+        return e
+    return f"{local}@{domain}"
 
 
 def classify(value: str) -> tuple[str, str] | None:

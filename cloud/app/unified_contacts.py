@@ -109,6 +109,20 @@ def _norm_name(name: str) -> str:
     return " ".join((name or "").strip().lower().split())
 
 
+def _norm_val(kind: str, value: str) -> str:
+    """Re-normalize a STORED identity value to the current canonical key so stale
+    forms (e.g. a Gmail address stored before dot/plus canonicalization) converge
+    onto the same union key as freshly-mined identifiers."""
+    v = (value or "").strip()
+    if not v:
+        return v
+    if kind == "email":
+        return contacts.normalize_email(v) or v.lower()
+    if kind == "phone":
+        return contacts.normalize_phone(v) or v
+    return v
+
+
 def _sort_key(name: str) -> str:
     return _norm_name(name)
 
@@ -406,7 +420,7 @@ def rebuild(db: Session, user: User) -> int:
         if ci.value:
             existing_manual[ci.contact_id].append(ci)
     for cid, cis in existing_manual.items():
-        vals = [f"{c.kind}:{c.value}" for c in cis if c.value]
+        vals = [f"{c.kind}:{_norm_val(c.kind, c.value)}" for c in cis if c.value]
         for v in vals[1:]:
             uf.union(vals[0], v)
 
@@ -547,9 +561,9 @@ def rebuild(db: Session, user: User) -> int:
     for cid, cis in existing_manual.items():
         if not cis:
             continue
-        p = _person(f"{cis[0].kind}:{cis[0].value}")
+        p = _person(f"{cis[0].kind}:{_norm_val(cis[0].kind, cis[0].value)}")
         for ci in cis:
-            p.add_identity(ci.kind, ci.value, raw=ci.raw_value, label=ci.label,
+            p.add_identity(ci.kind, _norm_val(ci.kind, ci.value), raw=ci.raw_value, label=ci.label,
                            source_type=ci.source_type, source_object_id=ci.source_object_id)
             # Seed a CLEAN name from the identity's raw ("Vivek Mani <vivek@x>" →
             # "Vivek Mani") so a manually-linked, interaction-less contact still gets
@@ -623,7 +637,7 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
                .filter(ContactIdentity.tenant_id == tid,
                        ContactIdentity.owner_user_id == user.id).all()):
         if ci.value:
-            val_to_contact[f"{ci.kind}:{ci.value}"] = ci.contact_id
+            val_to_contact[f"{ci.kind}:{_norm_val(ci.kind, ci.value)}"] = ci.contact_id
 
     # Relative closeness tiering (rank-based, recency-gated) computed over the
     # whole population so 'inner' is the few closest, not everyone over a threshold.
@@ -688,7 +702,10 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
         contact.updated_at = now
 
         # Identities: replace AUTO ones, preserve manual/suggested (curation).
-        manual = {(ci.kind, ci.value): ci
+        # Key the manual set by the NORMALIZED value so a stored pre-canonicalization
+        # form (e.g. a dotted Gmail) still matches the person's canonical identity and
+        # we don't write a duplicate auto row alongside it.
+        manual = {(ci.kind, _norm_val(ci.kind, ci.value)): ci
                   for ci in existing_manual.get(contact.id, [])}
         db.query(ContactIdentity).filter(
             ContactIdentity.contact_id == contact.id,
