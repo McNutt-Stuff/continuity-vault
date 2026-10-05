@@ -281,11 +281,110 @@ def _name_from_email(email: str) -> str:
     return " ".join(p.capitalize() for p in parts)
 
 
+# Important-date parsing (birthdays / anniversaries) --------------------------
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+_DATE_KEY_HINTS = ("birth", "bday", "b-day", "anniversar", "dob")
+# Keyword → kind for a calendar-event / card-field label.
+_DATE_KIND_WORDS = (
+    ("anniversar", "anniversary"), ("wedding", "anniversary"),
+    ("birthday", "birthday"), ("bday", "birthday"), ("b-day", "birthday"),
+    ("born", "birthday"), ("🎂", "birthday"), ("🎉", "birthday"),
+)
+
+
+def _parse_date(raw: str) -> tuple[int, int, int | None] | None:
+    """Parse a date into (month, day, year|None). Handles ISO (1985-03-12), vCard
+    no-year (--03-12), M/D[/Y], and 'March 12, 1985' / 'Mar 12'. Returns None if it
+    can't find a valid month+day."""
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    # vCard no-year: --MM-DD or --MMDD
+    m = re.match(r"^--(\d{2})-?(\d{2})$", s)
+    if m:
+        mo, da = int(m.group(1)), int(m.group(2))
+        return (mo, da, None) if 1 <= mo <= 12 and 1 <= da <= 31 else None
+    # ISO / YYYY-MM-DD(THH..)
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        yr, mo, da = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= da <= 31:
+            return (mo, da, yr if yr > 1 else None)
+    # Numeric M/D or M/D/Y (US order)
+    m = re.match(r"^(\d{1,2})[/.](\d{1,2})(?:[/.](\d{2,4}))?$", s)
+    if m:
+        mo, da = int(m.group(1)), int(m.group(2))
+        yr = int(m.group(3)) if m.group(3) else None
+        if yr is not None and yr < 100:
+            yr += 2000 if yr < 40 else 1900
+        if 1 <= mo <= 12 and 1 <= da <= 31:
+            return (mo, da, yr)
+    # 'March 12, 1985' / 'Mar 12' / '12 March 1985'
+    low = s.lower()
+    mon = None
+    for name, idx in _MONTHS.items():
+        if name in low:
+            mon = idx
+            break
+    if mon is not None:
+        nums = re.findall(r"\d{1,4}", low)
+        day = next((int(n) for n in nums if 1 <= int(n) <= 31 and len(n) <= 2), None)
+        year = next((int(n) for n in nums if len(n) == 4), None)
+        if day:
+            return (mon, day, year)
+    return None
+
+
+def _date_kind(text: str) -> str | None:
+    low = str(text or "").lower()
+    for word, kind in _DATE_KIND_WORDS:
+        if word in low:
+            return kind
+    return None
+
+
+def _dates_from_card_meta(meta: dict) -> list[tuple[str, int, int, int | None, str]]:
+    """Extract (kind, month, day, year, label) important dates from a contact card's
+    metadata — any key hinting at a birthday/anniversary with a parseable value."""
+    out: list[tuple[str, int, int, int | None, str]] = []
+    for k, v in (meta or {}).items():
+        kl = str(k).lower()
+        if not any(h in kl for h in _DATE_KEY_HINTS):
+            continue
+        kind = _date_kind(kl) or ("birthday" if "birth" in kl or "bday" in kl or "dob" in kl else "date")
+        for raw in contacts._iter_values(v):
+            parsed = _parse_date(str(raw))
+            if parsed:
+                out.append((kind, parsed[0], parsed[1], parsed[2], kind.capitalize()))
+    return out
+
+
+def _name_from_event_title(title: str) -> tuple[str, str] | None:
+    """From a calendar event title that looks like an important date, return
+    (kind, person_name) — e.g. "Jon Connet's Birthday" → ("birthday", "jon connet").
+    Returns None when the title isn't a person's birthday/anniversary."""
+    kind = _date_kind(title)
+    if not kind:
+        return None
+    t = str(title or "")
+    # Strip the keyword(s), possessives, emojis, connectors → leave the name.
+    t = re.sub(r"(?i)\b(happy|the|an?)\b", " ", t)
+    t = re.sub(r"(?i)(birthday|bday|b-day|anniversary|wedding|born|'s|’s)", " ", t)
+    t = re.sub(r"[^A-Za-z\s.'-]", " ", t)  # drop emojis/digits/punctuation
+    name = _norm_name(t)
+    toks = name.split()
+    if 2 <= len(toks) <= 4:
+        return (kind, name)
+    return None
+
+
 class _Person:
     """In-memory accumulator for one deduced person during a rebuild."""
 
     __slots__ = ("key", "names", "identities", "interactions", "sources",
-                 "in_count", "out_count", "bytes", "first_at", "last_at", "by_month")
+                 "in_count", "out_count", "bytes", "first_at", "last_at", "by_month",
+                 "dates", "_date_keys")
 
     def __init__(self, key: str) -> None:
         self.key = key
@@ -300,6 +399,29 @@ class _Person:
         self.first_at: datetime | None = None
         self.last_at: datetime | None = None
         self.by_month: dict[str, int] = defaultdict(int)
+        self.dates: list[dict] = []
+        self._date_keys: set[tuple] = set()
+
+    def add_date(self, kind: str, month: int, day: int, year: int | None,
+                 label: str, source_type: str) -> None:
+        key = (kind, month, day)
+        if key in self._date_keys:
+            # Prefer the entry that carries a year.
+            if year is not None:
+                for d in self.dates:
+                    if (d["kind"], d["month"], d["day"]) == key and not d.get("year"):
+                        d["year"] = year
+            return
+        self._date_keys.add(key)
+        self.dates.append({"kind": kind, "month": month, "day": day,
+                           "year": year, "label": label or kind.capitalize(),
+                           "source_type": source_type})
+
+    def note_source(self, source_type: str) -> None:
+        """Mark a source as contributing to this person WITHOUT counting it as an
+        interaction (e.g. a calendar event that gave us a birthday)."""
+        if source_type:
+            self.sources[source_type] += 1
 
     def add_identity(self, kind: str, value: str, *, raw: str = "", label: str = "",
                      source_type: str = "", source_object_id: str = "") -> None:
@@ -444,7 +566,8 @@ def rebuild(db: Session, user: User) -> int:
         for k in keys[1:]:
             uf.union(keys[0], k)
         contact_seeds.append({"name": name, "source_type": source_type or "",
-                              "object_id": object_id or "", "idents": idents})
+                              "object_id": object_id or "", "idents": idents,
+                              "dates": _dates_from_card_meta(meta or {})})
 
     # --- Pass 2: MESSAGE / SOCIAL / EMAIL docs (interactions) ----------------
     mq = db.query(SearchDocument.source_type, SearchDocument.doc_type,
@@ -537,6 +660,8 @@ def rebuild(db: Session, user: User) -> int:
         for (t, v) in idents:
             p.add_identity(t, v, raw=v, source_type=seed["source_type"],
                            source_object_id=seed["object_id"])
+        for (kind, mo, da, yr, label) in seed.get("dates", []):
+            p.add_date(kind, mo, da, yr, label, seed["source_type"])
 
     for source_type, doc_type, object_id, counter, direction, modified_at, size in message_rows:
         # One interaction per message per distinct counterparty person.
@@ -571,6 +696,10 @@ def rebuild(db: Session, user: User) -> int:
             parsed = contacts.parse_party(ci.raw_value or ci.value or "")
             if parsed and parsed[2]:
                 p.names[parsed[2].strip()[:200]] += 2
+
+    # Mine birthdays/anniversaries from matching calendar events (adds the calendar
+    # as a source for that contact too).
+    _mine_calendar_dates(db, user, vids, tid, people)
 
     n, person_to_contact = _persist(db, user, people, existing_manual, now)
     _write_exchanges(db, user, message_rows, person_to_contact, uf, now)
@@ -633,6 +762,59 @@ def _write_exchanges(db: Session, user: User, message_rows: list,
         db.bulk_insert_mappings(ContactExchange, batch[i:i + 5000])
 
 
+_CALENDAR_CATEGORIES = ("calendar",)
+
+
+def _mine_calendar_dates(db: Session, user: User, vids: list[str], tid: str,
+                         people: dict[str, _Person]) -> None:
+    """Attach birthdays/anniversaries from calendar events whose title names a
+    deduced person (e.g. "Jon Connet's Birthday"). Also notes the calendar as a
+    source for that contact. Conservative: requires a date keyword + a 2–4 token
+    name that EXACTLY matches a person's name (so holidays like "Lincoln's
+    Birthday" — a single token — never match)."""
+    from sqlalchemy import or_
+    name_index: dict[str, _Person] = {}
+    for p in people.values():
+        names = list(p.names.keys())
+        bn = p.best_name()
+        if bn:
+            names.append(bn)
+        for nm in names:
+            k = _norm_name(nm)
+            if k and len(k.split()) >= 2:
+                name_index.setdefault(k, p)
+    if not name_index:
+        return
+    q = db.query(SearchDocument.source_type, SearchDocument.title,
+                 SearchDocument.modified_at).filter(
+        SearchDocument.tenant_id == tid,
+        SearchDocument.is_current.is_(True),
+        SearchDocument.category.in_(_CALENDAR_CATEGORIES),
+        or_(SearchDocument.title.ilike("%birthday%"),
+            SearchDocument.title.ilike("%anniversar%"),
+            SearchDocument.title.ilike("%bday%")))
+    if vids:
+        q = q.filter(SearchDocument.vault_id.in_(vids))
+    matched = 0
+    for source_type, title, modified_at in q.all():
+        if modified_at is None:
+            continue
+        parsed = _name_from_event_title(title or "")
+        if not parsed:
+            continue
+        kind, name = parsed
+        p = name_index.get(name)
+        if not p:
+            continue
+        # The year of a recurring calendar series isn't the birth year — leave it off.
+        p.add_date(kind, modified_at.month, modified_at.day, None,
+                   (title or "").strip()[:120], source_type or "")
+        p.note_source(source_type or "")
+        matched += 1
+    if matched:
+        logger.info("unified contacts: matched %d calendar date(s) for %s", matched, user.id)
+
+
 def _combine_people(plist: list["_Person"]) -> "_Person":
     """Merge several deduced persons that resolve to the SAME contact into one view
     (union identities/names/sources, sum interactions, min/max dates). Prevents the
@@ -652,6 +834,9 @@ def _combine_people(plist: list["_Person"]) -> "_Person":
         base.interactions += p.interactions
         for s, c in p.sources.items():
             base.sources[s] += c
+        for d in p.dates:
+            base.add_date(d["kind"], d["month"], d["day"], d.get("year"),
+                          d.get("label", ""), d.get("source_type", ""))
         base.in_count += p.in_count
         base.out_count += p.out_count
         base.bytes += p.bytes
@@ -758,6 +943,9 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
                                      contact.primary_email or "")
         contact.primary_phone = next((v for (k, v) in person.identities if k == "phone"),
                                      contact.primary_phone or "")
+        # Important dates (birthdays/anniversaries) parsed from cards + calendar.
+        contact.important_dates = sorted(
+            person.dates, key=lambda d: (d["month"], d["day"]))
         # Computed circle unless the user pinned one.
         contact.circle = contact.pinned_circle or auto_circle
         contact.updated_at = now

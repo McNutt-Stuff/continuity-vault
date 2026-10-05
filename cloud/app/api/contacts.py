@@ -73,6 +73,7 @@ def _contact_view(c: UnifiedContact, *, full: bool = False) -> dict:
     if full:
         out["notes"] = c.notes or ""
         out["details"] = c.details or {}
+        out["important_dates"] = c.important_dates or []
     return out
 
 

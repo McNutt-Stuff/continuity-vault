@@ -2152,15 +2152,29 @@ def fetch_google_contacts(access_token: str,
                 phones = [ph.get("value") for ph in (p.get("phoneNumbers") or []) if ph.get("value")]
                 org = ((p.get("organizations") or [{}])[0]).get("name", "")
                 rid = (p.get("resourceName") or name).split("/")[-1]
+                # Birthday (People API returns {date:{year?,month,day}} or free text).
+                bday = ""
+                for b in (p.get("birthdays") or []):
+                    d = b.get("date") or {}
+                    if d.get("month") and d.get("day"):
+                        y = d.get("year")
+                        bday = (f"{int(y):04d}-{int(d['month']):02d}-{int(d['day']):02d}"
+                                if y else f"--{int(d['month']):02d}-{int(d['day']):02d}")
+                        break
+                    if b.get("text"):
+                        bday = str(b["text"]); break
                 # People API: the contact's last-updated time (its closest "date").
                 srcs = (p.get("metadata") or {}).get("sources") or []
                 updated = next((s.get("updateTime") for s in srcs if s.get("updateTime")), None)
+                meta = {"emails": emails, "phones": phones, "org": org, "kind": "contact"}
+                if bday:
+                    meta["birthday"] = bday
                 yield SourceObject(
                     object_id=f"google_contacts:{rid}",
                     doc_type="person", category="contact", title=name,
                     content=json.dumps(p).encode(),
                     preview=", ".join(emails + phones)[:140] or org,
-                    meta={"emails": emails, "phones": phones, "org": org, "kind": "contact"},
+                    meta=meta,
                     labels=["Contacts"],
                     modified_at=_parse_dt(updated))
             token = body.get("nextPageToken")

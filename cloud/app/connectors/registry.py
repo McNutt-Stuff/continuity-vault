@@ -682,7 +682,7 @@ class GoogleContactsConnector(Connector):
 
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
-            searchable_fields=["emails", "phones", "org"],
+            searchable_fields=["emails", "phones", "org", "birthday"],
             facet_fields=["org"],
         )
 

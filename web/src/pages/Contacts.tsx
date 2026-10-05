@@ -26,6 +26,11 @@ interface Contact {
   first_interaction_at?: string | null; source_types: string[];
   stats: Stats; notes?: string; details?: Record<string, Record<string, string>>;
   identities?: Identity[];
+  important_dates?: ImportantDate[];
+}
+interface ImportantDate {
+  kind: string; month: number; day: number; year?: number | null;
+  label: string; source_type: string;
 }
 interface Identity {
   id: string; kind: string; value: string; raw_value: string; label: string;
@@ -503,6 +508,8 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
         <StatBox label="Identifiers" value={c.stats?.identity_count || (c.identities?.length || 0)} />
       </div>
 
+      <ImportantDates dates={c.important_dates} />
+
       {/* Timeline */}
       {months.length > 0 && (
         <div style={{ marginBottom: 14 }}>
@@ -716,6 +723,9 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
       {/* Two-column body */}
       <div style={{ display: "grid", gridTemplateColumns: "minmax(300px, 1fr) minmax(320px, 1.2fr)", gap: 14, alignItems: "start" }}>
         <div className="stack" style={{ gap: 14 }}>
+          {c.important_dates && c.important_dates.length > 0 && (
+            <Card><ImportantDates dates={c.important_dates} /></Card>
+          )}
           {months.length > 0 && (
             <Card>
               <div className="faint" style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 8 }}>Interaction timeline</div>
@@ -857,6 +867,31 @@ function StatBox({ label, value }: { label: string; value: number }) {
     <div className="card" style={{ padding: "9px 11px", marginTop: 0, textAlign: "center" }}>
       <div style={{ fontSize: 18, fontWeight: 700 }}>{value.toLocaleString()}</div>
       <div className="faint" style={{ fontSize: 10.5 }}>{label}</div>
+    </div>
+  );
+}
+
+const MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"];
+function fmtImportantDate(d: ImportantDate): string {
+  const m = MONTH_NAMES[d.month] || "";
+  return d.year ? `${m} ${d.day}, ${d.year}` : `${m} ${d.day}`;
+}
+function ImportantDates({ dates }: { dates?: ImportantDate[] }) {
+  if (!dates || dates.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div className="faint" style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 6 }}>Important dates</div>
+      <div className="imp-dates">
+        {dates.map((d, i) => (
+          <div key={i} className="imp-date" title={`From ${d.source_type || "a source"}`}>
+            <span className="imp-ico"><Icon name="gift" size={15} /></span>
+            <span className="imp-when">{fmtImportantDate(d)}</span>
+            <span className="imp-what">· {d.label || (d.kind.charAt(0).toUpperCase() + d.kind.slice(1))}</span>
+            {d.source_type && <SourceIcon type={d.source_type} size={13} />}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -1984,6 +1984,9 @@ class UnifiedContact(Base):
     # Rich, expandable detail sections: {personal:{}, business:{}, intimate:{},
     # custom:{}} — each an object of free key/value fields the user curates.
     details = Column(JSON, default=dict)
+    # Auto-parsed important dates (birthdays/anniversaries) from contact cards +
+    # matching calendar events: [{kind, month, day, year?, label, source_type}].
+    important_dates = Column(JSON, default=list)
     # Interaction analytics (denormalized for the list + detail header).
     interaction_count = Column(BigInteger, default=0)
     first_interaction_at = Column(DateTime, nullable=True)

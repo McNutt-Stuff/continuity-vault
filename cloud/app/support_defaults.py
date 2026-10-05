@@ -922,6 +922,10 @@ extra collection and nothing new to configure.
   and add your own labels. The sets are customizable.
 - **Interaction analytics.** Total exchanges, sent vs. received, a timeline of when
   you talk, and *how* you connect (which sources/methods, by volume).
+- **Important dates.** Birthdays and anniversaries, pulled from your contact cards
+  **and** from matching calendar events (e.g. a "Jon Connet's Birthday" event). When
+  a date comes from the calendar, that calendar is shown as one of the person's
+  sources too.
 - **Rich details.** Keep personal, business, intimate and custom fields plus private
   notes on each person — yours alone.
 - **Relationship map.** A visual of your circles: you at the center, each person
@@ -942,6 +946,10 @@ to the full list in **[Unified Search](/support/unified-search)**.
   merged silently.
 - **Manual links** let you attach any identifier to a person yourself; a manual
   decision always sticks across rebuilds.
+- **Create a contact** by hand if one doesn't exist yet; any email or phone you add
+  is linked so a future message or contact card from that address attaches to it
+  automatically. You can also rename a person — your name sticks across rebuilds and
+  the deduced name is kept for matching.
 
 ## Privacy
 

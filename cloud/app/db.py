@@ -226,6 +226,7 @@ def _apply_additive_migrations() -> None:
         "ALTER TABLE search_documents ADD COLUMN IF NOT EXISTS is_current BOOLEAN DEFAULT true",
         "ALTER TABLE unified_contacts ADD COLUMN IF NOT EXISTS custom_name BOOLEAN DEFAULT false",
         "ALTER TABLE unified_contacts ADD COLUMN IF NOT EXISTS derived_name VARCHAR DEFAULT ''",
+        "ALTER TABLE unified_contacts ADD COLUMN IF NOT EXISTS important_dates JSON",
         "ALTER TABLE users ADD COLUMN notification_prefs JSON",
         "ALTER TABLE users ADD COLUMN notification_emails JSON",
         "ALTER TABLE users ADD COLUMN contact_linking_enabled BOOLEAN DEFAULT false",
