@@ -2641,13 +2641,18 @@ def fetch_instagram_personal(creds: dict, config: Optional[dict] = None,
     options = {"includeCategories": (config or {}).get("includeCategories")}
     cl = _instagram_client(creds.get("settings"))
     user = creds.get("username") or ""
-    # Validate/refresh the session once up front (cheap call).
+    # Validate/refresh the session once up front (cheap call). Any stale-profile
+    # failure (expired session, or an old pre-CAA "needs_upgrade" profile) is
+    # recovered by dropping the saved settings and doing a fresh CAA login.
     try:
         cl.get_timeline_feed()
-    except LoginRequired:
+    except (PleaseWaitFewMinutes, ClientThrottledError):
+        raise
+    except Exception:  # noqa: BLE001 — LoginRequired, needs_upgrade, bad profile, …
         if not creds.get("password"):
             raise PermissionError("Instagram session expired — reconnect the source "
                                   "and re-enter your password + 2FA code.")
+        cl = _instagram_client()  # fresh client: current app profile, no stale settings
         cl.login(user, creds["password"])
     uid = cl.user_id or cl.user_id_from_username(user)
 

@@ -57,6 +57,9 @@ pyicloud[cli]>=2.7.0,<3
 
 # instagrapi — personal (username/password + 2FA) Instagram backup for the
 # Instagram connector. Private mobile API wrapper; pulls own media, DMs and the
-# following/followers graph. Python 3.10+; ships curl_cffi + Pillow transitively.
-instagrapi>=2.5.0,<3
+# following/followers graph. 3.0.3+ is REQUIRED: it makes Instagram's new CAA login
+# the default (`login()`), which fixes the legacy "Your version of Instagram is out
+# of date" (needs_upgrade) rejection that the pre-3.0 legacy login hits. Needs
+# Python 3.10+ and curl_cffi>=0.15.0 (pulled in transitively for the HTTP/2 transport).
+instagrapi>=3.0.3,<4
 
