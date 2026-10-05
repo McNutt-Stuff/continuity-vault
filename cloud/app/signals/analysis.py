@@ -240,8 +240,11 @@ def _endpoint_posture_findings(db: Session, tenant) -> None:
 def _ai_usage(db: Session, tenant) -> None:
     """Phase-2 AI usage detection: emit ai.tool.detected signals from existing
     app/network signals, then raise a shadow-AI finding per unsanctioned tool.
-    Gated by the signal_ai_enabled flag (no-op when off)."""
+    On by default wherever the Signal Platform is enabled; a tenant can opt out by
+    clearing signal_ai_enabled."""
     from .. import features
+    if not features.resolve(None, tenant, "signal_platform_enabled", db):
+        return
     if not features.resolve(None, tenant, "signal_ai_enabled", db):
         return
     ai_detection.detect(db, tenant)

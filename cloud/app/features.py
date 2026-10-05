@@ -64,11 +64,12 @@ FLAGS: dict[str, bool] = {
     # detection and coverage — and (Phase 2) the AI Compliance add-on. Gates the
     # Signals surfaces; the collection substrate is always on where a provider runs.
     "signal_platform_enabled": False,
-    # AI usage detection (Phase 2 add-on, built on the Signal Platform): correlates
+    # AI usage detection (Phase 2, built on the Signal Platform): correlates
     # already-collected endpoint app inventory + network DPI apps against a catalog
-    # of known AI tools to surface shadow-AI usage as signals + findings. OFF by
-    # default; requires signal_platform_enabled for its surfaces.
-    "signal_ai_enabled": False,
+    # of known AI tools to surface shadow-AI usage as signals + findings. ON by
+    # default, but only runs where the Signal Platform is enabled — clear this flag
+    # to opt a tenant out while keeping the rest of the Signal Platform on.
+    "signal_ai_enabled": True,
     # Unified Contacts ("My Circles"): a deduced, cross-source personal contact
     # graph built from contact/message/email/social data already collected — a
     # Rolodex that links a person to all their identifiers, interaction history,
@@ -92,7 +93,7 @@ LABELS = {
     "ha_auto_failover": "Automatic failover to standby node (HA)",
     "debug_overlay_enabled": "Live debug overlay (behind-the-scenes diagnostics)",
     "signal_platform_enabled": "Signal Platform (asset awareness & protection-gap detection)",
-    "signal_ai_enabled": "AI usage detection (shadow-AI tools & findings — Phase 2)",
+    "signal_ai_enabled": "AI usage detection (shadow-AI tools & findings — on with Signals)",
     "unified_contacts_enabled": "Unified Contacts (My Circles — personal relationship graph)",
 }
 

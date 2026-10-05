@@ -999,7 +999,7 @@ what Arkive already has.
 
 ## AI usage detection
 
-When the **AI usage detection** feature is enabled, Arkive correlates the
+Whenever the Signal Platform is enabled, Arkive automatically correlates the
 endpoint application inventory and network app observations it already collects
 against a catalog of known AI tools and services (assistants, coding copilots,
 image/audio generators, meeting transcribers and local LLM runtimes). Each match
@@ -1007,7 +1007,8 @@ becomes an *AI tool detected* signal, and any **unsanctioned ("shadow AI")** use
 raises a finding — ranked by the tool's data‑risk — so you can review whether
 sensitive or regulated data may be flowing to a third‑party AI service and
 sanction or block it. This reuses existing signals: **no new agent and no new
-data collection.**
+data collection.** It's on by default with the Signal Platform; an administrator
+can opt a tenant out while keeping the rest of the platform on.
 
 ## Privacy
 
