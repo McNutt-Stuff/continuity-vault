@@ -110,9 +110,9 @@ function OverviewTab({ ov, onGoto }: { ov: Overview; onGoto: (t: Tab) => void })
   return (
     <>
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
-        <Stat label="Apps & services" value={t.apps.toLocaleString()} />
-        <Stat label="Devices" value={t.devices.toLocaleString()} />
-        <Stat label="Traffic observed" value={bytes(t.bytes)} />
+        <Stat label="Apps & services" value={t.apps.toLocaleString()} hint="across all sources" />
+        <Stat label="Devices" value={t.devices.toLocaleString()} hint="de-duplicated" />
+        <Stat label="Traffic observed" value={bytes(t.bytes)} hint="network traffic" />
         <Stat label="AI services" value={t.ai_apps.toLocaleString()} hint={t.ai_apps ? "in use" : "none seen"} />
         <Stat label="Not protected" value={t.unprotected.toLocaleString()}
           hint={t.unprotected ? "connect to protect" : "all covered"} />
