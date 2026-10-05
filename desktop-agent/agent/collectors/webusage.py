@@ -84,10 +84,11 @@ def _open_ro(path: str) -> sqlite3.Connection | None:
         return None
 
 
-def _scan_chromium(path: str, since_epoch: float, agg: dict) -> None:
+def _scan_chromium(path: str, since_epoch: float, agg: dict) -> int:
     con = _open_ro(path)
     if con is None:
-        return
+        return 0
+    seen = 0
     try:
         # Chromium last_visit_time: microseconds since 1601-01-01.
         min_chrome = int((since_epoch + 11644473600) * 1_000_000)
@@ -103,16 +104,20 @@ def _scan_chromium(path: str, since_epoch: float, agg: dict) -> None:
             g = agg.setdefault(key, {"visits": 0, "last": 0.0})
             g["visits"] += int(visits or 1)
             g["last"] = max(g["last"], (int(last or 0) / 1_000_000) - 11644473600)
+            seen += 1
     except Exception as exc:  # noqa: BLE001
         log.debug("webusage: chromium scan %s failed: %s", path, exc)
     finally:
         con.close()
+    log.debug("webusage: chromium %s → %d host-row(s)", path, seen)
+    return seen
 
 
-def _scan_safari(since_epoch: float, agg: dict) -> None:
+def _scan_safari(since_epoch: float, agg: dict) -> int:
     con = _open_ro(_SAFARI_DB)
     if con is None:
-        return
+        return 0
+    seen = 0
     try:
         # Safari visit_time: seconds since 2001-01-01 (CFAbsoluteTime).
         min_safari = since_epoch - 978307200
@@ -128,10 +133,13 @@ def _scan_safari(since_epoch: float, agg: dict) -> None:
             g = agg.setdefault(key, {"visits": 0, "last": 0.0})
             g["visits"] += int(visits or 1)
             g["last"] = max(g["last"], float(last or 0) + 978307200)
+            seen += 1
     except Exception as exc:  # noqa: BLE001
         log.debug("webusage: safari scan failed (Full Disk Access?): %s", exc)
     finally:
         con.close()
+    log.debug("webusage: safari → %d host-row(s)", seen)
+    return seen
 
 
 def collect(window_days: int = 7, limit: int = 800) -> list[dict]:
@@ -139,20 +147,31 @@ def collect(window_days: int = 7, limit: int = 800) -> list[dict]:
     most-used first. Cached ~30 min. Empty on non-macOS or when nothing readable."""
     global _CACHE, _CACHE_AT
     if _CACHE is not None and (time.time() - _CACHE_AT) < _TTL:
+        log.debug("webusage: cache hit (%d service(s), age %.0fs)",
+                  len(_CACHE), time.time() - _CACHE_AT)
         return _CACHE
     since = time.time() - window_days * 86400
     agg: dict[str, dict] = {}
+    browsers = 0
+    rows = 0
     for pattern in _CHROMIUM_GLOBS:
         for path in glob.glob(pattern):
-            _scan_chromium(path, since, agg)
-    _scan_safari(since, agg)
-    rows = sorted(agg.items(), key=lambda kv: -kv[1]["visits"])[:limit]
+            browsers += 1
+            rows += _scan_chromium(path, since, agg)
+    if os.path.exists(_SAFARI_DB):
+        browsers += 1
+        rows += _scan_safari(since, agg)
+    ordered = sorted(agg.items(), key=lambda kv: -kv[1]["visits"])[:limit]
     out = [{"host": host,
             "visits": int(g["visits"]),
             "last_seen": datetime.fromtimestamp(
                 g["last"], timezone.utc).replace(tzinfo=None).isoformat()}
-           for host, g in rows if g["last"] > 0]
+           for host, g in ordered if g["last"] > 0]
     _CACHE = out
     _CACHE_AT = time.time()
-    log.info("webusage: %d web service(s) from browser history", len(out))
+    log.info("webusage: scanned %d browser profile(s), %d history row(s) → "
+             "%d distinct service(s) (window %dd)", browsers, rows, len(out), window_days)
+    if out:
+        top = ", ".join(f"{r['host']}({r['visits']})" for r in out[:8])
+        log.debug("webusage: top services — %s", top)
     return out

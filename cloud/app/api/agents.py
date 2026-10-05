@@ -629,6 +629,7 @@ def _ingest_endpoint_web_usage(db: Session, agent: DesktopAgent, records: list) 
         NetworkUsage.tenant_id == agent.tenant_id, NetworkUsage.integration_id == iid,
         NetworkUsage.client_key == device_key).all()}
 
+    n_ai = n_web = 0
     for rec in records:
         if not isinstance(rec, dict):
             continue
@@ -645,11 +646,13 @@ def _ingest_endpoint_web_usage(db: Session, agent: DesktopAgent, records: list) 
                     "ai_category": ai.get("category", ""), "data_risk": ai.get("data_risk", "medium"),
                     "sanctioned": bool(ai.get("sanctioned")), "surface": "endpoint",
                     "domains": [host]}
+            n_ai += 1
         else:
             app_key = f"web:{host}"
             name, category = host, "Web"
             source_type = map_app_to_source(host, "")
             meta = {"endpoint": True, "host": host}
+            n_web += 1
 
         a = existing_a.get(app_key)
         if a is None:
@@ -672,6 +675,8 @@ def _ingest_endpoint_web_usage(db: Session, agent: DesktopAgent, records: list) 
             existing_u[app_key] = u
         u.sessions = visits
         u.last_seen = last_seen
+    logger.info("endpoint web-usage ingested: agent=%s device=%s records=%d → %d AI + %d web service(s)",
+                agent.id, (agent.hostname or agent.name or device_key), len(records), n_ai, n_web)
 
 
 @agent_router.post("/heartbeat")

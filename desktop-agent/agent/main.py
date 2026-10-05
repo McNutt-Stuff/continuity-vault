@@ -308,8 +308,11 @@ class Agent:
                 wu = webusage.collect()
                 if wu:
                     data["web_usage"] = wu
+                self.log.info("web-usage telemetry: %d service(s) attached to heartbeat", len(wu))
             except Exception as exc:  # noqa: BLE001
                 self.log.warning("web-usage collection failed: %s", exc)
+        else:
+            self.log.debug("web-usage telemetry: disabled (collect_web_usage off)")
         return data
 
     def _write_status(self, extra: dict) -> None:
