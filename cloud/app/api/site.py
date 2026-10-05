@@ -536,9 +536,15 @@ def node_bootstrap():
 
 # The code a fleet node needs — served from the control plane so public-web and
 # customer-tenant nodes never touch GitHub. Only the dirs each node role uses.
-_NODE_BUNDLE_DIRS = ("cloud", "shared", "web", "site", "installers", "infra", "updater")
+# desktop-agent + appliance MUST ship in the node bundle: customer-tenant nodes
+# serve /agent/bundle and /appliance/bundle to the endpoint agents and appliances
+# that heartbeat them directly. If a node's copy of these trees is stale, its
+# _agent_bundle_version()/_appliance_bundle_version() diverge from the control
+# plane's and the device self-updates back and forth forever (never stays online).
+_NODE_BUNDLE_DIRS = ("cloud", "shared", "web", "site", "installers", "infra",
+                     "updater", "desktop-agent", "appliance")
 _NODE_BUNDLE_EXCLUDE = (".venv", "__pycache__", "node_modules", ".git", ".pyc",
-                        "web/dist", "site/dist")
+                        "web/dist", "site/dist", "hxprobe/target", "hxprobe/.fingerprint")
 _node_bundle_version_cache: str | None = None
 
 
