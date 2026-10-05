@@ -64,6 +64,7 @@ def _contact_view(c: UnifiedContact, *, full: bool = False) -> dict:
         "avatar_url": c.avatar_url, "circle": c.circle,
         "pinned_circle": c.pinned_circle, "relationship": c.relationship,
         "labels": c.labels or [], "starred": bool(c.starred), "hidden": bool(c.hidden),
+        "custom_name": bool(c.custom_name), "derived_name": c.derived_name or "",
         "interaction_count": int(c.interaction_count or 0),
         "last_interaction_at": c.last_interaction_at.isoformat() if c.last_interaction_at else None,
         "first_interaction_at": c.first_interaction_at.isoformat() if c.first_interaction_at else None,
@@ -384,6 +385,103 @@ def rebuild_now(principal: security.Principal = Depends(security.get_principal),
 
 
 # --------------------------------------------------------------------------- #
+# Create a contact manually                                                   #
+# --------------------------------------------------------------------------- #
+class CreateContactBody(BaseModel):
+    display_name: str
+    emails: list[str] | None = None
+    phones: list[str] | None = None
+    nickname: str | None = None
+    relationship: str | None = None
+    labels: list[str] | None = None
+    notes: str | None = None
+
+
+@router.post("")
+def create_contact(body: CreateContactBody,
+                   principal: security.Principal = Depends(security.get_principal),
+                   tenant: Tenant = Depends(security.get_tenant),
+                   db: Session = Depends(get_db)):
+    """Create a contact by hand. Any email/phone is stored as a MANUAL identity so a
+    rebuild preserves it AND matches a future message/card carrying that identifier
+    onto this contact (instead of minting a duplicate). If a provided identifier
+    already belongs to a contact, that contact is reused (named + returned)."""
+    user = _guard(principal, tenant, db)
+    from .. import contacts as _c
+    name = (body.display_name or "").strip()
+    if not name:
+        raise HTTPException(400, "a name is required")
+    # Normalize the provided identifiers.
+    idents: list[tuple[str, str]] = []
+    for raw in (body.emails or []):
+        n = _c.normalize_email(str(raw))
+        if n and ("email", n) not in idents:
+            idents.append(("email", n))
+    for raw in (body.phones or []):
+        n = _c.normalize_phone(str(raw))
+        if n and ("phone", n) not in idents:
+            idents.append(("phone", n))
+
+    # Reuse an existing contact if any identifier already maps to one.
+    contact = None
+    for (kind, value) in idents:
+        ex = (db.query(ContactIdentity)
+              .filter(ContactIdentity.tenant_id == tenant.id,
+                      ContactIdentity.owner_user_id == user.id,
+                      ContactIdentity.kind == kind,
+                      ContactIdentity.value == value).first())
+        if ex:
+            contact = db.get(UnifiedContact, ex.contact_id)
+            if contact and contact.owner_user_id == user.id:
+                break
+            contact = None
+
+    if contact is None:
+        contact = UnifiedContact(
+            tenant_id=tenant.id, owner_user_id=user.id, circle="acquaintance",
+            created_at=_now())
+        db.add(contact)
+        db.flush()
+    contact.display_name = name[:200]
+    contact.sort_key = name.lower()[:200]
+    contact.custom_name = True
+    parts = name.split()
+    contact.given_name = contact.given_name or (parts[0][:120] if parts else "")
+    contact.family_name = contact.family_name or (parts[-1][:120] if len(parts) > 1 else "")
+    if body.nickname is not None:
+        contact.nickname = body.nickname.strip()
+    if body.relationship is not None:
+        contact.relationship = body.relationship.strip()
+    if body.labels is not None:
+        contact.labels = sorted({s.strip() for s in body.labels if s.strip()})
+    if body.notes is not None:
+        contact.notes = body.notes
+    contact.updated_at = _now()
+
+    for (kind, value) in idents:
+        exists = (db.query(ContactIdentity)
+                  .filter(ContactIdentity.contact_id == contact.id,
+                          ContactIdentity.kind == kind,
+                          ContactIdentity.value == value).first())
+        if exists:
+            exists.link_method = "manual"
+            exists.confirmed = True
+            exists.updated_at = _now()
+            continue
+        db.add(ContactIdentity(
+            tenant_id=tenant.id, owner_user_id=user.id, contact_id=contact.id,
+            kind=kind, value=value[:255], raw_value=value[:255],
+            source_type="manual", link_method="manual", confirmed=True,
+            confidence=1.0, last_seen=_now(), created_at=_now(), updated_at=_now()))
+    if idents and not contact.primary_email:
+        contact.primary_email = next((v for (k, v) in idents if k == "email"), "")
+    if idents and not contact.primary_phone:
+        contact.primary_phone = next((v for (k, v) in idents if k == "phone"), "")
+    db.commit()
+    return _contact_detail(db, contact)
+
+
+# --------------------------------------------------------------------------- #
 # Single contact: detail, exchanges, curation, identities                     #
 # --------------------------------------------------------------------------- #
 @router.get("/{cid}")
@@ -428,6 +526,7 @@ class ContactUpdate(BaseModel):
     hidden: bool | None = None
     notes: str | None = None
     details: dict | None = None
+    reset_name: bool | None = None  # drop the custom name, revert to the deduced one
 
 
 @router.put("/{cid}")
@@ -439,9 +538,17 @@ def update_contact(cid: str, body: ContactUpdate,
     c = db.get(UnifiedContact, cid)
     if not c or c.owner_user_id != user.id:
         raise HTTPException(404, "contact not found")
-    if body.display_name is not None:
-        c.display_name = body.display_name.strip() or c.display_name
+    if body.reset_name:
+        # Revert to the auto-deduced name; rebuild resumes managing it.
+        c.custom_name = False
+        if c.derived_name:
+            c.display_name = c.derived_name
+            c.sort_key = c.derived_name.lower()
+    elif body.display_name is not None and body.display_name.strip():
+        # A user-set name is pinned (custom_name) so a rebuild never reverts it.
+        c.display_name = body.display_name.strip()
         c.sort_key = c.display_name.lower()
+        c.custom_name = True
     if body.nickname is not None:
         c.nickname = body.nickname.strip()
     if body.relationship is not None:

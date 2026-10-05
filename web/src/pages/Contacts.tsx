@@ -4,7 +4,7 @@ import { api } from "../api";
 import { Card, Loading, Pill, timeAgo, serverDate } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
-import { notify, confirmDialog } from "../components/dialog";
+import { notify, confirmDialog, formDialog, promptDialog } from "../components/dialog";
 
 // ---- Types -----------------------------------------------------------------
 interface Stats {
@@ -21,6 +21,7 @@ interface Contact {
   primary_email?: string; primary_phone?: string; avatar_url?: string;
   circle: string; pinned_circle?: string; relationship?: string;
   labels: string[]; starred: boolean; hidden?: boolean;
+  custom_name?: boolean; derived_name?: string;
   interaction_count: number; last_interaction_at?: string | null;
   first_interaction_at?: string | null; source_types: string[];
   stats: Stats; notes?: string; details?: Record<string, Record<string, string>>;
@@ -98,6 +99,7 @@ export default function Contacts() {
   const [sort, setSort] = useState("circle");
   const [starredOnly, setStarredOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(params.get("c"));
+  const [seed, setSeed] = useState<Contact | null>(null);
   const [fullId, setFullId] = useState<string | null>(params.get("full"));
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -158,6 +160,38 @@ export default function Contacts() {
     } finally { setBusy(false); }
   }
 
+  async function createContact() {
+    const r = await formDialog({
+      title: "New contact",
+      description: "Add someone manually. Any email or phone you give is linked so a future message or contact card from that address attaches to this person automatically.",
+      fields: [
+        { name: "display_name", label: "Name", placeholder: "Jane Doe", required: true },
+        { name: "emails", label: "Emails", placeholder: "jane@example.com, jane@work.com", hint: "Comma-separated" },
+        { name: "phones", label: "Phones", placeholder: "+1 201 555 0100", hint: "Comma-separated" },
+        { name: "relationship", label: "Relationship", placeholder: "friend, family, colleague…" },
+        { name: "nickname", label: "Nickname" },
+      ],
+      confirmLabel: "Create contact",
+    });
+    if (!r || !r.display_name?.trim()) return;
+    const split = (s: string) => (s || "").split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
+    try {
+      const c = await api.post<Contact>("/contacts", {
+        display_name: r.display_name.trim(),
+        emails: split(r.emails || ""),
+        phones: split(r.phones || ""),
+        relationship: (r.relationship || "").trim() || undefined,
+        nickname: (r.nickname || "").trim() || undefined,
+      });
+      setSeed(c);
+      setSelected(c.id);
+      await loadOverview(); await loadList();
+      notify({ title: "Contact created", message: `${c.display_name} was added.`, tone: "ok" });
+    } catch (e) {
+      notify({ title: "Couldn't create contact", message: (e as { message?: string }).message || "The request failed.", tone: "danger" });
+    }
+  }
+
   const grouped = useMemo(() => {
     const m: Record<string, Contact[]> = {};
     for (const c of contacts || []) (m[c.circle] ||= []).push(c);
@@ -193,6 +227,9 @@ export default function Contacts() {
           )}
           <button className="btn ghost sm" onClick={() => setShowSettings(true)}>
             <Icon name="gear" size={13} /> Customize
+          </button>
+          <button className="btn ghost sm" onClick={createContact}>
+            <Icon name="plus" size={13} /> New contact
           </button>
           <button className="btn ghost sm" onClick={rebuild} disabled={busy}>
             <span style={busy ? { display: "inline-block", animation: "spin 1s linear infinite" } : undefined}>
@@ -300,7 +337,7 @@ export default function Contacts() {
           </div>
           {selected && (
             <ContactDetail id={selected} relationships={ov?.prefs.relationships || []}
-                           labels={ov?.prefs.labels || []}
+                           labels={ov?.prefs.labels || []} seed={seed || undefined}
                            onClose={() => setSelected(null)} onChanged={onContactsChanged}
                            onExpand={() => setFullId(selected)} />
           )}
@@ -351,9 +388,9 @@ function ContactRow({ c, active, onClick }: { c: Contact; active: boolean; onCli
 }
 
 // ---- Detail ----------------------------------------------------------------
-function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand }:
-  { id: string; relationships: string[]; labels: string[]; onClose: () => void; onChanged: (removedId?: string) => void; onExpand?: () => void }) {
-  const [c, setC] = useState<Contact | null>(null);
+function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand, seed }:
+  { id: string; relationships: string[]; labels: string[]; onClose: () => void; onChanged: (removedId?: string) => void; onExpand?: () => void; seed?: Contact }) {
+  const [c, setC] = useState<Contact | null>(seed && seed.id === id ? seed : null);
   const [exchanges, setExchanges] = useState<Exchange[] | null>(null);
   const [exTotal, setExTotal] = useState(0);
   const [editDetails, setEditDetails] = useState(false);
@@ -363,7 +400,11 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
     try {
       const d = await api.get<Contact>(`/contacts/${id}`);
       setC(d);
-    } catch { setC(null); }
+    } catch {
+      // A just-created contact lives on the node; the CP read replica lags ~30s —
+      // fall back to the seed from the create response so the detail still renders.
+      setC((cur) => cur || (seed && seed.id === id ? seed : null));
+    }
   }
   async function loadExchanges() {
     try {
@@ -371,9 +412,9 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
       setExchanges(r.items); setExTotal(r.total);
     } catch { setExchanges([]); }
   }
-  useEffect(() => { setC(null); setExchanges(null); void load(); void loadExchanges(); }, [id]);
+  useEffect(() => { setC(seed && seed.id === id ? seed : null); setExchanges(null); void load(); void loadExchanges(); }, [id]);
 
-  async function patch(body: Partial<Contact>) {
+  async function patch(body: Partial<Contact> & { reset_name?: boolean }) {
     try {
       const d = await api.put<Contact>(`/contacts/${id}`, body);
       setC((cur) => cur ? { ...cur, ...d } : d);
@@ -381,6 +422,11 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
     } catch (e) {
       notify({ message: (e as { message?: string }).message || "Couldn't save the change.", tone: "danger" });
     }
+  }
+
+  async function rename() {
+    const v = await promptDialog({ title: "Rename contact", message: "Set a custom display name. It won't be overwritten by a rebuild; the deduced name is kept for matching.", defaultValue: c?.display_name || "" });
+    if (v != null && v.trim()) void patch({ display_name: v.trim() });
   }
 
   if (!c) return <Card><Loading label="Loading contact…" card={false} /></Card>;
@@ -398,10 +444,20 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
           <div>
             <div className="row" style={{ gap: 8, alignItems: "center" }}>
               <h2 style={{ margin: 0, fontSize: 20 }}>{c.display_name}</h2>
+              <button className="btn ghost sm" title="Rename" onClick={rename}><Icon name="edit" size={13} /></button>
               <button className="btn ghost sm" title="Star"
                       onClick={() => patch({ starred: !c.starred })}
                       style={{ color: c.starred ? "var(--warn)" : "var(--text-faint)" }}>★</button>
             </div>
+            {c.custom_name && c.derived_name && c.derived_name !== c.display_name && (
+              <div className="faint" style={{ fontSize: 11 }}>
+                Custom name ·{" "}
+                <button title={`Reset to "${c.derived_name}"`} onClick={() => patch({ reset_name: true })}
+                        style={{ background: "none", border: "none", padding: 0, color: "var(--brand)", cursor: "pointer", fontSize: 11 }}>
+                  reset to deduced
+                </button>
+              </div>
+            )}
             <div className="faint" style={{ fontSize: 12 }}>
               <span style={{ color: CIRCLE_META[c.circle]?.color }}>● </span>
               {CIRCLE_META[c.circle]?.label}
@@ -552,7 +608,7 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
   useEffect(() => { setC(null); void load(); }, [id]);
   useEffect(() => { void loadExchanges(); }, [id, exLimit]);
 
-  async function patch(body: Partial<Contact>) {
+  async function patch(body: Partial<Contact> & { reset_name?: boolean }) {
     try {
       const d = await api.put<Contact>(`/contacts/${id}`, body);
       setC((cur) => cur ? { ...cur, ...d } : d);
@@ -560,6 +616,11 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
     } catch (e) {
       notify({ message: (e as { message?: string }).message || "Couldn't save the change.", tone: "danger" });
     }
+  }
+
+  async function rename() {
+    const v = await promptDialog({ title: "Rename contact", message: "Set a custom display name. It won't be overwritten by a rebuild; the deduced name is kept for matching.", defaultValue: c?.display_name || "" });
+    if (v != null && v.trim()) void patch({ display_name: v.trim() });
   }
 
   if (!c) return (
@@ -586,9 +647,19 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
             <div>
               <div className="row" style={{ gap: 10, alignItems: "center" }}>
                 <h1 style={{ margin: 0, fontSize: 26 }}>{c.display_name}</h1>
+                <button className="btn ghost sm" title="Rename" onClick={rename}><Icon name="edit" size={14} /></button>
                 <button className="btn ghost sm" title="Star" onClick={() => patch({ starred: !c.starred })}
                         style={{ color: c.starred ? "var(--warn)" : "var(--text-faint)", fontSize: 18 }}>★</button>
               </div>
+              {c.custom_name && c.derived_name && c.derived_name !== c.display_name && (
+                <div className="faint" style={{ fontSize: 11.5 }}>
+                  Custom name ·{" "}
+                  <button title={`Reset to "${c.derived_name}"`} onClick={() => patch({ reset_name: true })}
+                          style={{ background: "none", border: "none", padding: 0, color: "var(--brand)", cursor: "pointer", fontSize: 11.5 }}>
+                    reset to deduced
+                  </button>
+                </div>
+              )}
               {c.nickname && <div className="faint" style={{ fontSize: 13 }}>“{c.nickname}”</div>}
               <div className="faint" style={{ fontSize: 13, marginTop: 2 }}>
                 <span style={{ color: CIRCLE_META[c.circle]?.color }}>● </span>

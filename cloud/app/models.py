@@ -1962,6 +1962,11 @@ class UnifiedContact(Base):
     given_name = Column(String, default="")
     family_name = Column(String, default="")
     nickname = Column(String, default="")
+    # User set the display name — rebuild preserves it instead of overwriting with
+    # the deduced name. ``derived_name`` keeps the latest auto-deduced name so name
+    # matching (and a "reset to deduced" action) never loses that signal.
+    custom_name = Column(Boolean, default=False)
+    derived_name = Column(String, default="")
     primary_email = Column(String, default="")                # denormalized for the list
     primary_phone = Column(String, default="")
     avatar_url = Column(String, default="")

@@ -712,9 +712,13 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
         # Bound the name — a message field can be a giant recipient/raw blob, and
         # sort_key is indexed (btree rejects values past ~2704 bytes).
         name = (person.best_name() or "Unknown")[:200]
-        contact.display_name = name
-        contact.sort_key = _sort_key(name)[:200]
-        parts = name.split()
+        contact.derived_name = name
+        # A user-set name wins over the deduced one (but we keep deriving for matching
+        # + a "reset to deduced" action). sort_key/given/family follow the shown name.
+        shown = contact.display_name if (contact.custom_name and contact.display_name) else name
+        contact.display_name = shown
+        contact.sort_key = _sort_key(shown)[:200]
+        parts = shown.split()
         if parts and not contact.given_name:
             contact.given_name = parts[0][:120]
         if len(parts) > 1 and not contact.family_name:
@@ -772,7 +776,7 @@ def _persist(db: Session, user: User, people: dict[str, _Person],
         has_manual = bool(existing_manual.get(cid))
         curated = bool(contact.labels or contact.relationship or contact.notes
                        or (contact.details or {}) or contact.starred
-                       or contact.pinned_circle)
+                       or contact.pinned_circle or contact.custom_name)
         if has_manual or curated:
             continue  # keep user-touched contacts even if the index went quiet
         db.query(ContactIdentity).filter(
@@ -804,7 +808,19 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
             .filter(UnifiedContact.tenant_id == tid,
                     UnifiedContact.owner_user_id == user.id,
                     UnifiedContact.hidden.is_(False)).all())
-    multi = [c for c in rows if len(_norm_name(c.display_name).split()) >= 2]
+
+    def _cand_names(c: UnifiedContact) -> list[str]:
+        # Match on the shown name AND the deduced name, so a user-renamed contact
+        # still name-matches records that carry its original deduced name (no loss
+        # of fidelity when a name is customized).
+        out: list[str] = []
+        for nm in (c.display_name, c.derived_name):
+            nm = (nm or "").strip()
+            if nm and len(_norm_name(nm).split()) >= 2 and nm not in out:
+                out.append(nm)
+        return out
+
+    multi = [c for c in rows if _cand_names(c)]
     # Identity count per contact (to decide link-vs-merge + which side is "loose").
     idn_count: dict[str, int] = defaultdict(int)
     one_identity: dict[str, tuple] = {}  # contact_id -> (kind, value, raw, source)
@@ -833,15 +849,17 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
     # mid-loop; with expire_on_commit the ORM objects would then raise on re-access, so
     # we never touch them again — we compare plain Python snapshots and merge by id.
     snap: dict[str, dict] = {
-        c.id: {"id": c.id, "name": c.display_name, "loose": _loose(c),
-               "score": _curation_score(c), "oid": one_identity.get(c.id),
-               "card": c.id in card_backed}
+        c.id: {"id": c.id, "name": c.display_name, "names": _cand_names(c),
+               "loose": _loose(c), "score": _curation_score(c),
+               "oid": one_identity.get(c.id), "card": c.id in card_backed}
         for c in multi}
 
     # Bucket by surname so we only compare plausible pairs (O(n²) within a surname).
+    # A contact with a custom + deduced name is bucketed under BOTH surnames.
     by_surname: dict[str, list[dict]] = defaultdict(list)
     for c in multi:
-        by_surname[_norm_name(c.display_name).split()[-1].strip(".")].append(snap[c.id])
+        for nm in snap[c.id]["names"]:
+            by_surname[_norm_name(nm).split()[-1].strip(".")].append(snap[c.id])
 
     emitted: set[str] = set()
     for surname, group in by_surname.items():
@@ -850,9 +868,10 @@ def _suggest(db: Session, user: User, people: dict[str, _Person], now: datetime)
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
                 a, b = group[i], group[j]
-                if a["id"] in merged_away or b["id"] in merged_away:
+                if a["id"] == b["id"] or a["id"] in merged_away or b["id"] in merged_away:
                     continue
-                sim = _name_similarity(a["name"], b["name"])
+                sim = max((_name_similarity(na, nb)
+                           for na in a["names"] for nb in b["names"]), default=0.0)
                 if sim <= 0:
                     continue
                 # Primary = the richer record; other = the one we'd fold in.
