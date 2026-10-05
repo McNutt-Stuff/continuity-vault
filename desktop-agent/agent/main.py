@@ -1066,10 +1066,16 @@ class Agent:
         if not script.exists():
             script = Path(self.cfg.home) / "update.sh"
         if script.exists():
-            self.log.info("self-update: launching %s", script)
+            # Download the bundle from the SAME box that advertised the target
+            # version (the node we heartbeat, else the control plane) — otherwise a
+            # CP↔node code skew makes the installed VERSION never match the target
+            # and the agent self-updates in a loop forever.
+            base = self._base()
+            env = {**os.environ, "ARKIVE_CLOUD_URL": base}
+            self.log.info("self-update: launching %s (bundle from %s)", script, base)
             # Detach into its own session so restarting this agent (which the
             # updater does) doesn't kill the update mid-flight.
-            subprocess.Popen(["bash", str(script)], start_new_session=True)
+            subprocess.Popen(["bash", str(script)], start_new_session=True, env=env)
         else:
             self.log.warning("no update script found")
 
