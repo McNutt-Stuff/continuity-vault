@@ -72,6 +72,9 @@ const CIRCLES = [
 const CIRCLE_META: Record<string, { label: string; color: string }> =
   Object.fromEntries(CIRCLES.map((c) => [c.key, { label: c.label, color: c.color }]));
 
+// Capitalize the first letter for display (relationship values are stored lowercase).
+const cap = (s?: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
+
 function initials(name: string): string {
   const p = (name || "?").trim().split(/\s+/);
   return ((p[0]?.[0] || "") + (p.length > 1 ? p[p.length - 1][0] : "")).toUpperCase() || "?";
@@ -382,7 +385,7 @@ function ContactRow({ c, active, onClick }: { c: Contact; active: boolean; onCli
       <div style={{ minWidth: 0, flex: 1 }}>
         <div className="row" style={{ gap: 6, alignItems: "center", minWidth: 0 }}>
           <span style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.display_name}</span>
-          {c.relationship && <Pill tone="info">{c.relationship}</Pill>}
+          {c.relationship && <Pill tone="info">{cap(c.relationship)}</Pill>}
         </div>
         <div className="faint" style={{ fontSize: 11.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
           {c.interaction_count.toLocaleString()} interactions
@@ -488,7 +491,7 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
         <select className="pill-select" value={c.relationship || ""} onChange={(e) => patch({ relationship: e.target.value })}
                 title="Relationship">
           <option value="">Relationship…</option>
-          {relationships.map((r) => <option key={r} value={r}>{r}</option>)}
+          {relationships.map((r) => <option key={r} value={r}>{cap(r)}</option>)}
         </select>
         <select className="pill-select" value={c.pinned_circle || ""} onChange={(e) => patch({ pinned_circle: e.target.value })}
                 title="Pin to a circle (overrides the computed tier)">
@@ -678,7 +681,7 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
               <div className="faint" style={{ fontSize: 13, marginTop: 2 }}>
                 <span style={{ color: CIRCLE_META[c.circle]?.color }}>● </span>
                 {CIRCLE_META[c.circle]?.label}{c.pinned_circle ? " (pinned)" : ""}
-                {c.relationship ? ` · ${c.relationship}` : ""}
+                {c.relationship ? ` · ${cap(c.relationship)}` : ""}
                 {c.primary_email ? ` · ${c.primary_email}` : ""}
                 {c.primary_phone ? ` · ${c.primary_phone}` : ""}
               </div>
@@ -693,7 +696,7 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
         <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 14, alignItems: "center" }}>
           <select className="pill-select" value={c.relationship || ""} onChange={(e) => patch({ relationship: e.target.value })} title="Relationship">
             <option value="">Relationship…</option>
-            {relationships.map((r) => <option key={r} value={r}>{r}</option>)}
+            {relationships.map((r) => <option key={r} value={r}>{cap(r)}</option>)}
           </select>
           <select className="pill-select" value={c.pinned_circle || ""} onChange={(e) => patch({ pinned_circle: e.target.value })}
                   title="Pin to a circle (overrides the computed tier)">
