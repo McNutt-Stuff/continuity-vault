@@ -474,9 +474,13 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
             subj_index: Dict[str, list] = {}   # normalized subject -> [message_id]
             orphans: list = []
             addr_freq: Dict[str, int] = {}     # address -> fragment count (owner id)
-            # Deterministic row order (by block) so grouping/tie-breaks are stable
-            # across runs and the content signature doesn't churn.
-            order = "ORDER BY block" if "block" in mcols else ""
+            # FULLY deterministic row order so grouping/tie-breaks are stable across
+            # runs and the content signature never churns. ``block`` isn't always a
+            # column (schema varies by hxprobe/store), and WITHOUT an explicit order
+            # SQLite's row order can vary between runs — which reshuffled orphan-
+            # fragment grouping and re-versioned every email endlessly. Always fall
+            # back to rowid (always present + stable) so ordering is guaranteed.
+            order = "ORDER BY block, rowid" if "block" in mcols else "ORDER BY rowid"
             for row in con.execute(f"SELECT rowid AS _rid, * FROM messages {order} LIMIT {_MAX_MESSAGES}"):
                 _snd = _bare_email(mget(row, "sender"))
                 if _snd:
