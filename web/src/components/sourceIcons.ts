@@ -49,3 +49,61 @@ export function brandForSource(sourceType: string): string | null {
   const t = resolveIconType(sourceType);
   return t && SYNCED_SOURCE_ICONS.has(t) ? t : null;
 }
+
+// Human-friendly display names for raw source types. The single place that turns
+// "imessage" → "Apple Messages", "google_calendar" → "Google Calendar", etc.
+export const SOURCE_LABELS: Readonly<Record<string, string>> = {
+  gmail: "Gmail",
+  google_calendar: "Google Calendar",
+  google_contacts: "Google Contacts",
+  google_drive: "Google Drive",
+  google_photos: "Google Photos",
+  google_workspace: "Google Workspace",
+  outlook: "Outlook",
+  outlook_local: "Outlook (desktop)",
+  exchange: "Exchange Online",
+  onedrive: "OneDrive",
+  onenote: "OneNote",
+  sharepoint: "SharePoint",
+  teams: "Microsoft Teams",
+  microsoft365: "Microsoft 365",
+  copilot: "Microsoft Copilot",
+  imessage: "Apple Messages",
+  icloud: "iCloud",
+  onepassword: "1Password",
+  dropbox: "Dropbox",
+  slack: "Slack",
+  notion: "Notion",
+  github: "GitHub",
+  reddit: "Reddit",
+  facebook: "Facebook",
+  instagram: "Instagram",
+  linkedin: "LinkedIn",
+  evernote: "Evernote",
+  salesforce: "Salesforce",
+  crossbeam: "Crossbeam",
+  ubiquiti: "Ubiquiti UniFi",
+  okta: "Okta",
+  qualys: "Qualys",
+  tenable: "Tenable",
+  proofpoint: "Proofpoint",
+  aws: "Amazon S3",
+  azure: "Azure Blob",
+  gcp: "Google Cloud Storage",
+  endpoint_files: "Endpoint files",
+  manual: "Added manually",
+  macos: "macOS",
+  windows: "Windows",
+  ios: "iOS",
+  android: "Android",
+};
+
+// Pretty display name for a raw source type (falls back to a title-cased version
+// of the key so a brand-new source still reads reasonably).
+export function sourceLabel(type?: string): string {
+  if (!type) return "";
+  const hit = SOURCE_LABELS[type];
+  if (hit) return hit;
+  return type.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+

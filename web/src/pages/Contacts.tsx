@@ -4,6 +4,7 @@ import { api } from "../api";
 import { Card, Loading, Pill, timeAgo, serverDate } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
+import { sourceLabel } from "../components/sourceIcons";
 import { notify, confirmDialog, formDialog, promptDialog } from "../components/dialog";
 
 // ---- Types -----------------------------------------------------------------
@@ -389,7 +390,9 @@ function ContactRow({ c, active, onClick }: { c: Contact; active: boolean; onCli
         </div>
       </div>
       <div className="row" style={{ gap: 3 }}>
-        {(c.source_types || []).slice(0, 4).map((s) => <SourceIcon key={s} type={s} size={15} />)}
+        {(c.source_types || []).slice(0, 4).map((s) => (
+          <span key={s} title={sourceLabel(s)} style={{ display: "inline-flex" }}><SourceIcon type={s} size={15} /></span>
+        ))}
       </div>
     </div>
   );
@@ -536,7 +539,7 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
             {bySource.map(([s, n]) => (
               <div key={s} className="row" style={{ gap: 8, alignItems: "center" }}>
                 <SourceIcon type={s} size={15} />
-                <span style={{ fontSize: 12.5, flex: 1 }}>{s}</span>
+                <span style={{ fontSize: 12.5, flex: 1 }}>{sourceLabel(s)}</span>
                 <span className="faint" style={{ fontSize: 12 }}>{n.toLocaleString()}</span>
               </div>
             ))}
@@ -749,7 +752,7 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
                 {bySource.map(([s, n]) => (
                   <div key={s} className="row" style={{ gap: 8, alignItems: "center" }}>
                     <SourceIcon type={s} size={16} />
-                    <span style={{ fontSize: 13, flex: 1 }}>{s}</span>
+                    <span style={{ fontSize: 13, flex: 1 }}>{sourceLabel(s)}</span>
                     <span className="faint" style={{ fontSize: 12.5 }}>{n.toLocaleString()}</span>
                   </div>
                 ))}
@@ -887,7 +890,7 @@ function ImportantDates({ dates }: { dates?: ImportantDate[] }) {
       <div className="faint" style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 6 }}>Important dates</div>
       <div className="imp-dates">
         {dates.map((d, i) => (
-          <div key={i} className="imp-date" title={`From ${d.source_type || "a source"}`}>
+          <div key={i} className="imp-date" title={`From ${sourceLabel(d.source_type) || "a source"}`}>
             <span className="imp-ico"><Icon name="gift" size={15} /></span>
             <span className="imp-when">{fmtImportantDate(d)}</span>
             <span className="imp-what">· {d.label || (d.kind.charAt(0).toUpperCase() + d.kind.slice(1))}</span>
@@ -1278,7 +1281,7 @@ function SuggSide({ label, idents }: { label: string; idents?: SuggIdent[] }) {
       {(idents && idents.length) ? (
         <div className="sugg-idents">
           {idents.map((i, n) => (
-            <span key={n} className="idf-chip" title={`${i.kind}${i.source_type ? ` · from ${i.source_type}` : ""}`}>
+            <span key={n} className="idf-chip" title={`${i.kind}${i.source_type ? ` · from ${sourceLabel(i.source_type)}` : ""}`}>
               {i.source_type ? <SourceIcon type={i.source_type} size={12} /> : <span>{IDENT_GLYPH[i.kind] || "•"}</span>}
               <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 180 }}>{i.value}</span>
             </span>
@@ -1374,7 +1377,7 @@ function SourcesModal({ onClose }: { onClose: () => void }) {
                         <div className="row" style={{ gap: 8, alignItems: "center" }}>
                           <SourceIcon type={s.source_type} size={18} />
                           <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }} className="row">
-                            {s.source_type}
+                            {sourceLabel(s.source_type)}
                             {gap && <Pill tone="warn">indexed · not linked</Pill>}
                             {cardSource && <Pill tone="info">address book</Pill>}
                           </span>
