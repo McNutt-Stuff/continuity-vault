@@ -104,6 +104,7 @@ cat > "$PLIST" <<PLIST_EOF
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
   <key>StandardOutPath</key><string>${DATA_DIR}/agent.log</string>
   <key>StandardErrorPath</key><string>${DATA_DIR}/agent.err</string>
 </dict>

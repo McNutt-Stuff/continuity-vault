@@ -107,6 +107,10 @@ class Agent:
         self.reg = self._load_registration()
         self._last_collect = 0.0
         self._last_heartbeat = 0.0
+        # Liveness tick for the in-process watchdog: the run loop bumps this every
+        # iteration; a watchdog thread hard-exits (so launchd respawns us) if it
+        # goes stale — catching a HANG that KeepAlive can't see (process is alive).
+        self._last_tick = time.monotonic()
         # Assigned customer node URL (federated fleets): once set, all signaling +
         # ingest goes here instead of the control plane. Persisted in registration.
         self._node_url: Optional[str] = (self.reg or {}).get("node_url")
@@ -1057,6 +1061,33 @@ class Agent:
 
     # -- run loop -----------------------------------------------------
 
+    def _start_watchdog(self) -> None:
+        """Hard-restart the agent if the main loop stops ticking.
+
+        launchd's KeepAlive respawns us on a CRASH, but not on a HANG (the process
+        is still alive). This daemon thread watches the loop's liveness tick and,
+        if it goes stale beyond a generous threshold, logs + os._exit(1) so launchd
+        starts a fresh instance. Background collections run on worker threads, so
+        the main loop only does heartbeat + sleep — a long stall means a real hang."""
+        interval = int(self.reg.get("heartbeat_interval_seconds", 30) or 30)
+        stall_after = max(600, interval * 12)
+
+        def _watch() -> None:
+            while True:
+                time.sleep(min(60, max(15, interval)))
+                age = time.monotonic() - self._last_tick
+                if age > stall_after:
+                    self.log.error("watchdog: main loop stalled %.0fs (> %ds) — forcing "
+                                   "restart so launchd respawns the agent", age, stall_after)
+                    try:
+                        self._write_status({"error": f"watchdog restart (stalled {int(age)}s)"})
+                    except Exception:  # noqa: BLE001
+                        pass
+                    os._exit(1)
+
+        threading.Thread(target=_watch, name="watchdog", daemon=True).start()
+        self.log.info("watchdog started (restart if main loop stalls > %ds)", stall_after)
+
     def run(self) -> None:
         if not self.registered:
             if self.cfg.linking_code:
@@ -1066,9 +1097,11 @@ class Agent:
                 return
         self._start_indexer()  # background folder-index builder
         self._start_worker()   # background collection worker
+        self._start_watchdog()  # in-process liveness watchdog (restart on hang)
         interval = self.reg.get("heartbeat_interval_seconds", 30)
         idle = min(int(interval or 30), 15)  # cap idle poll so first command lands sooner
         while True:
+            self._last_tick = time.monotonic()  # liveness heartbeat for the watchdog
             try:
                 self.heartbeat()  # heartbeat pulls mappings + runs due collects
             except Exception as exc:
