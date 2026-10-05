@@ -327,10 +327,20 @@ class _Person:
                 nm = _name_from_email(value)
                 if nm:
                     return nm
-        # Fall back to a human-ish label from the strongest identity (bounded —
-        # a raw message field can be a giant blob).
+        # Fall back to a human-ish label from the strongest identity. Parse any
+        # "Name <email>" / '"Name" <+phone>' raw so the DISPLAY NAME is the clean
+        # name, not the whole string — otherwise a manually-linked identity whose
+        # raw_value is "Vivek Mani <vivek@x>" names the contact that verbatim and it
+        # never matches the clean-named card of the same person (blocks auto-merge).
         for (kind, value), d in self.identities.items():
-            return (d.get("raw") or value)[:200]
+            raw = str(d.get("raw") or value)
+            parsed = contacts.parse_party(raw)
+            if parsed and parsed[2]:
+                return parsed[2][:200]
+            cleaned = re.sub(r"\s*<[^>]*>\s*", " ", raw).strip().strip('"').strip()
+            if cleaned and "@" not in cleaned and not cleaned.replace("+", "").isdigit():
+                return cleaned[:200]
+            return raw[:200]
         return "Unknown"
 
 
@@ -541,6 +551,12 @@ def rebuild(db: Session, user: User) -> int:
         for ci in cis:
             p.add_identity(ci.kind, ci.value, raw=ci.raw_value, label=ci.label,
                            source_type=ci.source_type, source_object_id=ci.source_object_id)
+            # Seed a CLEAN name from the identity's raw ("Vivek Mani <vivek@x>" →
+            # "Vivek Mani") so a manually-linked, interaction-less contact still gets
+            # a real display name and name-matches the same person's card (→ merge).
+            parsed = contacts.parse_party(ci.raw_value or ci.value or "")
+            if parsed and parsed[2]:
+                p.names[parsed[2].strip()[:200]] += 2
 
     n, person_to_contact = _persist(db, user, people, existing_manual, now)
     _write_exchanges(db, user, message_rows, person_to_contact, uf, now)
