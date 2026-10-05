@@ -1008,6 +1008,11 @@ and **browser‑based AI services** seen on the network — when your UniFi
 controller exposes DNS/hostname telemetry, Arkive matches the destinations
 devices visit (e.g. `chat.openai.com`, `claude.ai`, `gemini.google.com`) against
 an AI‑domain catalog and records them in your apps/services and devices views.
+Endpoints running the Arkive agent can also opt in to **Web & AI usage
+detection** (Devices → the device → settings), which reads local browser history
+to map the web apps and AI services that device uses — **service hosts only,
+never pages or content** — and feeds the same apps/services tables and signals,
+so browser AI is caught even where the network can't see it.
 Each match becomes an *AI tool detected* signal, and any **unsanctioned ("shadow
 AI")** use raises a finding — ranked by the tool's data‑risk — so you can review
 whether sensitive or regulated data may be flowing to a third‑party AI service

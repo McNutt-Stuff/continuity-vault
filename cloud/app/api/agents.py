@@ -65,6 +65,7 @@ DEFAULT_AGENT_CONFIG = {
     "verbose_logging": False,  # advanced: DEBUG-level agent logging
     "log_level": "info",  # debug|info|warning|error (overrides verbose_logging)
     "show_tray_icon": True,  # show the macOS menu-bar icon (applies on agent restart)
+    "collect_web_usage": False,  # opt-in: browser-history web/app usage (AI + shadow apps)
 }
 
 
@@ -178,6 +179,7 @@ class AgentConfigUpdate(BaseModel):
     verbose_logging: bool | None = None
     log_level: str | None = None
     show_tray_icon: bool | None = None
+    collect_web_usage: bool | None = None
 
 
 @fleet_router.put("/{agent_id}/config")
@@ -587,6 +589,91 @@ def _agent_ingest_url(db: Session, agent: DesktopAgent) -> str | None:
     return services.tenant_home_node_url(db, agent.tenant_id)
 
 
+def _ingest_endpoint_web_usage(db: Session, agent: DesktopAgent, records: list) -> None:
+    """Fold the endpoint's browser web/app usage into the apps/services tables.
+
+    Each record is ``{host, visits, last_seen}``. Hosts become NetworkApp rows (so
+    they appear alongside network DPI apps and feed shadow-source + AI detection):
+    an AI domain → an ``ai:<tool>`` app (category AI, meta.ai) the AI detector picks
+    up; any other host → a ``web:<host>`` service mapped to a backup connector when
+    one exists (shadow-source detection). A per-device NetworkUsage edge records the
+    visit count. Scoped to a synthetic ``endpoint-web`` integration so these never
+    collide with a real UniFi instance."""
+    if not records:
+        return
+    from ..models import NetworkApp, NetworkClient, NetworkUsage
+    from ..integrations.source_map import map_app_to_source
+    from ..signals.ai import catalog as ai_catalog
+    now = _now()
+    iid = "endpoint-web"
+    device_key = agent.id
+
+    # Ensure a client row for this device so usage ties into the clients views.
+    client = (db.query(NetworkClient).filter(
+        NetworkClient.tenant_id == agent.tenant_id,
+        NetworkClient.integration_id == iid,
+        NetworkClient.client_key == device_key).first())
+    if client is None:
+        client = NetworkClient(tenant_id=agent.tenant_id, integration_id=iid,
+                               client_key=device_key, first_seen=now)
+        db.add(client)
+    client.name = agent.hostname or agent.name or device_key
+    client.hostname = agent.hostname or ""
+    client.device_type = "computer"
+    client.owner_user_id = getattr(agent, "owner_user_id", None) or client.owner_user_id
+    client.last_seen = now
+
+    existing_a = {a.app_key: a for a in db.query(NetworkApp).filter(
+        NetworkApp.tenant_id == agent.tenant_id, NetworkApp.integration_id == iid).all()}
+    existing_u = {u.app_key: u for u in db.query(NetworkUsage).filter(
+        NetworkUsage.tenant_id == agent.tenant_id, NetworkUsage.integration_id == iid,
+        NetworkUsage.client_key == device_key).all()}
+
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        host = (rec.get("host") or "").strip().lower()
+        if not host or "." not in host:
+            continue
+        visits = int(rec.get("visits") or 1)
+        last_seen = _parse_dt(rec.get("last_seen")) or now
+        ai = ai_catalog.match_domain(host)
+        if ai:
+            app_key = f"ai:{ai['id']}"
+            name, category, source_type = ai["name"], "AI", ""
+            meta = {"ai": True, "ai_tool_id": ai["id"], "vendor": ai.get("vendor", ""),
+                    "ai_category": ai.get("category", ""), "data_risk": ai.get("data_risk", "medium"),
+                    "sanctioned": bool(ai.get("sanctioned")), "surface": "endpoint",
+                    "domains": [host]}
+        else:
+            app_key = f"web:{host}"
+            name, category = host, "Web"
+            source_type = map_app_to_source(host, "")
+            meta = {"endpoint": True, "host": host}
+
+        a = existing_a.get(app_key)
+        if a is None:
+            a = NetworkApp(tenant_id=agent.tenant_id, integration_id=iid,
+                           app_key=app_key, first_seen=now)
+            db.add(a)
+            existing_a[app_key] = a
+        a.name = name
+        a.category = category
+        a.source_type = source_type
+        a.client_count = max(int(a.client_count or 0), 1)
+        a.last_seen = last_seen
+        a.meta = {**(a.meta or {}), **meta}
+
+        u = existing_u.get(app_key)
+        if u is None:
+            u = NetworkUsage(tenant_id=agent.tenant_id, integration_id=iid,
+                             client_key=device_key, app_key=app_key)
+            db.add(u)
+            existing_u[app_key] = u
+        u.sessions = visits
+        u.last_seen = last_seen
+
+
 @agent_router.post("/heartbeat")
 def heartbeat(body: AgentHeartbeat, request: Request,
               agent: DesktopAgent = Depends(_auth_agent),
@@ -620,6 +707,11 @@ def heartbeat(body: AgentHeartbeat, request: Request,
             device_name=getattr(agent, "hostname", "") or agent.name or "")
     except Exception:  # noqa: BLE001
         pass
+    # Opt-in browser web/app usage → apps/services tables (AI + shadow-app detection).
+    try:
+        _ingest_endpoint_web_usage(db, agent, tel.get("web_usage") or [])
+    except Exception:  # noqa: BLE001
+        logger.exception("endpoint web-usage ingest failed for agent %s", agent.id)
     # Drain several commands per heartbeat so interactive work (folder expansion)
     # isn't throttled to one per cycle. `command` (singular) stays for older agents.
     commands = []

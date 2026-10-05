@@ -351,6 +351,7 @@ function DeviceDetail({ a, onBack, onCommand, onRename, onRemove, reload }:
   const [kv, setKv] = useState<{ title: string; rows: [string, string][] } | null>(null);
   const [verbose, setVerbose] = useState<boolean>(!!a.config?.verbose_logging);
   const [showTray, setShowTray] = useState<boolean>(a.config?.show_tray_icon !== false);
+  const [webUsage, setWebUsage] = useState<boolean>(!!a.config?.collect_web_usage);
   const [dest, setDest] = useState<string>(() => {
     const arr = a.config?.destinations || ["cv-cloud"];
     if (arr.includes("appliance")) return arr.includes("cv-cloud") ? "both" : "appliance";
@@ -524,6 +525,19 @@ function DeviceDetail({ a, onBack, onCommand, onRename, onRemove, reload }:
           <button className={`btn sm ${verbose ? "primary" : ""}`}
                   onClick={() => { const next = !verbose; setVerbose(next); void setConfig({ verbose_logging: next }); }}>
             {verbose ? "On" : "Off"}
+          </button>
+        </div>
+        <div className="collector-row" style={{ marginTop: 10 }}>
+          <div className="row" style={{ gap: 10 }}>
+            <Icon name="activity" size={16} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Web &amp; AI usage detection</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>Reads local browser history to map the web apps &amp; AI services this device uses (service hosts only — never pages or content). Powers shadow-app &amp; AI detection.</div>
+            </div>
+          </div>
+          <button className={`btn sm ${webUsage ? "primary" : ""}`}
+                  onClick={() => { const next = !webUsage; setWebUsage(next); void setConfig({ collect_web_usage: next }); }}>
+            {webUsage ? "On" : "Off"}
           </button>
         </div>
       </Card>

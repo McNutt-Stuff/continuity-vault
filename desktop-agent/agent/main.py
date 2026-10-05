@@ -38,6 +38,7 @@ from .collectors import files as files_collector
 from .collectors import imessage
 from .collectors import outlook_local
 from .collectors import posture as posture_collector
+from .collectors import webusage
 from . import agent_log
 from .crypto import encrypt_content, load_or_create_key, wrap_for_recovery
 
@@ -270,7 +271,7 @@ class Agent:
             pq = get_provider().pq_available
         except Exception:
             pq = False
-        return {
+        data = {
             "hostname": socket.gethostname(),
             "local_ip": _local_ip(),
             "local_user": _local_user(),
@@ -300,6 +301,16 @@ class Agent:
                 "building": self._fs_index is None,
             },
         }
+        # Opt-in web/app usage (browser history → service-level telemetry) for AI
+        # + shadow-app detection. Off unless the admin enabled it for this agent.
+        if cfg.get("collect_web_usage"):
+            try:
+                wu = webusage.collect()
+                if wu:
+                    data["web_usage"] = wu
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("web-usage collection failed: %s", exc)
+        return data
 
     def _write_status(self, extra: dict) -> None:
         status = {"registered": self.registered,
