@@ -45,6 +45,10 @@ from .crypto import encrypt_content, load_or_create_key, wrap_for_recovery
 # Number of collection workers, so independent sources collect concurrently.
 _WORKER_THREADS = 4
 
+# If the agent can't successfully reach the fleet for this long, restart itself
+# (launchd respawns a clean process) — clears wedged network/thread state.
+_OFFLINE_RESTART_SECS = 900
+
 # Gateway statuses that mean the control plane is momentarily unreachable (e.g.
 # mid-deploy): treat as transient and retry rather than a hard failure.
 _GATEWAY_CODES = (502, 503, 504)
@@ -112,6 +116,11 @@ class Agent:
         # iteration; a watchdog thread hard-exits (so launchd respawns us) if it
         # goes stale — catching a HANG that KeepAlive can't see (process is alive).
         self._last_tick = time.monotonic()
+        # Heartbeat health for offline self-heal: track the last SUCCESSFUL contact
+        # and a running failure count so a persistently-offline agent can re-discover
+        # its node and, if still stuck, restart itself clean.
+        self._last_hb_success = time.monotonic()
+        self._hb_failures = 0
         # Assigned customer node URL (federated fleets): once set, all signaling +
         # ingest goes here instead of the control plane. Persisted in registration.
         self._node_url: Optional[str] = (self.reg or {}).get("node_url")
@@ -132,7 +141,7 @@ class Agent:
         self._fs_index_lock = threading.Lock()
         self._fs_index_file = Path(cfg.data_dir) / "fs_index.json"
         self._rebuild_event = threading.Event()
-        self._indexer_started = False
+        self._indexer_thread: Optional[threading.Thread] = None
         # Prior endpoint-files backup state ({path: {size, mtime, hash}}) so each
         # run only reads + uploads new or changed files (incremental dedup).
         self._files_state_file = Path(cfg.data_dir) / "files_state.json"
@@ -149,7 +158,7 @@ class Agent:
         # Collections run on a background worker so heartbeats keep flowing while
         # a (potentially long) collection is in progress.
         self._job_queue: "queue.Queue[dict]" = queue.Queue()
-        self._worker_started = False
+        self._worker_threads: list[threading.Thread] = []
         self._queued_sources: set = set()
         self._queued_lock = threading.Lock()
         # Serialize persistence of the per-source schedule state so parallel
@@ -642,11 +651,12 @@ class Agent:
             self._post_fs_index(idx, request_id="auto-index")
 
     def _start_indexer(self) -> None:
-        if self._indexer_started:
+        if self._indexer_thread and self._indexer_thread.is_alive():
             return
-        self._indexer_started = True
-        self.log.info("starting background filesystem indexer")
-        threading.Thread(target=self._indexer_loop, name="fs-indexer", daemon=True).start()
+        self._indexer_thread = threading.Thread(target=self._indexer_loop,
+                                                name="fs-indexer", daemon=True)
+        self._indexer_thread.start()
+        self.log.info("filesystem indexer thread started")
 
     def _indexer_loop(self) -> None:
         interval = int(self.reg.get("config", {}).get("index_interval_seconds", 900)) if self.reg else 900
@@ -663,16 +673,19 @@ class Agent:
     # -- background collection worker ---------------------------------
 
     def _start_worker(self) -> None:
-        if self._worker_started:
+        # Supervise the pool: keep _WORKER_THREADS alive, (re)spawning any that
+        # died so a crashed collector thread self-heals instead of silently
+        # shrinking the pool. Same-source runs are de-duplicated by _queued_sources.
+        self._worker_threads = [t for t in self._worker_threads if t.is_alive()]
+        missing = _WORKER_THREADS - len(self._worker_threads)
+        if missing <= 0:
             return
-        self._worker_started = True
-        # A small pool of workers so independent sources (1Password, files,
-        # iMessage, Outlook…) collect in parallel instead of queueing behind one
-        # another. Same-source runs are still de-duplicated by _queued_sources.
-        self.log.info("starting %d background collection workers", _WORKER_THREADS)
-        for i in range(_WORKER_THREADS):
-            threading.Thread(target=self._worker_loop, name=f"collector-{i}",
-                             daemon=True).start()
+        for i in range(missing):
+            t = threading.Thread(target=self._worker_loop,
+                                 name=f"collector-{len(self._worker_threads)}", daemon=True)
+            t.start()
+            self._worker_threads.append(t)
+        self.log.info("collection workers running: %d/%d", len(self._worker_threads), _WORKER_THREADS)
 
     def _enqueue_collect(self, params: Optional[dict]) -> bool:
         """Queue a collection to run on the worker. De-duplicates by source so a
@@ -1120,19 +1133,52 @@ class Agent:
         self._start_watchdog()  # in-process liveness watchdog (restart on hang)
         interval = self.reg.get("heartbeat_interval_seconds", 30)
         idle = min(int(interval or 30), 15)  # cap idle poll so first command lands sooner
+        self._last_hb_success = time.monotonic()
         while True:
             self._last_tick = time.monotonic()  # liveness heartbeat for the watchdog
             try:
-                self.heartbeat()  # heartbeat pulls mappings + runs due collects
+                self._start_indexer()  # (re)spawn background threads if any died
+                self._start_worker()   # supervise the collector pool (self-heal)
+                self.heartbeat()       # heartbeat pulls mappings + runs due collects
+                if self._hb_failures:
+                    self.log.info("back online after %d failed heartbeat(s)", self._hb_failures)
+                self._last_hb_success = time.monotonic()
+                self._hb_failures = 0
             except Exception as exc:
+                self._hb_failures += 1
                 if _is_cp_unavailable(exc):
                     self.log.info("control plane unavailable (update in progress?) — "
-                                  "will retry: %s", exc)
+                                  "will retry (%d): %s", self._hb_failures, exc)
                 else:
-                    self.log.error("loop error: %s", exc)
+                    self.log.error("heartbeat error (%d consecutive): %s", self._hb_failures, exc)
                     self._write_status({"error": str(exc)})
                 self._fast_poll = False
+                try:
+                    self._self_heal_if_offline()
+                except Exception:  # noqa: BLE001 — self-heal must never crash the loop
+                    pass
             time.sleep(2 if getattr(self, "_fast_poll", False) else idle)
+
+    def _self_heal_if_offline(self) -> None:
+        """Escalating recovery when the agent can't reach the fleet:
+        1) after a few failures, drop the assigned node so we re-discover it / fall
+           back to the control plane (a wedged or migrated node is the usual cause);
+        2) if still offline after a prolonged period, exit so launchd respawns a
+           clean process, clearing any wedged network/thread state."""
+        if self._hb_failures == 3 and self._node_url:
+            self.log.warning("3 failed heartbeats — dropping node %s to re-discover / fall back",
+                             self._node_url)
+            self._node_cooldown[self._node_url] = time.time() + 120
+            self._set_node_url(None)
+        offline = time.monotonic() - self._last_hb_success
+        if offline > _OFFLINE_RESTART_SECS:
+            self.log.error("offline for %.0fs (> %ds) — restarting to self-heal",
+                           offline, _OFFLINE_RESTART_SECS)
+            try:
+                self._write_status({"error": f"self-heal restart (offline {int(offline)}s)"})
+            except Exception:  # noqa: BLE001
+                pass
+            os._exit(1)
 
 
 def main(argv=None) -> None:
