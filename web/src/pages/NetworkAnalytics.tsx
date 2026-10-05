@@ -109,8 +109,9 @@ function OverviewTab({ ov, onGoto }: { ov: Overview; onGoto: (t: Tab) => void })
   const t = ov.totals;
   return (
     <>
-      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
-        <Stat label="Apps & services" value={t.apps.toLocaleString()} hint="across all sources" />
+      <div style={{ display: "grid", gap: 12, alignItems: "stretch",
+        gridTemplateColumns: "repeat(auto-fit, minmax(185px, 1fr))" }}>
+        <Stat label="Apps &amp; services" value={t.apps.toLocaleString()} hint="across all sources" />
         <Stat label="Devices" value={t.devices.toLocaleString()} hint="de-duplicated" />
         <Stat label="Traffic observed" value={bytes(t.bytes)} hint="network traffic" />
         <Stat label="AI services" value={t.ai_apps.toLocaleString()} hint={t.ai_apps ? "in use" : "none seen"} />
