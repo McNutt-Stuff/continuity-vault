@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
-import { Card, Loading, Pill, timeAgo } from "../components/ui";
+import { Card, Loading, Pill, timeAgo, serverDate } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
 import { notify, confirmDialog } from "../components/dialog";
@@ -33,7 +33,7 @@ interface Identity {
 interface Overview {
   total: number; by_circle: Record<string, number>;
   by_source: Record<string, number>; by_relationship: Record<string, number>;
-  pending_suggestions: number; ignored?: number; top_contacts: Contact[];
+  pending_suggestions: number; ignored?: number; last_built_at?: string | null; top_contacts: Contact[];
   prefs: { relationships: string[]; labels: string[]; auto_link: boolean };
 }
 interface Exchange {
@@ -185,7 +185,12 @@ export default function Contacts() {
             A unified view of the people in your life — deduced across every source and linked to your exchanges.
           </div>
         </div>
-        <div className="row" style={{ gap: 8 }}>
+        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          {ov?.last_built_at && (
+            <span className="faint" style={{ fontSize: 12 }} title={serverDate(ov.last_built_at).toLocaleString()}>
+              Last updated {timeAgo(ov.last_built_at)}
+            </span>
+          )}
           <button className="btn ghost sm" onClick={() => setShowSettings(true)}>
             <Icon name="gear" size={13} /> Customize
           </button>

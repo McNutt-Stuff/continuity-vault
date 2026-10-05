@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
 from .. import security, unified_contacts
@@ -166,10 +166,15 @@ def _overview_payload(db: Session, tenant: Tenant, user: User) -> dict:
         UnifiedContact.tenant_id == tenant.id,
         UnifiedContact.owner_user_id == user.id,
         UnifiedContact.hidden.is_(True)).count()
+    # When the graph was last (re)built — by a manual Rebuild or the scheduler sweep.
+    last_built = db.query(func.max(UnifiedContact.updated_at)).filter(
+        UnifiedContact.tenant_id == tenant.id,
+        UnifiedContact.owner_user_id == user.id).scalar()
     top = sorted(rows, key=lambda c: -(c.interaction_count or 0))[:8]
     return {"total": len(rows), "by_circle": by_circle, "by_source": by_source,
             "by_relationship": by_relationship, "pending_suggestions": pending,
             "ignored": ignored,
+            "last_built_at": last_built.isoformat() if last_built else None,
             "top_contacts": [_contact_view(c) for c in top],
             "prefs": _prefs(user)}
 
