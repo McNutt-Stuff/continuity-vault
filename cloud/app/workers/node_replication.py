@@ -936,33 +936,9 @@ def _push(s) -> int:
             rq2 = rq2.filter(IntegrationRun.created_at > integ_since)
         for row in rq2.order_by(IntegrationRun.created_at.asc()).limit(1000).all():
             integ_runs.append(_row(row))
-        # Unified Contacts: per-user snapshot of any user whose contacts changed
-        # since the cursor (so the CP-displayed replica reflects adds AND deletes).
-        try:
-            from ..models import (ContactIdentity as _CI, ContactSuggestion as _CS,
-                                  UnifiedContact as _UC)
-            ucq = db.query(_UC.owner_user_id, _UC.updated_at)
-            if owned_tids is not None:
-                ucq = ucq.filter(_UC.tenant_id.in_(owned_tids))
-            if contacts_since is not None:
-                ucq = ucq.filter(_UC.updated_at > contacts_since)
-            changed_uids: set = set()
-            for uid, upd in ucq.all():
-                if uid:
-                    changed_uids.add(uid)
-                if upd and (contacts_high is None or upd > contacts_high):
-                    contacts_high = upd
-            changed_uids = set(list(changed_uids)[:200])  # bound per push
-            if changed_uids:
-                contacts_users = list(changed_uids)
-                for row in db.query(_UC).filter(_UC.owner_user_id.in_(changed_uids)).all():
-                    unified_contacts.append(_row(row))
-                for row in db.query(_CI).filter(_CI.owner_user_id.in_(changed_uids)).all():
-                    contact_identities.append(_row(row))
-                for row in db.query(_CS).filter(_CS.owner_user_id.in_(changed_uids)).all():
-                    contact_suggestions.append(_row(row))
-        except Exception:  # noqa: BLE001 — contacts optional; never break the push
-            logger.debug("unified contacts collection failed", exc_info=True)
+        # Unified Contacts are served LIVE from the node (node_proxy proxies all
+        # /api/contacts reads), so the CP keeps NO replica — don't push them up.
+        # (A node that a tenant migrated away from likewise stops echoing them.)
         # Outbound-email history the node's email service recorded, so the admin's
         # per-user communications log on the control plane is complete.
         cq = db.query(Communication)

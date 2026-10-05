@@ -1006,6 +1006,33 @@ def _backfill_future_email_dates() -> None:
                     _BACKFILL_VERSION, res.rowcount or 0)
 
 
+def _cleanup_contact_replica() -> None:
+    """Unified Contacts are served LIVE from the owning node now (node_proxy proxies
+    all /api/contacts reads) and no longer replicated UP, so any CP-side contact rows
+    for NODE-HOSTED tenants are a stale replica — drop them. CP-hosted tenants
+    (node_id IS NULL) keep their authoritative rows. CP-only, one-shot, guarded."""
+    if (get_settings().node_role or "control-plane") != "control-plane":
+        return
+    from ..db import worker_engine
+    from ..models import SystemSetting
+    if worker_engine.dialect.name != "postgresql":
+        return
+    _VERSION = "1"
+    with SessionLocal() as db:
+        flag = db.get(SystemSetting, "contacts_replica_cleaned")
+        if flag and flag.value == _VERSION:
+            return
+        node_hosted = "SELECT id FROM tenants WHERE node_id IS NOT NULL"
+        total = 0
+        for tbl in ("contact_exchanges", "contact_suggestions", "contact_identities",
+                    "unified_contacts"):
+            res = db.execute(text(f"DELETE FROM {tbl} WHERE tenant_id IN ({node_hosted})"))
+            total += res.rowcount or 0
+        db.merge(SystemSetting(key="contacts_replica_cleaned", value=_VERSION))
+        db.commit()
+        logger.info("contact replica cleanup complete (v%s): %d row(s) dropped", _VERSION, total)
+
+
 def _prune_db() -> None:
     """Keep high-churn tables bounded (appliance_commands, sync_jobs, integration_runs,
     backup_runs, pending_actions, network_usage, node_metrics). At most once a day.
@@ -1029,6 +1056,10 @@ def _prune_db() -> None:
             _backfill_future_email_dates()
         except Exception:  # noqa: BLE001
             logger.exception("future-dated message backfill failed")
+        try:
+            _cleanup_contact_replica()
+        except Exception:  # noqa: BLE001
+            logger.exception("contact replica cleanup failed")
         _ensure_perf_indexes()
 
 
