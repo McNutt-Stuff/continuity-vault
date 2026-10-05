@@ -583,6 +583,9 @@ def rebuild(db: Session, user: User) -> int:
 # How many recent exchanges to index per contact (the drill-down paginates; the
 # "Open in Search" link covers the long tail). Bounds the node-local index size.
 _EXCHANGE_CAP = 1000
+# Keep the most-recent slice PER SOURCE so a chatty source (e.g. a big email
+# history) can't bury a quieter one (e.g. iMessage) out of the recent window.
+_EXCHANGE_CAP_PER_SOURCE = 400
 
 
 def _write_exchanges(db: Session, user: User, message_rows: list,
@@ -614,8 +617,18 @@ def _write_exchanges(db: Session, user: User, message_rows: list,
         ContactExchange.owner_user_id == user.id).delete(synchronize_session=False)
     batch: list[dict] = []
     for cid, rows in by_contact.items():
-        rows.sort(key=lambda d: d["modified_at"] or datetime.min, reverse=True)
-        batch.extend(rows[:_EXCHANGE_CAP])
+        # Keep each source's most-recent slice, then the overall most-recent — so a
+        # contact with both a big email thread and iMessages shows both in the
+        # drill-down instead of only the louder source.
+        by_src: dict[str, list[dict]] = defaultdict(list)
+        for r in rows:
+            by_src[r["source_type"] or ""].append(r)
+        kept: list[dict] = []
+        for srows in by_src.values():
+            srows.sort(key=lambda d: d["modified_at"] or datetime.min, reverse=True)
+            kept.extend(srows[:_EXCHANGE_CAP_PER_SOURCE])
+        kept.sort(key=lambda d: d["modified_at"] or datetime.min, reverse=True)
+        batch.extend(kept[:_EXCHANGE_CAP])
     for i in range(0, len(batch), 5000):
         db.bulk_insert_mappings(ContactExchange, batch[i:i + 5000])
 
