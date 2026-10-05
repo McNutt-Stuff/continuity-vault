@@ -26,7 +26,7 @@ from .. import audit, features, security
 from ..db import get_db
 from ..integrations.source_map import candidate_service, map_app_to_source
 from ..models import (ConnectorAccount, IntegrationInstance, NetworkApp,
-                      NetworkClient, NetworkUsage, Tenant, User)
+                      NetworkClient, NetworkSample, NetworkUsage, Tenant, User)
 
 router = APIRouter(prefix="/network-analytics", tags=["network-analytics"])
 logger = logging.getLogger("cv.netanalytics")
@@ -203,6 +203,124 @@ def _aggregate(db: Session, tid: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Trends (NetworkSample rollups — traffic over time)                          #
+# --------------------------------------------------------------------------- #
+def _tenant_iids(db: Session, tid: str) -> list[str]:
+    return [i.id for i in db.query(IntegrationInstance.id).filter(
+        IntegrationInstance.tenant_id == tid).all()]
+
+
+def _multi_trend(db: Session, tid: str, dim: str, keys: set[str], window: str) -> dict:
+    """Aggregate daily traffic across SEVERAL sample keys (a logical app spans
+    multiple per-source app_keys; a logical device spans several client_keys)."""
+    from .integrations import _change_pct, _day_bucket, _fill_series, _window_days
+    from datetime import timedelta
+    days = _window_days(window)
+    end_day = _day_bucket(_now())
+    cur_since = end_day - timedelta(days=days - 1)
+    prev_since = cur_since - timedelta(days=days)
+    by_day: dict = {}
+    cur = prev = 0
+    if keys:
+        rows = (db.query(NetworkSample)
+                .filter(NetworkSample.tenant_id == tid, NetworkSample.dim == dim,
+                        NetworkSample.key.in_(list(keys)),
+                        NetworkSample.day >= prev_since).all())
+        for s in rows:
+            b = int(s.total_bytes or 0)
+            if s.day >= cur_since:
+                by_day[s.day] = by_day.get(s.day, 0) + b
+                cur += b
+            else:
+                prev += b
+    return {"window": window, "days": days, "total_bytes": int(cur), "prev_bytes": int(prev),
+            "change_pct": _change_pct(int(cur), int(prev)),
+            "series": _fill_series(by_day, end_day, days)}
+
+
+def _appkeys_for_ref(db: Session, tid: str, ref: str) -> set[str]:
+    return {a.app_key for a in db.query(NetworkApp).filter(NetworkApp.tenant_id == tid).all()
+            if _app_ref(a.name, a.meta if isinstance(a.meta, dict) else {}) == ref}
+
+
+def _clientkeys_for_ref(db: Session, tid: str, ref: str) -> set[str]:
+    return {c.client_key for c in db.query(NetworkClient).filter(NetworkClient.tenant_id == tid).all()
+            if _device_ref(c, c.client_key) == ref}
+
+
+# --------------------------------------------------------------------------- #
+# People (device → person mapping + per-person aggregates)                    #
+# --------------------------------------------------------------------------- #
+def _members(db: Session, tid: str) -> dict[str, dict]:
+    return {u.id: {"user_id": u.id, "name": u.display_name or u.email or u.id, "email": u.email}
+            for u in db.query(User).filter(User.tenant_id == tid).all()}
+
+
+def _people(db: Session, tid: str) -> dict:
+    """Aggregate network usage by the PERSON each device is assigned to, so an admin
+    can see a member's apps + what they aren't protecting across all their devices."""
+    apps, usage, clients = _load(db, tid)
+    smap = _source_map(db, tid)
+    enabled = _enabled_source_types(db, tid)
+    members = _members(db, tid)
+    # app_key → (ref, name, category, protectable, protected, is_ai, source_type)
+    app_meta: dict[str, dict] = {}
+    for a in apps:
+        meta = a.meta if isinstance(a.meta, dict) else {}
+        ref = _app_ref(a.name, meta)
+        cur = app_meta.get(a.app_key)
+        st = a.source_type or (cur or {}).get("source_type", "")
+        app_meta[a.app_key] = {
+            "ref": ref, "name": meta.get("name") or a.name or a.app_key,
+            "category": "AI" if meta.get("ai") else (a.category or ""),
+            "is_ai": bool(meta.get("ai")), "source_type": st,
+            "protectable": bool(st), "protected": bool(st) and st in enabled}
+    owner_by_key = {c.client_key: (c.owner_user_id or "") for c in clients}
+    bytes_by_key = {c.client_key: int(c.total_bytes or 0) for c in clients}
+    dev_by_key = {c.client_key: c for c in clients}
+
+    buckets: dict[str, dict] = {}
+
+    def _bucket(uid: str) -> dict:
+        return buckets.setdefault(uid or "_unassigned", {
+            "user_id": uid, "name": members.get(uid, {}).get("name", "Unassigned") if uid else "Unassigned",
+            "devices": {}, "apps": {}, "bytes": 0})
+
+    for c in clients:
+        uid = c.owner_user_id or ""
+        b = _bucket(uid)
+        dref = _device_ref(c, c.client_key)
+        b["devices"][dref] = {"ref": dref, "name": c.nickname or c.name or c.hostname or c.mac or dref,
+                              "device_type": c.device_type or "device",
+                              "bytes": int(c.total_bytes or 0)}
+        b["bytes"] += int(c.total_bytes or 0)
+    for u in usage:
+        uid = owner_by_key.get(u.client_key, "")
+        meta = app_meta.get(u.app_key)
+        if not meta:
+            continue
+        b = _bucket(uid)
+        a = b["apps"].setdefault(meta["ref"], {**{k: meta[k] for k in
+            ("ref", "name", "category", "is_ai", "source_type", "protectable", "protected")}, "bytes": 0})
+        a["bytes"] += int(u.total_bytes or 0)
+
+    out = []
+    for uid, b in buckets.items():
+        app_list = list(b["apps"].values())
+        unprotected = [a for a in app_list if a["protectable"] and not a["protected"]]
+        out.append({
+            "user_id": b["user_id"], "name": b["name"],
+            "device_count": len(b["devices"]), "app_count": len(app_list),
+            "unprotected_count": len(unprotected),
+            "ai_count": sum(1 for a in app_list if a["is_ai"]),
+            "total_bytes": b["bytes"],
+            "assigned": bool(b["user_id"]),
+        })
+    out.sort(key=lambda p: (not p["assigned"], -p["total_bytes"]))
+    return {"people": out, "members": sorted(members.values(), key=lambda m: m["name"].lower())}
+
+
+# --------------------------------------------------------------------------- #
 # Views                                                                        #
 # --------------------------------------------------------------------------- #
 @router.get("/overview")
@@ -293,11 +411,11 @@ def list_devices(q: str | None = None, source: str | None = None, sort: str = "b
 
 
 @router.get("/apps/{ref:path}")
-def app_detail(ref: str,
+def app_detail(ref: str, window: str = "30d",
                principal: security.Principal = Depends(security.get_principal),
                tenant: Tenant = Depends(security.get_tenant),
                db: Session = Depends(get_db)):
-    """Drill-down: the devices that use a logical app + per-source breakdown."""
+    """Drill-down: the devices that use a logical app + per-source breakdown + trend."""
     _guard(principal, tenant, db)
     tid = tenant.id
     apps, usage, clients = _load(db, tid)
@@ -340,11 +458,12 @@ def app_detail(ref: str,
         "risk_reason": meta.get("risk_reason", ""),
         "by_source": sorted(by_source.values(), key=lambda s: -s["bytes"]),
         "devices": sorted(devs.values(), key=lambda d: -d["bytes"]),
+        "trend": _multi_trend(db, tid, "app", appkeys, window),
     }
 
 
 @router.get("/devices/{ref:path}")
-def device_detail(ref: str,
+def device_detail(ref: str, window: str = "30d",
                   principal: security.Principal = Depends(security.get_principal),
                   tenant: Tenant = Depends(security.get_tenant),
                   db: Session = Depends(get_db)):
@@ -376,13 +495,121 @@ def device_detail(ref: str,
             "risk": meta.get("risk", "") if meta.get("risk") in RISK_LEVELS else "",
             "bytes": 0})
         e["bytes"] += int(u.total_bytes or 0)
+    owner = next((c.owner_user_id for c in clients if c.client_key in member_keys and c.owner_user_id), "")
     return {
         "ref": ref,
-        "name": (head.nickname or head.name or head.hostname or head.mac) if head else ref,
+        "name": (head.nickname or head.name or head.mac or head.hostname) if head else ref,
         "device_type": (head.device_type or "device") if head else "device",
+        "owner_user_id": owner or "",
+        "members": sorted(_members(db, tid).values(), key=lambda m: m["name"].lower()),
         "sources": sorted({smap.get(c.integration_id, c.integration_id or "network")
                            for c in clients if c.client_key in member_keys}),
         "apps": sorted(used.values(), key=lambda a: -a["bytes"]),
+        "trend": _multi_trend(db, tid, "client", member_keys, window),
+    }
+
+
+@router.get("/trends")
+def trends(window: str = "30d",
+           principal: security.Principal = Depends(security.get_principal),
+           tenant: Tenant = Depends(security.get_tenant),
+           db: Session = Depends(get_db)):
+    """Traffic trends over time + top movers across EVERY network source (the
+    'Traffic' tab), from the 90-day NetworkSample rollups."""
+    _guard(principal, tenant, db)
+    from .integrations import _network_analytics
+    return _network_analytics(db, tenant.id, _tenant_iids(db, tenant.id), window)
+
+
+class AssignDevice(BaseModel):
+    owner_user_id: str = ""   # tenant member id; "" clears the assignment
+
+
+@router.post("/devices/{ref:path}/assign")
+def assign_device(ref: str, body: AssignDevice,
+                  principal: security.Principal = Depends(security.get_principal),
+                  tenant: Tenant = Depends(security.get_tenant),
+                  db: Session = Depends(get_db)):
+    """Assign a (de-duplicated) device to a person so per-person analytics can
+    attribute its traffic. Sets the owner on every NetworkClient row of the device."""
+    _guard(principal, tenant, db)
+    if not security.is_org_admin(principal.role) and not principal.is_platform_admin:
+        raise HTTPException(403, "Only an organization administrator can assign devices.")
+    uid = (body.owner_user_id or "").strip()
+    if uid:
+        member = db.get(User, uid)
+        if not member or member.tenant_id != tenant.id:
+            raise HTTPException(400, "user is not a member of this tenant")
+    rows = [c for c in db.query(NetworkClient).filter(NetworkClient.tenant_id == tenant.id).all()
+            if _device_ref(c, c.client_key) == ref]
+    if not rows:
+        raise HTTPException(404, "device not found")
+    now = _now()
+    for c in rows:
+        c.owner_user_id = uid or None
+        c.ownership = "personal" if uid else ("" if c.ownership == "personal" else c.ownership)
+        c.updated_at = now
+    audit.record(db, actor=principal.user_id, action="netanalytics.assign_device",
+                 tenant_id=tenant.id, resource=ref, category="admin", severity="info",
+                 detail={"device": ref, "owner_user_id": uid or "cleared"})
+    db.commit()
+    return {"ok": True, "ref": ref, "owner_user_id": uid, "rows": len(rows)}
+
+
+@router.get("/people")
+def people(principal: security.Principal = Depends(security.get_principal),
+           tenant: Tenant = Depends(security.get_tenant),
+           db: Session = Depends(get_db)):
+    """Per-person roll-up of devices, apps, traffic and unprotected apps."""
+    _guard(principal, tenant, db)
+    return _people(db, tenant.id)
+
+
+@router.get("/people/{uid}")
+def person_detail(uid: str,
+                  principal: security.Principal = Depends(security.get_principal),
+                  tenant: Tenant = Depends(security.get_tenant),
+                  db: Session = Depends(get_db)):
+    """One person's devices + apps, highlighting what they aren't protecting."""
+    _guard(principal, tenant, db)
+    tid = tenant.id
+    apps, usage, clients = _load(db, tid)
+    enabled = _enabled_source_types(db, tid)
+    members = _members(db, tid)
+    want = uid if uid != "_unassigned" else ""
+    my_keys = {c.client_key for c in clients if (c.owner_user_id or "") == want}
+    devices = [{"ref": _device_ref(c, c.client_key),
+                "name": c.nickname or c.name or c.hostname or c.mac or c.client_key,
+                "device_type": c.device_type or "device", "bytes": int(c.total_bytes or 0)}
+               for c in clients if (c.owner_user_id or "") == want]
+    app_by_key = {}
+    for a in apps:
+        app_by_key.setdefault(a.app_key, a)
+    used: dict[str, dict] = {}
+    for u in usage:
+        if u.client_key not in my_keys:
+            continue
+        a = app_by_key.get(u.app_key)
+        if a is None:
+            continue
+        meta = a.meta if isinstance(a.meta, dict) else {}
+        aref = _app_ref(a.name, meta)
+        st = a.source_type or ""
+        e = used.setdefault(aref, {
+            "ref": aref, "name": meta.get("name") or a.name or a.app_key,
+            "category": "AI" if meta.get("ai") else (a.category or ""),
+            "is_ai": bool(meta.get("ai")), "source_type": st,
+            "protectable": bool(st), "protected": bool(st) and st in enabled,
+            "risk": meta.get("risk", "") if meta.get("risk") in RISK_LEVELS else "",
+            "bytes": 0})
+        e["bytes"] += int(u.total_bytes or 0)
+    app_list = sorted(used.values(), key=lambda a: -a["bytes"])
+    return {
+        "user_id": want, "name": members.get(want, {}).get("name", "Unassigned") if want else "Unassigned",
+        "devices": sorted(devices, key=lambda d: -d["bytes"]),
+        "apps": app_list,
+        "unprotected": [a for a in app_list if a["protectable"] and not a["protected"]],
+        "trend": _multi_trend(db, tid, "client", my_keys, "30d"),
     }
 
 

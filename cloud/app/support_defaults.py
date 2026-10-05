@@ -1061,13 +1061,26 @@ was observed.
 
 - **Overview** — headline counts (apps, devices, traffic, AI services, unprotected,
   risk‑flagged), a *where the data comes from* breakdown, and your top apps.
+- **Traffic** — traffic over time with top apps and devices (sparklines + trend vs
+  the previous window) from the 90‑day rollups, like the UniFi traffic views.
 - **Apps** — every app/service with search, filtering (category, source, protection,
-  AI, flagged) and sorting. Open one to see which devices use it, the per‑source
-  breakdown, and (admins) to flag it.
-- **Devices** — every device, de‑duplicated, with the apps it used.
+  AI, flagged) and sorting. Open one to see its traffic trend, which devices use
+  it, the per‑source breakdown, and (admins) to flag it.
+- **Devices** — every device, de‑duplicated, with its traffic trend and the apps it
+  used. Admins can **assign a device to a person** here.
+- **People** — traffic rolled up **by person** from their assigned devices, so you
+  can see each member's apps and, crucially, **what they aren't protecting** at an
+  account level.
 - **Not protected** — cross‑source **"apps you aren't protecting"**: services in
   your traffic that Arkive can back up but you haven't connected yet, plus popular
   services we don't have a connector for.
+
+## Assigning devices to people
+
+An admin can assign any device to a tenant member from the device drawer. Traffic
+then rolls up **per person** on the People tab — the aggregate of each member's
+device‑to‑user mappings — so unprotected apps can be reviewed account‑wide, one
+person at a time.
 
 ## Flagging risky apps
 

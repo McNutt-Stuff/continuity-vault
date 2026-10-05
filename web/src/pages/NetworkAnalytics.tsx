@@ -3,10 +3,11 @@ import { api } from "../api";
 import { Card, Stat, Pill, Loading, bytes, timeAgo } from "../components/ui";
 import { Icon, IconName } from "../components/Icon";
 import { SourceIcon } from "../components/SourceIcon";
+import { Sparkline, AreaChart } from "../components/charts";
 import { useAuth } from "../auth";
 import { notify, promptDialog } from "../components/dialog";
 
-type Tab = "overview" | "apps" | "devices" | "unprotected";
+type Tab = "overview" | "traffic" | "apps" | "devices" | "people" | "unprotected";
 
 interface AiMeta { vendor: string; tool?: string; ai_category?: string; data_risk?: string; sanctioned: boolean }
 interface AppRow {
@@ -79,7 +80,7 @@ export default function NetworkAnalytics() {
       </div>
 
       <div className="row" style={{ gap: 4, borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
-        {(["overview", "apps", "devices", "unprotected"] as Tab[]).map((t) => (
+        {((["overview", "traffic", "apps", "devices", "people", "unprotected"]) as Tab[]).map((t) => (
           <button key={t} onClick={() => setTab(t)}
             className="btn ghost sm"
             style={{
@@ -95,8 +96,10 @@ export default function NetworkAnalytics() {
       {err && <Card><div className="row" style={{ gap: 8, color: "var(--danger-c)" }}><Icon name="alert" size={15} />{err}</div></Card>}
 
       {tab === "overview" && (ov ? <OverviewTab ov={ov} onGoto={setTab} /> : <Loading />)}
+      {tab === "traffic" && <TrafficTab />}
       {tab === "apps" && <AppsTab onFlagChanged={loadOv} />}
       {tab === "devices" && <DevicesTab />}
+      {tab === "people" && <PeopleTab />}
       {tab === "unprotected" && <UnprotectedTab />}
     </div>
   );
@@ -284,6 +287,8 @@ function AppDrawer({ appRow, onClose, onFlagChanged }: { appRow: AppRow; onClose
           {risk && <Pill tone={SEV_TONE[risk] || "warn"} dot>{RISK_LABEL[risk] || risk}</Pill>}
         </div>
 
+        <TrendChart trend={d?.trend} />
+
         {me?.can_admin && (
           <Card style={{ marginBottom: 14, background: "var(--inset)" }}>
             <div className="row" style={{ gap: 8, marginBottom: 8 }}><Icon name="alert" size={14} /><b style={{ fontSize: 13 }}>Flag this app</b></div>
@@ -390,8 +395,22 @@ function DevicesTab() {
 }
 
 function DeviceDrawer({ dev, onClose }: { dev: DeviceRow; onClose: () => void }) {
+  const { me } = useAuth();
   const [d, setD] = useState<any>(null);
-  useEffect(() => { (async () => { try { setD(await api.get(`/network-analytics/devices/${encodeURIComponent(dev.ref)}`)); } catch { setD({ ...dev, apps: [] }); } })(); }, [dev.ref]);
+  const [saving, setSaving] = useState(false);
+  const load = async () => { try { setD(await api.get(`/network-analytics/devices/${encodeURIComponent(dev.ref)}`)); } catch { setD({ ...dev, apps: [], members: [] }); } };
+  useEffect(() => { void load(); }, [dev.ref]);
+
+  const assign = async (uid: string) => {
+    setSaving(true);
+    try {
+      await api.post(`/network-analytics/devices/${encodeURIComponent(dev.ref)}/assign`, { owner_user_id: uid });
+      await load();
+      await notify({ message: uid ? "Device assigned" : "Assignment cleared", tone: "ok" });
+    } catch (e: any) { await notify({ message: e?.message || "Could not assign the device", tone: "danger" }); }
+    finally { setSaving(false); }
+  };
+
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 4000, background: "rgba(0,0,0,.4)", display: "flex", justifyContent: "flex-end" }}>
       <div onClick={(e) => e.stopPropagation()} style={{ width: "min(540px, 96vw)", height: "100%", overflow: "auto", background: "var(--panel)", borderLeft: "1px solid var(--border)", padding: 20 }}>
@@ -403,7 +422,22 @@ function DeviceDrawer({ dev, onClose }: { dev: DeviceRow; onClose: () => void })
           <Pill tone="info">{dev.device_type}</Pill>
           {(d?.sources || dev.sources).map((s: string) => <SourceBadge key={s} s={s} />)}
         </div>
-        <div className="faint" style={{ fontSize: 12, marginBottom: 6 }}>Apps &amp; services used</div>
+
+        {me?.can_admin && (
+          <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 14, padding: "10px 12px", borderRadius: 9, background: "var(--inset)" }}>
+            <Icon name="user" size={14} />
+            <span style={{ fontSize: 12.5, fontWeight: 600 }}>Assigned to</span>
+            <select className="input sm" disabled={saving || !d} value={d?.owner_user_id || ""}
+              onChange={(e) => assign(e.target.value)} style={{ flex: 1 }}>
+              <option value="">— Unassigned —</option>
+              {(d?.members || []).map((m: any) => <option key={m.user_id} value={m.user_id}>{m.name}</option>)}
+            </select>
+          </div>
+        )}
+
+        <TrendChart trend={d?.trend} />
+
+        <div className="faint" style={{ fontSize: 12, margin: "14px 0 6px" }}>Apps &amp; services used</div>
         {!d ? <Loading card={false} /> : (d.apps || []).length === 0 ? <span className="muted" style={{ fontSize: 12.5 }}>No per-app detail.</span> : (
           <div className="stack" style={{ gap: 0 }}>
             {d.apps.map((a: any) => (
@@ -465,3 +499,175 @@ function UnprotectedTab() {
     </>
   );
 }
+
+function TrendArrow({ pct }: { pct: number | null | undefined }) {
+  if (pct == null) return <span className="faint" style={{ fontSize: 11.5 }}>—</span>;
+  const up = pct >= 0;
+  return <span style={{ fontSize: 11.5, color: up ? "var(--ok)" : "var(--danger-c)" }}>{up ? "▲" : "▼"} {Math.abs(pct)}%</span>;
+}
+
+function TrendChart({ trend }: { trend: any }) {
+  if (!trend || !(trend.series || []).some((p: any) => p.bytes)) {
+    return <div className="muted" style={{ fontSize: 12, padding: "6px 0" }}>No traffic history in this window.</div>;
+  }
+  return (
+    <AreaChart height={120} unit="B" fmt={bytes} labels={(trend.series || []).map((p: any) => p.day.slice(5))}
+      series={[{ name: "traffic", color: "#4f7cff", data: (trend.series || []).map((p: any) => p.bytes) }]} />
+  );
+}
+
+const WINDOWS = ["7d", "14d", "30d", "90d"];
+
+function TrafficTab() {
+  const [window, setWindow] = useState("30d");
+  const [d, setD] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { (async () => { setLoading(true); try { setD(await api.get(`/network-analytics/trends?window=${window}`)); } finally { setLoading(false); } })(); }, [window]);
+  const s = d?.summary || {};
+  return (
+    <Card>
+      <div className="spread" style={{ marginBottom: 10 }}>
+        <div className="row" style={{ gap: 8 }}><Icon name="activity" size={15} /><b>Traffic trends</b>
+          {d && <span className="faint" style={{ fontSize: 12 }}>· {bytes(s.total_bytes || 0)} · <TrendArrow pct={s.change_pct} /> vs previous {d.days}d</span>}
+        </div>
+        <select className="input sm" value={window} onChange={(e) => setWindow(e.target.value)} style={{ width: 90 }}>
+          {WINDOWS.map((w) => <option key={w} value={w}>{w}</option>)}
+        </select>
+      </div>
+      {loading ? <Loading card={false} /> : !d || (d.series || []).every((p: any) => !p.bytes) ? (
+        <div className="muted" style={{ padding: 12 }}>No traffic history yet. Trends come from network traffic (UniFi DPI); endpoint web usage has no byte volume.</div>
+      ) : (
+        <>
+          <AreaChart height={200} unit="B" fmt={bytes} labels={(d.series || []).map((p: any) => p.day.slice(5))}
+            series={[{ name: "traffic", color: "#4f7cff", data: (d.series || []).map((p: any) => p.bytes) }]} />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginTop: 16 }}>
+            <div>
+              <h4 style={{ margin: "0 0 6px", fontSize: 13 }}>Top apps &amp; services</h4>
+              <div className="stack" style={{ gap: 2 }}>
+                {(d.top_apps || []).map((a: any) => (
+                  <div key={a.key} className="row" style={{ gap: 10, alignItems: "center", padding: "5px 0", borderBottom: "1px solid var(--border-soft)" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.name}</div>
+                      <div className="faint" style={{ fontSize: 11 }}>{a.category || "app"} · {bytes(a.total_bytes)}{a.source_type ? "" : " · no connector"}</div>
+                    </div>
+                    <div style={{ width: 90, flexShrink: 0 }}><Sparkline data={(a.series || []).map((p: any) => p.bytes)} color="#c56cf0" height={26} /></div>
+                    <div style={{ width: 52, textAlign: "right", flexShrink: 0 }}><TrendArrow pct={a.change_pct} /></div>
+                  </div>
+                ))}
+                {(d.top_apps || []).length === 0 && <div className="muted" style={{ fontSize: 12 }}>No apps in this window.</div>}
+              </div>
+            </div>
+            <div>
+              <h4 style={{ margin: "0 0 6px", fontSize: 13 }}>Top devices</h4>
+              <div className="stack" style={{ gap: 2 }}>
+                {(d.top_clients || []).map((c: any) => (
+                  <div key={c.key} className="row" style={{ gap: 10, alignItems: "center", padding: "5px 0", borderBottom: "1px solid var(--border-soft)" }}>
+                    <Icon name={DEVICE_ICON[c.device_type] || "grid"} size={14} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</div>
+                      <div className="faint" style={{ fontSize: 11 }}>{c.device_type || "device"} · {bytes(c.total_bytes)}</div>
+                    </div>
+                    <div style={{ width: 90, flexShrink: 0 }}><Sparkline data={(c.series || []).map((p: any) => p.bytes)} color="#2dbe60" height={26} /></div>
+                    <div style={{ width: 52, textAlign: "right", flexShrink: 0 }}><TrendArrow pct={c.change_pct} /></div>
+                  </div>
+                ))}
+                {(d.top_clients || []).length === 0 && <div className="muted" style={{ fontSize: 12 }}>No devices in this window.</div>}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function PeopleTab() {
+  const [d, setD] = useState<{ people: any[]; members: any[] } | null>(null);
+  const [sel, setSel] = useState<any>(null);
+  const load = async () => { try { setD(await api.get("/network-analytics/people")); } catch { setD({ people: [], members: [] }); } };
+  useEffect(() => { void load(); }, []);
+  if (!d) return <Loading />;
+  return (
+    <Card>
+      <div className="row" style={{ gap: 8, marginBottom: 4 }}><Icon name="user" size={15} /><b>By person</b></div>
+      <div className="faint" style={{ fontSize: 12.5, marginBottom: 12 }}>Traffic aggregated from each member's assigned devices — so you can see, per person, what they use and what isn't protected. Assign devices from the Devices tab.</div>
+      {d.people.length === 0 ? <div className="muted" style={{ padding: 8 }}>No network data yet.</div> : (
+        <div className="stack" style={{ gap: 0 }}>
+          {d.people.map((p) => (
+            <div key={p.user_id || "_unassigned"} className="row" onClick={() => setSel(p)}
+              style={{ gap: 12, alignItems: "center", padding: "10px 4px", borderTop: "1px solid var(--border-soft)", cursor: "pointer" }}>
+              <div style={{ width: 30, height: 30, borderRadius: "50%", background: p.assigned ? "var(--accent-soft, var(--inset))" : "var(--inset)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Icon name="user" size={15} />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 13 }}>{p.name}{!p.assigned && <span className="faint" style={{ fontWeight: 400 }}> · unassigned devices</span>}</div>
+                <div className="faint" style={{ fontSize: 11.5 }}>{p.device_count} device{p.device_count === 1 ? "" : "s"} · {p.app_count} app{p.app_count === 1 ? "" : "s"}</div>
+              </div>
+              {p.ai_count > 0 && <Pill tone="info">{p.ai_count} AI</Pill>}
+              {p.unprotected_count > 0 && <Pill tone="warn">{p.unprotected_count} not protected</Pill>}
+              <span className="faint" style={{ fontSize: 12, minWidth: 64, textAlign: "right" }}>{bytes(p.total_bytes)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {sel && <PersonDrawer person={sel} onClose={() => setSel(null)} />}
+    </Card>
+  );
+}
+
+function PersonDrawer({ person, onClose }: { person: any; onClose: () => void }) {
+  const [d, setD] = useState<any>(null);
+  useEffect(() => { (async () => { try { setD(await api.get(`/network-analytics/people/${encodeURIComponent(person.user_id || "_unassigned")}`)); } catch { setD(null); } })(); }, [person.user_id]);
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 4000, background: "rgba(0,0,0,.4)", display: "flex", justifyContent: "flex-end" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "min(580px, 96vw)", height: "100%", overflow: "auto", background: "var(--panel)", borderLeft: "1px solid var(--border)", padding: 20 }}>
+        <div className="spread" style={{ marginBottom: 12 }}>
+          <div className="row" style={{ gap: 10 }}><Icon name="user" size={16} /><b style={{ fontSize: 15 }}>{person.name}</b></div>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="x" size={14} /></button>
+        </div>
+        {!d ? <Loading card={false} /> : (
+          <>
+            <TrendChart trend={d.trend} />
+            {(d.unprotected || []).length > 0 && (
+              <Card style={{ margin: "14px 0", background: "var(--inset)" }}>
+                <div className="row" style={{ gap: 8, marginBottom: 8 }}><span style={{ color: "var(--warn)", display: "inline-flex" }}><Icon name="alert" size={14} /></span><b style={{ fontSize: 13 }}>Not protected ({d.unprotected.length})</b></div>
+                <div className="stack" style={{ gap: 0 }}>
+                  {d.unprotected.map((a: any) => (
+                    <div key={a.ref} className="row" style={{ gap: 10, alignItems: "center", padding: "6px 0", borderTop: "1px solid var(--border-soft)" }}>
+                      {a.source_type ? <SourceIcon type={a.source_type} size={14} /> : <Icon name="grid" size={14} />}
+                      <div style={{ flex: 1, fontSize: 12.5 }}>{a.name}</div>
+                      <a className="btn ghost sm" href="/connectors"><Icon name="link" size={12} /> Connect</a>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
+            <div className="faint" style={{ fontSize: 12, margin: "12px 0 6px" }}>Devices ({(d.devices || []).length})</div>
+            <div className="stack" style={{ gap: 0 }}>
+              {(d.devices || []).map((dev: any) => (
+                <div key={dev.ref} className="row" style={{ gap: 10, alignItems: "center", padding: "7px 0", borderTop: "1px solid var(--border-soft)" }}>
+                  <Icon name={DEVICE_ICON[dev.device_type] || "grid"} size={14} />
+                  <div style={{ flex: 1, fontSize: 12.5 }}>{dev.name}</div>
+                  <span className="faint" style={{ fontSize: 12 }}>{bytes(dev.bytes)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="faint" style={{ fontSize: 12, margin: "14px 0 6px" }}>Apps &amp; services ({(d.apps || []).length})</div>
+            <div className="stack" style={{ gap: 0 }}>
+              {(d.apps || []).map((a: any) => (
+                <div key={a.ref} className="row" style={{ gap: 10, alignItems: "center", padding: "7px 0", borderTop: "1px solid var(--border-soft)" }}>
+                  {a.is_ai ? <Icon name="sparkle" size={14} /> : a.source_type ? <SourceIcon type={a.source_type} size={14} /> : <Icon name="grid" size={14} />}
+                  <div style={{ flex: 1, fontSize: 12.5 }}>{a.name}</div>
+                  {a.protectable && !a.protected && <Pill tone="warn">Unprotected</Pill>}
+                  {a.risk && <Pill tone={SEV_TONE[a.risk] || "warn"} dot>{RISK_LABEL[a.risk] || a.risk}</Pill>}
+                  <span className="faint" style={{ fontSize: 12 }}>{bytes(a.bytes)}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
