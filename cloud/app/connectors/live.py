@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
 from email.header import decode_header, make_header
@@ -2532,10 +2533,31 @@ _IG_THREAD_MSGS = 40
 _IG_FOLLOWING_CAP = 300
 
 
-def _instagram_client(settings: Optional[dict] = None):
+def _ig_stable_uuids(username: str) -> dict:
+    """Deterministic device UUIDs derived from the username. A fresh random device
+    on EVERY sign-in attempt looks like automation to Instagram and provokes extra
+    challenges/rate-limits; seeding a consistent device makes repeated attempts for
+    the same account look like the same phone, which is far less likely to throttle."""
+    seed = hashlib.sha256(f"arkive-ig:{(username or '').strip().lower()}".encode()).digest()
+
+    def _u(tag: str) -> str:
+        return str(uuid.UUID(bytes=hashlib.sha256(seed + tag.encode()).digest()[:16]))
+
+    return {
+        "phone_id": _u("phone"),
+        "uuid": _u("uuid"),
+        "client_session_id": _u("session"),
+        "advertising_id": _u("ad"),
+        "device_id": "android-" + hashlib.sha256(seed + b"device").hexdigest()[:16],
+    }
+
+
+def _instagram_client(settings: Optional[dict] = None, username: Optional[str] = None):
     """A rate-limit-friendly instagrapi client. ``delay_range`` inserts a random
     2–5s pause between private-API calls (instagrapi best-practice) so a backup
-    never bursts. Reuses a saved session (``settings``) when provided."""
+    never bursts. Reuses a saved session (``settings``) when provided; otherwise
+    seeds a STABLE device from ``username`` so repeated fresh sign-ins aren't flagged
+    as a new device each time (reduces challenges + sign-in rate-limiting)."""
     try:
         from instagrapi import Client
     except Exception as exc:  # noqa: BLE001
@@ -2549,6 +2571,11 @@ def _instagram_client(settings: Optional[dict] = None):
             cl.set_settings(settings)
         except Exception as exc:  # noqa: BLE001
             logger.info("instagram: set_settings failed (ignored): %s", exc)
+    elif username:
+        try:
+            cl.set_uuids(_ig_stable_uuids(username))
+        except Exception as exc:  # noqa: BLE001
+            logger.info("instagram: set_uuids failed (ignored): %s", exc)
     return cl
 
 
@@ -2563,7 +2590,7 @@ def instagram_start_session(username: str, password: str):
     pw = password or ""
     if not user or not pw:
         raise PermissionError("Enter your Instagram username and password.")
-    cl = _instagram_client()
+    cl = _instagram_client(username=user)
     try:
         cl.login(user, pw)
     except TwoFactorRequired:
@@ -2652,7 +2679,7 @@ def fetch_instagram_personal(creds: dict, config: Optional[dict] = None,
         if not creds.get("password"):
             raise PermissionError("Instagram session expired — reconnect the source "
                                   "and re-enter your password + 2FA code.")
-        cl = _instagram_client()  # fresh client: current app profile, no stale settings
+        cl = _instagram_client(username=user)  # fresh client: stable device, no stale settings
         cl.login(user, creds["password"])
     uid = cl.user_id or cl.user_id_from_username(user)
 
