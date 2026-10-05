@@ -259,7 +259,7 @@ function AppDrawer({ appRow, onClose, onFlagChanged }: { appRow: AppRow; onClose
     try {
       await api.post("/network-analytics/flags", { ref: appRow.ref, risk, reason });
       await load(); onFlagChanged();
-      await notify({ message: risk ? `Flagged as ${RISK_LABEL[risk] || risk}` : "Flag cleared", tone: "success" });
+      await notify({ message: risk ? `Flagged as ${RISK_LABEL[risk] || risk}` : "Flag cleared", tone: "ok" });
     } catch (e: any) { await notify({ message: e?.message || "Could not update the flag", tone: "danger" }); }
     finally { setBusy(false); }
   };
@@ -431,7 +431,7 @@ function UnprotectedTab() {
   return (
     <>
       <Card>
-        <div className="row" style={{ gap: 8, marginBottom: 4 }}><Icon name="alert" size={15} style={{ color: "var(--warn)" }} /><b>Apps you aren't protecting yet</b></div>
+        <div className="row" style={{ gap: 8, marginBottom: 4 }}><span style={{ color: "var(--warn)", display: "inline-flex" }}><Icon name="alert" size={15} /></span><b>Apps you aren't protecting yet</b></div>
         <div className="faint" style={{ fontSize: 12.5, marginBottom: 12 }}>Services seen in your traffic that Arkive can back up — connect them to capture their data.</div>
         {d.unprotected.length === 0 ? <div className="muted" style={{ padding: 8 }}>Everything Arkive can protect is connected. Nice.</div> : (
           <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
