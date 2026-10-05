@@ -33,7 +33,7 @@ interface Identity {
 interface Overview {
   total: number; by_circle: Record<string, number>;
   by_source: Record<string, number>; by_relationship: Record<string, number>;
-  pending_suggestions: number; top_contacts: Contact[];
+  pending_suggestions: number; ignored?: number; top_contacts: Contact[];
   prefs: { relationships: string[]; labels: string[]; auto_link: boolean };
 }
 interface Exchange {
@@ -89,7 +89,7 @@ function Avatar({ name, size = 38, starred }: { name: string; size?: number; sta
 // ---- Main ------------------------------------------------------------------
 export default function Contacts() {
   const [params, setParams] = useSearchParams();
-  const [tab, setTab] = useState<"people" | "circles" | "suggestions">("people");
+  const [tab, setTab] = useState<"people" | "circles" | "suggestions" | "ignored">("people");
   const [ov, setOv] = useState<Overview | null>(null);
   const [contacts, setContacts] = useState<Contact[] | null>(null);
   const [q, setQ] = useState("");
@@ -214,12 +214,13 @@ export default function Contacts() {
       {showSources && <SourcesModal onClose={() => setShowSources(false)} />}
 
       <div className="row" style={{ gap: 6, marginBottom: 14, borderBottom: "1px solid var(--border)" }}>
-        {([["people", "People"], ["circles", "Circles map"], ["suggestions", "Suggestions"]] as const).map(([k, l]) => (
+        {([["people", "People"], ["circles", "Circles map"], ["suggestions", "Suggestions"], ["ignored", "Ignored"]] as const).map(([k, l]) => (
           <button key={k} onClick={() => setTab(k)}
                   className="btn ghost sm"
                   style={{ borderRadius: 0, borderBottom: tab === k ? "2px solid var(--brand)" : "2px solid transparent",
                            color: tab === k ? "var(--text)" : "var(--text-dim)", fontWeight: tab === k ? 600 : 400 }}>
             {l}{k === "suggestions" && ov?.pending_suggestions ? ` (${ov.pending_suggestions})` : ""}
+            {k === "ignored" && ov?.ignored ? ` (${ov.ignored})` : ""}
           </button>
         ))}
       </div>
@@ -303,6 +304,10 @@ export default function Contacts() {
 
       {tab === "circles" && <CirclesMap onSelect={(id) => { setTab("people"); setSelected(id); }} />}
       {tab === "suggestions" && <Suggestions onChanged={onContactsChanged} />}
+      {tab === "ignored" && (
+        <IgnoredPeople relationships={ov?.prefs.relationships || []} labels={ov?.prefs.labels || []}
+                       onChanged={() => { void loadOverview(); void loadList(); }} />
+      )}
     </div>
   );
 }
@@ -418,7 +423,7 @@ function ContactDetail({ id, relationships, labels, onClose, onChanged, onExpand
           {CIRCLES.map((x) => <option key={x.key} value={x.key}>Pin: {x.label}</option>)}
         </select>
         <button className="btn ghost sm" onClick={() => patch({ hidden: !c.hidden })}>
-          {c.hidden ? "Unhide" : "Hide"}
+          {c.hidden ? "Un-ignore" : "Ignore"}
         </button>
         <button className="btn ghost sm" title="Merge / link into another contact" onClick={() => setMerging((v) => !v)}>
           <Icon name="repeat" size={12} /> Merge
@@ -605,7 +610,7 @@ function ContactFull({ id, relationships, labels, onBack, onChanged }:
             <option value="">Auto circle</option>
             {CIRCLES.map((x) => <option key={x.key} value={x.key}>Pin: {x.label}</option>)}
           </select>
-          <button className="btn ghost sm" onClick={() => patch({ hidden: !c.hidden })}>{c.hidden ? "Unhide" : "Hide"}</button>
+          <button className="btn ghost sm" onClick={() => patch({ hidden: !c.hidden })}>{c.hidden ? "Un-ignore" : "Ignore"}</button>
           <button className="btn ghost sm" onClick={() => setMerging((v) => !v)}><Icon name="repeat" size={12} /> Merge</button>
         </div>
         {merging && <div style={{ marginTop: 10 }}>
@@ -899,6 +904,66 @@ function Identities({ contactId, identities, onChanged }:
                onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") add(); }} />
         <button className="btn sm" onClick={add} disabled={busy}><Icon name="plus" size={12} /></button>
       </div>
+    </div>
+  );
+}
+
+// ---- Ignored people --------------------------------------------------------
+function IgnoredPeople({ relationships, labels, onChanged }:
+  { relationships: string[]; labels: string[]; onChanged: () => void }) {
+  const [contacts, setContacts] = useState<Contact[] | null>(null);
+  const [q, setQ] = useState("");
+  const [selected, setSelected] = useState<string | null>(null);
+
+  async function load() {
+    const p = new URLSearchParams({ hidden_only: "true", sort: "name" });
+    if (q) p.set("q", q);
+    try {
+      const r = await api.get<{ contacts: Contact[] }>(`/contacts?${p.toString()}`);
+      setContacts(r.contacts);
+    } catch { setContacts([]); }
+  }
+  useEffect(() => { void load(); }, [q]);
+
+  // A contact was un-ignored (or edited) in the detail pane: drop it from this
+  // list optimistically and refresh the parent counts.
+  function handleChanged(removedId?: string) {
+    if (removedId) {
+      setContacts((cs) => (cs ? cs.filter((c) => c.id !== removedId) : cs));
+      if (selected === removedId) setSelected(null);
+    }
+    onChanged();
+    window.setTimeout(() => { void load(); }, 400);
+  }
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: selected ? "minmax(320px, 1fr) minmax(360px, 1.3fr)" : "1fr", gap: 14, alignItems: "start" }}>
+      <div>
+        <div className="faint" style={{ fontSize: 12.5, marginBottom: 12 }}>
+          Ignored people are hidden from your People list and Circles map, and excluded from the
+          stats above. Open one and choose <b>Un-ignore</b> to bring it back.
+        </div>
+        <div className="search-bar" style={{ padding: "9px 13px", marginBottom: 14 }}>
+          <Icon name="search" size={16} />
+          <input placeholder="Search ignored people by name, email or phone…" value={q}
+                 onChange={(e) => setQ(e.target.value)} />
+          {q && <button className="filter-bar-clear" title="Clear" onClick={() => setQ("")}>×</button>}
+        </div>
+        {contacts === null ? <Loading label="Loading ignored people…" />
+          : contacts.length === 0 ? (
+            <Card><div className="muted" style={{ padding: "16px 4px" }}>
+              {q ? "No ignored people match your search." : "You haven't ignored anyone. Use Ignore on a contact to hide people you don't care about."}
+            </div></Card>
+          ) : (
+            <div className="stack" style={{ gap: 6 }}>
+              {contacts.map((p) => <ContactRow key={p.id} c={p} active={selected === p.id} onClick={() => setSelected(p.id)} />)}
+            </div>
+          )}
+      </div>
+      {selected && (
+        <ContactDetail id={selected} relationships={relationships} labels={labels}
+                       onClose={() => setSelected(null)} onChanged={handleChanged} />
+      )}
     </div>
   );
 }

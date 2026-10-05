@@ -91,6 +91,7 @@ def _identity_view(i: ContactIdentity) -> dict:
 def list_contacts(q: str = "", circle: str | None = None, relationship: str | None = None,
                   label: str | None = None, source: str | None = None,
                   starred: bool = False, include_hidden: bool = False,
+                  hidden_only: bool = False,
                   sort: str = "circle", limit: int = 500, offset: int = 0,
                   principal: security.Principal = Depends(security.get_principal),
                   tenant: Tenant = Depends(security.get_tenant),
@@ -99,7 +100,10 @@ def list_contacts(q: str = "", circle: str | None = None, relationship: str | No
     query = db.query(UnifiedContact).filter(
         UnifiedContact.tenant_id == tenant.id,
         UnifiedContact.owner_user_id == user.id)
-    if not include_hidden:
+    if hidden_only:
+        # The "Ignored" view: ONLY the people the user chose to suppress.
+        query = query.filter(UnifiedContact.hidden.is_(True))
+    elif not include_hidden:
         query = query.filter(UnifiedContact.hidden.is_(False))
     if circle:
         query = query.filter(UnifiedContact.circle == circle)
@@ -158,9 +162,14 @@ def _overview_payload(db: Session, tenant: Tenant, user: User) -> dict:
         ContactSuggestion.tenant_id == tenant.id,
         ContactSuggestion.owner_user_id == user.id,
         ContactSuggestion.status == "pending").count()
+    ignored = db.query(UnifiedContact).filter(
+        UnifiedContact.tenant_id == tenant.id,
+        UnifiedContact.owner_user_id == user.id,
+        UnifiedContact.hidden.is_(True)).count()
     top = sorted(rows, key=lambda c: -(c.interaction_count or 0))[:8]
     return {"total": len(rows), "by_circle": by_circle, "by_source": by_source,
             "by_relationship": by_relationship, "pending_suggestions": pending,
+            "ignored": ignored,
             "top_contacts": [_contact_view(c) for c in top],
             "prefs": _prefs(user)}
 
