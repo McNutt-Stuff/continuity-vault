@@ -840,11 +840,17 @@ def _collect_contacts(con, cols, table, out, seen):
         email = _first(row, cols, "email") or ""
         phone = _first(row, cols, "phone", "mobile", "number") or ""
         org = _first(row, cols, "company", "organization", "org") or ""
+        # Real record date (Outlook.sqlite carries a *TimeModified/*LastModDate);
+        # without it the ingest defaults the date to NOW (ingest time) and the
+        # contact looks re-touched every sync.
+        when = _iso(_first(row, cols, "timemodified", "modified", "moddate",
+                           "lastmod", "changed", "timecreated", "created"))
         rec = {"name": name, "email": email, "phone": phone, "org": org}
         out.append(_obj(
             f"outlook_local:contact:{rid}", "contact", name, _json(rec),
             " · ".join(x for x in (email, phone, org) if x),
-            {"kind": "contact", "email": email, "phone": phone, "org": org},
+            {"kind": "contact", "email": email, "phone": phone, "org": org,
+             "modified": when},
             ["Outlook", "Contacts"]))
 
 
