@@ -577,7 +577,7 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                 # from the DURABLE envelope (subject+sender+recipients+time) — NEVER the
                 # volatile HxStore ``block`` (Outlook renumbers it as it rewrites the
                 # live cache, which churned the oid and re-pushed every message).
-                envelope_key = _mail_envelope_key(subject, frm, recipients, when)
+                envelope_key = _mail_envelope_key(subject, frm, recipients, when, mid)
                 oid = ("outlook_local:mail:hx:" + re.sub(r"[^A-Za-z0-9._@+-]", "_", mid)) if mid \
                     else ("outlook_local:mail:hx:"
                           + hashlib.sha256(envelope_key.encode("utf-8", "replace")).hexdigest()[:24])
@@ -612,10 +612,9 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                     "<pre>" + html.escape(body) + "</pre>" if body else "")
                 content = _wrap_html_email(subject, frm, recipients, when, date_text,
                                            display_body)
-                # Signature over the envelope + NORMALIZED visible text (not the raw
-                # rendered HTML), so Outlook re-encoding the cached body between runs
-                # doesn't churn it and re-push an unchanged message.
-                signature = _mail_signature(envelope_key, body, html_body)
+                # Signature over stable identity + body KIND only (not the body text),
+                # so Outlook re-decoding the live cache between runs can't churn it.
+                signature = _mail_signature(envelope_key, body_kind)
                 obj = _obj(
                     oid, "email", subject, content,
                     (f"{frm} · " if frm else "") + (body[:180] or subject),
@@ -928,18 +927,27 @@ def _addr_key(s: Optional[str]) -> str:
     return ",".join(sorted(p for p in parts if p))
 
 
-def _mail_envelope_key(subject: str, frm: str, recipients: str, when: Optional[str]) -> str:
-    """Durable identity of an email (independent of body re-encoding + block churn)."""
+def _mail_envelope_key(subject: str, frm: str, recipients: str, when: Optional[str],
+                       mid: str = "") -> str:
+    """Durable identity of an email. A message_id is the ONE fully stable key across
+    hxprobe re-decodes of the live store — use it when present; otherwise fall back
+    to the durable envelope headers (independent of body re-encoding + block churn)."""
+    if mid and mid.strip():
+        return "mid\x1f" + mid.strip() + "\x1f" + (when or "")
     return "\x1f".join([_norm_ws(subject).lower(),
                         (_bare_email(frm) or _norm_ws(frm).lower()),
                         _addr_key(recipients), (when or "")])
 
 
-def _mail_signature(envelope_key: str, body: str, html_body: str) -> str:
-    """Delta signature over the envelope + NORMALIZED visible body text, so an
-    unchanged message yields the same signature run-to-run (no spurious re-push)."""
-    text = _html_text(html_body) if html_body else _norm_ws(body)
-    return hashlib.sha256((envelope_key + "\x1f" + text).encode("utf-8", "replace")).hexdigest()
+def _mail_signature(envelope_key: str, body_kind: str = "") -> str:
+    """Delta signature = stable identity + the body KIND only (preview|full), NOT the
+    body text. New Outlook re-decodes the SAME message with byte-different bodies
+    every run (it's a live cache), so hashing the text churned every message endlessly
+    and re-pushed the whole mailbox. A real preview→full upgrade still flips body_kind
+    so the fuller copy is re-captured; trivial re-encodings no longer churn."""
+    return hashlib.sha256(
+        (envelope_key + "\x1f" + (body_kind or "").lower()).encode("utf-8", "replace")
+    ).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
