@@ -355,23 +355,29 @@ class Agent:
         self._last_telemetry = tel
         body = {"state": "active", "version": self.cfg.version, "telemetry": tel}
         base = self._base()
+        used_base = base
+        t0 = time.perf_counter()
         try:
             r = httpx.post(f"{base}/agent/heartbeat",
                            json=body, headers=self._headers(), timeout=30)
             r.raise_for_status()
-        except Exception:
+        except Exception as exc:
             # Assigned node unreachable → fall back to the control plane so the
             # agent keeps reporting and can re-discover its node.
             if self._node_url and base == self._node_url:
-                self.log.warning("assigned node %s unreachable; falling back to control plane",
-                                 self._node_url)
+                self.log.warning("assigned node %s unreachable (%s); falling back to "
+                                 "control plane", self._node_url, exc.__class__.__name__)
                 self._node_cooldown[self._node_url] = time.time() + 120
                 self._set_node_url(None)
-                r = httpx.post(f"{self.cfg.cloud_base_url}/agent/heartbeat",
+                used_base = self.cfg.cloud_base_url
+                r = httpx.post(f"{used_base}/agent/heartbeat",
                                json=body, headers=self._headers(), timeout=30)
                 r.raise_for_status()
             else:
+                self.log.warning("heartbeat POST to %s failed: %s: %s",
+                                 base, exc.__class__.__name__, str(exc)[:160])
                 raise
+        ms = round((time.perf_counter() - t0) * 1000)
         self._last_heartbeat = time.time()
         data = r.json()
         self.reg["config"] = data.get("config", self.reg.get("config", {}))
@@ -388,7 +394,11 @@ class Agent:
         self._adopt_node(data.get("node_url") or data.get("ingest_url") or None)
         self.cfg.registration_file.write_text(json.dumps(self.reg))
         # Auto-update: pull a new bundle when the cloud advertises a newer version.
-        self._maybe_self_update(data.get("latest_version"))
+        # On the FIRST heartbeat after start, announce the outcome (up to date vs
+        # updating) so a fresh start always shows the update check in the log.
+        self._maybe_self_update(data.get("latest_version"),
+                                announce=not getattr(self, "_update_checked", False))
+        self._update_checked = True
         # Push-model scheduling: the cloud tells us WHICH sources to collect and
         # HOW OFTEN (from the Data Map); the agent decides WHEN, based on its own
         # timers — so nothing fires when we're offline or the data is unreachable.
@@ -412,6 +422,12 @@ class Agent:
         # Poll again quickly when we did command work or more is queued, so
         # interactive folder browsing isn't throttled to one folder per cycle.
         self._fast_poll = handled > 0 or bool(data.get("pending_more"))
+        # Visible heartbeat result so "is it talking to the cloud?" is never a
+        # mystery (target, latency, status, commands drained, mappings, version).
+        self.log.info("heartbeat ok → %s (%dms, HTTP %s, %d command(s), %d mapping(s)%s)",
+                      used_base, ms, r.status_code, handled,
+                      len(self._mappings) if isinstance(getattr(self, "_mappings", None), list) else 0,
+                      f", latest={data.get('latest_version')}" if data.get("latest_version") else "")
         return data
 
     def _apply_tray_preference(self) -> None:
@@ -504,8 +520,15 @@ class Agent:
             self.log.warning("could not update launchd plist for tray recovery: %s", exc)
             return False
 
-    def _maybe_self_update(self, latest: Optional[str]) -> None:
-        if not latest or latest == self.cfg.version:
+    def _maybe_self_update(self, latest: Optional[str], announce: bool = False) -> None:
+        if not latest:
+            if announce:
+                self.log.info("startup update check: cloud did not advertise a version yet")
+            return
+        if latest == self.cfg.version:
+            if announce:
+                self.log.info("startup update check: agent is up to date (version %s)",
+                              self.cfg.version)
             return
         # Throttle so a failing update doesn't loop every heartbeat.
         if time.time() - self._last_update_attempt < 300:
@@ -1133,6 +1156,9 @@ class Agent:
         self._start_watchdog()  # in-process liveness watchdog (restart on hang)
         interval = self.reg.get("heartbeat_interval_seconds", 30)
         idle = min(int(interval or 30), 15)  # cap idle poll so first command lands sooner
+        self.log.info("agent loop starting (version %s, cloud=%s, heartbeat every ~%ds) — "
+                      "checking for updates on the first heartbeat",
+                      self.cfg.version, self.cfg.cloud_base_url, idle)
         self._last_hb_success = time.monotonic()
         while True:
             self._last_tick = time.monotonic()  # liveness heartbeat for the watchdog

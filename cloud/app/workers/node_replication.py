@@ -88,7 +88,15 @@ _PULL_ORDER = [
 # at runtime and pushes them UP; pulling the control plane's stale copy back down
 # would clobber a just-recorded sync error/cursor before it's ever pushed).
 _PULL_EXCLUDE = {
-    "desktop_agents": {"pending_commands", "last_scan", "fs_expansions"},
+    # A node-hosted desktop agent heartbeats its assigned NODE, which owns these
+    # runtime fields (mirrors `appliances` below). Pulling the control plane's
+    # stale copy back down would clobber the just-recorded liveness/telemetry
+    # before it's pushed up — freezing the agent as perpetually "offline". Must
+    # cover every field the node→CP push sends (node_sync._AGENT_FIELDS) plus the
+    # node-owned command queue + scan blobs.
+    "desktop_agents": {"pending_commands", "last_scan", "fs_expansions",
+                       "state", "version", "telemetry", "last_heartbeat_at",
+                       "collectors", "last_collection_at", "version_updated_at"},
     # A node's cluster_id is an FK to `clusters`, which lives ONLY on the control
     # plane (customer nodes don't replicate cluster topology). Pulling it would make
     # every remote node row un-insertable (FK violation) — which, once HA makes a
