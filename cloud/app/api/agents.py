@@ -694,6 +694,17 @@ def heartbeat(body: AgentHeartbeat, request: Request,
         agent.version = body.version
         agent.version_updated_at = _now()
     agent.telemetry = tel
+    # "Last collection" should reflect the last collection RUN the agent reports
+    # (every heartbeat), not just the last new-data ingest — otherwise a fully
+    # deduped source (nothing new to push) leaves it looking stale for hours.
+    lce = tel.get("last_collect_epoch")
+    if lce:
+        try:
+            ran = datetime.fromtimestamp(float(lce), tz=timezone.utc).replace(tzinfo=None)
+            if agent.last_collection_at is None or ran > agent.last_collection_at:
+                agent.last_collection_at = ran
+        except (TypeError, ValueError, OSError, OverflowError):
+            pass
     # Let the agent advertise which collectors it supports so new capabilities
     # (e.g. endpoint files) appear for already-linked agents after they update.
     advertised = tel.get("collectors")
