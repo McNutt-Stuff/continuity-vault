@@ -27,6 +27,8 @@ export const SYNCED_SOURCE_ICONS: ReadonlySet<string> = new Set([
 // Outlook store shows the Outlook logo). Keep in sync with the backend map.
 export const SOURCE_ICON_ALIASES: Readonly<Record<string, string>> = {
   outlook_local: "outlook",
+  // Apple Passwords is iCloud Keychain — reuse the real Apple/iCloud brand mark.
+  apple_passwords: "icloud",
   // Managed Exchange calendar/contacts are Outlook/Exchange data.
   calendar: "outlook",
   contacts: "outlook",
@@ -71,6 +73,7 @@ export const SOURCE_LABELS: Readonly<Record<string, string>> = {
   imessage: "Apple Messages",
   icloud: "iCloud",
   onepassword: "1Password",
+  apple_passwords: "Apple Passwords",
   dropbox: "Dropbox",
   slack: "Slack",
   notion: "Notion",

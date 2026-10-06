@@ -67,6 +67,15 @@ def _setup_instructions(connector_type: str) -> list[str]:
             "Unlock 1Password and enable Settings → Developer → Integrate with 1Password CLI.",
             "The agent extracts items with the `op` CLI and pushes them encrypted.",
         ]
+    if connector_type == "apple_passwords":
+        return [
+            "Apple Passwords (iCloud Keychain) is collected by a local Arkive desktop agent on the Mac (no cloud pull).",
+            "In the device's agent settings, enable \u201cCollect Apple Passwords\u201d. A headless keychain",
+            "inventory (which logins exist \u2014 no secret values) is then backed up automatically.",
+            "To back up the actual passwords, open the Passwords app \u2192 \u22ef \u2192 Export All Passwords\u2026 and save the",
+            "CSV into the agent's import folder (~/.arkive-agent/data/apple-passwords); the agent ingests it",
+            "client-encrypted, then securely deletes the plaintext export.",
+        ]
     if connector_type == "endpoint_files":
         return [
             "Endpoint files are collected by a local Arkive desktop agent (not a cloud pull).",
@@ -172,6 +181,7 @@ _SOURCE_FAMILY = {
     "imessage": "Apple", "outlook_local": "Microsoft",
     "sharepoint": "Microsoft", "teams": "Microsoft",
     "onepassword": "Endpoint Collected", "endpoint_files": "Endpoint Collected",
+    "apple_passwords": "Endpoint Collected",
     "custom": "Custom",
 }
 _SOURCE_TYPE = {
@@ -183,6 +193,7 @@ _SOURCE_TYPE = {
     "google_contacts": "Contacts",
     "google_calendar": "Calendar",
     "onepassword": "Passwords",
+    "apple_passwords": "Passwords",
     "reddit": "Social", "facebook": "Social", "instagram": "Social",
     "linkedin": "Social",
     "github": "Developer",

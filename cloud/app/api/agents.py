@@ -66,6 +66,7 @@ DEFAULT_AGENT_CONFIG = {
     "log_level": "info",  # debug|info|warning|error (overrides verbose_logging)
     "show_tray_icon": True,  # show the macOS menu-bar icon (applies on agent restart)
     "collect_web_usage": False,  # opt-in: browser-history web/app usage (AI + shadow apps)
+    "collect_apple_passwords": False,  # opt-in: Apple Passwords / iCloud Keychain logins
 }
 
 
@@ -180,6 +181,7 @@ class AgentConfigUpdate(BaseModel):
     log_level: str | None = None
     show_tray_icon: bool | None = None
     collect_web_usage: bool | None = None
+    collect_apple_passwords: bool | None = None
 
 
 @fleet_router.put("/{agent_id}/config")

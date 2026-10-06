@@ -23,6 +23,8 @@ BRAND_ICON_TYPES: frozenset[str] = frozenset({
 # Variant/local types that reuse another type's brand mark (mirror the frontend).
 SOURCE_ICON_ALIASES: dict[str, str] = {
     "outlook_local": "outlook",
+    # Apple Passwords is iCloud Keychain — reuse the real Apple/iCloud brand mark.
+    "apple_passwords": "icloud",
     # Managed Exchange calendar/contacts are Outlook/Exchange data.
     "calendar": "outlook",
     "contacts": "outlook",

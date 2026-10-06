@@ -1342,6 +1342,28 @@ _SOURCE_PAGES = [
          "background collection needs a 1Password **service account** (Business plan).",
          "Requires the 1Password desktop app + CLI on the agent's Mac."]),
     _source_doc(
+        "source-apple-passwords", "Apple Passwords", "key", 73,
+        "Back up your Apple Passwords (iCloud Keychain) logins — collected locally, secrets stay encrypted.",
+        "Your saved website logins from iCloud Keychain, collected on-device by the desktop agent. "
+        "A headless keychain **inventory** (which logins exist — no secret values) is backed up "
+        "automatically; to also back up the actual passwords, export them from the Passwords app and "
+        "drop the file into the agent's import folder. Items flow into the same login model and "
+        "recovered-item viewer as 1Password.",
+        _agent_connect("Enable **Collect Apple Passwords** in the device's agent settings. To back "
+                       "up the passwords themselves, open the **Passwords** app → **⋯** → **Export "
+                       "All Passwords…** and save the CSV into the agent's import folder "
+                       "(`~/.arkive-agent/data/apple-passwords`)."),
+        ["**Credentials** — each login (`login`) with its site, username and (when exported) "
+         "password / 2FA seed. Secret values are envelope-encrypted; only non-secret titles and "
+         "metadata are indexed."],
+        ["Collected locally — your passwords never reach the cloud in plaintext.",
+         "macOS protects Keychain secrets behind per-item approval, so **passwords require a "
+         "manual export** into the import folder; the agent ingests it client-encrypted then "
+         "securely deletes the plaintext export.",
+         "The automatic keychain **inventory** captures which logins exist (no secrets) even "
+         "without an export.",
+         "macOS only (iCloud Keychain)."]),
+    _source_doc(
         "source-imessage", "Apple Messages", "mail", 74,
         "Back up iMessage / SMS threads and attachments from your Mac.",
         "Your Messages history — individual and group threads, with attachments — read locally "

@@ -137,6 +137,43 @@ class OnePasswordConnector(Connector):
 
 
 @register_connector
+class ApplePasswordsConnector(Connector):
+    """Apple Passwords / iCloud Keychain website logins, collected locally by the
+    desktop agent on a Mac. Full secrets come from an export the user drops into the
+    agent's import folder (then scrubbed); a headless keychain inventory keeps the
+    list of which credentials exist current even without an export. Objects flow
+    into the same login model + recovered-item viewer as 1Password."""
+
+    connector_type = "apple_passwords"
+    display_name = "Apple Passwords"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            incremental=True,
+            requires_agent=True,  # collected locally from macOS iCloud Keychain
+            searchable_fields=["url", "username", "kind", "vault"],
+            facet_fields=["vault", "kind"],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type,
+            display_name=self.display_name,
+            auth_type="api-token",
+            authorize_url="",
+            token_url="",
+            scopes=[],
+            icon="key",
+            color="#0a84ff",
+            doc_types=["login", "note"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        # Collected locally by the desktop agent; nothing is pulled from the cloud.
+        return []
+
+
+@register_connector
 class ImessageConnector(Connector):
     """Apple iMessage / SMS, collected locally by the desktop agent from
     ``~/Library/Messages/chat.db``. Messages carry their thread (chat) id, the

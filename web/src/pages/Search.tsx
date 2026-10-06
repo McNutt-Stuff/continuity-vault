@@ -432,6 +432,7 @@ function parse1Password(d: any): OnePasswordView {
 
 function isOnePassword(item: Recovered): boolean {
   return item.source_type === "onepassword"
+    || item.source_type === "apple_passwords"
     || ["login", "password", "secret", "note", "identity", "api_key", "credit_card"].includes(item.doc_type);
 }
 

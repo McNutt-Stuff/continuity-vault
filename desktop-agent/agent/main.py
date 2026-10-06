@@ -34,6 +34,7 @@ import httpx
 
 from .config import Config
 from .collectors import onepassword
+from .collectors import apple_passwords
 from .collectors import files as files_collector
 from .collectors import imessage
 from .collectors import outlook_local
@@ -148,6 +149,7 @@ class Agent:
         # Incremental collect state for the message/mail collectors.
         self._imessage_state_file = Path(cfg.data_dir) / "imessage_state.json"
         self._outlook_state_file = Path(cfg.data_dir) / "outlook_local_state.json"
+        self._apple_passwords_state_file = Path(cfg.data_dir) / "apple_passwords_state.json"
         # Push-model scheduling: the agent owns the cadence for its sources. The
         # per-source last-run timestamps are persisted so a restart doesn't
         # immediately re-collect everything, and the mappings (source + interval +
@@ -287,6 +289,7 @@ class Agent:
             "os": platform.platform(),
             "op_available": onepassword.available(),
             "op_auth": onepassword.auth_state(self.cfg.op_service_account_token),
+            "apple_passwords_available": apple_passwords.available(),
             "collectors": self._collectors(),
             "collector_notices": self._collector_notices,
             "version": self.cfg.version,
@@ -812,6 +815,8 @@ class Agent:
             return self._collect_imessage(params)
         if st == "outlook_local":
             return self._collect_outlook_local(params)
+        if st == "apple_passwords":
+            return self._collect_apple_passwords(params)
         if st == "endpoint_files" or params.get("file_config"):
             return self._collect_files(params.get("file_config") or {})
         return self._collect_onepassword()
@@ -820,6 +825,9 @@ class Agent:
         """Collector source-types this agent can serve (advertised on activate +
         heartbeat so the Data Map only offers what's actually present)."""
         cols = ["onepassword", "endpoint_files"]
+        cfg = self.reg.get("config", {})
+        if apple_passwords.available() and cfg.get("collect_apple_passwords"):
+            cols.append("apple_passwords")
         for name, mod in (("imessage", imessage), ("outlook_local", outlook_local)):
             try:
                 if mod.available():
@@ -1093,6 +1101,35 @@ class Agent:
         self._last_collect = time.time()
         self._write_status({"last_collect": _now_iso(), "results": results})
         self.log.info("pushed %d objects", total)
+        return {"objects": total, "results": results}
+
+    def _collect_apple_passwords(self, params: Optional[dict] = None) -> dict:
+        """Collect Apple Passwords (iCloud Keychain) — full secrets from an exported
+        CSV (then scrubbed) + the headless keychain inventory. Gated by the
+        collect_apple_passwords config toggle; flows into the same login models +
+        viewer as 1Password."""
+        cfg = self.reg.get("config", {})
+        if not cfg.get("collect_apple_passwords"):
+            self.log.info("apple_passwords: disabled (collect_apple_passwords off) — skipping")
+            return {"objects": 0, "results": [{"collector": "apple_passwords", "skipped": "disabled"}]}
+        if not apple_passwords.available():
+            self.log.warning("apple_passwords: only available on macOS (iCloud Keychain)")
+            return {"objects": 0, "results": [{"collector": "apple_passwords", "skipped": "unsupported os"}]}
+        destinations = cfg.get("destinations", ["cv-cloud"])
+        self.log.info("apple_passwords: starting collection → destinations=%s "
+                      "(export dir: %s)", destinations,
+                      apple_passwords.import_dir(str(self.cfg.data_dir)))
+        state = self._load_json_state(self._apple_passwords_state_file)
+        objects, new_state = apple_passwords.collect(str(self.cfg.data_dir), state)
+        self.log.info("apple_passwords: collected %d object(s); encrypting + pushing…",
+                      len(objects))
+        total = self._push_objects("apple_passwords", objects, destinations) if objects else 0
+        if objects and not getattr(self, "_push_failed", set()):
+            self._save_json_state(self._apple_passwords_state_file, new_state)
+        self._last_collect = time.time()
+        results = [{"collector": "apple_passwords", "objects": total}]
+        self._write_status({"last_collect": _now_iso(), "results": results})
+        self.log.info("apple_passwords: pushed %d/%d object(s)", total, len(objects))
         return {"objects": total, "results": results}
 
     # -- self update --------------------------------------------------

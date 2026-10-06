@@ -21,6 +21,7 @@ interface Agent {
 const COLLECTOR_META: Record<string, { label: string; desc: string; brand?: string }> = {
   onepassword: { label: "1Password", desc: "Passwords & secure items via the op CLI", brand: "onepassword" },
   endpoint_files: { label: "Endpoint files", desc: "Folders you select in the Data Map" },
+  apple_passwords: { label: "Apple Passwords", desc: "iCloud Keychain logins (export + keychain inventory)", brand: "apple_passwords" },
   imessage: { label: "Apple Messages", desc: "iMessage/SMS, group threads & attachments", brand: "imessage" },
   outlook_local: { label: "Outlook (local)", desc: "Local email, attachments, contacts, calendar & notes", brand: "outlook" },
 };
@@ -352,6 +353,7 @@ function DeviceDetail({ a, onBack, onCommand, onRename, onRemove, reload }:
   const [verbose, setVerbose] = useState<boolean>(!!a.config?.verbose_logging);
   const [showTray, setShowTray] = useState<boolean>(a.config?.show_tray_icon !== false);
   const [webUsage, setWebUsage] = useState<boolean>(!!a.config?.collect_web_usage);
+  const [applePasswords, setApplePasswords] = useState<boolean>(!!a.config?.collect_apple_passwords);
   const [dest, setDest] = useState<string>(() => {
     const arr = a.config?.destinations || ["cv-cloud"];
     if (arr.includes("appliance")) return arr.includes("cv-cloud") ? "both" : "appliance";
@@ -538,6 +540,19 @@ function DeviceDetail({ a, onBack, onCommand, onRename, onRemove, reload }:
           <button className={`btn sm ${webUsage ? "primary" : ""}`}
                   onClick={() => { const next = !webUsage; setWebUsage(next); void setConfig({ collect_web_usage: next }); }}>
             {webUsage ? "On" : "Off"}
+          </button>
+        </div>
+        <div className="collector-row" style={{ marginTop: 10 }}>
+          <div className="row" style={{ gap: 10 }}>
+            <Icon name="key" size={16} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Apple Passwords</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>Backs up iCloud Keychain logins. A headless keychain inventory (which logins exist — no secret values) runs automatically; export the Passwords app CSV into the agent's import folder to also back up the passwords (the plaintext export is scrubbed after ingest).</div>
+            </div>
+          </div>
+          <button className={`btn sm ${applePasswords ? "primary" : ""}`}
+                  onClick={() => { const next = !applePasswords; setApplePasswords(next); void setConfig({ collect_apple_passwords: next }); }}>
+            {applePasswords ? "On" : "Off"}
           </button>
         </div>
       </Card>
