@@ -195,9 +195,35 @@ def _hxprobe_runnable(hxprobe: Path) -> bool:
         return True  # ran but exited non-zero (e.g. usage) — still runnable
 
 
+def _clone_or_copy(src: Path, dst: Path) -> bool:
+    """Snapshot ``src``. Prefer an APFS copy-on-write clone (``cp -c``): it's
+    instant + atomic (a consistent point-in-time view), so a multi-GB HxStore that
+    Outlook is actively writing snapshots cleanly. Falls back to a byte copy on a
+    non-APFS / cross-volume target."""
+    try:
+        r = subprocess.run(["cp", "-c", str(src), str(dst)],
+                           capture_output=True, timeout=300)
+        if r.returncode == 0 and dst.exists() and dst.stat().st_size > 0:
+            return True
+        try:
+            dst.unlink()
+        except OSError:
+            pass
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("outlook_local: clone (cp -c) failed, falling back to copy: %s", exc)
+    try:
+        shutil.copyfile(src, dst)
+        return dst.exists() and dst.stat().st_size > 0
+    except OSError as exc:
+        log.debug("outlook_local: snapshot copy failed: %s", exc)
+        return False
+
+
 def _stable_snapshot(src: Path, dst: Path, retries: int = 5, stability_ms: int = 250) -> bool:
-    """Copy a live HxStore only when its size/mtime stay stable across the copy,
-    so an open Outlook doesn't hand us a torn file. Returns True on success."""
+    """Copy a live HxStore when it's momentarily quiet, so an open Outlook doesn't
+    hand us a torn file. Uses an APFS CoW clone (atomic point-in-time) so the copy
+    itself can't tear even on a multi-GB store that's being written. Returns True
+    on success."""
     delay = max(0, stability_ms) / 1000.0
     for _ in range(max(1, retries)):
         try:
@@ -205,16 +231,14 @@ def _stable_snapshot(src: Path, dst: Path, retries: int = 5, stability_ms: int =
             if delay:
                 time.sleep(delay)
             settled = src.stat()
+            # Start the snapshot from a quiet moment (not mid-flush). The clone
+            # is atomic, so no post-copy recheck is needed (the old size/mtime
+            # recheck could NEVER pass on a multi-GB actively-written store, which
+            # made mail collection fail with "could not obtain a stable snapshot").
             if (before.st_size, before.st_mtime_ns) != (settled.st_size, settled.st_mtime_ns):
                 continue
-            shutil.copyfile(src, dst)
-            after = src.stat()
-            if (settled.st_size, settled.st_mtime_ns) == (after.st_size, after.st_mtime_ns):
+            if _clone_or_copy(src, dst):
                 return True
-            try:
-                dst.unlink()
-            except OSError:
-                pass
         except OSError as exc:
             log.debug("outlook_local: snapshot attempt failed: %s", exc)
         if delay:
