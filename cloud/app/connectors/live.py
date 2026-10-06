@@ -2579,6 +2579,14 @@ def _instagram_client(settings: Optional[dict] = None, username: Optional[str] =
     return cl
 
 
+def _instagrapi_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("instagrapi")
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
 def instagram_start_session(username: str, password: str):
     """Begin an interactive Instagram sign-in. Returns ``(status, state)``:
     ``"linked"`` (no 2FA; state has ``{settings, username}``) or ``"needs_2fa"``
@@ -2590,6 +2598,10 @@ def instagram_start_session(username: str, password: str):
     pw = password or ""
     if not user or not pw:
         raise PermissionError("Enter your Instagram username and password.")
+    # Record the running instagrapi version so Platform Logs shows whether the CAA
+    # login (3.x) is actually live — a rate-limit raises a handled error otherwise.
+    logger.info("instagram: sign-in attempt for %s (instagrapi=%s)",
+                user, _instagrapi_version())
     cl = _instagram_client(username=user)
     try:
         cl.login(user, pw)
@@ -2607,9 +2619,18 @@ def instagram_start_session(username: str, password: str):
                               "them and try again.") from exc
     except ClientError as exc:  # noqa: BLE001
         detail = (str(exc).strip() or exc.__class__.__name__)
-        if any(s in detail.lower() for s in ("please_wait", "few minutes", "429")):
-            raise PermissionError("Instagram is rate-limiting sign-ins from this "
-                                  "server — wait a few minutes and try again.") from exc
+        if any(s in detail.lower() for s in ("please_wait", "few minutes", "429",
+                                             "wait a few", "throttl")):
+            logger.warning("instagram: sign-in RATE-LIMITED for %s (instagrapi=%s, "
+                           "%s: %s)", user, _instagrapi_version(),
+                           exc.__class__.__name__, detail[:200])
+            raise PermissionError(
+                "Instagram has temporarily blocked sign-ins from this server's IP "
+                "(too many attempts). This clears on its own — wait at least 15–30 "
+                "minutes and DON'T keep retrying, because each attempt restarts the "
+                "cooldown. Then try once more.") from exc
+        logger.warning("instagram: sign-in failed for %s (instagrapi=%s, %s: %s)",
+                       user, _instagrapi_version(), exc.__class__.__name__, detail[:200])
         raise PermissionError(f"Instagram sign-in failed: {detail}") from exc
     logger.info("instagram: signed in (no 2FA) for %s", user)
     return "linked", {"settings": cl.get_settings(), "username": user}
