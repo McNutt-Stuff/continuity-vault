@@ -337,7 +337,11 @@ def _agent_view(a: DesktopAgent, db: Session | None = None) -> dict:
 
 # Base collectors are on by default; more sensitive/new ones (iMessage, local
 # Outlook) are OPT-IN — the operator enables them per agent in the Agents UI.
-_BASE_COLLECTORS = {"onepassword", "endpoint_files"}
+# The native mobile app's obvious sources default ON so a freshly-linked phone
+# starts protecting photos/contacts/calendar/reminders/files right away.
+_BASE_COLLECTORS = {"onepassword", "endpoint_files", "device_photos",
+                    "device_contacts", "device_calendar", "device_reminders",
+                    "device_files"}
 
 
 def _enabled_collectors(a: DesktopAgent) -> list:

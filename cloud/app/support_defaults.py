@@ -1296,6 +1296,27 @@ _SOURCE_PAGES = [
          "Runs entirely on the endpoint — the cloud only receives ciphertext.",
          "Great for anything not covered by a cloud connector."]),
     _source_doc(
+        "source-ios-app", "Arkive for iPhone & iPad", "ios", 65,
+        "A native iOS app that backs up your photos, contacts, calendar, reminders and files.",
+        "The Arkive iOS app is a mobile endpoint agent: it links to your account with a one-time "
+        "linking code (exactly like the desktop agent) and then protects the data on your device — "
+        "**Photos & videos**, **Contacts**, **Calendar events**, **Reminders** and **Files** you "
+        "grant it access to. It backs up changes on its own schedule and uploads them over TLS.",
+        ["Open **Devices → Add a device → iPhone / iPad** and copy the **linking code** (valid 15 min).",
+         "Install the **Arkive** app, open it and choose **Link device**, then enter the code.",
+         "Grant the app access to **Photos, Contacts, Calendars, Reminders** and any **Files** folders "
+         "when prompted — only what you allow is backed up.",
+         "Add each mobile source in the **Data Map** (Photos, Contacts, Calendar, …) so its backups "
+         "land in a vault — same approve-then-collect flow as the desktop agent."],
+        ["**Photos** — images & videos from your library.",
+         "**Contacts** — your address book.",
+         "**Calendar** — events from your calendars.",
+         "**Reminders** — your to-dos.",
+         "**Files** — folders you grant the app access to."],
+        ["Collected on-device by the native app — no cloud account needed for your own data.",
+         "You control exactly which categories and folders are included; permissions are iOS-native.",
+         "Backups continue in the background and resume automatically after the app is reopened."]),
+    _source_doc(
         "source-google-photos", "Google Photos", "image", 66,
         "Back up photos and videos you pick from Google Photos.",
         "Google now requires an interactive **picker** — you select the albums or items to back "

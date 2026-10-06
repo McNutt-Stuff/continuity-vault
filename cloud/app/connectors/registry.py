@@ -173,6 +173,105 @@ class ApplePasswordsConnector(Connector):
         return []
 
 
+class _MobileCollector(Connector):
+    """Base for sources collected on-device by the native mobile app (iOS/Android),
+    pushed through the SAME agent enroll→heartbeat→ingest pipeline as the desktop
+    agent. Nothing is pulled from the cloud — ``fetch_objects`` is a no-op; the app
+    runs the collector on its own cadence when a mapping exists for it."""
+
+    _icon = "box"
+    _color = "#0a84ff"
+    _doc_types: list[str] = []
+    _searchable: list[str] = []
+    _facets: list[str] = []
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            incremental=True,
+            requires_agent=True,  # collected on-device by the mobile app
+            searchable_fields=self._searchable,
+            facet_fields=self._facets,
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type,
+            display_name=self.display_name,
+            auth_type="api-token",
+            authorize_url="",
+            token_url="",
+            scopes=[],
+            icon=self._icon,
+            color=self._color,
+            doc_types=self._doc_types,
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        return []
+
+
+@register_connector
+class DevicePhotosConnector(_MobileCollector):
+    """Photos & videos from the device's photo library (iOS PhotoKit), collected
+    by the native app and pushed client-side over TLS into the same media models."""
+
+    connector_type = "device_photos"
+    display_name = "Device Photos"
+    _icon = "image"
+    _doc_types = ["image", "video"]
+    _searchable = ["album", "kind", "filename", "device"]
+    _facets = ["album", "kind"]
+
+
+@register_connector
+class DeviceContactsConnector(_MobileCollector):
+    """Contacts from the device's address book (iOS Contacts framework)."""
+
+    connector_type = "device_contacts"
+    display_name = "Device Contacts"
+    _icon = "users"
+    _doc_types = ["person"]
+    _searchable = ["name", "email", "phone", "org", "device"]
+    _facets = ["org"]
+
+
+@register_connector
+class DeviceCalendarConnector(_MobileCollector):
+    """Calendar events from the device's calendars (iOS EventKit)."""
+
+    connector_type = "device_calendar"
+    display_name = "Device Calendar"
+    _icon = "calendar"
+    _doc_types = ["event"]
+    _searchable = ["title", "calendar", "location", "organizer", "device"]
+    _facets = ["calendar"]
+
+
+@register_connector
+class DeviceRemindersConnector(_MobileCollector):
+    """Reminders / to-dos from the device (iOS EventKit reminders)."""
+
+    connector_type = "device_reminders"
+    display_name = "Device Reminders"
+    _icon = "check"
+    _doc_types = ["note"]
+    _searchable = ["title", "list", "device"]
+    _facets = ["list"]
+
+
+@register_connector
+class DeviceFilesConnector(_MobileCollector):
+    """Files the user grants the mobile app access to (security-scoped folders /
+    iCloud Drive), backed up as their own file objects."""
+
+    connector_type = "device_files"
+    display_name = "Device Files"
+    _icon = "folder"
+    _doc_types = ["file", "image", "pdf", "video", "audio"]
+    _searchable = ["filename", "folder", "kind", "device"]
+    _facets = ["kind", "folder"]
+
+
 @register_connector
 class ImessageConnector(Connector):
     """Apple iMessage / SMS, collected locally by the desktop agent from

@@ -76,6 +76,14 @@ def _setup_instructions(connector_type: str) -> list[str]:
             "CSV into the agent's import folder (~/.arkive-agent/data/apple-passwords); the agent ingests it",
             "client-encrypted, then securely deletes the plaintext export.",
         ]
+    if connector_type in ("device_photos", "device_contacts", "device_calendar",
+                          "device_reminders", "device_files"):
+        return [
+            "This source is collected by the Arkive app on your iPhone or iPad (no cloud pull).",
+            "Install the Arkive app, then add the device under Devices \u2192 Add a device and enter the linking code.",
+            "Grant the app access to Photos / Contacts / Calendars / Reminders / Files when prompted.",
+            "The app backs up changes on its own schedule and pushes them encrypted over TLS.",
+        ]
     if connector_type == "endpoint_files":
         return [
             "Endpoint files are collected by a local Arkive desktop agent (not a cloud pull).",
@@ -182,6 +190,9 @@ _SOURCE_FAMILY = {
     "sharepoint": "Microsoft", "teams": "Microsoft",
     "onepassword": "Endpoint Collected", "endpoint_files": "Endpoint Collected",
     "apple_passwords": "Endpoint Collected",
+    "device_photos": "On-device (Mobile)", "device_contacts": "On-device (Mobile)",
+    "device_calendar": "On-device (Mobile)", "device_reminders": "On-device (Mobile)",
+    "device_files": "On-device (Mobile)",
     "custom": "Custom",
 }
 _SOURCE_TYPE = {
@@ -194,6 +205,11 @@ _SOURCE_TYPE = {
     "google_calendar": "Calendar",
     "onepassword": "Passwords",
     "apple_passwords": "Passwords",
+    "device_photos": "Photos",
+    "device_contacts": "Contacts",
+    "device_calendar": "Calendar",
+    "device_reminders": "Reminders",
+    "device_files": "Files & Storage",
     "reddit": "Social", "facebook": "Social", "instagram": "Social",
     "linkedin": "Social",
     "github": "Developer",

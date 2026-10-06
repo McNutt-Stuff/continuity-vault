@@ -22,6 +22,11 @@ const COLLECTOR_META: Record<string, { label: string; desc: string; brand?: stri
   onepassword: { label: "1Password", desc: "Passwords & secure items via the op CLI", brand: "onepassword" },
   endpoint_files: { label: "Endpoint files", desc: "Folders you select in the Data Map" },
   apple_passwords: { label: "Apple Passwords", desc: "iCloud Keychain logins (export + keychain inventory)", brand: "apple_passwords" },
+  device_photos: { label: "Photos", desc: "Photos & videos from the device library" },
+  device_contacts: { label: "Contacts", desc: "Address book contacts" },
+  device_calendar: { label: "Calendar", desc: "Calendar events" },
+  device_reminders: { label: "Reminders", desc: "Reminders & to-dos" },
+  device_files: { label: "Files", desc: "Folders you grant the app access to" },
   imessage: { label: "Apple Messages", desc: "iMessage/SMS, group threads & attachments", brand: "imessage" },
   outlook_local: { label: "Outlook (local)", desc: "Local email, attachments, contacts, calendar & notes", brand: "outlook" },
 };
@@ -32,7 +37,7 @@ interface DeviceTypeMeta { label: string; icon: string; kind: DeviceKind; availa
 const DEVICE_TYPES: Record<string, DeviceTypeMeta> = {
   macos: { label: "Mac", icon: "macos", kind: "agent", available: true, note: "macOS desktop agent" },
   windows: { label: "Windows", icon: "windows", kind: "agent", available: false, note: "Windows desktop agent" },
-  ios: { label: "iPhone / iPad", icon: "ios", kind: "app", available: false, note: "iOS app" },
+  ios: { label: "iPhone / iPad", icon: "ios", kind: "app", available: true, note: "iOS app" },
   android: { label: "Android", icon: "android", kind: "app", available: false, note: "Android app" },
 };
 function deviceTypeKey(platform?: string): string {
@@ -237,6 +242,7 @@ function AddDeviceModal({ me, stepUp, onClose, flash, reload }:
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   { me: any; stepUp: () => Promise<void>; onClose: () => void; flash: (m: string) => void; reload: () => Promise<void> }) {
   const [code, setCode] = useState<string | null>(null);
+  const [iosCode, setIosCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function downloadMac() {
@@ -262,6 +268,15 @@ function AddDeviceModal({ me, stepUp, onClose, flash, reload }:
     try {
       const res = await api.post<{ code: string }>("/agents/linking-code", { name: "Mac", collectors: ["onepassword"] });
       setCode(res.code);
+    } catch (e) { await notify({ title: "Couldn't create code", message: (e as ApiError).message, tone: "danger" }); }
+  }
+  async function iosLinkingCode() {
+    try {
+      const res = await api.post<{ code: string }>("/agents/linking-code", {
+        name: "iPhone",
+        collectors: ["device_photos", "device_contacts", "device_calendar", "device_reminders", "device_files"],
+      });
+      setIosCode(res.code);
     } catch (e) { await notify({ title: "Couldn't create code", message: (e as ApiError).message, tone: "danger" }); }
   }
 
@@ -300,8 +315,32 @@ function AddDeviceModal({ me, stepUp, onClose, flash, reload }:
               )}
             </div>
 
+            {/* iPhone / iPad — available (native app, linking-code onboarding) */}
+            <div style={{ border: "1px solid var(--border-soft)", borderRadius: 12, padding: 14 }}>
+              <div className="row" style={{ gap: 10, marginBottom: 8 }}>
+                <DeviceGlyph typeKey="ios" size={20} />
+                <div>
+                  <div style={{ fontWeight: 650 }}>iPhone / iPad</div>
+                  <div className="faint" style={{ fontSize: 11.5 }}>Arkive iOS app</div>
+                </div>
+              </div>
+              <div className="faint" style={{ fontSize: 12, marginBottom: 10 }}>
+                Install the Arkive app, open it and enter the linking code to back up photos, contacts, calendar, reminders &amp; files.
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="btn sm" onClick={iosLinkingCode}><Icon name="link" size={14} /> Linking code</button>
+              </div>
+              {iosCode && (
+                <div className="card" style={{ marginTop: 12, textAlign: "center", background: "var(--bg-elev)" }}>
+                  <div className="faint" style={{ fontSize: 11.5 }}>Linking code (valid 15 min)</div>
+                  <div className="mono" style={{ fontSize: 24, letterSpacing: 2, margin: "6px 0" }}>{iosCode}</div>
+                  <div className="faint" style={{ fontSize: 11 }}>Enter this in the Arkive app → Link device.</div>
+                </div>
+              )}
+            </div>
+
             {/* Coming-soon device types */}
-            {(["windows", "ios", "android"] as const).map((k) => {
+            {(["windows", "android"] as const).map((k) => {
               const meta = DEVICE_TYPES[k];
               return (
                 <div key={k} style={{ border: "1px solid var(--border-soft)", borderRadius: 12, padding: 14, opacity: 0.72 }}>
