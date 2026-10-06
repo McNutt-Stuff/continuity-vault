@@ -537,8 +537,6 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                 rows = sorted(rows, key=lambda r: (mget(r, "block") or 0, r["_rid"]))
                 env = max(rows, key=_env_score)       # trusted headers
                 body_row = max(rows, key=_body_score)  # richest body
-                oid = ("outlook_local:mail:hx:" + re.sub(r"[^A-Za-z0-9._@+-]", "_", mid)) if mid \
-                    else ("outlook_local:mail:hx:" + hashlib.sha256(group_key.encode()).hexdigest()[:16])
                 subject = (mget(env, "subject") or "").strip() or "(no subject)"
                 subject_inherited = bool(mget(env, "subject_inherited")) and not mid
                 sender = mget(env, "sender") or ""
@@ -551,6 +549,14 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                 body_kind = (mget(body_row, "body_kind") or "").lower()
                 frm = (f"{sender_name} <{sender}>".strip() if sender_name and sender
                        else (sender or sender_name))
+                # Identity: a message_id is the stable key; otherwise derive the oid
+                # from the DURABLE envelope (subject+sender+recipients+time) — NEVER the
+                # volatile HxStore ``block`` (Outlook renumbers it as it rewrites the
+                # live cache, which churned the oid and re-pushed every message).
+                envelope_key = _mail_envelope_key(subject, frm, recipients, when)
+                oid = ("outlook_local:mail:hx:" + re.sub(r"[^A-Za-z0-9._@+-]", "_", mid)) if mid \
+                    else ("outlook_local:mail:hx:"
+                          + hashlib.sha256(envelope_key.encode("utf-8", "replace")).hexdigest()[:24])
 
                 folder_id = _classify_folder(
                     _bare_email(sender), bool(mget(env, "sent_unix")), bool(mid),
@@ -582,7 +588,10 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
                     "<pre>" + html.escape(body) + "</pre>" if body else "")
                 content = _wrap_html_email(subject, frm, recipients, when, date_text,
                                            display_body)
-                signature = hashlib.sha256(content).hexdigest()
+                # Signature over the envelope + NORMALIZED visible text (not the raw
+                # rendered HTML), so Outlook re-encoding the cached body between runs
+                # doesn't churn it and re-push an unchanged message.
+                signature = _mail_signature(envelope_key, body, html_body)
                 obj = _obj(
                     oid, "email", subject, content,
                     (f"{frm} · " if frm else "") + (body[:180] or subject),
@@ -609,12 +618,14 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
         if want("contacts") and "contacts" in tables:
             ccols = [r[1] for r in con.execute("PRAGMA table_info(contacts)")]
             for row in con.execute(f"SELECT rowid AS _rid, * FROM contacts LIMIT {_MAX_ROWS}"):
-                block = row["block"] if "block" in ccols else row["_rid"]
-                oid = f"outlook_local:contact:hx:{block}"
                 name = (row["display_name"] if "display_name" in ccols else None) or "(contact)"
                 emails = (row["email_addresses"] if "email_addresses" in ccols else "") or ""
                 phones = (row["phone_numbers"] if "phone_numbers" in ccols else "") or ""
                 when = _iso_from_unix(row["modified_unix"] if "modified_unix" in ccols else None)
+                # Stable content-derived oid (NOT the volatile HxStore block).
+                oid = ("outlook_local:contact:hx:" + hashlib.sha256(
+                    "\x1f".join([_norm_ws(name).lower(), _addr_key(emails), _norm_ws(phones)])
+                    .encode("utf-8", "replace")).hexdigest()[:20])
                 rec = {"name": name, "email": emails, "phone": phones}
                 content = _json(rec)
                 signature = hashlib.sha256(content).hexdigest()
@@ -631,14 +642,17 @@ def _collect_hxstore(store: Path, hxprobe: Path, out: List[dict],
         if want("calendar") and "calendar_events" in tables:
             ecols = [r[1] for r in con.execute("PRAGMA table_info(calendar_events)")]
             for row in con.execute(f"SELECT rowid AS _rid, * FROM calendar_events LIMIT {_MAX_ROWS}"):
-                block = row["block"] if "block" in ecols else row["_rid"]
-                oid = f"outlook_local:event:hx:{block}"
                 title = (row["title"] if "title" in ecols else None) or "(event)"
                 start = _iso_from_unix(row["start_unix"] if "start_unix" in ecols else None)
                 end = _iso_from_unix(row["end_unix"] if "end_unix" in ecols else None)
                 organizer = (row["organizer"] if "organizer" in ecols else "") or ""
                 attendees = (row["attendees"] if "attendees" in ecols else "") or ""
                 body = (row["body"] if "body" in ecols else "") or ""
+                # Stable content-derived oid (NOT the volatile HxStore block).
+                oid = ("outlook_local:event:hx:" + hashlib.sha256(
+                    "\x1f".join([_norm_ws(title).lower(), start or "", end or "",
+                                 _norm_ws(organizer).lower()])
+                    .encode("utf-8", "replace")).hexdigest()[:20])
                 rec = {"title": title, "start": start, "end": end,
                        "organizer": organizer, "attendees": attendees, "body": body}
                 content = _json(rec)
@@ -859,6 +873,49 @@ def _wrap_html_email(subject: str, frm: str, to: str, when: Optional[str],
         hdr.append(f"Date: {date_text or when}")
     hdr += ["MIME-Version: 1.0", "Content-Type: text/html; charset=utf-8"]
     return ("\r\n".join(hdr) + "\r\n\r\n" + (html_body or "")).encode("utf-8", "replace")
+
+
+# --------------------------------------------------------------------------- #
+# Stable identity + delta signatures (HxStore is a LIVE cache)                 #
+# --------------------------------------------------------------------------- #
+# New Outlook continuously rewrites HxStore, so between runs the same message
+# comes back with a different ``block`` number and a re-encoded (byte-different)
+# body. Keying an oid on ``block`` or hashing the raw rendered HTML made EVERY
+# message look new every run → the agent re-pushed the whole mailbox (and the
+# cloud re-versioned it). Both the oid and the delta signature must therefore be
+# derived from DURABLE, re-encoding-proof fields.
+_WS_RE = re.compile(r"\s+")
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _norm_ws(s: Optional[str]) -> str:
+    return _WS_RE.sub(" ", s or "").strip()
+
+
+def _html_text(s: Optional[str]) -> str:
+    """Visible text of an HTML body — tags/attributes/whitespace stripped — so a
+    re-encoding of the cached body (attribute order, spacing) doesn't churn it."""
+    return _norm_ws(html.unescape(_TAG_RE.sub(" ", s or "")))
+
+
+def _addr_key(s: Optional[str]) -> str:
+    parts = [(_bare_email(x) or x.strip().lower())
+             for x in re.split(r"[,;]", s or "") if x and x.strip()]
+    return ",".join(sorted(p for p in parts if p))
+
+
+def _mail_envelope_key(subject: str, frm: str, recipients: str, when: Optional[str]) -> str:
+    """Durable identity of an email (independent of body re-encoding + block churn)."""
+    return "\x1f".join([_norm_ws(subject).lower(),
+                        (_bare_email(frm) or _norm_ws(frm).lower()),
+                        _addr_key(recipients), (when or "")])
+
+
+def _mail_signature(envelope_key: str, body: str, html_body: str) -> str:
+    """Delta signature over the envelope + NORMALIZED visible body text, so an
+    unchanged message yields the same signature run-to-run (no spurious re-push)."""
+    text = _html_text(html_body) if html_body else _norm_ws(body)
+    return hashlib.sha256((envelope_key + "\x1f" + text).encode("utf-8", "replace")).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
