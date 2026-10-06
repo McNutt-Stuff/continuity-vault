@@ -627,7 +627,8 @@ class PushPayload(BaseModel):
 
 _JOB_FIELDS = ("status", "processed", "total", "message", "error", "snapshot_id",
                "log", "started_at", "finished_at")
-_AGENT_FIELDS = ("state", "version", "telemetry", "last_heartbeat_at", "collectors")
+_AGENT_FIELDS = ("state", "version", "telemetry", "last_heartbeat_at", "collectors",
+                 "last_collection_at", "version_updated_at")
 _APPLIANCE_FIELDS = ("state", "isolation_state", "software_version", "telemetry",
                      "tamper_state", "attestation_ok", "last_heartbeat_at",
                      "last_attestation_at", "model", "version_updated_at")
