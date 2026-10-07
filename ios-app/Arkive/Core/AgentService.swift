@@ -38,8 +38,9 @@ final class AgentService: ObservableObject {
 
     func link(code: String, deviceName: String) async throws {
         let device = deviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? UIDevice.current.name
+            ? enrollment.deviceName
             : deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        enrollment.setDeviceName(device)
         let body = ActivateRequest(
             linking_code: code.trimmingCharacters(in: .whitespacesAndNewlines),
             hostname: device, platform: AppConfig.platform,
@@ -87,6 +88,7 @@ final class AgentService: ObservableObject {
         guard let token = enrollment.agentToken else { return }
         let tel = Telemetry(
             os: UIDevice.current.systemName + " " + UIDevice.current.systemVersion,
+            device_name: enrollment.deviceName,
             collectors: AppConfig.collectorSourceTypes,
             last_collect_epoch: UserDefaults.standard.double(forKey: AppConfig.Keys.lastCollectEpoch) > 0
                 ? UserDefaults.standard.double(forKey: AppConfig.Keys.lastCollectEpoch) : nil,

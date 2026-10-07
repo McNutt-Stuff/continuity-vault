@@ -709,6 +709,12 @@ def heartbeat(body: AgentHeartbeat, request: Request,
         agent.version = body.version
         agent.version_updated_at = _now()
     agent.telemetry = tel
+    # Mobile devices can't read their user-assigned name (iOS entitlement), so the
+    # app lets the user set it and reports it here — keep the agent name in sync.
+    dn = str(tel.get("device_name") or "").strip()
+    if dn and agent.platform in ("ios", "ipados", "android") and dn != agent.name:
+        agent.name = dn[:120]
+        agent.hostname = dn[:120]
     # "Last collection" should reflect the last collection RUN the agent reports
     # (every heartbeat), not just the last new-data ingest — otherwise a fully
     # deduped source (nothing new to push) leaves it looking stale for hours.

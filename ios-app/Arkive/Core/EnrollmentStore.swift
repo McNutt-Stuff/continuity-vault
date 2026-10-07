@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import UIKit
 
 /// Persisted enrollment: the bearer token (Keychain), ids, the control base and the
 /// tenant's node URL, plus the heartbeat interval. `@MainActor` so SwiftUI can bind
@@ -8,6 +9,9 @@ import Combine
 final class EnrollmentStore: ObservableObject {
     @Published private(set) var isLinked: Bool
     @Published var baseURL: String
+    /// User-set device name (iOS can't read the real one), reported on heartbeat so
+    /// the cloud shows e.g. "Rob's iPhone 17 Pro" instead of a generic "iPhone".
+    @Published var deviceName: String
 
     private let defaults = UserDefaults.standard
 
@@ -26,6 +30,7 @@ final class EnrollmentStore: ObservableObject {
         self.tenantId = defaults.string(forKey: AppConfig.Keys.tenantId)
         self.baseURL = base
         self.controlURL = defaults.string(forKey: AppConfig.Keys.nodeURL) ?? base
+        self.deviceName = defaults.string(forKey: AppConfig.Keys.deviceName) ?? UIDevice.current.name
         self.heartbeatInterval = defaults.integer(forKey: AppConfig.Keys.heartbeatInterval)
         if self.heartbeatInterval <= 0 { self.heartbeatInterval = 30 }
         self.isLinked = token != nil
@@ -37,6 +42,13 @@ final class EnrollmentStore: ObservableObject {
         baseURL = trimmed
         defaults.set(trimmed, forKey: AppConfig.Keys.baseURL)
         if controlURL.isEmpty { controlURL = trimmed }
+    }
+
+    func setDeviceName(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        deviceName = trimmed
+        defaults.set(trimmed, forKey: AppConfig.Keys.deviceName)
     }
 
     func store(_ resp: ActivateResponse) {

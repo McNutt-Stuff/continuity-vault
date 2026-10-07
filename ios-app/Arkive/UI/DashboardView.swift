@@ -13,9 +13,11 @@ struct AdvancedView: View {
     @State private var confirmUnlink = false
     @State private var folderNames = FolderBookmarks.names()
     @State private var refreshTick = 0
+    @State private var nameDraft = ""
 
     var body: some View {
         List {
+            deviceSection
             collectorsSection
             filesSection
             serverSection
@@ -34,9 +36,29 @@ struct AdvancedView: View {
         } message: {
             Text("Backups will stop. Already-backed-up data is kept in your vault.")
         }
+        .onAppear { if nameDraft.isEmpty { nameDraft = enrollment.deviceName } }
     }
 
     // MARK: - Sections
+
+    private var deviceSection: some View {
+        Section {
+            TextField("Device name", text: $nameDraft)
+                .autocorrectionDisabled()
+                .onSubmit { enrollment.setDeviceName(nameDraft) }
+            Button {
+                enrollment.setDeviceName(nameDraft)
+                Task { await agent.heartbeatOnce(runCollectors: false) }
+            } label: {
+                Label("Save name", systemImage: "checkmark.circle")
+            }
+            .disabled(nameDraft.trimmingCharacters(in: .whitespaces).isEmpty || nameDraft == enrollment.deviceName)
+        } header: {
+            Text("Device name")
+        } footer: {
+            Text("iOS doesn't let apps read your device's name, so set how this device appears in Arkive. Saving updates the portal on the next heartbeat.")
+        }
+    }
 
     private var serverSection: some View {
         Section("Connection") {

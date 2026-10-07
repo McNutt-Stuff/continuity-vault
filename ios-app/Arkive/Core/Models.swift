@@ -19,6 +19,7 @@ struct ActivateResponse: Codable {
 
 struct Telemetry: Codable {
     let os: String
+    let device_name: String
     let collectors: [String]
     let last_collect_epoch: Double?
     let recent_logs: [String]

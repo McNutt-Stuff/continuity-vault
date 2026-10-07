@@ -27,6 +27,7 @@ enum AppConfig {
         static let tenantId = "tenant_id"
         static let baseURL = "base_url"
         static let nodeURL = "node_url"
+        static let deviceName = "device_name"
         static let heartbeatInterval = "hb_interval"
         static let lastCollectBySource = "last_collect_by_source"
         static let lastCollectEpoch = "last_collect_epoch"
