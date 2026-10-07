@@ -82,6 +82,17 @@ func byteString(_ bytes: Int) -> String {
     return i == 0 ? "\(bytes) B" : String(format: "%.1f %@", v, units[i])
 }
 
+/// Compact item count: 999 stays as-is, 1_320_000 → "1.32M", 12_300 → "12.3K".
+func countString(_ n: Int) -> String {
+    let d = Double(n)
+    switch abs(n) {
+    case 1_000_000_000...: return String(format: "%.2fB", d / 1_000_000_000)
+    case 1_000_000...: return String(format: "%.2fM", d / 1_000_000)
+    case 10_000...: return String(format: "%.1fK", d / 1_000)
+    default: return "\(n)"
+    }
+}
+
 /// Parse an ISO-8601 timestamp into a relative string ("3m ago"), tolerant of
 /// fractional seconds and missing timezone (server sends naive UTC).
 func relativeTime(_ iso: String?) -> String {

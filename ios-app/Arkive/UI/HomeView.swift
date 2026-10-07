@@ -93,7 +93,7 @@ struct HomeView: View {
     private func totalsSection(_ s: AgentSummary) -> some View {
         Section {
             HStack(spacing: 10) {
-                stat("\(s.totals.objects)", "Items")
+                stat(countString(s.totals.objects), "Items")
                 Divider()
                 stat(byteString(s.totals.bytes), "Protected")
                 Divider()
@@ -134,7 +134,7 @@ struct HomeView: View {
                         Text(byteString(cat.bytes)).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text("\(cat.objects)")
+                    Text(countString(cat.objects))
                         .font(.callout.weight(.semibold)).foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 2)
