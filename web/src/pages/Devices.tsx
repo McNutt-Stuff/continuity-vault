@@ -22,6 +22,7 @@ const COLLECTOR_META: Record<string, { label: string; desc: string; brand?: stri
   onepassword: { label: "1Password", desc: "Passwords & secure items via the op CLI", brand: "onepassword" },
   endpoint_files: { label: "Device Files", desc: "Folders you select in the Data Map" },
   apple_passwords: { label: "Apple Passwords", desc: "iCloud Keychain logins (export + keychain inventory)", brand: "apple_passwords" },
+  apple_notes: { label: "Apple Notes", desc: "Notes from the Mac Notes app", brand: "apple_notes" },
   device_photos: { label: "Photos", desc: "Photos & videos from the device library" },
   device_contacts: { label: "Contacts", desc: "Address book contacts" },
   device_calendar: { label: "Calendar", desc: "Calendar events" },
@@ -393,6 +394,7 @@ function DeviceDetail({ a, onBack, onCommand, onRename, onRemove, reload }:
   const [showTray, setShowTray] = useState<boolean>(a.config?.show_tray_icon !== false);
   const [webUsage, setWebUsage] = useState<boolean>(!!a.config?.collect_web_usage);
   const [applePasswords, setApplePasswords] = useState<boolean>(!!a.config?.collect_apple_passwords);
+  const [appleNotes, setAppleNotes] = useState<boolean>(!!a.config?.collect_apple_notes);
   const [dest, setDest] = useState<string>(() => {
     const arr = a.config?.destinations || ["cv-cloud"];
     if (arr.includes("appliance")) return arr.includes("cv-cloud") ? "both" : "appliance";
@@ -592,6 +594,19 @@ function DeviceDetail({ a, onBack, onCommand, onRename, onRemove, reload }:
           <button className={`btn sm ${applePasswords ? "primary" : ""}`}
                   onClick={() => { const next = !applePasswords; setApplePasswords(next); void setConfig({ collect_apple_passwords: next }); }}>
             {applePasswords ? "On" : "Off"}
+          </button>
+        </div>
+        <div className="collector-row" style={{ marginTop: 10 }}>
+          <div className="row" style={{ gap: 10 }}>
+            <Icon name="note" size={16} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Apple Notes</div>
+              <div className="faint" style={{ fontSize: 11.5 }}>Backs up notes from the Mac Notes app (local NoteStore). Needs Full Disk Access. iOS sandboxes Notes, so they're collected on the Mac.</div>
+            </div>
+          </div>
+          <button className={`btn sm ${appleNotes ? "primary" : ""}`}
+                  onClick={() => { const next = !appleNotes; setAppleNotes(next); void setConfig({ collect_apple_notes: next }); }}>
+            {appleNotes ? "On" : "Off"}
           </button>
         </div>
       </Card>

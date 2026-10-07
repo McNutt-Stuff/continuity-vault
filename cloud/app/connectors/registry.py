@@ -173,6 +173,41 @@ class ApplePasswordsConnector(Connector):
         return []
 
 
+@register_connector
+class AppleNotesConnector(Connector):
+    """Apple Notes, collected locally by the desktop agent on a Mac from the Notes
+    store (``NoteStore.sqlite``). iOS sandboxes Notes, so they're collected on the
+    Mac like iMessage / local Outlook. Each note flows into the same note model."""
+
+    connector_type = "apple_notes"
+    display_name = "Apple Notes"
+
+    def capabilities(self) -> ConnectorCapabilities:
+        return ConnectorCapabilities(
+            incremental=True,
+            requires_agent=True,  # collected locally from the macOS Notes store
+            searchable_fields=["title", "folder", "kind"],
+            facet_fields=["folder"],
+        )
+
+    def oauth_spec(self) -> OAuthSpec:
+        return OAuthSpec(
+            connector_type=self.connector_type,
+            display_name=self.display_name,
+            auth_type="api-token",
+            authorize_url="",
+            token_url="",
+            scopes=[],
+            icon="note",
+            color="#f5a623",
+            doc_types=["note"],
+        )
+
+    def fetch_objects(self, account_label, since=None, config=None) -> Iterable[SourceObject]:
+        # Collected locally by the desktop agent; nothing is pulled from the cloud.
+        return []
+
+
 class _MobileCollector(Connector):
     """Base for sources collected on-device by the native mobile app (iOS/Android),
     pushed through the SAME agent enroll→heartbeat→ingest pipeline as the desktop

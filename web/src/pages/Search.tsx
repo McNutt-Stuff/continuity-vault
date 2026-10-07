@@ -163,6 +163,7 @@ const SOURCE_META: Record<string, { color: string; icon: IconName; label: string
   dropbox: { color: "#0061ff", icon: "cloud", label: "Dropbox" },
   icloud: { color: "#3693f3", icon: "cloud", label: "iCloud" },
   onepassword: { color: "#0364d3", icon: "key", label: "1Password" },
+  apple_notes: { color: "#f5a623", icon: "note", label: "Apple Notes" },
   custom: { color: "#7a5cff", icon: "database", label: "Custom" },
   endpoint_files: { color: "#7a5cff", icon: "file", label: "Device Files" },
   device_photos: { color: "#35d0a5", icon: "image", label: "Photos" },

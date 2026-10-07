@@ -76,6 +76,14 @@ def _setup_instructions(connector_type: str) -> list[str]:
             "CSV into the agent's import folder (~/.arkive-agent/data/apple-passwords); the agent ingests it",
             "client-encrypted, then securely deletes the plaintext export.",
         ]
+    if connector_type == "apple_notes":
+        return [
+            "Apple Notes are collected by a local Arkive desktop agent on the Mac (no cloud pull).",
+            "Grant the agent Full Disk Access (System Settings \u2192 Privacy & Security \u2192 Full Disk",
+            "Access) so it can read the Notes store (NoteStore.sqlite).",
+            "Enable \u201cCollect Apple Notes\u201d in the device's agent settings; notes are pushed",
+            "client-encrypted and searchable. iOS sandboxes Notes, so they're collected on the Mac.",
+        ]
     if connector_type in ("device_photos", "device_contacts", "device_calendar",
                           "device_reminders", "device_files"):
         return [
@@ -190,6 +198,7 @@ _SOURCE_FAMILY = {
     "sharepoint": "Microsoft", "teams": "Microsoft",
     "onepassword": "Endpoint Collected", "endpoint_files": "Endpoint Collected",
     "apple_passwords": "Endpoint Collected",
+    "apple_notes": "Endpoint Collected",
     "device_photos": "On-device (Mobile)", "device_contacts": "On-device (Mobile)",
     "device_calendar": "On-device (Mobile)", "device_reminders": "On-device (Mobile)",
     "device_files": "On-device (Mobile)",
@@ -205,6 +214,7 @@ _SOURCE_TYPE = {
     "google_calendar": "Calendar",
     "onepassword": "Passwords",
     "apple_passwords": "Passwords",
+    "apple_notes": "Notes",
     "device_photos": "Photos",
     "device_contacts": "Contacts",
     "device_calendar": "Calendar",

@@ -1385,6 +1385,18 @@ _SOURCE_PAGES = [
          "without an export.",
          "macOS only (iCloud Keychain)."]),
     _source_doc(
+        "source-apple-notes", "Apple Notes", "note", 73,
+        "Back up your Apple Notes — collected locally from the Mac Notes app.",
+        "Your notes from the macOS Notes app, read on-device by the desktop agent from the local "
+        "Notes store (`NoteStore.sqlite`). Each note's title, folder and body are backed up, "
+        "client-encrypted and searchable. iOS sandboxes Notes, so they're collected on the Mac.",
+        _agent_connect("Grant the agent **Full Disk Access** so it can read the Notes store, then "
+                       "enable **Collect Apple Notes** in the device's agent settings."),
+        ["**Notes** — each note (`note`) with its title, folder and body text."],
+        ["Collected locally on the Mac — nothing depends on iCloud.",
+         "Requires macOS **Full Disk Access**.",
+         "iOS cannot read Apple Notes (sandbox), so they're collected via the Mac agent."]),
+    _source_doc(
         "source-imessage", "Apple Messages", "mail", 74,
         "Back up iMessage / SMS threads and attachments from your Mac.",
         "Your Messages history — individual and group threads, with attachments — read locally "

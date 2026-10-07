@@ -84,6 +84,7 @@ export const SOURCE_LABELS: Readonly<Record<string, string>> = {
   icloud: "iCloud",
   onepassword: "1Password",
   apple_passwords: "Apple Passwords",
+  apple_notes: "Apple Notes",
   dropbox: "Dropbox",
   slack: "Slack",
   notion: "Notion",

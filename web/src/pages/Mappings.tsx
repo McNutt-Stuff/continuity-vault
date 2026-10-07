@@ -1053,6 +1053,7 @@ function collectorLabel(c: string): string {
   return c === "onepassword" ? "1Password"
     : c === "endpoint_files" ? "Device Files"
     : c === "apple_passwords" ? "Apple Passwords"
+    : c === "apple_notes" ? "Apple Notes"
     : c === "imessage" ? "Apple Messages"
     : c === "outlook_local" ? "Outlook (local)"
     : c === "device_photos" ? "Photos"

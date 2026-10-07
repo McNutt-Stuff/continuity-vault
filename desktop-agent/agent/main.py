@@ -35,6 +35,7 @@ import httpx
 from .config import Config
 from .collectors import onepassword
 from .collectors import apple_passwords
+from .collectors import apple_notes
 from .collectors import files as files_collector
 from .collectors import imessage
 from .collectors import outlook_local
@@ -150,6 +151,7 @@ class Agent:
         self._imessage_state_file = Path(cfg.data_dir) / "imessage_state.json"
         self._outlook_state_file = Path(cfg.data_dir) / "outlook_local_state.json"
         self._apple_passwords_state_file = Path(cfg.data_dir) / "apple_passwords_state.json"
+        self._apple_notes_state_file = Path(cfg.data_dir) / "apple_notes_state.json"
         # Push-model scheduling: the agent owns the cadence for its sources. The
         # per-source last-run timestamps are persisted so a restart doesn't
         # immediately re-collect everything, and the mappings (source + interval +
@@ -290,6 +292,7 @@ class Agent:
             "op_available": onepassword.available(),
             "op_auth": onepassword.auth_state(self.cfg.op_service_account_token),
             "apple_passwords_available": apple_passwords.available(),
+            "apple_notes_available": apple_notes.available(),
             "collectors": self._collectors(),
             "collector_notices": self._collector_notices,
             "version": self.cfg.version,
@@ -817,6 +820,8 @@ class Agent:
             return self._collect_outlook_local(params)
         if st == "apple_passwords":
             return self._collect_apple_passwords(params)
+        if st == "apple_notes":
+            return self._collect_apple_notes(params)
         if st == "endpoint_files" or params.get("file_config"):
             return self._collect_files(params.get("file_config") or {})
         return self._collect_onepassword()
@@ -828,6 +833,8 @@ class Agent:
         cfg = self.reg.get("config", {})
         if apple_passwords.available() and cfg.get("collect_apple_passwords"):
             cols.append("apple_passwords")
+        if apple_notes.available() and cfg.get("collect_apple_notes"):
+            cols.append("apple_notes")
         for name, mod in (("imessage", imessage), ("outlook_local", outlook_local)):
             try:
                 if mod.available():
@@ -1130,6 +1137,30 @@ class Agent:
         results = [{"collector": "apple_passwords", "objects": total}]
         self._write_status({"last_collect": _now_iso(), "results": results})
         self.log.info("apple_passwords: pushed %d/%d object(s)", total, len(objects))
+        return {"objects": total, "results": results}
+
+    def _collect_apple_notes(self, params: Optional[dict] = None) -> dict:
+        """Collect Apple Notes from the local NoteStore. Gated by the
+        collect_apple_notes config toggle; flows into the same note model + viewer."""
+        cfg = self.reg.get("config", {})
+        if not cfg.get("collect_apple_notes"):
+            self.log.info("apple_notes: disabled (collect_apple_notes off) — skipping")
+            return {"objects": 0, "results": [{"collector": "apple_notes", "skipped": "disabled"}]}
+        if not apple_notes.available():
+            self.log.warning("apple_notes: NoteStore not found (macOS only; needs Full Disk Access)")
+            return {"objects": 0, "results": [{"collector": "apple_notes", "skipped": "unavailable"}]}
+        destinations = cfg.get("destinations", ["cv-cloud"])
+        self.log.info("apple_notes: starting collection → destinations=%s", destinations)
+        state = self._load_json_state(self._apple_notes_state_file)
+        objects, new_state = apple_notes.collect(str(self.cfg.data_dir), state)
+        self.log.info("apple_notes: collected %d object(s); encrypting + pushing…", len(objects))
+        total = self._push_objects("apple_notes", objects, destinations) if objects else 0
+        if objects and not getattr(self, "_push_failed", set()):
+            self._save_json_state(self._apple_notes_state_file, new_state)
+        self._last_collect = time.time()
+        results = [{"collector": "apple_notes", "objects": total}]
+        self._write_status({"last_collect": _now_iso(), "results": results})
+        self.log.info("apple_notes: pushed %d/%d object(s)", total, len(objects))
         return {"objects": total, "results": results}
 
     # -- self update --------------------------------------------------
