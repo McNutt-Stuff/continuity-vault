@@ -8,7 +8,7 @@ enum AppConfig {
     /// switches to the tenant's `node_url` once heartbeat reports one.
     static let defaultBaseURL = "https://vault.arkive.life"
 
-    static let agentVersion = "1.0.0"
+    static let agentVersion = "1.0.1"
     static let platform = "ios"
 
     static let refreshTaskId = "life.arkive.ios.refresh"

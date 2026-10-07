@@ -45,6 +45,7 @@ struct AdvancedView: View {
             if let hb = agent.lastHeartbeat {
                 row("Last heartbeat", value: hb.formatted(.relative(presentation: .named)))
             }
+            row("App version", value: "v\(AppConfig.agentVersion)")
         }
     }
 
