@@ -483,8 +483,15 @@ def activate(body: AgentActivate, db: Session = Depends(get_db)):
     if not lc or lc.consumed or lc.expires_at < _now():
         raise HTTPException(400, "invalid or expired linking code")
 
+    # Mobile devices identify by their user-assigned name (e.g. "Rob's iPhone"),
+    # so prefer the reported hostname as the display name; desktops keep the
+    # operator-chosen linking-code name ("Mac") with the machine hostname beside it.
+    host = (body.hostname or "").strip()
+    is_mobile = body.platform in ("ios", "ipados", "android")
+    display_name = (host if (is_mobile and host) else None) or lc.name or "Desktop Agent"
+
     agent = DesktopAgent(
-        tenant_id=lc.tenant_id, name=lc.name or "Desktop Agent",
+        tenant_id=lc.tenant_id, name=display_name,
         platform=body.platform, hostname=body.hostname, version=body.version,
         collectors=body.collectors, config=dict(DEFAULT_AGENT_CONFIG),
         identity_bundle=body.identity_bundle, state="active",

@@ -216,7 +216,7 @@ class DevicePhotosConnector(_MobileCollector):
     by the native app and pushed client-side over TLS into the same media models."""
 
     connector_type = "device_photos"
-    display_name = "Device Photos"
+    display_name = "Photos"
     _icon = "image"
     _doc_types = ["image", "video"]
     _searchable = ["album", "kind", "filename", "device"]
@@ -228,7 +228,7 @@ class DeviceContactsConnector(_MobileCollector):
     """Contacts from the device's address book (iOS Contacts framework)."""
 
     connector_type = "device_contacts"
-    display_name = "Device Contacts"
+    display_name = "Contacts"
     _icon = "users"
     _doc_types = ["person"]
     _searchable = ["name", "email", "phone", "org", "device"]
@@ -240,7 +240,7 @@ class DeviceCalendarConnector(_MobileCollector):
     """Calendar events from the device's calendars (iOS EventKit)."""
 
     connector_type = "device_calendar"
-    display_name = "Device Calendar"
+    display_name = "Calendar"
     _icon = "calendar"
     _doc_types = ["event"]
     _searchable = ["title", "calendar", "location", "organizer", "device"]
@@ -252,7 +252,7 @@ class DeviceRemindersConnector(_MobileCollector):
     """Reminders / to-dos from the device (iOS EventKit reminders)."""
 
     connector_type = "device_reminders"
-    display_name = "Device Reminders"
+    display_name = "Reminders"
     _icon = "check"
     _doc_types = ["note"]
     _searchable = ["title", "list", "device"]
@@ -265,7 +265,7 @@ class DeviceFilesConnector(_MobileCollector):
     iCloud Drive), backed up as their own file objects."""
 
     connector_type = "device_files"
-    display_name = "Device Files"
+    display_name = "Files"
     _icon = "folder"
     _doc_types = ["file", "image", "pdf", "video", "audio"]
     _searchable = ["filename", "folder", "kind", "device"]

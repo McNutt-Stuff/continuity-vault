@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Linking-code onboarding — the mobile mirror of the desktop agent's installer.
 /// The user gets a code from the portal (Devices → Add a device → iPhone) and
@@ -8,6 +9,7 @@ struct OnboardingView: View {
     @EnvironmentObject var agent: AgentService
 
     @State private var code = ""
+    @State private var deviceName = ""
     @State private var showAdvanced = false
     @State private var baseURL = ""
     @State private var busy = false
@@ -38,6 +40,17 @@ struct OnboardingView: View {
                             .textInputAutocapitalization(.characters)
                             .autocorrectionDisabled()
                             .font(.title3.monospaced())
+                            .padding()
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Device name").font(.headline)
+                        Text("How this device appears in Arkive.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("e.g. Rob's iPhone", text: $deviceName)
+                            .autocorrectionDisabled()
                             .padding()
                             .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
                     }
@@ -77,7 +90,10 @@ struct OnboardingView: View {
             .navigationTitle("Link device")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .onAppear { baseURL = enrollment.baseURL }
+        .onAppear {
+            baseURL = enrollment.baseURL
+            if deviceName.isEmpty { deviceName = UIDevice.current.name }
+        }
     }
 
     private func link() {
@@ -88,7 +104,7 @@ struct OnboardingView: View {
         busy = true
         Task {
             do {
-                try await agent.link(code: code)
+                try await agent.link(code: code, deviceName: deviceName)
                 agent.startLoop()
             } catch {
                 self.error = (error as? ApiError)?.localizedDescription ?? error.localizedDescription

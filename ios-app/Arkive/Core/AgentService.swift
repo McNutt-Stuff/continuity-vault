@@ -35,8 +35,10 @@ final class AgentService: ObservableObject {
 
     // MARK: - Enrollment
 
-    func link(code: String) async throws {
-        let device = UIDevice.current.name
+    func link(code: String, deviceName: String) async throws {
+        let device = deviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? UIDevice.current.name
+            : deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = ActivateRequest(
             linking_code: code.trimmingCharacters(in: .whitespacesAndNewlines),
             hostname: device, platform: AppConfig.platform,
