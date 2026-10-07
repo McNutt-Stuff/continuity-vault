@@ -163,6 +163,11 @@ def _wrap_png_as_svg(data: bytes) -> bytes:
         import io
         from PIL import Image  # type: ignore
         im = Image.open(io.BytesIO(data)).convert("RGBA")
+        # Trim fully-transparent borders so the icon fills its frame (many Commons
+        # app-icon PNGs are centered on a large transparent canvas → render small).
+        bbox = im.getchannel("A").getbbox()
+        if bbox:
+            im = im.crop(bbox)
         if max(im.size) > 256:
             r = 256 / max(im.size)
             im = im.resize((max(1, round(im.width * r)), max(1, round(im.height * r))), Image.LANCZOS)
