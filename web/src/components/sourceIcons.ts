@@ -19,7 +19,7 @@ export const SYNCED_SOURCE_ICONS: ReadonlySet<string> = new Set([
   "copilot", "onenote",
   // Apple on-device app marks (device_* source types alias onto these).
   "apple_photos", "apple_contacts", "apple_calendar", "apple_reminders",
-  "apple_notes",
+  "apple_notes", "apple_files", "apple_finder",
   // Beyond-Microsoft compliance integrations (Phase 3).
   "google_workspace", "okta", "qualys", "tenable", "proofpoint",
   // Device/endpoint platform marks (Devices page).
@@ -37,6 +37,8 @@ export const SOURCE_ICON_ALIASES: Readonly<Record<string, string>> = {
   device_contacts: "apple_contacts",
   device_calendar: "apple_calendar",
   device_reminders: "apple_reminders",
+  device_files: "apple_files",
+  endpoint_files: "apple_finder",
   // Managed Exchange calendar/contacts are Outlook/Exchange data.
   calendar: "outlook",
   contacts: "outlook",

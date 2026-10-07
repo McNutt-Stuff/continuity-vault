@@ -1621,6 +1621,34 @@ def _source_analytics(db: Session, tenant_id: str | None) -> dict:
         if a.active:
             e["active"] += 1
 
+    # Agent-collected sources (device_*, onepassword, apple_passwords, endpoint_files,
+    # imessage, outlook_local) have NO ConnectorAccount — each is a Collection bound
+    # to a DesktopAgent. Count them as adopted sources so they appear with their own
+    # entry + count like regular cloud sources (otherwise they'd show accounts=0 and
+    # drop out of the source_types total).
+    from ..models import Collection
+    cq = db.query(Collection).filter(Collection.agent_id.isnot(None),
+                                     Collection.connector_account_id.is_(None))
+    if tenant_id:
+        cq = cq.filter(Collection.tenant_id == tenant_id)
+    agent_source_count = 0
+    for c in cq.all():
+        e = _entry(c.source_type or "unknown")
+        e["accounts"] += 1
+        agent_source_count += 1
+        e["tenants"].add(c.tenant_id)
+        owner = getattr(c, "owner_user_id", None)
+        if owner:
+            e["users"].add(owner)
+            users_with_sources.add(owner)
+        e["active"] += 1
+        if getattr(c, "last_error", None):
+            e["issues"] += 1
+            health["error"] += 1
+        else:
+            e["healthy"] += 1
+            health["healthy"] += 1
+
     # Protected data per source type from the CURRENT search index (deduped rows).
     try:
         sq = db.query(SearchDocument.source_type,
@@ -1646,7 +1674,7 @@ def _source_analytics(db: Session, tenant_id: str | None) -> dict:
         "sources": sources,
         "health": health,
         "totals": {
-            "connected": len(accounts),
+            "connected": len(accounts) + agent_source_count,
             "source_types": len([s for s in sources if s["accounts"]]),
             "users_with_sources": len(users_with_sources),
             "protected_bytes": sum(s["protected_bytes"] for s in sources),
