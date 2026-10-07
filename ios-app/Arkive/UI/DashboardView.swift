@@ -72,12 +72,14 @@ struct DashboardView: View {
     }
 
     private var collectorsSection: some View {
-        Section("What's protected") {
+        Section {
             ForEach(agent.collectors, id: \.sourceType) { col in
                 CollectorRow(collector: col,
                              mapped: agent.activeMappings.contains { $0.source_type == col.sourceType },
                              tick: refreshTick) { refreshTick += 1 }
             }
+        } header: {
+            Text("What's protected")
         } footer: {
             Text("Add each source in the Arkive portal's Data Map so its backups land in a vault.")
         }

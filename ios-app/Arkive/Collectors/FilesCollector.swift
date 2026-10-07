@@ -62,7 +62,10 @@ final class FilesCollector: Collector {
 
             let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
             guard let en = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys) else { continue }
-            for case let url as URL in en {
+            // Pull from the enumerator manually — `for-in` over an NSEnumerator is
+            // unavailable from async contexts.
+            while let next = en.nextObject() {
+                guard let url = next as? URL else { continue }
                 let rv = try? url.resourceValues(forKeys: Set(keys))
                 guard rv?.isRegularFile == true else { continue }
                 let size = rv?.fileSize ?? 0
