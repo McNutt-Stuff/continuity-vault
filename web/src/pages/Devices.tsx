@@ -28,6 +28,8 @@ const COLLECTOR_META: Record<string, { label: string; desc: string; brand?: stri
   device_calendar: { label: "Calendar", desc: "Calendar events" },
   device_reminders: { label: "Reminders", desc: "Reminders & to-dos" },
   device_files: { label: "Files", desc: "Folders you grant the app access to" },
+  device_health: { label: "Health & Fitness", desc: "Daily activity, workouts, heart rate & sleep (HealthKit)" },
+  device_wallet: { label: "Wallet", desc: "Passes, tickets & loyalty cards (PassKit)" },
   imessage: { label: "Apple Messages", desc: "iMessage/SMS, group threads & attachments", brand: "imessage" },
   outlook_local: { label: "Outlook (local)", desc: "Local email, attachments, contacts, calendar & notes", brand: "outlook" },
 };

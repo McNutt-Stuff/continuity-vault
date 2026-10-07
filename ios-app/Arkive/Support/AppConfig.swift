@@ -18,7 +18,7 @@ enum AppConfig {
     /// heartbeat so already-linked devices light up new collectors after an update.
     static let collectorSourceTypes = [
         "device_photos", "device_contacts", "device_calendar",
-        "device_reminders", "device_files",
+        "device_reminders", "device_files", "device_health", "device_wallet",
     ]
 
     enum Keys {

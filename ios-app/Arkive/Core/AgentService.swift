@@ -13,7 +13,7 @@ final class AgentService: ObservableObject {
     /// Registered collectors, keyed by source type.
     let collectors: [Collector] = [
         PhotosCollector(), ContactsCollector(), CalendarCollector(),
-        RemindersCollector(), FilesCollector(),
+        RemindersCollector(), FilesCollector(), HealthCollector(), WalletCollector(),
     ]
 
     @Published var isWorking = false

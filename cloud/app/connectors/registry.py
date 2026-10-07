@@ -308,6 +308,32 @@ class DeviceFilesConnector(_MobileCollector):
 
 
 @register_connector
+class DeviceHealthConnector(_MobileCollector):
+    """Health & Fitness data (iOS HealthKit) — daily activity aggregates (steps,
+    distance, energy, exercise, heart rate, body mass, sleep) + workouts."""
+
+    connector_type = "device_health"
+    display_name = "Health & Fitness"
+    _icon = "activity"
+    _doc_types = ["record"]
+    _searchable = ["metric", "workout", "date", "device"]
+    _facets = ["metric"]
+
+
+@register_connector
+class DeviceWalletConnector(_MobileCollector):
+    """Wallet passes (iOS PassKit) — boarding passes, tickets, loyalty/membership
+    cards and coupons (metadata the app can access)."""
+
+    connector_type = "device_wallet"
+    display_name = "Wallet"
+    _icon = "database"
+    _doc_types = ["record"]
+    _searchable = ["organization", "pass_type", "device"]
+    _facets = ["organization"]
+
+
+@register_connector
 class ImessageConnector(Connector):
     """Apple iMessage / SMS, collected locally by the desktop agent from
     ``~/Library/Messages/chat.db``. Messages carry their thread (chat) id, the

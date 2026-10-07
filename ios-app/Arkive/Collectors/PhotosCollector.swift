@@ -53,14 +53,34 @@ final class PhotosCollector: Collector {
         }
         AgentLog.shared.info("device_photos: \(changed.count) new/changed asset(s) to upload")
 
+        let albumMap = buildAlbumMap()
         var out: [CollectedObject] = []
         for asset in changed {
-            if let obj = await materialize(asset) { out.append(obj) }
+            if let obj = await materialize(asset, albums: albumMap[asset.localIdentifier]) { out.append(obj) }
         }
         return (out, current)
     }
 
-    private func materialize(_ asset: PHAsset) async -> CollectedObject? {
+    /// Map each asset's localIdentifier → the album titles it belongs to, so a
+    /// restore can rebuild the library's organization (not just the files).
+    private func buildAlbumMap() -> [String: [String]] {
+        var map: [String: [String]] = [:]
+        let types: [PHAssetCollectionType] = [.album, .smartAlbum]
+        for t in types {
+            let collections = PHAssetCollection.fetchAssetCollections(with: t, subtype: .any, options: nil)
+            collections.enumerateObjects { col, _, _ in
+                let title = col.localizedTitle ?? ""
+                guard !title.isEmpty else { return }
+                let assets = PHAsset.fetchAssets(in: col, options: nil)
+                assets.enumerateObjects { a, _, _ in
+                    map[a.localIdentifier, default: []].append(title)
+                }
+            }
+        }
+        return map
+    }
+
+    private func materialize(_ asset: PHAsset, albums: [String]?) async -> CollectedObject? {
         let oid = Hasher2.objectId(sourceType, asset.localIdentifier)
         let mod = asset.modificationDate?.timeIntervalSince1970 ?? 0
         let hash = Hasher2.sha256Hex("\(asset.localIdentifier)|\(mod)|\(asset.pixelWidth)x\(asset.pixelHeight)")
@@ -85,10 +105,27 @@ final class PhotosCollector: Collector {
         ]
         if asset.pixelWidth > 0 { meta["width"] = String(asset.pixelWidth) }
         if asset.pixelHeight > 0 { meta["height"] = String(asset.pixelHeight) }
+        if asset.isFavorite { meta["favorite"] = "true" }
+        if let loc = asset.location {
+            meta["latitude"] = String(loc.coordinate.latitude)
+            meta["longitude"] = String(loc.coordinate.longitude)
+        }
+        if isVideo && asset.duration > 0 { meta["duration_sec"] = String(Int(asset.duration.rounded())) }
+        if let albums, !albums.isEmpty { meta["albums"] = albums.joined(separator: ", ") }
+        var subtypes: [String] = []
+        if asset.mediaSubtypes.contains(.photoLive) { subtypes.append("live") }
+        if asset.mediaSubtypes.contains(.photoPanorama) { subtypes.append("panorama") }
+        if asset.mediaSubtypes.contains(.photoHDR) { subtypes.append("hdr") }
+        if asset.mediaSubtypes.contains(.photoScreenshot) { subtypes.append("screenshot") }
+        if asset.mediaSubtypes.contains(.videoHighFrameRate) { subtypes.append("slomo") }
+        if asset.mediaSubtypes.contains(.videoTimelapse) { subtypes.append("timelapse") }
+        if asset.representsBurst { subtypes.append("burst") }
+        if !subtypes.isEmpty { meta["kinds"] = subtypes.joined(separator: ",") }
         return CollectedObject(
             objectId: oid, kind: isVideo ? "video" : "image", title: filename,
             content: data, preview: (isVideo ? "Video · " : "Photo · ") + filename,
-            meta: meta, labels: ["Photos", isVideo ? "Video" : "Image"], contentHash: hash)
+            meta: meta, labels: ["Photos", isVideo ? "Video" : "Image"] + (albums ?? []),
+            contentHash: hash)
     }
 
     private func imageData(_ asset: PHAsset) async -> Data? {

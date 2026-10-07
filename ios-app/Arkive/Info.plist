@@ -35,6 +35,8 @@
 	<string>Arkive backs up your contacts so you can recover them if you lose your device.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Arkive backs up the photos and videos you choose so you can recover them later.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Arkive backs up your Health &amp; Fitness data (daily activity, workouts) so you can recover it later.</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>Arkive backs up your reminders so you can recover them later.</string>
 	<key>NSRemindersUsageDescription</key>

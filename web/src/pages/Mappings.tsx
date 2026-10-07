@@ -1061,6 +1061,8 @@ function collectorLabel(c: string): string {
     : c === "device_calendar" ? "Calendar"
     : c === "device_reminders" ? "Reminders"
     : c === "device_files" ? "Files"
+    : c === "device_health" ? "Health & Fitness"
+    : c === "device_wallet" ? "Wallet"
     : c;
 }
 

@@ -25,3 +25,4 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_BITCODE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: Arkive/Arkive.entitlements

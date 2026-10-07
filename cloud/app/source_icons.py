@@ -18,7 +18,7 @@ BRAND_ICON_TYPES: frozenset[str] = frozenset({
     "copilot", "onenote",
     # Apple on-device app marks (device_* source types alias onto these).
     "apple_photos", "apple_contacts", "apple_calendar", "apple_reminders",
-    "apple_notes", "apple_files", "apple_finder",
+    "apple_notes", "apple_files", "apple_finder", "apple_health", "apple_wallet",
     # Beyond-Microsoft compliance integrations (Phase 3).
     "google_workspace", "okta", "qualys", "tenable", "proofpoint",
 })
@@ -35,6 +35,8 @@ SOURCE_ICON_ALIASES: dict[str, str] = {
     "device_reminders": "apple_reminders",
     "device_files": "apple_files",
     "endpoint_files": "apple_finder",
+    "device_health": "apple_health",
+    "device_wallet": "apple_wallet",
     # Managed Exchange calendar/contacts are Outlook/Exchange data.
     "calendar": "outlook",
     "contacts": "outlook",

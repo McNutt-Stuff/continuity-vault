@@ -343,7 +343,7 @@ def _agent_view(a: DesktopAgent, db: Session | None = None) -> dict:
 # starts protecting photos/contacts/calendar/reminders/files right away.
 _BASE_COLLECTORS = {"onepassword", "endpoint_files", "device_photos",
                     "device_contacts", "device_calendar", "device_reminders",
-                    "device_files"}
+                    "device_files", "device_health", "device_wallet"}
 
 
 def _enabled_collectors(a: DesktopAgent) -> list:

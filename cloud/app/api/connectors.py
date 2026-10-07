@@ -85,7 +85,8 @@ def _setup_instructions(connector_type: str) -> list[str]:
             "client-encrypted and searchable. iOS sandboxes Notes, so they're collected on the Mac.",
         ]
     if connector_type in ("device_photos", "device_contacts", "device_calendar",
-                          "device_reminders", "device_files"):
+                          "device_reminders", "device_files", "device_health",
+                          "device_wallet"):
         return [
             "This source is collected by the Arkive app on your iPhone or iPad (no cloud pull).",
             "Install the Arkive app, then add the device under Devices \u2192 Add a device and enter the linking code.",
@@ -202,6 +203,7 @@ _SOURCE_FAMILY = {
     "device_photos": "On-device (Mobile)", "device_contacts": "On-device (Mobile)",
     "device_calendar": "On-device (Mobile)", "device_reminders": "On-device (Mobile)",
     "device_files": "On-device (Mobile)",
+    "device_health": "On-device (Mobile)", "device_wallet": "On-device (Mobile)",
     "custom": "Custom",
 }
 _SOURCE_TYPE = {
@@ -220,6 +222,8 @@ _SOURCE_TYPE = {
     "device_calendar": "Calendar",
     "device_reminders": "Reminders",
     "device_files": "Files & Storage",
+    "device_health": "Health & Fitness",
+    "device_wallet": "Wallet",
     "reddit": "Social", "facebook": "Social", "instagram": "Social",
     "linkedin": "Social",
     "github": "Developer",

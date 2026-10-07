@@ -80,6 +80,8 @@ SOURCE_ICONS: dict[str, dict] = {
     "apple_notes":     {"file": "Apple Notes icon.svg", "search": "Apple Notes icon"},
     "apple_files":     {"file": "Files App icon iOS.png", "search": "Apple Files app iOS icon"},
     "apple_finder":    {"file": "Finder Icon macOS Tahoe.png", "search": "macOS Finder icon"},
+    "apple_health":    {"file": "Icon - Apple Health.png", "search": "Apple Health app icon"},
+    "apple_wallet":    {"file": "Apple Wallet Icon.svg", "search": "Apple Wallet app icon"},
     # NOTE: Crossbeam has no brand file on Wikimedia Commons. Its icon is a
     # locally-provided asset committed at web/public/source-icons/crossbeam.svg
     # (brand logo embedded), so this script intentionally does NOT manage it.
@@ -130,6 +132,8 @@ SOURCE_ICON_ALIASES: dict[str, str] = {
     "device_reminders": "apple_reminders",
     "device_files": "apple_files",      # iOS Files app
     "endpoint_files": "apple_finder",   # desktop (macOS) files → Finder mark
+    "device_health": "apple_health",
+    "device_wallet": "apple_wallet",
 }
 
 

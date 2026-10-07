@@ -171,6 +171,8 @@ const SOURCE_META: Record<string, { color: string; icon: IconName; label: string
   device_calendar: { color: "#e5484d", icon: "calendar", label: "Calendar" },
   device_reminders: { color: "#f5a623", icon: "check", label: "Reminders" },
   device_files: { color: "#4f7cff", icon: "file", label: "Files" },
+  device_health: { color: "#fb3a5d", icon: "activity", label: "Health & Fitness" },
+  device_wallet: { color: "#1a1a1a", icon: "database", label: "Wallet" },
   imessage: { color: "#34da50", icon: "mail", label: "Apple Messages" },
   outlook_local: { color: "#0a5bd3", icon: "mail", label: "Outlook (local)" },
   crossbeam: { color: "#4b3bd6", icon: "insights", label: "Crossbeam" },
