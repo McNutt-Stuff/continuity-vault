@@ -97,6 +97,7 @@ export default function Mappings() {
   const [intEditId, setIntEditId] = useState<string | null>(null);
   const [intEditDests, setIntEditDests] = useState<string[]>([]);
   const [intEditInterval, setIntEditInterval] = useState<number>(-1);
+  const [intEditMaxMb, setIntEditMaxMb] = useState<number>(-1);
   // Gmail: which folders to skip + whether to include Spam/Trash.
   const [editGmailExclude, setEditGmailExclude] = useState<string[]>([]);
   const [editGmailSpamTrash, setEditGmailSpamTrash] = useState<boolean>(false);
@@ -311,6 +312,7 @@ export default function Mappings() {
     setIntEditId(m.id);
     setIntEditDests(m.destinations || ["cv-cloud"]);
     setIntEditInterval(m.backup_interval_minutes == null ? -1 : m.backup_interval_minutes);
+    setIntEditMaxMb(m.max_file_bytes ? Math.round(m.max_file_bytes / (1024 * 1024)) : -1);
   }
 
   function toggleIntDest(id: string) {
@@ -323,6 +325,7 @@ export default function Mappings() {
       await api.put(`/collections/integration/${m.instance_id}`, {
         destinations: intEditDests,
         backup_interval_minutes: intEditInterval,
+        max_file_bytes: intEditMaxMb > 0 ? Math.round(intEditMaxMb) * 1024 * 1024 : 0,
       });
       setIntEditId(null);
       flash("Integration mapping updated");
@@ -543,6 +546,28 @@ export default function Mappings() {
                                 <option key={o.value} value={o.value}>{o.label}</option>
                               ))}
                             </select>
+                          </div>
+                          <div className="stack" style={{ gap: 6 }}>
+                            <label className="row" style={{ gap: 8, alignItems: "center", cursor: "pointer" }}>
+                              <input type="checkbox"
+                                     checked={intEditMaxMb > 0}
+                                     onChange={(e) => setIntEditMaxMb(e.target.checked
+                                       ? Math.round((m.default_max_file_bytes || 268435456) / (1024 * 1024))
+                                       : -1)} />
+                              <span className="faint" style={{ fontSize: 11.5 }}>Limit the maximum file size</span>
+                            </label>
+                            {intEditMaxMb > 0 ? (
+                              <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                <input type="number" min={1} value={intEditMaxMb}
+                                       onChange={(e) => setIntEditMaxMb(Math.max(1, Number(e.target.value)))}
+                                       style={{ padding: "5px 8px", borderRadius: 6, width: 100 }} />
+                                <span className="faint" style={{ fontSize: 11 }}>MB</span>
+                              </div>
+                            ) : (
+                              <span className="faint" style={{ fontSize: 11 }}>
+                                Using the platform default ({bytes(m.default_max_file_bytes || 268435456)}).
+                              </span>
+                            )}
                           </div>
                           <div className="faint" style={{ fontSize: 11.5 }}>
                             This routing and schedule cascade to all {m.child_count ?? 0} managed source{(m.child_count ?? 0) === 1 ? "" : "s"}.

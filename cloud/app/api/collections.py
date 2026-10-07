@@ -406,6 +406,9 @@ def _integration_mapping_view(db: Session, inst: IntegrationInstance,
         "child_count": len(children),
         "destinations": dests,
         "backup_interval_minutes": prof.get("backup_interval_minutes"),
+        "max_file_bytes": prof.get("max_file_bytes"),
+        "default_max_file_bytes": node_config.get_int(
+            db, "CV_CONTENT_MAX_BYTES", get_settings().content_max_bytes),
         "default_interval_minutes": get_settings().sync_interval_minutes,
         "last_backup_at": last.created_at.isoformat() if last else None,
         "last_object_count": objects,
@@ -416,6 +419,7 @@ def _integration_mapping_view(db: Session, inst: IntegrationInstance,
 class UpdateIntegrationMappingRequest(BaseModel):
     destinations: list[str] | None = None
     backup_interval_minutes: int | None = None  # NULL/<0 = default, 0 = manual, >0 = every N min
+    max_file_bytes: int | None = None  # <=0 = use platform default, >0 = override
 
 
 @router.put("/integration/{instance_id}")
@@ -442,6 +446,9 @@ def update_integration_mapping(instance_id: str, body: UpdateIntegrationMappingR
     if body.backup_interval_minutes is not None:
         prof["backup_interval_minutes"] = (None if body.backup_interval_minutes < 0
                                            else int(body.backup_interval_minutes))
+    if body.max_file_bytes is not None:
+        prof["max_file_bytes"] = (None if body.max_file_bytes <= 0
+                                  else int(body.max_file_bytes))
     cfg["managed_profile"] = prof
     inst.config = cfg
     # Cascade to every managed child collection so the change is immediate here;
@@ -455,6 +462,13 @@ def update_integration_mapping(instance_id: str, body: UpdateIntegrationMappingR
             c.destinations = list(prof.get("destinations") or ["cv-cloud"])
         if body.backup_interval_minutes is not None:
             c.backup_interval_minutes = prof.get("backup_interval_minutes")
+        if body.max_file_bytes is not None:
+            cc = dict(c.config or {})
+            if prof.get("max_file_bytes"):
+                cc["max_file_bytes"] = int(prof["max_file_bytes"])
+            else:
+                cc.pop("max_file_bytes", None)
+            c.config = cc
     db.commit()
     _reprovision_integration(db, inst)
     audit.record(db, actor=principal.user_id, action="integration.mapping_updated",
