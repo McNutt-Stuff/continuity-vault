@@ -62,9 +62,9 @@ final class PhotosCollector: Collector {
             if let obj = await materialize(item.asset, albums: albumMap[item.asset.localIdentifier]) {
                 out.append(obj)
                 current[item.oid] = item.hash  // only mark done once its bytes are read
-            } else {
-                AgentLog.shared.warn("device_photos: could not read \(item.asset.localIdentifier) — will retry next run")
             }
+            // failures are logged with the filename + real reason inside materialize;
+            // the item stays out of `current` so it retries next run.
         }
         AgentLog.shared.info("device_photos: materialized \(out.count)/\(changed.count) asset(s)")
         return (out, current)
@@ -97,9 +97,8 @@ final class PhotosCollector: Collector {
         let created = asset.creationDate ?? asset.modificationDate ?? Date()
         let filename = (asset.value(forKey: "filename") as? String) ?? "\(asset.localIdentifier).\(isVideo ? "mov" : "jpg")"
 
-        guard let data = await (isVideo ? videoData(asset) : imageData(asset)) else {
-            AgentLog.shared.warn("device_photos: could not read bytes for \(filename)")
-            return nil
+        guard let data = await originalData(asset, isVideo: isVideo, filename: filename) else {
+            return nil  // originalData already logged the reason
         }
         if data.count > maxBytes {
             AgentLog.shared.warn("device_photos: skipping \(filename) (\(data.count) bytes > cap)")
@@ -137,26 +136,72 @@ final class PhotosCollector: Collector {
             contentHash: hash)
     }
 
-    private func imageData(_ asset: PHAsset) async -> Data? {
+    /// Read the ORIGINAL file bytes for an asset. Uses PHAssetResourceManager (the
+    /// canonical way to get the untouched original, including iCloud-optimized
+    /// assets that must be downloaded), and falls back to the image/video request
+    /// APIs. Logs the real PhotoKit error so failures are triageable.
+    private func originalData(_ asset: PHAsset, isVideo: Bool, filename: String) async -> Data? {
+        let resources = PHAssetResource.assetResources(for: asset)
+        let pick: PHAssetResource? = isVideo
+            ? (resources.first { $0.type == .video } ?? resources.first { $0.type == .fullSizeVideo } ?? resources.first)
+            : (resources.first { $0.type == .photo } ?? resources.first { $0.type == .fullSizePhoto } ?? resources.first)
+        if let res = pick, let data = await resourceData(res, filename: filename) {
+            return data
+        }
+        // Fallback to the rendered image/video request path.
+        if let data = await (isVideo ? videoData(asset, filename: filename) : imageData(asset, filename: filename)) {
+            return data
+        }
+        AgentLog.shared.warn("device_photos: could not read bytes for \(filename) — will retry next run")
+        return nil
+    }
+
+    private func resourceData(_ res: PHAssetResource, filename: String) async -> Data? {
+        final class Box { var data = Data() }
+        let box = Box()
+        let opts = PHAssetResourceRequestOptions()
+        opts.isNetworkAccessAllowed = true  // pull iCloud-optimized originals
+        return await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+            PHAssetResourceManager.default().requestData(
+                for: res, options: opts,
+                dataReceivedHandler: { box.data.append($0) },
+                completionHandler: { err in
+                    if let err {
+                        AgentLog.shared.warn("device_photos: resource read failed for \(filename): \(err.localizedDescription)")
+                        cont.resume(returning: nil)
+                    } else {
+                        cont.resume(returning: box.data)
+                    }
+                })
+        }
+    }
+
+    private func imageData(_ asset: PHAsset, filename: String) async -> Data? {
         await withCheckedContinuation { cont in
             let opts = PHImageRequestOptions()
             opts.isNetworkAccessAllowed = true
             opts.isSynchronous = false
             opts.deliveryMode = .highQualityFormat
-            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, _, _, _ in
+            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, _, _, info in
+                if data == nil, let err = info?[PHImageErrorKey] as? Error {
+                    AgentLog.shared.warn("device_photos: image read failed for \(filename): \(err.localizedDescription)")
+                }
                 cont.resume(returning: data)
             }
         }
     }
 
-    private func videoData(_ asset: PHAsset) async -> Data? {
+    private func videoData(_ asset: PHAsset, filename: String) async -> Data? {
         await withCheckedContinuation { cont in
             let opts = PHVideoRequestOptions()
             opts.isNetworkAccessAllowed = true
             opts.deliveryMode = .highQualityFormat
-            PHImageManager.default().requestAVAsset(forVideo: asset, options: opts) { avAsset, _, _ in
+            PHImageManager.default().requestAVAsset(forVideo: asset, options: opts) { avAsset, _, info in
                 guard let urlAsset = avAsset as? AVURLAsset,
                       let data = try? Data(contentsOf: urlAsset.url) else {
+                    if let err = info?[PHImageErrorKey] as? Error {
+                        AgentLog.shared.warn("device_photos: video read failed for \(filename): \(err.localizedDescription)")
+                    }
                     cont.resume(returning: nil); return
                 }
                 cont.resume(returning: data)
