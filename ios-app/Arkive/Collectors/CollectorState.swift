@@ -31,11 +31,21 @@ enum CollectorState {
     /// were actually uploaded (photos/files), so stuck items re-scan once.
     static func migrateIfNeeded() {
         let key = "collector_state_reset_v2"
-        guard !UserDefaults.standard.bool(forKey: key) else { return }
-        for s in ["device_photos", "device_files"] {
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(s).json"))
+        if !UserDefaults.standard.bool(forKey: key) {
+            for s in ["device_photos", "device_files"] {
+                try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(s).json"))
+            }
+            UserDefaults.standard.set(true, forKey: key)
         }
-        UserDefaults.standard.set(true, forKey: key)
+        // v3: photos previously recorded the asset's modificationDate (which iCloud
+        // bumps toward now) as the object date instead of the capture date. Clear
+        // device_photos once so the library re-dates to creationDate (bytes dedupe
+        // server-side by content hash, so nothing is re-stored).
+        let v3 = "collector_state_reset_v3_photo_dates"
+        if !UserDefaults.standard.bool(forKey: v3) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("device_photos.json"))
+            UserDefaults.standard.set(true, forKey: v3)
+        }
     }
 
     // Last-collect times (seconds since epoch) keyed by source type.

@@ -197,9 +197,16 @@ final class PhotosCollector: StreamingCollector {
             "kind": isVideo ? "video" : "image",
             "filename": filename,
             "created": iso(created),
-            "modified": iso(asset.modificationDate ?? created),
+            // The object's date is the CAPTURE date (creationDate). The asset's
+            // modificationDate drifts toward now from iCloud syncs/edits/favorites,
+            // so it must NOT be the date the server records — the server reads
+            // "modified" first, so point it at the capture date too.
+            "modified": iso(created),
             "device": "ios",
         ]
+        if let edited = asset.modificationDate, edited != created {
+            meta["edited"] = iso(edited)  // real last-edit time, for reference only
+        }
         if asset.pixelWidth > 0 { meta["width"] = String(asset.pixelWidth) }
         if asset.pixelHeight > 0 { meta["height"] = String(asset.pixelHeight) }
         if asset.isFavorite { meta["favorite"] = "true" }
