@@ -72,12 +72,15 @@ final class AgentService: ObservableObject {
 
     func stopLoop() { heartbeatTask?.cancel(); heartbeatTask = nil }
 
-    /// Fetch the protected-data summary for the home screen. Best-effort — if the
-    /// endpoint isn't deployed yet it degrades to the locally-known status.
+    /// Fetch the protected-data summary for the home screen. Read from the CONTROL
+    /// PLANE (not the tenant node): the CP runs the latest code and serves the same
+    /// replicated search index the web portal reads, so the app's totals always
+    /// match the portal — even when the node lags a deploy. Ingest/heartbeat still
+    /// go to the node. Best-effort — degrades to the locally-known status.
     func refreshSummary() async {
         guard let token = enrollment.agentToken else { return }
         do {
-            summary = try await api.summary(control: enrollment.controlURL, token: token)
+            summary = try await api.summary(control: enrollment.baseURL, token: token)
         } catch {
             AgentLog.shared.warn("summary unavailable: \((error as? ApiError)?.localizedDescription ?? error.localizedDescription)")
         }
