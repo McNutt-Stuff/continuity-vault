@@ -791,7 +791,7 @@ def agent_summary(agent: DesktopAgent = Depends(_auth_agent),
     Photos, Contacts, …) and per-source counts — the same shape the cloud Overview
     shows, scoped to what this device's account protects."""
     from sqlalchemy import func
-    from ..models import SearchDocument, User, Vault
+    from ..models import SearchDocument, User, Vault, Collection
 
     # Category buckets — mirror the cloud Overview (dashboard._OBJECT_BUCKETS).
     buckets = [
@@ -814,8 +814,20 @@ def agent_summary(agent: DesktopAgent = Depends(_auth_agent),
              or db.query(User).filter(User.tenant_id == agent.tenant_id)
                    .order_by(User.created_at).first())
     is_org = bool(tenant and (tenant.tenant_type or "") not in ("shared", ""))
+    # Scope to the account owner's vaults so the totals match the cloud Overview's
+    # default ("me") view; fall back to all tenant vaults if none are owner-scoped.
     vault_ids = [v.id for v in db.query(Vault).filter(
-        Vault.tenant_id == agent.tenant_id).all()]
+        Vault.tenant_id == agent.tenant_id,
+        Vault.owner_user_id == (owner.id if owner else None)).all()]
+    if not vault_ids:
+        vault_ids = [v.id for v in db.query(Vault).filter(
+            Vault.tenant_id == agent.tenant_id).all()]
+
+    # Sources protected = configured sources (Collections) in scope — the SAME count
+    # the Overview shows (its source-type mix), not just types that have data.
+    sources_count = int((db.query(func.count(Collection.id)).filter(
+        Collection.tenant_id == agent.tenant_id,
+        Collection.vault_id.in_(vault_ids)).scalar() or 0)) if vault_ids else 0
 
     src_agg: dict[str, dict] = {}
     cat_agg: dict[str, dict] = {}
@@ -869,7 +881,7 @@ def agent_summary(agent: DesktopAgent = Depends(_auth_agent),
             "last_backup_at": (agent.last_collection_at.isoformat()
                                if agent.last_collection_at else None),
         },
-        "totals": {"sources": len(sources), "objects": total_objects, "bytes": total_bytes},
+        "totals": {"sources": sources_count, "objects": total_objects, "bytes": total_bytes},
         "categories": categories,
         "sources": sources,
     }
