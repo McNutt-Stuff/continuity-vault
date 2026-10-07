@@ -36,58 +36,17 @@ final class PhotosCollector: StreamingCollector {
     }
 
     func collect(prior: [String: String]) async throws -> (objects: [CollectedObject], current: [String: String]) {
-        guard authorizationState() == .authorized || authorizationState() == .limited else {
-            AgentLog.shared.warn("device_photos: not authorized — skipping")
-            return ([], prior)
-        }
-        let options = PHFetchOptions()
-        options.sortDescriptors = [NSSortDescriptor(key: "modificationDate", ascending: false)]
-        let assets = PHAsset.fetchAssets(with: options)
-        AgentLog.shared.info("device_photos: \(assets.count) asset(s) in library")
+        // Photos always back up via the streaming path (collectStreaming); this
+        // satisfies the Collector protocol and is intentionally a no-op.
+        return ([], prior)
+    }
 
-        var current: [String: String] = [:]
-        var changed: [(asset: PHAsset, oid: String, hash: String)] = []
-        assets.enumerateObjects { asset, _, _ in
-            let oid = Hasher2.objectId(self.sourceType, asset.localIdentifier)
-            let mod = asset.modificationDate?.timeIntervalSince1970 ?? 0
-            let hash = Hasher2.sha256Hex("\(asset.localIdentifier)|\(mod)|\(asset.pixelWidth)x\(asset.pixelHeight)")
-            if prior[oid] == hash {
-                current[oid] = hash  // unchanged — already backed up
-            } else {
-                changed.append((asset, oid, hash))
-            }
-        }
-        // Process images before videos so photos (the common case) upload first,
-        // not after a long tail of large videos.
-        changed.sort { ($0.asset.mediaType == .image ? 0 : 1) < ($1.asset.mediaType == .image ? 0 : 1) }
-        AgentLog.shared.info("device_photos: \(changed.count) new/changed asset(s) to upload")
-
-        let albumMap = buildAlbumMap()
-        var out: [CollectedObject] = []
-        var skipped = 0
-        for item in changed {
-            // Check the original size UP-FRONT (cheap) and skip oversize assets
-            // WITHOUT downloading them — otherwise a 500 MB iCloud video is pulled
-            // in full just to be discarded, starving the rest of the run.
-            let size = assetSize(item.asset)
-            if size > maxBytes {
-                skipped += 1
-                // Not marked done: the size check is cheap (no download), so these
-                // re-evaluate each run and get captured if the limit is raised.
-                if skipped <= 20 {
-                    AgentLog.shared.warn("device_photos: skipping oversize \(item.asset.localIdentifier) (\(size) bytes > \(maxBytes) cap) — not downloaded")
-                }
-                continue
-            }
-            if let obj = await materialize(item.asset, albums: albumMap[item.asset.localIdentifier]) {
-                out.append(obj)
-                current[item.oid] = item.hash  // only mark done once its bytes are read
-            }
-            // failures are logged with the filename + real reason inside materialize;
-            // the item stays out of `current` so it retries next run.
-        }
-        AgentLog.shared.info("device_photos: materialized \(out.count)/\(changed.count) asset(s), \(skipped) oversize skipped")
-        return (out, current)
+    /// Stable content hash for change-detection. Uses the CAPTURE date (creationDate)
+    /// — NOT modificationDate, which iCloud/edits bump, which would make every asset
+    /// look "changed" on every run and stall progress on the newest items.
+    private func stableHash(_ asset: PHAsset) -> String {
+        let created = asset.creationDate?.timeIntervalSince1970 ?? 0
+        return Hasher2.sha256Hex("\(asset.localIdentifier)|\(created)|\(asset.pixelWidth)x\(asset.pixelHeight)")
     }
 
     /// Original byte size of an asset's primary resource, read from PhotoKit
@@ -113,7 +72,7 @@ final class PhotosCollector: StreamingCollector {
             return
         }
         let options = PHFetchOptions()
-        options.sortDescriptors = [NSSortDescriptor(key: "modificationDate", ascending: false)]
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         let assets = PHAsset.fetchAssets(with: options)
         AgentLog.shared.info("device_photos: \(assets.count) asset(s) in library")
 
@@ -121,8 +80,7 @@ final class PhotosCollector: StreamingCollector {
         var changed: [(asset: PHAsset, oid: String, hash: String)] = []
         assets.enumerateObjects { asset, _, _ in
             let oid = Hasher2.objectId(self.sourceType, asset.localIdentifier)
-            let mod = asset.modificationDate?.timeIntervalSince1970 ?? 0
-            let hash = Hasher2.sha256Hex("\(asset.localIdentifier)|\(mod)|\(asset.pixelWidth)x\(asset.pixelHeight)")
+            let hash = self.stableHash(asset)
             if prior[oid] != hash { changed.append((asset, oid, hash)) }
         }
         AgentLog.shared.info("device_photos: \(changed.count) new/changed asset(s) to upload (newest first)")
@@ -180,8 +138,7 @@ final class PhotosCollector: StreamingCollector {
 
     private func materialize(_ asset: PHAsset, albums: [String]?) async -> CollectedObject? {
         let oid = Hasher2.objectId(sourceType, asset.localIdentifier)
-        let mod = asset.modificationDate?.timeIntervalSince1970 ?? 0
-        let hash = Hasher2.sha256Hex("\(asset.localIdentifier)|\(mod)|\(asset.pixelWidth)x\(asset.pixelHeight)")
+        let hash = stableHash(asset)
         let isVideo = asset.mediaType == .video
         let created = asset.creationDate ?? asset.modificationDate ?? Date()
         let filename = (asset.value(forKey: "filename") as? String) ?? "\(asset.localIdentifier).\(isVideo ? "mov" : "jpg")"

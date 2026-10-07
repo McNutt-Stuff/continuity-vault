@@ -46,6 +46,15 @@ enum CollectorState {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent("device_photos.json"))
             UserDefaults.standard.set(true, forKey: v3)
         }
+        // v4: the photo change-hash now uses creationDate (stable) instead of
+        // modificationDate (iCloud-bumped), which was marking every asset "changed"
+        // each run and stalling progress on the newest items. Reset once so state
+        // keys match the new stable hash and the backup accumulates forward.
+        let v4 = "collector_state_reset_v4_stable_hash"
+        if !UserDefaults.standard.bool(forKey: v4) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("device_photos.json"))
+            UserDefaults.standard.set(true, forKey: v4)
+        }
     }
 
     // Last-collect times (seconds since epoch) keyed by source type.
