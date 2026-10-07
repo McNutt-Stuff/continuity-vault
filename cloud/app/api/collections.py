@@ -263,7 +263,7 @@ def _collection_view(db: Session, c: Collection) -> dict:
         # platform default, so the UI can show "default X / override Y".
         "max_file_bytes": (c.config or {}).get("max_file_bytes"),
         "default_max_file_bytes": node_config.get_int(
-            db, "CV_CONTENT_MAX_BYTES", get_settings().content_max_bytes),
+            db, "CV_MAX_FILE_BYTES", get_settings().max_file_bytes),
         "last_backup_run_at": c.last_backup_run_at.isoformat() if c.last_backup_run_at else None,
         "config": c.config or {},
         # Big-history sources support a "back up from this date" window; crawling
@@ -408,7 +408,7 @@ def _integration_mapping_view(db: Session, inst: IntegrationInstance,
         "backup_interval_minutes": prof.get("backup_interval_minutes"),
         "max_file_bytes": prof.get("max_file_bytes"),
         "default_max_file_bytes": node_config.get_int(
-            db, "CV_CONTENT_MAX_BYTES", get_settings().content_max_bytes),
+            db, "CV_MAX_FILE_BYTES", get_settings().max_file_bytes),
         "default_interval_minutes": get_settings().sync_interval_minutes,
         "last_backup_at": last.created_at.isoformat() if last else None,
         "last_object_count": objects,

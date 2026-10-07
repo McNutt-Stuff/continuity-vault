@@ -46,11 +46,11 @@ CONFIG_CATALOG: list[dict] = [
      "description": "How long per-node health time-series is kept."},
 
     # --- Storage ----------------------------------------------------------- #
-    {"key": "CV_CONTENT_MAX_BYTES", "label": "Maximum file size",
-     "type": "int", "group": "Storage", "example": "268435456", "unit": "bytes",
-     "description": "Default maximum size of a single file/object that is backed up. Larger "
-                    "items are indexed (searchable metadata) but their contents aren't stored. "
-                    "Each Data Map can override this in its settings."},
+    {"key": "CV_MAX_FILE_BYTES", "label": "Maximum file size",
+     "type": "int", "group": "Storage", "example": "104857600", "unit": "bytes",
+     "description": "Default maximum size of a single file/object that is backed up (100 MB). "
+                    "Larger items are indexed (searchable metadata) but their contents aren't "
+                    "stored. Each Data Map can override this in its settings."},
     {"key": "CV_CONTENT_CHUNK_BYTES", "label": "Content chunk size",
      "type": "int", "group": "Storage", "example": "8388608", "unit": "bytes",
      "description": "Chunk size used to split large content into encrypted units at rest."},

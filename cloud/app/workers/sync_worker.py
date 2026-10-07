@@ -627,8 +627,8 @@ def collection_max_file_bytes(db: Session, collection: Collection) -> int:
     else the platform default (``CV_CONTENT_MAX_BYTES`` → ``content_max_bytes``).
     Objects larger than this are indexed (searchable metadata) but their contents
     are not stored."""
-    default = node_config.get_int(db, "CV_CONTENT_MAX_BYTES",
-                                  get_settings().content_max_bytes)
+    default = node_config.get_int(db, "CV_MAX_FILE_BYTES",
+                                  get_settings().max_file_bytes)
     cfg = collection.config or {}
     try:
         # `max_file_bytes` is the generic Data-Map key; `maxSizeBytes` is the

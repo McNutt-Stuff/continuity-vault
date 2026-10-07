@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     # Max raw content pulled/held per object during a sync (memory bound). Larger
     # items are indexed metadata-only.
     content_max_bytes: int = 268435456  # 256 MiB
+    # Default max size of a single file/object that is BACKED UP (stored). Larger
+    # items are indexed (searchable metadata) but their contents aren't stored.
+    # Each Data Map can override this; capped in practice by content_max_bytes for
+    # cloud-pull sources. Tunable via CV_MAX_FILE_BYTES.
+    max_file_bytes: int = 104857600  # 100 MiB
     # Content larger than this is split into encrypted chunks at rest.
     content_chunk_bytes: int = 8388608  # 8 MiB
     # How long a recovered (decrypted) item stays viewable before auto-destroy.

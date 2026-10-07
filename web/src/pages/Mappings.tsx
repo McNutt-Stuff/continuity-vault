@@ -552,7 +552,7 @@ export default function Mappings() {
                               <input type="checkbox"
                                      checked={intEditMaxMb > 0}
                                      onChange={(e) => setIntEditMaxMb(e.target.checked
-                                       ? Math.round((m.default_max_file_bytes || 268435456) / (1024 * 1024))
+                                       ? Math.round((m.default_max_file_bytes || 104857600) / (1024 * 1024))
                                        : -1)} />
                               <span className="faint" style={{ fontSize: 11.5 }}>Limit the maximum file size</span>
                             </label>
@@ -565,7 +565,7 @@ export default function Mappings() {
                               </div>
                             ) : (
                               <span className="faint" style={{ fontSize: 11 }}>
-                                Using the platform default ({bytes(m.default_max_file_bytes || 268435456)}).
+                                Using the platform default ({bytes(m.default_max_file_bytes || 104857600)}).
                               </span>
                             )}
                           </div>
@@ -862,7 +862,7 @@ export default function Mappings() {
                         <input type="checkbox"
                                checked={editMaxMb > 0}
                                onChange={(e) => setEditMaxMb(e.target.checked
-                                 ? Math.round((m.default_max_file_bytes || 268435456) / (1024 * 1024))
+                                 ? Math.round((m.default_max_file_bytes || 104857600) / (1024 * 1024))
                                  : -1)} />
                         <span className="faint" style={{ fontSize: 11.5 }}>Limit the maximum file size</span>
                       </label>
@@ -878,7 +878,7 @@ export default function Mappings() {
                         </div>
                       ) : (
                         <span className="faint" style={{ fontSize: 11 }}>
-                          Using the platform default ({bytes(m.default_max_file_bytes || 268435456)}). Larger files are indexed, not stored.
+                          Using the platform default ({bytes(m.default_max_file_bytes || 104857600)}). Larger files are indexed, not stored.
                         </span>
                       )}
                     </div>

@@ -10,8 +10,8 @@ final class PhotosCollector: StreamingCollector {
     let displayName = "Photos"
 
     /// Cap very large videos in v1 so a single asset can't blow the request budget.
-    /// Overridable per Data Map via setMaxFileBytes().
-    private var maxBytes = 200 * 1024 * 1024
+    /// Default 100 MB; overridable per Data Map via setMaxFileBytes().
+    private var maxBytes = 100 * 1024 * 1024
 
     func isAvailable() -> Bool { true }
 
