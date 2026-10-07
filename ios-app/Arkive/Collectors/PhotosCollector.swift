@@ -5,7 +5,7 @@ import AVFoundation
 /// Backs up photos & videos from the device library (PhotoKit). Enumerates assets
 /// cheaply (localIdentifier + modificationDate) and only materializes bytes for
 /// new/changed assets, so routine runs are battery-light.
-final class PhotosCollector: Collector {
+final class PhotosCollector: StreamingCollector {
     let sourceType = "device_photos"
     let displayName = "Photos"
 
@@ -102,6 +102,61 @@ final class PhotosCollector: Collector {
             : (resources.first { $0.type == .photo } ?? resources.first { $0.type == .fullSizePhoto })
         if let p = primary, sz(p) > 0 { return sz(p) }
         return resources.map(sz).max() ?? 0
+    }
+
+    /// Streaming upload: materialize + push NEWEST-FIRST in batches so progress is
+    /// visible and only one batch is in memory at a time.
+    func collectStreaming(prior: [String: String], batchSize: Int, maxBatchBytes: Int,
+                          sink: @escaping ([CollectedObject]) async -> Bool) async {
+        guard authorizationState() == .authorized || authorizationState() == .limited else {
+            AgentLog.shared.warn("device_photos: not authorized — skipping")
+            return
+        }
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "modificationDate", ascending: false)]
+        let assets = PHAsset.fetchAssets(with: options)
+        AgentLog.shared.info("device_photos: \(assets.count) asset(s) in library")
+
+        // Cheap enumerate → the changed assets, newest first (fetch order).
+        var changed: [(asset: PHAsset, oid: String, hash: String)] = []
+        assets.enumerateObjects { asset, _, _ in
+            let oid = Hasher2.objectId(self.sourceType, asset.localIdentifier)
+            let mod = asset.modificationDate?.timeIntervalSince1970 ?? 0
+            let hash = Hasher2.sha256Hex("\(asset.localIdentifier)|\(mod)|\(asset.pixelWidth)x\(asset.pixelHeight)")
+            if prior[oid] != hash { changed.append((asset, oid, hash)) }
+        }
+        AgentLog.shared.info("device_photos: \(changed.count) new/changed asset(s) to upload (newest first)")
+
+        let albumMap = buildAlbumMap()
+        var batch: [CollectedObject] = []
+        var batchBytes = 0
+        var uploaded = 0
+        var skipped = 0
+        func flush() async {
+            guard !batch.isEmpty else { return }
+            if await sink(batch) { uploaded += batch.count }
+            batch.removeAll(); batchBytes = 0
+        }
+        for item in changed {
+            // Skip oversize assets cheaply (size from metadata, no download).
+            let size = assetSize(item.asset)
+            if size > maxBytes {
+                skipped += 1
+                if skipped <= 20 {
+                    AgentLog.shared.warn("device_photos: skipping oversize \(item.asset.localIdentifier) (\(size) bytes > \(maxBytes) cap) — not downloaded")
+                }
+                continue
+            }
+            guard let obj = await materialize(item.asset, albums: albumMap[item.asset.localIdentifier]) else {
+                continue  // failure logged in materialize; left out of state to retry
+            }
+            if batch.count >= batchSize || (batchBytes + obj.content.count) > maxBatchBytes {
+                await flush()
+            }
+            batch.append(obj); batchBytes += obj.content.count
+        }
+        await flush()
+        AgentLog.shared.info("device_photos: uploaded \(uploaded) asset(s), \(skipped) oversize skipped")
     }
 
     /// Map each asset's localIdentifier → the album titles it belongs to, so a

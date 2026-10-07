@@ -28,6 +28,10 @@ final class AgentService: ObservableObject {
     /// True while a collection pass is running, so we never start a second one
     /// concurrently (which would race the per-source state files).
     private var collecting = false
+    /// Running state for a streaming collector pass (photos/files): the state map
+    /// persisted after each landed batch, and the count uploaded so far.
+    private var streamSaved: [String: String] = [:]
+    private var streamLanded = 0
 
     init(enrollment: EnrollmentStore) {
         self.enrollment = enrollment
@@ -181,6 +185,35 @@ final class AgentService: ObservableObject {
             return
         }
         if let limit = mapping.max_file_bytes { collector.setMaxFileBytes(limit) }
+
+        // Streaming collectors (photos/files) materialize + upload newest-first in
+        // batches, checkpointing each landed batch so progress is visible and only
+        // one batch is held in memory at a time.
+        if let sc = collector as? StreamingCollector {
+            let st = collector.sourceType
+            let noun = collector.displayName.lowercased()
+            streamSaved = CollectorState.load(st)
+            streamLanded = 0
+            await sc.collectStreaming(prior: streamSaved, batchSize: 15,
+                                      maxBatchBytes: 40 * 1024 * 1024) { [weak self] objs in
+                guard let self else { return false }
+                let ok = await self.pushBatch(sourceType: st, destinations: mapping.destinations,
+                                              objects: objs, token: token)
+                if ok {
+                    for o in objs { self.streamSaved[o.objectId] = o.contentHash }
+                    CollectorState.save(st, self.streamSaved)
+                    self.streamLanded += objs.count
+                    self.statusLine = "Backed up \(self.streamLanded) \(noun)…"
+                    self.lastSync = Date()
+                }
+                return ok
+            }
+            CollectorState.setLastCollect(st, Date().timeIntervalSince1970)
+            AgentLog.shared.info("\(st): run done (\(streamLanded) uploaded)")
+            statusLine = "Idle"
+            return
+        }
+
         do {
             let prior = CollectorState.load(collector.sourceType)
             let (objects, current) = try await collector.collect(prior: prior)
@@ -206,6 +239,22 @@ final class AgentService: ObservableObject {
             lastError = error.localizedDescription
         }
         statusLine = "Idle"
+    }
+
+    /// Upload one already-formed batch. Returns true if the server accepted it.
+    private func pushBatch(sourceType: String, destinations: [String]?,
+                           objects: [CollectedObject], token: String) async -> Bool {
+        guard !objects.isEmpty else { return true }
+        let req = IngestRequest(source_type: sourceType, destinations: destinations,
+                                objects: objects.map { $0.toDTO() })
+        do {
+            let res = try await api.ingest(control: enrollment.controlURL, token: token, body: req)
+            AgentLog.shared.info("\(sourceType): pushed \(objects.count) object(s) → \(res.status ?? "ok")")
+            return true
+        } catch {
+            AgentLog.shared.error("\(sourceType): ingest batch failed: \(error.localizedDescription)")
+            return false
+        }
     }
 
     /// Push objects in bounded batches (by count AND cumulative bytes). `onBatchLanded`

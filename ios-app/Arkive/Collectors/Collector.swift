@@ -46,6 +46,16 @@ extension Collector {
     func setMaxFileBytes(_ bytes: Int) {}
 }
 
+/// A collector that materializes AND uploads in batches, newest-first, so progress
+/// is visible and only one batch is held in memory at a time. For each batch it
+/// calls `sink`, which uploads + checkpoints it and returns true if it landed;
+/// `await`ing the sink gives natural backpressure (the next batch isn't read until
+/// the current one is handled).
+protocol StreamingCollector: Collector {
+    func collectStreaming(prior: [String: String], batchSize: Int, maxBatchBytes: Int,
+                          sink: @escaping ([CollectedObject]) async -> Bool) async
+}
+
 enum CollectorAuth: String {
     case authorized, limited, denied, notDetermined, unavailable
 }
