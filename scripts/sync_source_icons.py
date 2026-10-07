@@ -70,11 +70,14 @@ SOURCE_ICONS: dict[str, dict] = {
     "google_contacts": {"file": "Google Contacts icon.svg", "search": "Google Contacts icon"},
     "google_photos": {"file": "Google Photos icon (2020).svg", "search": "Google Photos logo"},
     "imessage":   {"file": "IMessage logo.svg", "search": "iMessage logo"},
-    # Apple on-device (mobile app) sources. Commons only hosts the Contacts and
-    # Calendar app marks as SVG; Photos/Reminders/Files aren't on Commons, so they
-    # keep the built-in glyph fallback (per the no-fabrication brand rule).
-    "device_contacts": {"file": "Contacts iOS.svg", "search": "Contacts iOS icon Apple"},
+    # Apple on-device (mobile app) sources. Exact Commons files requested by the
+    # product; some are PNG (wrapped into an SVG on download so the .svg pipeline
+    # is unchanged). Photos/Reminders/Contacts use the macOS/iOS app marks.
+    "device_photos":   {"file": "Foto (iOS).png", "search": "Apple Photos iOS icon"},
+    "device_contacts": {"file": "Contacts Icon (macOS 27).png", "search": "Apple Contacts icon"},
     "device_calendar": {"file": "Apple Calendar (iOS).svg", "search": "Apple Calendar iOS icon"},
+    "device_reminders": {"file": "Reminders Icon (macOS 27).png", "search": "Apple Reminders icon"},
+    "device_notes":    {"file": "Apple Notes icon.svg", "search": "Apple Notes icon"},
     # NOTE: Crossbeam has no brand file on Wikimedia Commons. Its icon is a
     # locally-provided asset committed at web/public/source-icons/crossbeam.svg
     # (brand logo embedded), so this script intentionally does NOT manage it.
@@ -131,6 +134,38 @@ def _is_svg(data: bytes) -> bool:
     return head.startswith(b"<svg") or (head.startswith(b"<?xml") and b"<svg" in data[:2048].lower())
 
 
+def _is_png(data: bytes) -> bool:
+    return data[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def _wrap_png_as_svg(data: bytes) -> bytes:
+    """Wrap a raster PNG icon in an SVG <image> (base64) so it renders through the
+    unchanged /source-icons/<type>.svg pipeline. Downscaled to keep the file small
+    when Pillow is available; else embedded as-is at its native size."""
+    import base64
+    import struct
+    w = h = 512
+    try:  # downscale with Pillow if present
+        import io
+        from PIL import Image  # type: ignore
+        im = Image.open(io.BytesIO(data)).convert("RGBA")
+        if max(im.size) > 256:
+            r = 256 / max(im.size)
+            im = im.resize((max(1, round(im.width * r)), max(1, round(im.height * r))), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, "PNG")
+        data = buf.getvalue()
+        w, h = im.size
+    except Exception:
+        if _is_png(data) and data[12:16] == b"IHDR":
+            w, h = struct.unpack(">II", data[16:24])
+    b64 = base64.b64encode(data).decode()
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" '
+           f'width="{w}" height="{h}"><image href="data:image/png;base64,{b64}" '
+           f'width="{w}" height="{h}"/></svg>')
+    return svg.encode()
+
+
 def _search_title(phrase: str) -> str | None:
     q = urllib.parse.urlencode({
         "action": "query", "list": "search", "srnamespace": 6,
@@ -151,9 +186,13 @@ def _download(title: str) -> bytes | None:
     url = FILEPATH + urllib.parse.quote(title)
     try:
         data = _get(url)
-        return data if _is_svg(data) else None
     except Exception:
         return None
+    if _is_svg(data):
+        return data
+    if _is_png(data):
+        return _wrap_png_as_svg(data)
+    return None
 
 
 def sync() -> int:
