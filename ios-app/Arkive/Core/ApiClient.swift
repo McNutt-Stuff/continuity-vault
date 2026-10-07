@@ -48,7 +48,7 @@ struct ApiClient {
     private func post<Req: Encodable, Res: Decodable>(
         base: String, path: String, token: String?, body: Req
     ) async throws -> Res {
-        guard let url = URL(string: base.trimmingCharacters(in: .whitespaces) + path) else {
+        guard let url = URL(string: Self.fullURL(base: base, path: path)) else {
             throw ApiError.badURL
         }
         var req = URLRequest(url: url)
@@ -73,5 +73,20 @@ struct ApiClient {
         } catch {
             throw ApiError.transport(error.localizedDescription)
         }
+    }
+
+    /// Join a base and an "/api/..." path. The control plane is advertised without
+    /// a path (e.g. "https://vault.arkive.life") while a tenant node's endpoint
+    /// already ends in "/api" (e.g. "https://useast-ct002-a.arkive.life/api") — so
+    /// drop our leading "/api" when the base already carries it, else we'd build
+    /// "/api/api/agent/..." and 404.
+    static func fullURL(base: String, path: String) -> String {
+        var b = base.trimmingCharacters(in: .whitespaces)
+        while b.hasSuffix("/") { b.removeLast() }
+        var p = path
+        if b.hasSuffix("/api"), p.hasPrefix("/api/") {
+            p = String(p.dropFirst(4))
+        }
+        return b + p
     }
 }

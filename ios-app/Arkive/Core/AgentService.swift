@@ -87,6 +87,7 @@ final class AgentService: ObservableObject {
             enrollment.updateControlURL(resp.node_url ?? resp.ingest_url)
             enrollment.updateHeartbeatInterval(resp.next_heartbeat_seconds)
             activeMappings = resp.mappings ?? []
+            AgentLog.shared.info("heartbeat ok → \(enrollment.controlURL) (\(activeMappings.count) mapping(s))")
             if resp.commands?.contains(where: { $0.type == "deregister" }) == true {
                 AgentLog.shared.info("received deregister command — unlinking")
                 unlink(); return
