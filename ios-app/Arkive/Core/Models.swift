@@ -39,6 +39,9 @@ struct Mapping: Codable {
     let source_type: String
     let interval_minutes: Int
     let destinations: [String]?
+    /// Per-Data-Map max object size (bytes); objects larger than this are skipped
+    /// by the collector. Nil → use the collector's built-in default.
+    let max_file_bytes: Int?
 }
 
 struct AgentCommand: Codable {

@@ -20,7 +20,7 @@ interface StorageTarget {
 interface FileConfig {
   roots?: string[]; excludeExts?: string[]; maxSizeBytes?: number;
   excludeFolders?: string[]; includeSpamTrash?: boolean;
-  includeCategories?: string[];
+  includeCategories?: string[]; max_file_bytes?: number;
 }
 interface CatalogItem {
   type: string;
@@ -36,6 +36,7 @@ interface Mapping {
   last_error?: string | null; last_error_at?: string | null; fail_count?: number; needs_reauth?: boolean;
   offpolicy_points: number;
   backup_interval_minutes: number | null; default_interval_minutes: number;
+  max_file_bytes?: number | null; default_max_file_bytes?: number;
   last_backup_run_at: string | null;
   supports_since?: boolean; since_date?: string;
   is_picker?: boolean; reminder_days?: number;
@@ -89,6 +90,8 @@ export default function Mappings() {
   const [editDests, setEditDests] = useState<string[]>([]);
   const [editFields, setEditFields] = useState<string[]>([]);
   const [editInterval, setEditInterval] = useState<number>(-1);
+  // Max file size override in MB (-1 = use the platform default).
+  const [editMaxMb, setEditMaxMb] = useState<number>(-1);
   // Managed-integration entry editor (org-admin only): destinations + schedule
   // that cascade to every managed source under the integration.
   const [intEditId, setIntEditId] = useState<string | null>(null);
@@ -244,7 +247,8 @@ export default function Mappings() {
     // Default the indexed fields to the mapping's override, or all available.
     setEditFields(m.index_fields && m.index_fields.length ? [...m.index_fields] : [...m.available_fields]);
     setEditInterval(m.backup_interval_minutes == null ? -1 : m.backup_interval_minutes);
-    setEditGmailExclude([...(m.config?.excludeFolders || [])]);
+    // Max file size override in MB (-1 = use platform default).
+    setEditMaxMb(m.config?.max_file_bytes ? Math.round(m.config.max_file_bytes / (1024 * 1024)) : -1);
     setEditGmailSpamTrash(!!m.config?.includeSpamTrash);
     setEditCategories([...(m.config?.includeCategories || [])]);
     setEditSince(m.since_date || "");
@@ -275,8 +279,15 @@ export default function Mappings() {
         destinations: editDests, index_fields: editFields,
         backup_interval_minutes: editInterval,
       };
+      // Max file size: store the override (MB→bytes) or clear it to use the default.
+      {
+        const cfg = { ...(m.config || {}) } as FileConfig;
+        if (editMaxMb > 0) cfg.max_file_bytes = Math.round(editMaxMb) * 1024 * 1024;
+        else delete cfg.max_file_bytes;
+        body.config = cfg;
+      }
       if (m.source_type === "gmail") {
-        body.config = { ...(m.config || {}), excludeFolders: editGmailExclude, includeSpamTrash: editGmailSpamTrash };
+        body.config = { ...(m.config || {}), ...(body.config || {}), excludeFolders: editGmailExclude, includeSpamTrash: editGmailSpamTrash };
       }
       if (filterCatsFor(m.source_type).length > 0) {
         body.config = { ...(m.config || {}), ...(body.config || {}), includeCategories: editCategories };
@@ -818,6 +829,31 @@ export default function Mappings() {
                       ) : (
                         <span className="faint" style={{ fontSize: 11 }}>
                           Automatic backups are off — this source only backs up when you click Sync/Back up now.
+                        </span>
+                      )}
+                    </div>
+                    <div className="stack" style={{ gap: 6 }}>
+                      <label className="row" style={{ gap: 8, alignItems: "center", cursor: "pointer" }}>
+                        <input type="checkbox"
+                               checked={editMaxMb > 0}
+                               onChange={(e) => setEditMaxMb(e.target.checked
+                                 ? Math.round((m.default_max_file_bytes || 268435456) / (1024 * 1024))
+                                 : -1)} />
+                        <span className="faint" style={{ fontSize: 11.5 }}>Limit the maximum file size</span>
+                      </label>
+                      {editMaxMb > 0 ? (
+                        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <input type="number" min={1} value={editMaxMb}
+                                 onChange={(e) => setEditMaxMb(Math.max(1, Number(e.target.value)))}
+                                 style={{ padding: "5px 8px", borderRadius: 6, width: 100 }} />
+                          <span className="faint" style={{ fontSize: 11 }}>MB</span>
+                          <span className="faint" style={{ fontSize: 11 }}>
+                            Files larger than {editMaxMb} MB are indexed (searchable) but their contents aren't stored.
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="faint" style={{ fontSize: 11 }}>
+                          Using the platform default ({bytes(m.default_max_file_bytes || 268435456)}). Larger files are indexed, not stored.
                         </span>
                       )}
                     </div>

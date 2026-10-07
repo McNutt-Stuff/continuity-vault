@@ -10,9 +10,12 @@ final class PhotosCollector: Collector {
     let displayName = "Photos"
 
     /// Cap very large videos in v1 so a single asset can't blow the request budget.
-    private let maxBytes = 200 * 1024 * 1024
+    /// Overridable per Data Map via setMaxFileBytes().
+    private var maxBytes = 200 * 1024 * 1024
 
     func isAvailable() -> Bool { true }
+
+    func setMaxFileBytes(_ bytes: Int) { if bytes > 0 { maxBytes = bytes } }
 
     func authorizationState() -> CollectorAuth {
         switch PHPhotoLibrary.authorizationStatus(for: .readWrite) {

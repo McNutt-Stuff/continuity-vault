@@ -32,7 +32,9 @@ final class FilesCollector: Collector {
     let sourceType = "device_files"
     let displayName = "Files"
 
-    private let maxBytes = 200 * 1024 * 1024
+    private var maxBytes = 200 * 1024 * 1024
+
+    func setMaxFileBytes(_ bytes: Int) { if bytes > 0 { maxBytes = bytes } }
 
     func isAvailable() -> Bool { true }
     func authorizationState() -> CollectorAuth {

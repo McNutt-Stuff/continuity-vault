@@ -36,7 +36,14 @@ protocol Collector {
     func authorizationState() -> CollectorAuth
     /// Request access if needed. Returns true when granted (full or limited).
     func requestAccess() async -> Bool
+    /// Apply the Data Map's per-object size limit (bytes) before a run. Default is
+    /// a no-op; size-bearing collectors (photos, files) override it.
+    func setMaxFileBytes(_ bytes: Int)
     func collect(prior: [String: String]) async throws -> (objects: [CollectedObject], current: [String: String])
+}
+
+extension Collector {
+    func setMaxFileBytes(_ bytes: Int) {}
 }
 
 enum CollectorAuth: String {

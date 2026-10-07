@@ -621,6 +621,24 @@ def _sane_index_date(doc_type: str, dt: Optional[datetime]) -> Optional[datetime
     return None if naive > horizon else dt
 
 
+def collection_max_file_bytes(db: Session, collection: Collection) -> int:
+    """Effective per-object size limit for a Data Map: its own override
+    (``config['max_file_bytes']``, set in the Data Map settings) when present,
+    else the platform default (``CV_CONTENT_MAX_BYTES`` → ``content_max_bytes``).
+    Objects larger than this are indexed (searchable metadata) but their contents
+    are not stored."""
+    default = node_config.get_int(db, "CV_CONTENT_MAX_BYTES",
+                                  get_settings().content_max_bytes)
+    cfg = collection.config or {}
+    try:
+        # `max_file_bytes` is the generic Data-Map key; `maxSizeBytes` is the
+        # legacy endpoint-files key — honor either as the override.
+        override = int(cfg.get("max_file_bytes") or cfg.get("maxSizeBytes") or 0)
+    except (TypeError, ValueError):
+        override = 0
+    return override if override > 0 else default
+
+
 def ingest_objects(db: Session, collection: Collection, source_objects,
                    destinations: Optional[List[str]] = None,
                    searchable_fields: Optional[List[str]] = None,
@@ -659,6 +677,9 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
     snapshot_id = str(uuid.uuid4())
     snapshot_key = hierarchy.snapshot_key(vault.id, collection.id, snapshot_id)
     chunk_size = node_config.get_int(db, "CV_CONTENT_CHUNK_BYTES", get_settings().content_chunk_bytes)
+    # Effective per-object size limit for this Data Map (override or platform
+    # default). Oversized objects are indexed metadata-only (contents not stored).
+    max_file_bytes = collection_max_file_bytes(db, collection)
 
     storage_units: list = []  # envelopes to persist (single, or chunks + index)
     index_rows: List[SearchDocument] = []
@@ -768,17 +789,29 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         version = (prev.version + 1) if prev is not None else 1
         if prev is not None:
             prev.is_current = False
+        # Enforce the Data Map's max file size: objects over the limit are indexed
+        # (searchable metadata) but their bytes are replaced with a small marker so
+        # they aren't stored — recoverable size stays truthful via size_bytes.
+        body = src.content or b""
+        real_size = len(body)
+        oversize = real_size > max_file_bytes
+        if oversize:
+            logger.info("ingest: object=%s source=%s is %d bytes > max_file_bytes %d — "
+                        "stored metadata-only", src.object_id, collection.source_type,
+                        real_size, max_file_bytes)
+            body = json.dumps({"_arkive": "content_exceeds_cap",
+                               "bytes": real_size, "limit": max_file_bytes}).encode()
         new_versions.append(ObjectVersion(
             tenant_id=collection.tenant_id, source_type=collection.source_type,
             object_id=src.object_id, collection_id=collection.id, version=version,
             content_hash=content_hash, snapshot_id=snapshot_id,
-            size_bytes=len(src.content or b""), is_current=True,
+            size_bytes=real_size, is_current=True,
         ))
         # Large content is split into encrypted chunks at rest; small content is a
         # single envelope. Either way the item stays one logical object in search.
         storage_units.extend(
-            _encrypt_content_units(snapshot_key, src.content, src.object_id, chunk_size))
-        total_bytes += len(src.content)
+            _encrypt_content_units(snapshot_key, body, src.object_id, chunk_size))
+        total_bytes += len(body)
         stored += 1
         # Index only discrete, connector-declared metadata — no body/content. The
         # preview is a composed "Field: value" summary of that metadata (empty for
@@ -801,6 +834,8 @@ def ingest_objects(db: Session, collection: Collection, source_objects,
         # bytes (recoverable) but writes no search row.
         row_labels = [] if zero_knowledge else list(src.labels or [])
         restricted = False
+        if oversize and not zero_knowledge and "Oversize" not in row_labels:
+            row_labels.append("Oversize")  # over the Data Map's max file size — metadata-only
         if outcome is not None:
             if outcome.add_labels:
                 for lbl in outcome.add_labels:

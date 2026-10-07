@@ -781,18 +781,28 @@ class Agent:
             if now - last < interval_min * 60:
                 continue
             self._enqueue_collect({"source_type": source,
-                                   "file_config": m.get("file_config") or {}})
+                                   "file_config": self._merge_max_bytes(m)})
 
     def sync_now(self) -> int:
         """Manually collect every configured source now (menu-bar 'Sync now')."""
         n = 0
         for m in self._mappings or []:
             if self._enqueue_collect({"source_type": m.get("source_type"),
-                                      "file_config": m.get("file_config") or {}}):
+                                      "file_config": self._merge_max_bytes(m)}):
                 n += 1
         if not n and self._enqueue_collect(None):  # no mappings yet → legacy default
             n = 1
         return n
+
+    @staticmethod
+    def _merge_max_bytes(m: dict) -> dict:
+        """Fold the Data Map's effective max file size (server-computed override or
+        platform default) into the file_config the collectors read."""
+        fc = dict(m.get("file_config") or {})
+        mfb = m.get("max_file_bytes")
+        if mfb:
+            fc["maxSizeBytes"] = int(mfb)
+        return fc
 
     def _load_collect_state(self) -> dict:
         try:

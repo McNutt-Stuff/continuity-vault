@@ -180,6 +180,7 @@ final class AgentService: ObservableObject {
             AgentLog.shared.warn("\(collector.sourceType): access denied — skipping")
             return
         }
+        if let limit = mapping.max_file_bytes { collector.setMaxFileBytes(limit) }
         do {
             let prior = CollectorState.load(collector.sourceType)
             let (objects, current) = try await collector.collect(prior: prior)

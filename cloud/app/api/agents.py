@@ -31,7 +31,7 @@ from ..connectors.base import SourceObject
 from ..connectors.live import _parse_dt
 from ..db import get_db
 from ..models import Collection, DesktopAgent, LinkingCode, Node, Tenant, Vault
-from ..workers.sync_worker import ingest_objects
+from ..workers.sync_worker import ingest_objects, collection_max_file_bytes
 
 settings = get_settings()
 logger = logging.getLogger("cv.agents")
@@ -589,6 +589,7 @@ def _agent_mappings(db: Session, agent: DesktopAgent) -> list[dict]:
             "source_type": c.source_type,
             "interval_minutes": interval,  # 0 = manual only (no auto cadence)
             "file_config": c.config or {},
+            "max_file_bytes": collection_max_file_bytes(db, c),  # Data Map override or platform default
             "destinations": c.destinations or ["cv-cloud"],
         })
     return out

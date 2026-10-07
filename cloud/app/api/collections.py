@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .. import audit, security
 from ..config import get_settings
 from ..db import get_db
+from .. import node_config
 from ..connectors import get_connector
 from ..models import (
     Collection,
@@ -258,6 +259,11 @@ def _collection_view(db: Session, c: Collection) -> dict:
         "offpolicy_points": offpolicy_points,
         "backup_interval_minutes": c.backup_interval_minutes,  # NULL = use default
         "default_interval_minutes": get_settings().sync_interval_minutes,
+        # Max file size: the Data Map's override (config.max_file_bytes) and the
+        # platform default, so the UI can show "default X / override Y".
+        "max_file_bytes": (c.config or {}).get("max_file_bytes"),
+        "default_max_file_bytes": node_config.get_int(
+            db, "CV_CONTENT_MAX_BYTES", get_settings().content_max_bytes),
         "last_backup_run_at": c.last_backup_run_at.isoformat() if c.last_backup_run_at else None,
         "config": c.config or {},
         # Big-history sources support a "back up from this date" window; crawling
