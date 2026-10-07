@@ -156,16 +156,23 @@ final class AgentService: ObservableObject {
         do {
             let prior = CollectorState.load(collector.sourceType)
             let (objects, current) = try await collector.collect(prior: prior)
-            let pushedOK = await push(sourceType: collector.sourceType,
-                                      destinations: mapping.destinations,
-                                      objects: objects, token: token)
-            // Only advance state for what actually landed: if a push failed, keep the
-            // prior hashes for the failed items so they retry next run.
-            if pushedOK {
-                CollectorState.save(collector.sourceType, current)
-            }
+            // Checkpoint incrementally: the saved state starts from the unchanged
+            // baseline (everything in `current` except the newly-collected items),
+            // then each item is added back ONLY once its batch is accepted by the
+            // server. A failure partway through a large library keeps the progress
+            // already made, and the un-landed items retry next run.
+            var saved = current
+            for obj in objects { saved.removeValue(forKey: obj.objectId) }
+            if saved != prior { CollectorState.save(collector.sourceType, saved) }
+            let pushedOK = await push(
+                sourceType: collector.sourceType, destinations: mapping.destinations,
+                objects: objects, token: token,
+                onBatchLanded: { landed in
+                    for obj in landed { saved[obj.objectId] = obj.contentHash }
+                    CollectorState.save(collector.sourceType, saved)
+                })
             CollectorState.setLastCollect(collector.sourceType, Date().timeIntervalSince1970)
-            AgentLog.shared.info("\(collector.sourceType): run done (\(objects.count) pushed)")
+            AgentLog.shared.info("\(collector.sourceType): run done (\(saved.count) checkpointed, \(objects.count) new\(pushedOK ? "" : ", some batches deferred"))")
         } catch {
             AgentLog.shared.error("\(collector.sourceType): collect failed: \(error.localizedDescription)")
             lastError = error.localizedDescription
@@ -173,23 +180,27 @@ final class AgentService: ObservableObject {
         statusLine = "Idle"
     }
 
-    /// Push objects in bounded batches (by count AND cumulative bytes). Returns true
-    /// only if every batch was accepted, so the caller knows whether to persist state.
+    /// Push objects in bounded batches (by count AND cumulative bytes). `onBatchLanded`
+    /// is invoked with the objects of each accepted batch so the caller can checkpoint
+    /// progress incrementally. Returns true only if every batch was accepted.
     private func push(sourceType: String, destinations: [String]?,
-                      objects: [CollectedObject], token: String) async -> Bool {
+                      objects: [CollectedObject], token: String,
+                      onBatchLanded: ([CollectedObject]) -> Void) async -> Bool {
         guard !objects.isEmpty else { return true }
         let maxCount = 15
         let maxBytes = 40 * 1024 * 1024
-        var batch: [AgentObjectDTO] = []
+        var batch: [CollectedObject] = []
         var batchBytes = 0
         var allOK = true
 
         func flush() async {
             guard !batch.isEmpty else { return }
-            let req = IngestRequest(source_type: sourceType, destinations: destinations, objects: batch)
+            let req = IngestRequest(source_type: sourceType, destinations: destinations,
+                                    objects: batch.map { $0.toDTO() })
             do {
                 let res = try await api.ingest(control: enrollment.controlURL, token: token, body: req)
                 AgentLog.shared.info("\(sourceType): pushed \(batch.count) object(s) → \(res.status ?? "ok")")
+                onBatchLanded(batch)  // checkpoint only what the server accepted
             } catch {
                 allOK = false
                 AgentLog.shared.error("\(sourceType): ingest batch failed: \(error.localizedDescription)")
@@ -198,11 +209,11 @@ final class AgentService: ObservableObject {
         }
 
         for obj in objects {
-            let dto = obj.toDTO()
-            if batch.count >= maxCount || (batchBytes + dto.size_bytes) > maxBytes {
+            let size = obj.content.count
+            if batch.count >= maxCount || (batchBytes + size) > maxBytes {
                 await flush()
             }
-            batch.append(dto); batchBytes += dto.size_bytes
+            batch.append(obj); batchBytes += size
         }
         await flush()
         return allOK
