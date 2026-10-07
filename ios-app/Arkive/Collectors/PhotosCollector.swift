@@ -57,11 +57,28 @@ final class PhotosCollector: Collector {
                 changed.append((asset, oid, hash))
             }
         }
+        // Process images before videos so photos (the common case) upload first,
+        // not after a long tail of large videos.
+        changed.sort { ($0.asset.mediaType == .image ? 0 : 1) < ($1.asset.mediaType == .image ? 0 : 1) }
         AgentLog.shared.info("device_photos: \(changed.count) new/changed asset(s) to upload")
 
         let albumMap = buildAlbumMap()
         var out: [CollectedObject] = []
+        var skipped = 0
         for item in changed {
+            // Check the original size UP-FRONT (cheap) and skip oversize assets
+            // WITHOUT downloading them — otherwise a 500 MB iCloud video is pulled
+            // in full just to be discarded, starving the rest of the run.
+            let size = assetSize(item.asset)
+            if size > maxBytes {
+                skipped += 1
+                // Not marked done: the size check is cheap (no download), so these
+                // re-evaluate each run and get captured if the limit is raised.
+                if skipped <= 20 {
+                    AgentLog.shared.warn("device_photos: skipping oversize \(item.asset.localIdentifier) (\(size) bytes > \(maxBytes) cap) — not downloaded")
+                }
+                continue
+            }
             if let obj = await materialize(item.asset, albums: albumMap[item.asset.localIdentifier]) {
                 out.append(obj)
                 current[item.oid] = item.hash  // only mark done once its bytes are read
@@ -69,8 +86,22 @@ final class PhotosCollector: Collector {
             // failures are logged with the filename + real reason inside materialize;
             // the item stays out of `current` so it retries next run.
         }
-        AgentLog.shared.info("device_photos: materialized \(out.count)/\(changed.count) asset(s)")
+        AgentLog.shared.info("device_photos: materialized \(out.count)/\(changed.count) asset(s), \(skipped) oversize skipped")
         return (out, current)
+    }
+
+    /// Original byte size of an asset's primary resource, read from PhotoKit
+    /// metadata WITHOUT downloading the file (so oversize items can be skipped
+    /// cheaply). Returns 0 if unknown.
+    private func assetSize(_ asset: PHAsset) -> Int {
+        let isVideo = asset.mediaType == .video
+        let resources = PHAssetResource.assetResources(for: asset)
+        func sz(_ r: PHAssetResource) -> Int { (r.value(forKey: "fileSize") as? Int) ?? 0 }
+        let primary = isVideo
+            ? (resources.first { $0.type == .video } ?? resources.first { $0.type == .fullSizeVideo })
+            : (resources.first { $0.type == .photo } ?? resources.first { $0.type == .fullSizePhoto })
+        if let p = primary, sz(p) > 0 { return sz(p) }
+        return resources.map(sz).max() ?? 0
     }
 
     /// Map each asset's localIdentifier → the album titles it belongs to, so a
