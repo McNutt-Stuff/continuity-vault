@@ -86,7 +86,16 @@ struct AgentSummary: Codable {
     let account: SummaryAccount
     let device: SummaryDevice
     let totals: SummaryTotals
+    let categories: [SummaryCategory]?
     let sources: [SummarySource]
+}
+
+struct SummaryCategory: Codable, Identifiable {
+    let key: String
+    let label: String
+    let objects: Int
+    let bytes: Int
+    var id: String { key }
 }
 
 struct SummaryAccount: Codable {

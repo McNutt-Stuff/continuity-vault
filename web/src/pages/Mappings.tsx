@@ -1051,7 +1051,7 @@ function scheduleLabel(m: Mapping): string {
 
 function collectorLabel(c: string): string {
   return c === "onepassword" ? "1Password"
-    : c === "endpoint_files" ? "Endpoint Files"
+    : c === "endpoint_files" ? "Device Files"
     : c === "apple_passwords" ? "Apple Passwords"
     : c === "imessage" ? "Apple Messages"
     : c === "outlook_local" ? "Outlook (local)"

@@ -56,7 +56,7 @@ class EndpointFilesConnector(Connector):
     pull, so ``fetch_objects`` yields nothing."""
 
     connector_type = "endpoint_files"
-    display_name = "Endpoint Files"
+    display_name = "Device Files"
 
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(

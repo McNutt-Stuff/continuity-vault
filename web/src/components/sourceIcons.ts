@@ -95,7 +95,7 @@ export const SOURCE_LABELS: Readonly<Record<string, string>> = {
   aws: "Amazon S3",
   azure: "Azure Blob",
   gcp: "Google Cloud Storage",
-  endpoint_files: "Endpoint files",
+  endpoint_files: "Device Files",
   device_photos: "Photos",
   device_contacts: "Contacts",
   device_calendar: "Calendar",

@@ -779,11 +779,26 @@ def deregister(agent: DesktopAgent = Depends(_auth_agent),
 def agent_summary(agent: DesktopAgent = Depends(_auth_agent),
                   db: Session = Depends(get_db)):
     """A compact protected-data summary for the mobile app's home screen: the
-    linked account (+ org), this device's status, and per-source object/byte
-    counts for the tenant — the same shape the cloud Overview shows, scoped to
-    what this device's account protects."""
+    linked account (+ org), this device's status, a CATEGORY breakdown (Emails,
+    Photos, Contacts, …) and per-source counts — the same shape the cloud Overview
+    shows, scoped to what this device's account protects."""
     from sqlalchemy import func
     from ..models import SearchDocument, User, Vault
+
+    # Category buckets — mirror the cloud Overview (dashboard._OBJECT_BUCKETS).
+    buckets = [
+        ("email", "Emails", {"email"}),
+        ("message", "Messages & posts", {"message", "chat", "sms", "post", "comment", "dm", "voicemail", "tweet", "story", "reel"}),
+        ("photo", "Photos & images", {"image", "photo"}),
+        ("media", "Audio & video", {"video", "audio"}),
+        ("contact", "Contacts", {"person", "contact", "organization", "group", "profile"}),
+        ("event", "Calendar & reminders", {"event", "task", "reminder"}),
+        ("credential", "Credentials", {"login", "password", "secret", "note", "api_key", "secure_note", "credit_card", "wifi"}),
+        ("document", "Documents", {"pdf", "text", "spreadsheet", "presentation", "form", "ebook", "resume", "record"}),
+        ("developer", "Developer", {"code", "gist", "repository", "issue", "pull_request", "release"}),
+        ("file", "Files & archives", {"file", "archive", "binary", "generic"}),
+    ]
+    bucket_for = {t: (k, label) for (k, label, types) in buckets for t in types}
 
     tenant = db.get(Tenant, agent.tenant_id)
     owner = (db.query(User).filter(User.tenant_id == agent.tenant_id,
@@ -794,30 +809,43 @@ def agent_summary(agent: DesktopAgent = Depends(_auth_agent),
     vault_ids = [v.id for v in db.query(Vault).filter(
         Vault.tenant_id == agent.tenant_id).all()]
 
-    sources: list[dict] = []
+    src_agg: dict[str, dict] = {}
+    cat_agg: dict[str, dict] = {}
     total_objects = 0
     total_bytes = 0
     if vault_ids:
-        rows = (db.query(SearchDocument.source_type, func.count(),
+        rows = (db.query(SearchDocument.source_type, SearchDocument.doc_type, func.count(),
                          func.coalesce(func.sum(SearchDocument.size_bytes), 0),
                          func.max(SearchDocument.created_at))
                 .filter(SearchDocument.tenant_id == agent.tenant_id,
                         SearchDocument.vault_id.in_(vault_ids),
                         SearchDocument.is_current.is_(True))
-                .group_by(SearchDocument.source_type).all())
-        for st, cnt, sz, last in rows:
-            conn = get_connector(st or "")
+                .group_by(SearchDocument.source_type, SearchDocument.doc_type).all())
+        for st, dt, cnt, sz, last in rows:
             n = int(cnt or 0)
+            b = int(sz or 0)
             total_objects += n
-            total_bytes += int(sz or 0)
-            sources.append({
-                "source_type": st or "other",
-                "name": conn.display_name if conn else (st or "Other"),
-                "objects": n,
-                "bytes": int(sz or 0),
-                "last_backup_at": last.isoformat() if last else None,
-            })
-        sources.sort(key=lambda s: -s["objects"])
+            total_bytes += b
+            s = src_agg.setdefault(st or "other", {"objects": 0, "bytes": 0, "last": None})
+            s["objects"] += n
+            s["bytes"] += b
+            if last and (s["last"] is None or last > s["last"]):
+                s["last"] = last
+            key, label = bucket_for.get((dt or "").lower(), ("file", "Files & archives"))
+            c = cat_agg.setdefault(key, {"label": label, "objects": 0, "bytes": 0})
+            c["objects"] += n
+            c["bytes"] += b
+
+    sources = [{"source_type": st,
+                "name": (get_connector(st).display_name if get_connector(st) else st.title()),
+                "objects": v["objects"], "bytes": v["bytes"],
+                "last_backup_at": v["last"].isoformat() if v["last"] else None}
+               for st, v in src_agg.items()]
+    sources.sort(key=lambda s: -s["objects"])
+    # Categories ordered by the bucket order above, only non-empty.
+    categories = [{"key": k, "label": cat_agg[k]["label"],
+                   "objects": cat_agg[k]["objects"], "bytes": cat_agg[k]["bytes"]}
+                  for (k, _label, _types) in buckets if k in cat_agg]
 
     return {
         "account": {
@@ -834,6 +862,7 @@ def agent_summary(agent: DesktopAgent = Depends(_auth_agent),
                                if agent.last_collection_at else None),
         },
         "totals": {"sources": len(sources), "objects": total_objects, "bytes": total_bytes},
+        "categories": categories,
         "sources": sources,
     }
 

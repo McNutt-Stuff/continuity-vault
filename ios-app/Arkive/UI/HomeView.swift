@@ -116,12 +116,13 @@ struct HomeView: View {
 
     private func sourcesSection(_ s: AgentSummary) -> some View {
         Section("What's protected") {
-            if s.sources.isEmpty {
+            let cats = s.categories ?? []
+            if cats.isEmpty {
                 Text("No backups yet. Grant permissions and add sources in the Arkive portal.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
-            ForEach(s.sources) { src in
-                let st = SourceStyles.style(for: src.source_type)
+            ForEach(cats) { cat in
+                let st = CategoryStyles.style(for: cat.key)
                 HStack(spacing: 12) {
                     Image(systemName: st.symbol)
                         .font(.system(size: 16))
@@ -129,13 +130,12 @@ struct HomeView: View {
                         .frame(width: 32, height: 32)
                         .background(st.color, in: RoundedRectangle(cornerRadius: 8))
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(src.name).fontWeight(.medium)
-                        Text("\(src.objects) item\(src.objects == 1 ? "" : "s") · \(byteString(src.bytes))")
-                            .font(.caption).foregroundStyle(.secondary)
+                        Text(cat.label).fontWeight(.medium)
+                        Text(byteString(cat.bytes)).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text(relativeTime(src.last_backup_at))
-                        .font(.caption2).foregroundStyle(.secondary)
+                    Text("\(cat.objects)")
+                        .font(.callout.weight(.semibold)).foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 2)
             }

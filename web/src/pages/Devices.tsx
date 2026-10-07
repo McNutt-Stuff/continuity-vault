@@ -20,7 +20,7 @@ interface Agent {
 // Per-collector display metadata for the collector toggles.
 const COLLECTOR_META: Record<string, { label: string; desc: string; brand?: string }> = {
   onepassword: { label: "1Password", desc: "Passwords & secure items via the op CLI", brand: "onepassword" },
-  endpoint_files: { label: "Endpoint files", desc: "Folders you select in the Data Map" },
+  endpoint_files: { label: "Device Files", desc: "Folders you select in the Data Map" },
   apple_passwords: { label: "Apple Passwords", desc: "iCloud Keychain logins (export + keychain inventory)", brand: "apple_passwords" },
   device_photos: { label: "Photos", desc: "Photos & videos from the device library" },
   device_contacts: { label: "Contacts", desc: "Address book contacts" },

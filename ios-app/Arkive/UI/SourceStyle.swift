@@ -43,6 +43,25 @@ enum SourceStyles {
     }
 }
 
+/// Per-category icon + color for the "What's protected" breakdown (mirrors the
+/// cloud Overview buckets).
+enum CategoryStyles {
+    static func style(for key: String) -> SourceStyle {
+        switch key {
+        case "email": return .init(symbol: "envelope.fill", color: Color(hex: 0xea4335))
+        case "message": return .init(symbol: "message.fill", color: Color(hex: 0xc56cf0))
+        case "photo": return .init(symbol: "photo.fill", color: Color(hex: 0x35d0a5))
+        case "media": return .init(symbol: "play.rectangle.fill", color: Color(hex: 0xf5a623))
+        case "contact": return .init(symbol: "person.2.fill", color: Color(hex: 0x4f7cff))
+        case "event": return .init(symbol: "calendar", color: Color(hex: 0x00b8d9))
+        case "credential": return .init(symbol: "key.fill", color: Color(hex: 0x0364d3))
+        case "document": return .init(symbol: "doc.text.fill", color: Color(hex: 0x4f7cff))
+        case "developer": return .init(symbol: "chevron.left.forwardslash.chevron.right", color: Color(hex: 0x24292e))
+        default: return .init(symbol: "doc.fill", color: Color(hex: 0x7a5cff))
+        }
+    }
+}
+
 extension Color {
     init(hex: UInt32) {
         self.init(.sRGB,
