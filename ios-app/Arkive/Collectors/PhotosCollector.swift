@@ -43,21 +43,30 @@ final class PhotosCollector: Collector {
         AgentLog.shared.info("device_photos: \(assets.count) asset(s) in library")
 
         var current: [String: String] = [:]
-        var changed: [PHAsset] = []
+        var changed: [(asset: PHAsset, oid: String, hash: String)] = []
         assets.enumerateObjects { asset, _, _ in
             let oid = Hasher2.objectId(self.sourceType, asset.localIdentifier)
             let mod = asset.modificationDate?.timeIntervalSince1970 ?? 0
             let hash = Hasher2.sha256Hex("\(asset.localIdentifier)|\(mod)|\(asset.pixelWidth)x\(asset.pixelHeight)")
-            current[oid] = hash
-            if prior[oid] != hash { changed.append(asset) }
+            if prior[oid] == hash {
+                current[oid] = hash  // unchanged — already backed up
+            } else {
+                changed.append((asset, oid, hash))
+            }
         }
         AgentLog.shared.info("device_photos: \(changed.count) new/changed asset(s) to upload")
 
         let albumMap = buildAlbumMap()
         var out: [CollectedObject] = []
-        for asset in changed {
-            if let obj = await materialize(asset, albums: albumMap[asset.localIdentifier]) { out.append(obj) }
+        for item in changed {
+            if let obj = await materialize(item.asset, albums: albumMap[item.asset.localIdentifier]) {
+                out.append(obj)
+                current[item.oid] = item.hash  // only mark done once its bytes are read
+            } else {
+                AgentLog.shared.warn("device_photos: could not read \(item.asset.localIdentifier) — will retry next run")
+            }
         }
+        AgentLog.shared.info("device_photos: materialized \(out.count)/\(changed.count) asset(s)")
         return (out, current)
     }
 

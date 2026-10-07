@@ -28,6 +28,7 @@ final class AgentService: ObservableObject {
 
     init(enrollment: EnrollmentStore) {
         self.enrollment = enrollment
+        CollectorState.migrateIfNeeded()
     }
 
     func collector(for sourceType: String) -> Collector? {

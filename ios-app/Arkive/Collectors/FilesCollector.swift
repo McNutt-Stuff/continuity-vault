@@ -73,13 +73,16 @@ final class FilesCollector: Collector {
                 let rel = url.path.replacingOccurrences(of: root.path, with: name)
                 let oid = Hasher2.objectId(sourceType, rel)
                 let hash = Hasher2.sha256Hex("\(rel)|\(size)|\(mod)")
-                current[oid] = hash
-                guard prior[oid] != hash else { continue }
+                if prior[oid] == hash { current[oid] = hash; continue }  // unchanged
                 if size > maxBytes {
                     AgentLog.shared.warn("device_files: skipping \(url.lastPathComponent) (\(size) bytes > cap)")
+                    current[oid] = hash  // deliberate skip — won't fit, don't retry forever
                     continue
                 }
-                guard let data = try? Data(contentsOf: url) else { continue }
+                guard let data = try? Data(contentsOf: url) else {
+                    AgentLog.shared.warn("device_files: could not read \(url.lastPathComponent) — will retry")
+                    continue  // read failed — leave out of state so it retries
+                }
                 let meta: [String: String] = [
                     "kind": kind(for: url), "filename": url.lastPathComponent,
                     "folder": name, "path": rel,
@@ -90,6 +93,7 @@ final class FilesCollector: Collector {
                     objectId: oid, kind: kind(for: url), title: url.lastPathComponent,
                     content: data, preview: "File · " + url.lastPathComponent, meta: meta,
                     labels: ["Files", name], contentHash: hash))
+                current[oid] = hash  // only mark done once its bytes are read
             }
         }
         AgentLog.shared.info("device_files: \(current.count) file(s), \(out.count) new/changed")

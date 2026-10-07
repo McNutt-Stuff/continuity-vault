@@ -27,6 +27,17 @@ enum CollectorState {
         }
     }
 
+    /// One-time reset of collectors that previously advanced state before the bytes
+    /// were actually uploaded (photos/files), so stuck items re-scan once.
+    static func migrateIfNeeded() {
+        let key = "collector_state_reset_v2"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        for s in ["device_photos", "device_files"] {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(s).json"))
+        }
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
     // Last-collect times (seconds since epoch) keyed by source type.
     static func lastCollect(_ sourceType: String) -> TimeInterval {
         let all = UserDefaults.standard.dictionary(forKey: AppConfig.Keys.lastCollectBySource) as? [String: Double] ?? [:]
