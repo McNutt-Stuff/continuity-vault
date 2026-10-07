@@ -72,18 +72,30 @@ final class ContactsCollector: Collector {
     }
 
     private func contactDict(_ c: CNContact) -> [String: Any] {
-        [
+        // Sort multi-valued fields so array ordering can't churn the content hash
+        // (CNContact doesn't guarantee a stable order), which would re-version the
+        // contact every sync and reset its date.
+        let emails = c.emailAddresses.map {
+            ["label": CNLabeledValue<NSString>.localizedString(forLabel: $0.label ?? ""),
+             "value": $0.value as String]
+        }.sorted { ($0["value"] ?? "") < ($1["value"] ?? "") }
+        let phones = c.phoneNumbers.map {
+            ["label": CNLabeledValue<NSString>.localizedString(forLabel: $0.label ?? ""),
+             "value": $0.value.stringValue]
+        }.sorted { ($0["value"] ?? "") < ($1["value"] ?? "") }
+        let addresses = c.postalAddresses.map {
+            ["label": CNLabeledValue<NSString>.localizedString(forLabel: $0.label ?? ""),
+             "street": $0.value.street, "city": $0.value.city, "state": $0.value.state,
+             "postal_code": $0.value.postalCode, "country": $0.value.country]
+        }.sorted { ($0["street"] ?? "" ) + ($0["city"] ?? "") < ($1["street"] ?? "") + ($1["city"] ?? "") }
+        return [
             "given_name": c.givenName,
             "family_name": c.familyName,
             "organization": c.organizationName,
             "job_title": c.jobTitle,
-            "emails": c.emailAddresses.map { ["label": CNLabeledValue<NSString>.localizedString(forLabel: $0.label ?? ""), "value": $0.value as String] },
-            "phones": c.phoneNumbers.map { ["label": CNLabeledValue<NSString>.localizedString(forLabel: $0.label ?? ""), "value": $0.value.stringValue] },
-            "addresses": c.postalAddresses.map {
-                ["label": CNLabeledValue<NSString>.localizedString(forLabel: $0.label ?? ""),
-                 "street": $0.value.street, "city": $0.value.city, "state": $0.value.state,
-                 "postal_code": $0.value.postalCode, "country": $0.value.country]
-            },
+            "emails": emails,
+            "phones": phones,
+            "addresses": addresses,
         ]
     }
 }
