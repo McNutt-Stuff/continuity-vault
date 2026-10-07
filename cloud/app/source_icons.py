@@ -16,6 +16,8 @@ BRAND_ICON_TYPES: frozenset[str] = frozenset({
     "evernote", "linkedin", "imessage", "ubiquiti", "aws", "azure", "gcp",
     "salesforce", "crossbeam", "microsoft365", "sharepoint", "teams", "exchange",
     "copilot", "onenote",
+    # Apple on-device (mobile) sources with a real Commons app mark.
+    "device_contacts", "device_calendar",
     # Beyond-Microsoft compliance integrations (Phase 3).
     "google_workspace", "okta", "qualys", "tenable", "proofpoint",
 })

@@ -70,6 +70,11 @@ SOURCE_ICONS: dict[str, dict] = {
     "google_contacts": {"file": "Google Contacts icon.svg", "search": "Google Contacts icon"},
     "google_photos": {"file": "Google Photos icon (2020).svg", "search": "Google Photos logo"},
     "imessage":   {"file": "IMessage logo.svg", "search": "iMessage logo"},
+    # Apple on-device (mobile app) sources. Commons only hosts the Contacts and
+    # Calendar app marks as SVG; Photos/Reminders/Files aren't on Commons, so they
+    # keep the built-in glyph fallback (per the no-fabrication brand rule).
+    "device_contacts": {"file": "Contacts iOS.svg", "search": "Contacts iOS icon Apple"},
+    "device_calendar": {"file": "Apple Calendar (iOS).svg", "search": "Apple Calendar iOS icon"},
     # NOTE: Crossbeam has no brand file on Wikimedia Commons. Its icon is a
     # locally-provided asset committed at web/public/source-icons/crossbeam.svg
     # (brand logo embedded), so this script intentionally does NOT manage it.

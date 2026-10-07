@@ -54,7 +54,14 @@ final class ContactsCollector: Collector {
             let payload = (try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])) ?? canonical
             var meta: [String: String] = ["kind": "person", "name": title, "device": "ios"]
             if !contact.organizationName.isEmpty { meta["org"] = contact.organizationName }
-            if let email = contact.emailAddresses.first?.value as String? { meta["email"] = email }
+            // Expose every email/phone as its own meta key so the unified-contacts
+            // engine (contacts.contact_identifiers) can link this person across sources.
+            for (i, e) in contact.emailAddresses.enumerated() {
+                meta[i == 0 ? "email" : "email_\(i)"] = (e.value as String)
+            }
+            for (i, p) in contact.phoneNumbers.enumerated() {
+                meta[i == 0 ? "phone" : "phone_\(i)"] = p.value.stringValue
+            }
             out.append(CollectedObject(
                 objectId: oid, kind: "person", title: title, content: payload,
                 preview: "Contact · " + title, meta: meta,

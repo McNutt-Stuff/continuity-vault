@@ -53,6 +53,11 @@ final class CalendarCollector: Collector {
                                           "calendar": ev.calendar?.title ?? "", "device": "ios"]
             if let s = ev.startDate { meta["modified"] = iso(ev.lastModifiedDate ?? s); meta["start"] = iso(s) }
             if let loc = ev.location, !loc.isEmpty { meta["location"] = loc }
+            // Organizer → "from", attendees → "to" so the unified-contacts engine
+            // mines the people you meet with (events become interactions).
+            if let org = email(ev.organizer) { meta["from"] = org }
+            let attendeeEmails = (ev.attendees ?? []).compactMap { email($0) }
+            if !attendeeEmails.isEmpty { meta["to"] = attendeeEmails.joined(separator: ", ") }
             out.append(CollectedObject(
                 objectId: oid, kind: "event", title: title, content: payload,
                 preview: "Event · " + title, meta: meta,
@@ -90,4 +95,11 @@ final class CalendarCollector: Collector {
     }
 
     private func iso(_ d: Date) -> String { ISO8601DateFormatter().string(from: d) }
+
+    private func email(_ p: EKParticipant?) -> String? {
+        guard let url = p?.url, (url.scheme ?? "").lowercased() == "mailto" else { return nil }
+        let addr = url.absoluteString.replacingOccurrences(
+            of: "mailto:", with: "", options: [.caseInsensitive])
+        return addr.isEmpty ? nil : addr
+    }
 }

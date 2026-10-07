@@ -42,10 +42,12 @@ logger = logging.getLogger("cv.unified_contacts")
 # Categories we mine. Contact records seed people; message/social/email docs
 # contribute interactions (and surface people we only ever messaged).
 _PERSON_CATEGORIES = ("contact",)
-_INTERACTION_CATEGORIES = ("message", "social")
+# Calendar events are interactions too: the people you meet with. Their meta carries
+# organizer→"from" / attendees→"to" so they flow through the same party-mining pass.
+_INTERACTION_CATEGORIES = ("message", "social", "calendar")
 # Email lives under the "message" category in the taxonomy, but guard doc_type too
 # so a future split still works.
-_INTERACTION_DOC_TYPES = ("email", "message", "post", "comment", "dm", "chat")
+_INTERACTION_DOC_TYPES = ("email", "message", "post", "comment", "dm", "chat", "event")
 
 # Closeness tiers, widest → tightest. Derived from interaction volume + recency,
 # overridable per contact via ``pinned_circle``.
@@ -263,7 +265,8 @@ _ROLE_LOCALS = {"info", "support", "admin", "noreply", "no-reply", "donotreply",
                 "service", "alerts", "security", "abuse", "webmaster", "marketing"}
 # Address-book sources — an identity from one of these makes a contact "card-backed"
 # (authoritative name), which is the gate for safe AUTO-merge of same-named people.
-_CARD_SOURCES = {"google_contacts", "icloud", "carddav", "contacts", "outlook_contacts"}
+_CARD_SOURCES = {"google_contacts", "icloud", "carddav", "contacts", "outlook_contacts",
+                "device_contacts"}
 
 
 def _name_from_email(email: str) -> str:
