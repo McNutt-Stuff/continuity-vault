@@ -80,7 +80,7 @@ struct HomeView: View {
                     .font(.footnote).foregroundStyle(.orange)
             }
             Button {
-                Task { await agent.runDueCollectors(force: true); await agent.refreshSummary() }
+                agent.kickCollectors(force: true)
             } label: {
                 Label("Back up now", systemImage: "icloud.and.arrow.up")
             }

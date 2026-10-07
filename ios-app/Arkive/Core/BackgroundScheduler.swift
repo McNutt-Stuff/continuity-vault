@@ -51,7 +51,8 @@ final class BackgroundScheduler {
     private func handleCollect(_ task: BGProcessingTask) {
         scheduleCollect()
         let work = Task { @MainActor in
-            await agent.heartbeatOnce(runCollectors: true)
+            await agent.heartbeatOnce(runCollectors: false)  // refresh mappings + stay online
+            await agent.collectNowAwaiting()                 // run to completion before finishing
             task.setTaskCompleted(success: true)
         }
         task.expirationHandler = { work.cancel() }

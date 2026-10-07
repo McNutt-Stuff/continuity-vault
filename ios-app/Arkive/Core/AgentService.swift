@@ -25,6 +25,9 @@ final class AgentService: ObservableObject {
     @Published var summary: AgentSummary?
 
     private var heartbeatTask: Task<Void, Never>?
+    /// True while a collection pass is running, so we never start a second one
+    /// concurrently (which would race the per-source state files).
+    private var collecting = false
 
     init(enrollment: EnrollmentStore) {
         self.enrollment = enrollment
@@ -110,7 +113,9 @@ final class AgentService: ObservableObject {
                 AgentLog.shared.info("received deregister command — unlinking")
                 unlink(); return
             }
-            if runCollectors { await runDueCollectors() }
+            // Kick collection off in a SEPARATE task so a long/stuck backup never
+            // blocks the heartbeat loop (which would make the device look offline).
+            if runCollectors { kickCollectors() }
             await refreshSummary()
         } catch {
             lastError = (error as? ApiError)?.localizedDescription ?? error.localizedDescription
@@ -119,6 +124,25 @@ final class AgentService: ObservableObject {
     }
 
     // MARK: - Collection
+
+    /// Start a collection pass unless one is already running — decoupled from the
+    /// heartbeat loop so heartbeats keep the device online while backup proceeds.
+    func kickCollectors(force: Bool = false) {
+        Task { [weak self] in await self?.collectNowAwaiting(force: force) }
+    }
+
+    /// Run a collection pass to completion (guarded against concurrent runs). The
+    /// background task handler awaits this so the app isn't suspended mid-backup.
+    func collectNowAwaiting(force: Bool = false) async {
+        guard !collecting else {
+            if force { AgentLog.shared.info("backup already in progress — ignoring request") }
+            return
+        }
+        collecting = true
+        await runDueCollectors(force: force)
+        collecting = false
+        await refreshSummary()
+    }
 
     func runDueCollectors(force: Bool = false) async {
         guard let token = enrollment.agentToken else { return }
