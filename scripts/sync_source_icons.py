@@ -70,14 +70,14 @@ SOURCE_ICONS: dict[str, dict] = {
     "google_contacts": {"file": "Google Contacts icon.svg", "search": "Google Contacts icon"},
     "google_photos": {"file": "Google Photos icon (2020).svg", "search": "Google Photos logo"},
     "imessage":   {"file": "IMessage logo.svg", "search": "iMessage logo"},
-    # Apple on-device (mobile app) sources. Exact Commons files requested by the
-    # product; some are PNG (wrapped into an SVG on download so the .svg pipeline
-    # is unchanged). Photos/Reminders/Contacts use the macOS/iOS app marks.
-    "device_photos":   {"file": "Foto (iOS).png", "search": "Apple Photos iOS icon"},
-    "device_contacts": {"file": "Contacts Icon (macOS 27).png", "search": "Apple Contacts icon"},
-    "device_calendar": {"file": "Apple Calendar (iOS).svg", "search": "Apple Calendar iOS icon"},
-    "device_reminders": {"file": "Reminders Icon (macOS 27).png", "search": "Apple Reminders icon"},
-    "device_notes":    {"file": "Apple Notes icon.svg", "search": "Apple Notes icon"},
+    # Apple on-device app marks. Named apple_* so Android/Windows can ship their
+    # own (android_*/windows_*) later; the platform-neutral device_* source types
+    # alias onto these (see SOURCE_ICON_ALIASES). Some are PNG (wrapped into SVG).
+    "apple_photos":    {"file": "Foto (iOS).png", "search": "Apple Photos iOS icon"},
+    "apple_contacts":  {"file": "Contacts Icon (macOS 27).png", "search": "Apple Contacts icon"},
+    "apple_calendar":  {"file": "Apple Calendar (iOS).svg", "search": "Apple Calendar iOS icon"},
+    "apple_reminders": {"file": "Reminders Icon (macOS 27).png", "search": "Apple Reminders icon"},
+    "apple_notes":     {"file": "Apple Notes icon.svg", "search": "Apple Notes icon"},
     # NOTE: Crossbeam has no brand file on Wikimedia Commons. Its icon is a
     # locally-provided asset committed at web/public/source-icons/crossbeam.svg
     # (brand logo embedded), so this script intentionally does NOT manage it.
@@ -120,6 +120,12 @@ SOURCE_ICON_ALIASES: dict[str, str] = {
     "contacts": "outlook",
     # iPhone/iPad share Apple's brand mark with the Mac.
     "ios": "macos",
+    # Platform-neutral on-device source types → the Apple app marks for now
+    # (swap to android_*/windows_* once those platforms ship).
+    "device_photos": "apple_photos",
+    "device_contacts": "apple_contacts",
+    "device_calendar": "apple_calendar",
+    "device_reminders": "apple_reminders",
 }
 
 

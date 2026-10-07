@@ -17,9 +17,9 @@ export const SYNCED_SOURCE_ICONS: ReadonlySet<string> = new Set([
   "evernote", "linkedin", "imessage", "ubiquiti", "aws", "azure", "gcp",
   "salesforce", "crossbeam", "microsoft365", "sharepoint", "teams", "exchange",
   "copilot", "onenote",
-  // Apple on-device (mobile) sources with real Commons app marks.
-  "device_photos", "device_contacts", "device_calendar", "device_reminders",
-  "device_notes",
+  // Apple on-device app marks (device_* source types alias onto these).
+  "apple_photos", "apple_contacts", "apple_calendar", "apple_reminders",
+  "apple_notes",
   // Beyond-Microsoft compliance integrations (Phase 3).
   "google_workspace", "okta", "qualys", "tenable", "proofpoint",
   // Device/endpoint platform marks (Devices page).
@@ -32,6 +32,11 @@ export const SOURCE_ICON_ALIASES: Readonly<Record<string, string>> = {
   outlook_local: "outlook",
   // Apple Passwords is iCloud Keychain — reuse the real Apple/iCloud brand mark.
   apple_passwords: "icloud",
+  // Platform-neutral on-device sources → Apple app marks (swap per-platform later).
+  device_photos: "apple_photos",
+  device_contacts: "apple_contacts",
+  device_calendar: "apple_calendar",
+  device_reminders: "apple_reminders",
   // Managed Exchange calendar/contacts are Outlook/Exchange data.
   calendar: "outlook",
   contacts: "outlook",
