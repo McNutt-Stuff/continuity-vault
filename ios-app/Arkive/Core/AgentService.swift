@@ -22,6 +22,7 @@ final class AgentService: ObservableObject {
     @Published var lastSync: Date?
     @Published var activeMappings: [Mapping] = []
     @Published var statusLine = "Idle"
+    @Published var summary: AgentSummary?
 
     private var heartbeatTask: Task<Void, Never>?
 
@@ -69,6 +70,17 @@ final class AgentService: ObservableObject {
 
     func stopLoop() { heartbeatTask?.cancel(); heartbeatTask = nil }
 
+    /// Fetch the protected-data summary for the home screen. Best-effort — if the
+    /// endpoint isn't deployed yet it degrades to the locally-known status.
+    func refreshSummary() async {
+        guard let token = enrollment.agentToken else { return }
+        do {
+            summary = try await api.summary(control: enrollment.controlURL, token: token)
+        } catch {
+            AgentLog.shared.warn("summary unavailable: \((error as? ApiError)?.localizedDescription ?? error.localizedDescription)")
+        }
+    }
+
     /// A single heartbeat + (optionally) run any due collectors. Also used by the
     /// background task handler.
     func heartbeatOnce(runCollectors: Bool) async {
@@ -93,6 +105,7 @@ final class AgentService: ObservableObject {
                 unlink(); return
             }
             if runCollectors { await runDueCollectors() }
+            await refreshSummary()
         } catch {
             lastError = (error as? ApiError)?.localizedDescription ?? error.localizedDescription
             AgentLog.shared.error("heartbeat failed: \(lastError ?? "unknown")")

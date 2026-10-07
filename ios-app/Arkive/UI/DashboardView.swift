@@ -1,9 +1,10 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Main screen once linked: device status, each collector's permission + backup
-/// state, folder management for Files, recent activity, and unlink.
-struct DashboardView: View {
+/// Advanced / settings & debug: each collector's permission state, Files folder
+/// management, the server it's linked to, recent logs, and unlink. Pushed from the
+/// Home screen; the day-to-day status + summary live there.
+struct AdvancedView: View {
     @EnvironmentObject var enrollment: EnrollmentStore
     @EnvironmentObject var agent: AgentService
 
@@ -14,60 +15,36 @@ struct DashboardView: View {
     @State private var refreshTick = 0
 
     var body: some View {
-        NavigationStack {
-            List {
-                statusSection
-                collectorsSection
-                filesSection
-                activitySection
-                dangerSection
-            }
-            .navigationTitle("Arkive")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { Task { await agent.heartbeatOnce(runCollectors: true) } } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-            }
-            .sheet(isPresented: $showLogs) { LogView() }
-            .sheet(isPresented: $showFolderPicker) {
-                FolderPicker { url in addFolder(url) }
-            }
-            .alert("Unlink this device?", isPresented: $confirmUnlink) {
-                Button("Unlink", role: .destructive) { agent.stopLoop(); agent.unlink() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Backups will stop. Already-backed-up data is kept in your vault.")
-            }
+        List {
+            collectorsSection
+            filesSection
+            serverSection
+            activitySection
+            dangerSection
+        }
+        .navigationTitle("Advanced")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showLogs) { LogView() }
+        .sheet(isPresented: $showFolderPicker) {
+            FolderPicker { url in addFolder(url) }
+        }
+        .alert("Unlink this device?", isPresented: $confirmUnlink) {
+            Button("Unlink", role: .destructive) { agent.stopLoop(); agent.unlink() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Backups will stop. Already-backed-up data is kept in your vault.")
         }
     }
 
     // MARK: - Sections
 
-    private var statusSection: some View {
-        Section("Status") {
-            row("Device", value: UIDevice.current.name)
-            row("State", value: enrollment.isLinked ? "Linked" : "Not linked",
-                tint: enrollment.isLinked ? .green : .secondary)
+    private var serverSection: some View {
+        Section("Connection") {
+            row("Server", value: enrollment.baseURL.replacingOccurrences(of: "https://", with: ""))
+            row("Node", value: enrollment.controlURL.replacingOccurrences(of: "https://", with: ""))
             if let hb = agent.lastHeartbeat {
                 row("Last heartbeat", value: hb.formatted(.relative(presentation: .named)))
             }
-            if let sync = agent.lastSync {
-                row("Last backup", value: sync.formatted(.relative(presentation: .named)))
-            }
-            if agent.isWorking {
-                HStack { ProgressView(); Text(agent.statusLine).foregroundStyle(.secondary) }
-            }
-            if let err = agent.lastError {
-                Label(err, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).font(.footnote)
-            }
-            Button {
-                Task { await agent.runDueCollectors(force: true) }
-            } label: {
-                Label("Back up now", systemImage: "icloud.and.arrow.up")
-            }
-            .disabled(agent.isWorking)
         }
     }
 

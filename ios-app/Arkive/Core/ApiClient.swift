@@ -43,7 +43,36 @@ struct ApiClient {
         try await post(base: control, path: "/api/agent/ingest", token: token, body: body)
     }
 
+    func summary(control: String, token: String) async throws -> AgentSummary {
+        try await get(base: control, path: "/api/agent/summary", token: token)
+    }
+
     // MARK: - Core
+
+    private func get<Res: Decodable>(base: String, path: String, token: String?) async throws -> Res {
+        guard let url = URL(string: Self.fullURL(base: base, path: path)) else {
+            throw ApiError.badURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        req.timeoutInterval = 30
+        do {
+            let (data, resp) = try await session.data(for: req)
+            guard let http = resp as? HTTPURLResponse else {
+                throw ApiError.transport("No HTTP response")
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                let snippet = String(data: data.prefix(300), encoding: .utf8) ?? ""
+                throw ApiError.http(http.statusCode, snippet)
+            }
+            return try decoder.decode(Res.self, from: data)
+        } catch let e as ApiError {
+            throw e
+        } catch {
+            throw ApiError.transport(error.localizedDescription)
+        }
+    }
 
     private func post<Req: Encodable, Res: Decodable>(
         base: String, path: String, token: String?, body: Req

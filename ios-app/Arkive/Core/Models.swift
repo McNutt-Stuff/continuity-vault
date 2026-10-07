@@ -79,3 +79,41 @@ struct IngestResponse: Codable {
     let object_count: Int?
     let message: String?
 }
+
+// Home-screen summary (GET /api/agent/summary) — the linked account + org, this
+// device's status, and per-source protected-data counts (mirrors cloud Overview).
+struct AgentSummary: Codable {
+    let account: SummaryAccount
+    let device: SummaryDevice
+    let totals: SummaryTotals
+    let sources: [SummarySource]
+}
+
+struct SummaryAccount: Codable {
+    let name: String
+    let email: String
+    let org: String?
+    let is_org: Bool
+}
+
+struct SummaryDevice: Codable {
+    let name: String
+    let platform: String
+    let state: String
+    let last_backup_at: String?
+}
+
+struct SummaryTotals: Codable {
+    let sources: Int
+    let objects: Int
+    let bytes: Int
+}
+
+struct SummarySource: Codable, Identifiable {
+    let source_type: String
+    let name: String
+    let objects: Int
+    let bytes: Int
+    let last_backup_at: String?
+    var id: String { source_type }
+}

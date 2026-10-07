@@ -5,7 +5,7 @@ struct RootView: View {
 
     var body: some View {
         if enrollment.isLinked {
-            DashboardView()
+            HomeView()
         } else {
             OnboardingView()
         }

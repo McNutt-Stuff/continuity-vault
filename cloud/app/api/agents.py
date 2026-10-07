@@ -775,6 +775,69 @@ def deregister(agent: DesktopAgent = Depends(_auth_agent),
     return {"ok": True, "state": "retired"}
 
 
+@agent_router.get("/summary")
+def agent_summary(agent: DesktopAgent = Depends(_auth_agent),
+                  db: Session = Depends(get_db)):
+    """A compact protected-data summary for the mobile app's home screen: the
+    linked account (+ org), this device's status, and per-source object/byte
+    counts for the tenant — the same shape the cloud Overview shows, scoped to
+    what this device's account protects."""
+    from sqlalchemy import func
+    from ..models import SearchDocument, User, Vault
+
+    tenant = db.get(Tenant, agent.tenant_id)
+    owner = (db.query(User).filter(User.tenant_id == agent.tenant_id,
+                                   User.role == "owner").first()
+             or db.query(User).filter(User.tenant_id == agent.tenant_id)
+                   .order_by(User.created_at).first())
+    is_org = bool(tenant and (tenant.tenant_type or "") not in ("shared", ""))
+    vault_ids = [v.id for v in db.query(Vault).filter(
+        Vault.tenant_id == agent.tenant_id).all()]
+
+    sources: list[dict] = []
+    total_objects = 0
+    total_bytes = 0
+    if vault_ids:
+        rows = (db.query(SearchDocument.source_type, func.count(),
+                         func.coalesce(func.sum(SearchDocument.size_bytes), 0),
+                         func.max(SearchDocument.created_at))
+                .filter(SearchDocument.tenant_id == agent.tenant_id,
+                        SearchDocument.vault_id.in_(vault_ids),
+                        SearchDocument.is_current.is_(True))
+                .group_by(SearchDocument.source_type).all())
+        for st, cnt, sz, last in rows:
+            conn = get_connector(st or "")
+            n = int(cnt or 0)
+            total_objects += n
+            total_bytes += int(sz or 0)
+            sources.append({
+                "source_type": st or "other",
+                "name": conn.display_name if conn else (st or "Other"),
+                "objects": n,
+                "bytes": int(sz or 0),
+                "last_backup_at": last.isoformat() if last else None,
+            })
+        sources.sort(key=lambda s: -s["objects"])
+
+    return {
+        "account": {
+            "name": (owner.full_name if owner else "") or "",
+            "email": (owner.email if owner else "") or "",
+            "org": (tenant.name if (tenant and is_org) else None),
+            "is_org": is_org,
+        },
+        "device": {
+            "name": agent.name,
+            "platform": agent.platform,
+            "state": agent.state,
+            "last_backup_at": (agent.last_collection_at.isoformat()
+                               if agent.last_collection_at else None),
+        },
+        "totals": {"sources": len(sources), "objects": total_objects, "bytes": total_bytes},
+        "sources": sources,
+    }
+
+
 class AgentObject(BaseModel):
     object_id: str
     kind: str
