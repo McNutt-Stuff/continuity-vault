@@ -239,6 +239,7 @@ final class AgentService: ObservableObject {
                     return ok
                 })
             CollectorState.setLastCollect(st, Date().timeIntervalSince1970)
+            CollectorState.save(st, streamSaved)  // final flush of the checkpoint
             AgentLog.shared.info("\(st): run done (\(streamLanded) uploaded this pass, \(streamSaved.count)/\(total) total)")
             progress = nil
             statusLine = "Idle"

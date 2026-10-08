@@ -85,7 +85,7 @@ final class PhotosCollector: StreamingCollector {
             let hash = self.stableHash(asset)
             if prior[oid] != hash { changed.append((asset, oid, hash)) }
         }
-        AgentLog.shared.info("device_photos: \(changed.count) new/changed asset(s) to upload (newest first)")
+        AgentLog.shared.info("device_photos: \(prior.count) already backed up (skipped), \(changed.count) new/changed to upload (newest first)")
 
         let albumMap = buildAlbumMap()
         var batch: [CollectedObject] = []

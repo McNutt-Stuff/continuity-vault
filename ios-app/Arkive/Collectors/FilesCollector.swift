@@ -150,7 +150,7 @@ final class FilesCollector: StreamingCollector {
         }
         cands.sort { $0.mod > $1.mod }  // newest first
         onTotal(prior.count + cands.count)
-        AgentLog.shared.info("device_files: \(cands.count) new/changed file(s) to upload (newest first)")
+        AgentLog.shared.info("device_files: \(prior.count) already backed up (skipped), \(cands.count) new/changed to upload (newest first)")
 
         var batch: [CollectedObject] = []
         var batchBytes = 0
