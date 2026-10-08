@@ -1112,16 +1112,16 @@ function scheduleLabel(m: Mapping): string {
 
 function collectorLabel(c: string): string {
   return c === "onepassword" ? "1Password"
-    : c === "endpoint_files" ? "Device Files"
+    : c === "endpoint_files" ? "Apple Files"
     : c === "apple_passwords" ? "Apple Passwords"
     : c === "apple_notes" ? "Apple Notes"
     : c === "imessage" ? "Apple Messages"
     : c === "outlook_local" ? "Outlook (local)"
-    : c === "device_photos" ? "Photos"
-    : c === "device_contacts" ? "Contacts"
+    : c === "device_photos" ? "Apple Photos"
+    : c === "device_contacts" ? "Apple Contacts"
     : c === "device_calendar" ? "Calendar"
     : c === "device_reminders" ? "Reminders"
-    : c === "device_files" ? "Files"
+    : c === "device_files" ? "Apple Files"
     : c === "device_health" ? "Health & Fitness"
     : c === "device_wallet" ? "Wallet"
     : c;

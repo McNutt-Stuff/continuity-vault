@@ -20,14 +20,14 @@ interface Agent {
 // Per-collector display metadata for the collector toggles.
 const COLLECTOR_META: Record<string, { label: string; desc: string; brand?: string }> = {
   onepassword: { label: "1Password", desc: "Passwords & secure items via the op CLI", brand: "onepassword" },
-  endpoint_files: { label: "Device Files", desc: "Folders you select in the Data Map" },
+  endpoint_files: { label: "Apple Files", desc: "Folders you select in the Data Map" },
   apple_passwords: { label: "Apple Passwords", desc: "iCloud Keychain logins (export + keychain inventory)", brand: "apple_passwords" },
   apple_notes: { label: "Apple Notes", desc: "Notes from the Mac Notes app", brand: "apple_notes" },
-  device_photos: { label: "Photos", desc: "Photos & videos from the device library" },
-  device_contacts: { label: "Contacts", desc: "Address book contacts" },
+  device_photos: { label: "Apple Photos", desc: "Photos & videos from the device library" },
+  device_contacts: { label: "Apple Contacts", desc: "Address book contacts" },
   device_calendar: { label: "Calendar", desc: "Calendar events" },
   device_reminders: { label: "Reminders", desc: "Reminders & to-dos" },
-  device_files: { label: "Files", desc: "Folders you grant the app access to" },
+  device_files: { label: "Apple Files", desc: "Folders you grant the app access to" },
   device_health: { label: "Health & Fitness", desc: "Daily activity, workouts, heart rate & sleep (HealthKit)" },
   device_wallet: { label: "Wallet", desc: "Passes, tickets & loyalty cards (PassKit)" },
   imessage: { label: "Apple Messages", desc: "iMessage/SMS, group threads & attachments", brand: "imessage" },

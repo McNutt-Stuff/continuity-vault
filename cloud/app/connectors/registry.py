@@ -56,7 +56,7 @@ class EndpointFilesConnector(Connector):
     pull, so ``fetch_objects`` yields nothing."""
 
     connector_type = "endpoint_files"
-    display_name = "Device Files"
+    display_name = "Apple Files"
 
     def capabilities(self) -> ConnectorCapabilities:
         return ConnectorCapabilities(
@@ -251,7 +251,7 @@ class DevicePhotosConnector(_MobileCollector):
     by the native app and pushed client-side over TLS into the same media models."""
 
     connector_type = "device_photos"
-    display_name = "Photos"
+    display_name = "Apple Photos"
     _icon = "image"
     _doc_types = ["image", "video"]
     _searchable = ["album", "kind", "filename", "device"]
@@ -263,7 +263,7 @@ class DeviceContactsConnector(_MobileCollector):
     """Contacts from the device's address book (iOS Contacts framework)."""
 
     connector_type = "device_contacts"
-    display_name = "Contacts"
+    display_name = "Apple Contacts"
     _icon = "users"
     _doc_types = ["person"]
     _searchable = ["name", "email", "phone", "org", "device"]
@@ -300,7 +300,7 @@ class DeviceFilesConnector(_MobileCollector):
     iCloud Drive), backed up as their own file objects."""
 
     connector_type = "device_files"
-    display_name = "Files"
+    display_name = "Apple Files"
     _icon = "folder"
     _doc_types = ["file", "image", "pdf", "video", "audio"]
     _searchable = ["filename", "folder", "kind", "device"]
