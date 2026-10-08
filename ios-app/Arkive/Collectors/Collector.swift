@@ -53,6 +53,7 @@ extension Collector {
 /// the current one is handled).
 protocol StreamingCollector: Collector {
     func collectStreaming(prior: [String: String], batchSize: Int, maxBatchBytes: Int,
+                          onTotal: @escaping (Int) -> Void,
                           sink: @escaping ([CollectedObject]) async -> Bool) async
 }
 

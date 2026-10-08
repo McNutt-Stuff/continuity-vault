@@ -106,10 +106,12 @@ final class FilesCollector: StreamingCollector {
     /// NEWEST-FIRST, then materialize + push in batches so progress is visible and
     /// only one batch is in memory at a time.
     func collectStreaming(prior: [String: String], batchSize: Int, maxBatchBytes: Int,
+                          onTotal: @escaping (Int) -> Void,
                           sink: @escaping ([CollectedObject]) async -> Bool) async {
         let bookmarks = FolderBookmarks.all()
         guard !bookmarks.isEmpty else {
             AgentLog.shared.info("device_files: no folders granted — nothing to collect")
+            onTotal(0)
             return
         }
         struct Cand { let url: URL; let rel: String; let folder: String
@@ -147,6 +149,7 @@ final class FilesCollector: StreamingCollector {
             }
         }
         cands.sort { $0.mod > $1.mod }  // newest first
+        onTotal(prior.count + cands.count)
         AgentLog.shared.info("device_files: \(cands.count) new/changed file(s) to upload (newest first)")
 
         var batch: [CollectedObject] = []

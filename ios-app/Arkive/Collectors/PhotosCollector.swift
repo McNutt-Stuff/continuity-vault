@@ -66,6 +66,7 @@ final class PhotosCollector: StreamingCollector {
     /// Streaming upload: materialize + push NEWEST-FIRST in batches so progress is
     /// visible and only one batch is in memory at a time.
     func collectStreaming(prior: [String: String], batchSize: Int, maxBatchBytes: Int,
+                          onTotal: @escaping (Int) -> Void,
                           sink: @escaping ([CollectedObject]) async -> Bool) async {
         guard authorizationState() == .authorized || authorizationState() == .limited else {
             AgentLog.shared.warn("device_photos: not authorized — skipping")
@@ -75,6 +76,7 @@ final class PhotosCollector: StreamingCollector {
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         let assets = PHAsset.fetchAssets(with: options)
         AgentLog.shared.info("device_photos: \(assets.count) asset(s) in library")
+        onTotal(assets.count)
 
         // Cheap enumerate → the changed assets, newest first (fetch order).
         var changed: [(asset: PHAsset, oid: String, hash: String)] = []

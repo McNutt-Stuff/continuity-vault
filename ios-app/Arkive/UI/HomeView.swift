@@ -75,6 +75,18 @@ struct HomeView: View {
                 HStack { ProgressView(); Text(agent.statusLine).foregroundStyle(.secondary) }
                     .font(.subheadline)
             }
+            if let p = agent.progress {
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: p.fraction)
+                    HStack {
+                        Text("\(p.label): \(p.done.formatted()) of \(p.total.formatted())")
+                        Spacer()
+                        Text("\(Int(p.fraction * 100))%")
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+            }
             if let err = agent.lastError {
                 Label(err, systemImage: "exclamationmark.triangle")
                     .font(.footnote).foregroundStyle(.orange)

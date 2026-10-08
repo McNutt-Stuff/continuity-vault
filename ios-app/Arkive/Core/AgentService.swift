@@ -1,6 +1,14 @@
 import Foundation
 import UIKit
 
+/// Live progress for a streaming backup source (photos/files).
+struct BackupProgress {
+    let label: String      // e.g. "Photos"
+    let done: Int          // items backed up (incl. prior runs)
+    let total: Int         // items in the library
+    var fraction: Double { total > 0 ? min(1, Double(done) / Double(total)) : 0 }
+}
+
 /// The agent orchestrator — the mobile equivalent of the desktop agent's run loop.
 /// Enrolls with a linking code, heartbeats on the server-provided cadence, and runs
 /// each collector when the operator has a mapping for it and its interval elapsed,
@@ -23,6 +31,9 @@ final class AgentService: ObservableObject {
     @Published var activeMappings: [Mapping] = []
     @Published var statusLine = "Idle"
     @Published var summary: AgentSummary?
+    /// Live backup progress for the active streaming source (photos/files), so the
+    /// home screen can show a bar + "N of M" count.
+    @Published var progress: BackupProgress?
 
     private var heartbeatTask: Task<Void, Never>?
     /// True while a collection pass is running, so we never start a second one
@@ -143,9 +154,18 @@ final class AgentService: ObservableObject {
             return
         }
         collecting = true
+        // Hold a background execution assertion so a backup that's running when the
+        // user leaves the app keeps going for as long as iOS allows (instead of
+        // being suspended mid-batch). Released when the pass finishes.
+        var bgTask = UIBackgroundTaskIdentifier.invalid
+        bgTask = UIApplication.shared.beginBackgroundTask(withName: "arkive.backup") {
+            UIApplication.shared.endBackgroundTask(bgTask)
+            bgTask = .invalid
+        }
         await runDueCollectors(force: force)
         collecting = false
         await refreshSummary()
+        if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
     }
 
     func runDueCollectors(force: Bool = false) async {
@@ -192,24 +212,35 @@ final class AgentService: ObservableObject {
         if let sc = collector as? StreamingCollector {
             let st = collector.sourceType
             let noun = collector.displayName.lowercased()
+            let label = collector.displayName
             streamSaved = CollectorState.load(st)
             streamLanded = 0
-            await sc.collectStreaming(prior: streamSaved, batchSize: 15,
-                                      maxBatchBytes: 40 * 1024 * 1024) { [weak self] objs in
-                guard let self else { return false }
-                let ok = await self.pushBatch(sourceType: st, destinations: mapping.destinations,
-                                              objects: objs, token: token)
-                if ok {
-                    for o in objs { self.streamSaved[o.objectId] = o.contentHash }
-                    CollectorState.save(st, self.streamSaved)
-                    self.streamLanded += objs.count
-                    self.statusLine = "Backed up \(self.streamLanded) \(noun)…"
-                    self.lastSync = Date()
-                }
-                return ok
-            }
+            var total = 0
+            progress = BackupProgress(label: label, done: streamSaved.count, total: max(streamSaved.count, 1))
+            await sc.collectStreaming(
+                prior: streamSaved, batchSize: 15, maxBatchBytes: 40 * 1024 * 1024,
+                onTotal: { [weak self] t in
+                    total = t
+                    self?.progress = BackupProgress(label: label, done: self?.streamSaved.count ?? 0, total: max(t, 1))
+                },
+                sink: { [weak self] objs in
+                    guard let self else { return false }
+                    let ok = await self.pushBatch(sourceType: st, destinations: mapping.destinations,
+                                                  objects: objs, token: token)
+                    if ok {
+                        for o in objs { self.streamSaved[o.objectId] = o.contentHash }
+                        CollectorState.save(st, self.streamSaved)
+                        self.streamLanded += objs.count
+                        let done = self.streamSaved.count
+                        self.progress = BackupProgress(label: label, done: done, total: max(total, done))
+                        self.statusLine = "Backed up \(done)\(total > 0 ? " of \(total)" : "") \(noun)…"
+                        self.lastSync = Date()
+                    }
+                    return ok
+                })
             CollectorState.setLastCollect(st, Date().timeIntervalSince1970)
-            AgentLog.shared.info("\(st): run done (\(streamLanded) uploaded)")
+            AgentLog.shared.info("\(st): run done (\(streamLanded) uploaded this pass, \(streamSaved.count)/\(total) total)")
+            progress = nil
             statusLine = "Idle"
             return
         }
@@ -241,20 +272,36 @@ final class AgentService: ObservableObject {
         statusLine = "Idle"
     }
 
-    /// Upload one already-formed batch. Returns true if the server accepted it.
+    /// Upload one already-formed batch, retrying transient failures (network drop,
+    /// control-plane mid-deploy) with backoff. Returns true only if accepted — a
+    /// batch that never lands stays out of state and retries next run.
     private func pushBatch(sourceType: String, destinations: [String]?,
                            objects: [CollectedObject], token: String) async -> Bool {
         guard !objects.isEmpty else { return true }
         let req = IngestRequest(source_type: sourceType, destinations: destinations,
                                 objects: objects.map { $0.toDTO() })
-        do {
-            let res = try await api.ingest(control: enrollment.controlURL, token: token, body: req)
-            AgentLog.shared.info("\(sourceType): pushed \(objects.count) object(s) → \(res.status ?? "ok")")
-            return true
-        } catch {
-            AgentLog.shared.error("\(sourceType): ingest batch failed: \(error.localizedDescription)")
-            return false
+        let delays: [UInt64] = [2, 5, 10]  // seconds between attempts
+        for attempt in 0...delays.count {
+            do {
+                let res = try await api.ingest(control: enrollment.controlURL, token: token, body: req)
+                AgentLog.shared.info("\(sourceType): pushed \(objects.count) object(s) → \(res.status ?? "ok")")
+                return true
+            } catch {
+                let msg = (error as? ApiError)?.localizedDescription ?? error.localizedDescription
+                // A 4xx (except 429) is a permanent reject — don't spin on it.
+                if case let .http(code, _)? = (error as? ApiError), (400..<500).contains(code), code != 429 {
+                    AgentLog.shared.error("\(sourceType): batch rejected (HTTP \(code)): \(msg)")
+                    return false
+                }
+                if attempt < delays.count {
+                    AgentLog.shared.warn("\(sourceType): ingest failed (\(msg)) — retry \(attempt + 1)/\(delays.count) in \(delays[attempt])s")
+                    try? await Task.sleep(nanoseconds: delays[attempt] * 1_000_000_000)
+                } else {
+                    AgentLog.shared.error("\(sourceType): ingest batch failed after retries: \(msg) — deferring to next run")
+                }
+            }
         }
+        return false
     }
 
     /// Push objects in bounded batches (by count AND cumulative bytes). `onBatchLanded`
